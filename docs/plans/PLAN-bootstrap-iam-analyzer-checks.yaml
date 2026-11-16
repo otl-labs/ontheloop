@@ -50,8 +50,8 @@ scope:
   - file: tests/checks/iam_tf/test_bootstrap_preview_analyzer.py
     action: Create
     purpose: >-
-      BUILD PR 1. Text tests in the iam_tf predicate convention over every terraform/bootstrap/*.tf text (the
-      bootstrap_texts mapping): analyzer_problems(texts) returns problems unless
+      BUILD PR 1. Text tests in the iam_tf predicate convention over every terraform/bootstrap/*.tf text, globbed
+      in this module (no import from another test_* module, tests/CLAUDE.md): analyzer_problems(texts) returns problems unless
       bootstrap_preview_analyzer_actions is exactly the four actions, the analyzer policy holds exactly one Allow
       statement with those actions on "*", exactly one attachment of it exists and names aws_iam_role.bootstrap_preview,
       no bootstrap-apply attachment or bootstrap_apply_* local names an access-analyzer action, and
@@ -142,7 +142,10 @@ scope:
       scripts/ci/terraform_bootstrap_apply_classify.py or scripts/ci/plan_names_core.py, cannot be read, or are
       truncated (300 or more files): fail toward checking. In full mode every row build_rows keeps takes its result
       exactly as in changed mode (checked_document, and group_digest over the changed instances), and the sweep adds
-      one result per unchanged address (no-op in the plan) from prior state; a destroyed row is never checked, so a
+      one result per unchanged address (a normalised address none of whose instances changes) from prior state; the
+      unchanged instances of a keyed group that has a changed instance, and the unchanged trust of a kept
+      aws_iam_role row (a tag-only or description update), are checked too, their checks folded into that row's
+      result without changing its digest, so the gate's binding is as in changed mode; a destroyed row is never checked, so a
       push removing a bad grant is not refused by it. Checks are deduplicated by (document digest, class set), each
       verdict copied to every address that shares the pair. A dispatch runs in changed mode. Classes, ceilings and
       principal resolution per scope row 6. Checks, by document kind, through the aws CLI by subprocess (no SDK: the
@@ -158,7 +161,7 @@ scope:
       a single [0] instance included) is one result whose digest is classify.group_digest of its instances' digests
       and whose checks are each instance's, the worst verdict shown. Output, names only (Decisions 101, 238 cl.4): one
       line per check "ANALYZER <address> <check> <PASS|FAIL|WIDENS|NEW|UNCHECKED>" with "sid=<statementId>" on a FAIL
-      when the Sid matches [A-Za-z0-9]{1,64}, else "index=<statementIndex>", never a document, ARN, account, finding
+      when the Sid matches [A-Za-z0-9]{1,64} and holds no run of twelve or more digits, else "index=<statementIndex>", never a document, ARN, account, finding
       description, message or CLI stderr (stderr is captured and dropped); then "ANALYZER_SUMMARY
       verdict=<PASS|REFUSED> mode=<changed|full> documents=<n> fail=<n> widens=<n> unchecked=<n>". R holds
       {schema_version, mode, verdict, results: [{address, classes, digest, checks}]} with the same names-only content.
@@ -178,8 +181,9 @@ scope:
       import and moved rows alike); for aws_iam_role, the known after trust when the trust is new or differs from
       before (create, replace, import, moved or update); for aws_iam_role_policy_attachment and
       aws_iam_user_policy_attachment rows whose actions include create, or that are imported or moved, the attached
-      customer policy's known document (from the plan's after values or prior state, through _resolve); None for
-      no-op, delete-only, unknown-after and AWS-managed rows. Add group_digest(digests) -> "" when every digest is "",
+      customer policy's known document (from the plan's after values or prior state, through _resolve); None for a
+      no-op row with neither previous_address nor importing set (a pure move or import has actions ["no-op"] and
+      gets a document), and for delete-only, unknown-after and AWS-managed rows. Add group_digest(digests) -> "" when every digest is "",
       else document_digest of the sorted non-empty digests. build_rows adds "digest" to each row:
       document_digest(checked_document(plan, rc)) for a single instance, group_digest over the instances for a keyed
       group (a single [0] instance included). This one predicate is the analyzer's selection (scope row 7), so every
@@ -197,7 +201,8 @@ scope:
       1 on every event with has_changes=false and a ::error::ANALYZER_REFUSED line; the verdict is ANALYZER_REFUSED,
       or CLOUDSHELL_REQUIRED when a protected row is also present (then the operator reads the Analyzer column before
       any CloudShell apply). _CHECK_KEYS gains "digest", so check refuses as unreviewed any applied row whose document
-      differs from the previewed one. Docstring updated. No other behaviour changes.
+      differs from the previewed one. Docstring updated, noting that a reviewed digest is sha256 hex and may hold a
+      twelve-digit decimal run (not an account id), so a later digit-run scanner of the apply log excludes it. No other behaviour changes.
   - file: .github/workflows/terraform-bootstrap-apply.yml
     action: Modify
     purpose: >-
@@ -285,12 +290,13 @@ scope:
       raise.
   - file: tests/checks/iam_tf/test_iam_invariants.py
     action: Create
-    purpose: >-
-      BUILD PR 2. The static, credential-free layer over config/iam-invariants.json: (1) pin: the session class's never
-      row ids are exactly the seven above, secret_values_ssm's actions are exactly Decision 237 cl.2's five value verbs
-      on parameter/secret/*, secret_values_secretsmanager holds PutSecretValue and UpdateSecret, ci_writable's row ids are exactly the
-      six above and validate_policy_block is exactly the four lists above, so removing or narrowing a row fails a test
-      (Decision 235); (2) drift: every role/ and policy/ pattern in terraform_bootstrap_apply_classify.py's
+    purpose: >- # pragma: allowlist secret
+      BUILD PR 2. The static, credential-free layer over config/iam-invariants.json: (1) pin: the parsed file equals,
+      field for field, one expected mapping written out in the test from scope row 6 (every class's role_names,
+      policy_names and user_names globs, ceilings == [classify.BOUNDARY_NAME], every never row's id, actions and
+      resources exactly, and validate_policy_block's four lists), so removing, narrowing or widening any field fails
+      a test (Decision 235), with red cases for a narrowed session glob, a dropped secretsmanager:GetSecretValue, an
+      added ceiling and an emptied ci_writable policy_names; (2) drift: every role/ and policy/ pattern in terraform_bootstrap_apply_classify.py's
       PROTECTED_NAME_PATTERNS appears in a ci_writable resource; (3) offline, resource-aware: no Allow statement in
       agent_session_user.tf grants a session never action on a never resource, an action matching when the two
       fnmatch case-insensitively in either direction and a resource matching when a row's resource (placeholders read
@@ -331,8 +337,8 @@ infrastructure_dependencies:
   - "No Lambda code changes and no deploy channel. No new repository secret or variable (GH_TOKEN is the job token; the compare API needs contents read, which the preview job holds), so no project-configuration.yaml row."
 acceptance_criteria:
   - "bootstrap-preview alone may call the four Access Analyzer checks (one Allow on '*', attached only to it), its DenyAllButReads NotAction is exactly reads plus those four plus sts:GetCallerIdentity, bootstrap-apply and the shared reads list hold no access-analyzer action, and test_bootstrap_ci_roles.py and test_bootstrap_preview_analyzer.py pass with each red case red (VP 1); after PR 1's apply, live simulation allows the four for bootstrap-preview and denies them to bootstrap-apply (VP 8)."
-  - "config/iam-invariants.json holds exactly the two classes and thirteen never rows named in scope, test_iam_invariants.py pins them, checks their drift against the classifier's protected names and finds no session Allow granting a never action on a never resource (VP 4)."
-  - "The analyzer sends only created or updated documents, new attachments' policies and changed trusts on a push that leaves config/iam-invariants.json unchanged, sweeps every document otherwise, classes each document by its name and the principals it grants (a ci_writable boundary skipping the never rows), refuses on a ValidatePolicy ERROR, on a SECURITY_WARNING in classes session and ci_writable, on a granted never row or on a public trust, flags widening without refusing, prints names only, and the gate refuses the CI apply on its REFUSED verdict and refuses at apply time any document whose digest differs from the previewed one (VP 4; the existing gate tests unchanged in assertion)."
+  - "config/iam-invariants.json holds exactly the two classes and thirteen never rows named in scope, test_iam_invariants.py pins every class's globs, the ceilings and every row's actions and resources exactly, checks their drift against the classifier's protected names and finds no session Allow granting a never action on a never resource (VP 4)."
+  - "The analyzer checks, in changed mode (every dispatch, and every push that changes none of the sweep triggers), exactly the documents classify.checked_document selects (created, updated, replaced, imported or moved policies, created, imported or moved attachments' policies, and new or changed trusts), and sweeps every kept and unchanged document when a push changes config/iam-invariants.json, an analyzer, classify or plan_names_core file, has an empty or zero before, or has an unreadable or truncated compare, classes each document by its name and the principals it grants (a ci_writable boundary skipping the never rows), refuses on a ValidatePolicy ERROR, on a SECURITY_WARNING in classes session and ci_writable, on a granted never row or on a public trust, flags widening without refusing, prints names only, and the gate refuses the CI apply on its REFUSED verdict and refuses at apply time any document whose digest differs from the previewed one (VP 4; the existing gate tests unchanged in assertion)."
   - "PR 1's head plans exactly its three changes, and the live probes, with the operator's credentials and no PR code, return FAIL for a document granting s3:GetObject against the s3_objects row, FAIL for one granting ssm:GetParameter on a parameter/secret/ name against the secret_values_ssm row, PASS for a CloudWatch read against the s3_objects row and FAIL for a trust open to every principal (VP 7)."
   - "PR 2's merge push preview runs a full sweep that ends ANALYZER_SUMMARY verdict=PASS mode=full and BOOTSTRAP_APPLY_PREVIEW verdict=NO_CHANGES; a prove_gate dispatch runs in changed mode (ANALYZER_SUMMARY verdict=PASS mode=changed documents=0), and its approved apply job prints PROVE_OK without calling Access Analyzer (VP 9-10)."
   - "DECISIONS.md and deploy-paths.yaml carry exactly the sidecar's words (approved_text verify passes, VP 5)."
@@ -494,18 +500,18 @@ verification_plan:
       result --output text 2>> "$L" | sed 's/^/PROBE public_trust /' || echo "PROBE public_trust ERROR"; jq -c
       '.prior_state.values.root_module.resources[]? | select(.type == "aws_iam_policy" or .type == "aws_iam_role_policy" or
       .type == "aws_iam_user_policy") | {a: .address, p: .values.policy}' "$W/plan.json" > "$W/docs.jsonl" 2>> "$L";
-      echo "VALIDATE_DOCS $(wc -l < "$W/docs.jsonl")"; while IFS= read -r J; do N=$(jq -r .a <<< "$J"); T=$(aws
-      accessanalyzer validate-policy --policy-type IDENTITY_POLICY --policy-document "$(jq -r .p <<< "$J")" --query
-      'findings[].findingType' --output text 2>> "$L") || T=CALL_ERROR; E=$(tr '\t' '\n' <<< "$T" | grep -c '^ERROR$');
+      echo "VALIDATE_DOCS $(wc -l < "$W/docs.jsonl")"; K=0; while IFS= read -r J; do K=$((K + 1)); N=$(jq -r .a <<<
+      "$J"); T=$(aws accessanalyzer validate-policy --policy-type IDENTITY_POLICY --policy-document "$(jq -r .p <<<
+      "$J")" --query 'findings[].findingType' --output text 2>> "$L" < /dev/null) || T=CALL_ERROR; E=$(tr '\t' '\n' <<< "$T" | grep -c '^ERROR$');
       SW=$(tr '\t' '\n' <<< "$T" | grep -c '^SECURITY_WARNING$'); C=$(tr '\t' '\n' <<< "$T" | grep -c '^CALL_ERROR$'); [
       "$E$SW$C" = 000 ] || echo "VALIDATE $N error=$E security_warning=$SW call_error=$C"; done < "$W/docs.jsonl"; echo
-      "PROBE_SECONDS $((SECONDS - T0))"; echo "PR_HEAD_SHA $PR_HEAD_SHA" )
+      "VALIDATED $K"; echo "PROBE_SECONDS $((SECONDS - T0))"; echo "PR_HEAD_SHA $PR_HEAD_SHA" )
     expected: >-
       SCREEN_OK; HEAD_PLAN_EXIT 2; Plan: 2 to add, 1 to change, 0 to destroy.; exactly three lines: create
       aws_iam_policy.bootstrap_preview_analyzer, create aws_iam_role_policy_attachment.bootstrap_preview_analyzer, update
       aws_iam_policy.bootstrap_preview_guard; PROBE s3_objects FAIL; PROBE iam_wildcard FAIL; PROBE secret_ssm FAIL; PROBE metric_read PASS;
       PROBE role_prefix_disjoint PASS; PROBE role_star_overlap FAIL; PROBE no_new_access FAIL; PROBE public_trust FAIL;
-      VALIDATE_DOCS n (at least 23); no VALIDATE line with error above 0 or call_error above 0, and no VALIDATE line
+      VALIDATE_DOCS n (at least 23) and VALIDATED the same n; no VALIDATE line with error above 0 or call_error above 0, and no VALIDATE line
       with security_warning above 0 on an agent_session or github_ci_apply address other than
       aws_iam_policy.github_ci_apply_boundary (the ceiling, which validate_policy_block holds to errors only; class
       other may show warnings too: they are shown, not refused);
@@ -759,6 +765,7 @@ context:
   - "Critique r2 dispositions: (1) one selection predicate, classify.checked_document, gives the digest and the analyzer's selection, import, moved and replace rows included; (2) principals resolve through configuration references, users included, unresolvable ones checked against every class; (3) the ceiling exemption is pinned to the protected CI apply boundary's name and void when that policy is attached anywhere, so a decoy permissions_boundary buys nothing; (4) VP 7 adds two wildcard-overlap probes and a free findingType-count validate pass over prior-state documents; (5) a dispatch runs in changed mode and the Update's words name the fail-toward-checking sweeps; nits 6-10, 13 and 14 adopted; nit 11 (config placement) kept at config/ root with the CI-read precedents; nit 12 (length) is the operator's call on the words."
   - "Critique r3 dispositions: (1) the composite-action body baseline is scope row 20; (2) checks split by document kind, trusts only to check-no-public-access; (3) VP 7's warning expectation exempts the ceiling address; (4) replaced, imported and moved attachments are selected; (5) VP 9's leak check reads the analyzer and gate lines and the summary only; (6) the sweep triggers on any checking-code file; (7) group_digest is empty for an all-empty group and is classify's, imported by the analyzer; (8) the Update names the unchecked resource policies and blocks; nits 9-11 and 13-15 adopted; nit 12: no message id goes in the repository, so the 246 cl.4 ruling is cited by date and by rec-5206, whose context carries it."
   - "Critique r4 dispositions: (1) the session never rows mirror DenySessionEscalation's IAM families and Decision 256 cl.2 (S3 object families, UpdateSecret), with a drift node and VP 7's wildcard-action probe; (2) the contradictory dispatch-sweep test wording is gone; (3) full mode gives changed rows their changed-mode digests, adds unchanged addresses from prior state and skips destroyed rows, with an analyzer-to-gate node; nits 4-10, 12 and 13 adopted (no cites change: the cites are the set the r3 scout fingerprinted); nit 11 (a pre-merge public-access pass over prior-state trusts) left to VP 9, since today's trusts name only service principals, GitHub OIDC subjects and the operator's account."
+  - "Critique r5 dispositions: (1) test_iam_invariants pin (1) now compares the parsed file field for field with an expected mapping written out from scope row 6 (every class glob, the ceilings and every row's actions and resources), with red cases for a narrowed glob, a dropped GetSecretValue, an added ceiling and an emptied policy_names; nits 2-7 and 9 adopted (VP 7's loop closes stdin and counts VALIDATED; AC[2] restates scope row 7; full mode checks unchanged group instances and unchanged kept trusts without changing digests; a pure move or import gets a document; a Sid with a twelve-digit run prints its index; the new PR 1 test globs locally); nit 8 left to VP 9 as in r4; nit 10 left because the sidecar words claim less than is built. No sidecar block or fingerprinted field changes."
   - "Why a dated Update and not a new Decision (decision-entry.yaml amendment_forms): the Update adds a check inside clause 2's preview and one read-class grant to clause 3's bootstrap-preview; who approves, the protected set, the root of trust and the CloudShell route are unchanged. It is longer than the 248 precedent because the refusal rule, the never-list's governance and the residuals must be bound in the operator's words; a new Decision would restate clauses 2-3 for no added authority."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
@@ -772,6 +779,7 @@ gate_rounds:
   - {gate: wording-check, round: 4, verdict: PASS, digest: 6febd99cb2f2b7c0cd6845eab08e6ee9f744652280c0484734800beee7484532, base: 137d6533cc2970808a57a8bb1c4df4583f75e494, selection: complete}  # pragma: allowlist secret
   - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:2f1838c05e701b4599121135413f88cb17900d5599d560b4a3cbb1c3aa941a00'}  # pragma: allowlist secret
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 3, nits: 10}
+  - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 9}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
