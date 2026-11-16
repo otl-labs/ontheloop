@@ -16,6 +16,24 @@ pytestmark = pytest.mark.unit
 STORED_AT = datetime(2026, 4, 1, tzinfo=timezone.utc)
 
 
+class _RefCon(FakeCon):
+    """FakeCon plus the reference lookup: a SELECT ... IN (?, ...) returns the asked ids that exist (None: all exist)."""
+
+    def __init__(self, *, known_ids: set | None = None, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._known_ids = known_ids
+        self._asked: list | None = None
+
+    def execute(self, sql, params=None):
+        self._asked = params
+        return super().execute(sql, params)
+
+    def fetchall(self):
+        if self._last.startswith("SELECT ") and " IN (" in self._last:
+            return [(p,) for p in (self._asked or []) if self._known_ids is None or p in self._known_ids]
+        return super().fetchall()
+
+
 def _lookups(con: FakeCon) -> list[tuple[str, list | None]]:
     return [(s, p) for s, p in con.executed if s.startswith("SELECT id FROM") and " IN (" in s]
 
@@ -57,7 +75,7 @@ def test_file_scd2_rejects_dangling_dependency_inside_transaction() -> None:
 
 
 def test_write_scd2_rejects_dangling_dependency_inside_transaction() -> None:
-    con = FakeCon(created_lookup=None, known_ids={"rec-1"})
+    con = _RefCon(created_lookup=None, known_ids={"rec-1"})
     with pytest.raises(RowRuleViolationError) as raised:
         rt.write_scd2(con, ops_rec_record(dependencies=["rec-1", "rec-999999999"]), table="ops_recommendations")
     assert (raised.value.rule, raised.value.column) == ("array_element_reference", "dependencies")
@@ -67,7 +85,7 @@ def test_write_scd2_rejects_dangling_dependency_inside_transaction() -> None:
 
 
 def test_valid_dependencies_pass_with_one_lookup() -> None:
-    con = FakeCon(created_lookup=None, known_ids={"rec-7", "rec-8"})
+    con = _RefCon(created_lookup=None, known_ids={"rec-7", "rec-8"})
     rt.write_scd2(con, ops_rec_record(dependencies=["rec-7", "rec-8"]), table="ops_recommendations")
     assert len(_lookups(con)) == 1
     assert len(_merges(con)) == 2
@@ -75,7 +93,7 @@ def test_valid_dependencies_pass_with_one_lookup() -> None:
 
 def test_unchanged_legacy_value_issues_no_lookup() -> None:
     prior = {"created_timestamp": STORED_AT, "status": "open", "dependencies": ["rec-610"]}
-    con = FakeCon(created_lookup=[prior], known_ids=set())
+    con = _RefCon(created_lookup=[prior], known_ids=set())
     rt.write_scd2(
         con,
         ops_rec_record(status="closed", dependencies=["rec-610"]),
@@ -89,7 +107,7 @@ def test_unchanged_legacy_value_issues_no_lookup() -> None:
 
 def test_changed_value_is_looked_up() -> None:
     prior = {"created_timestamp": STORED_AT, "status": "open", "dependencies": ["rec-610"]}
-    con = FakeCon(created_lookup=[prior], known_ids={"rec-5"})
+    con = _RefCon(created_lookup=[prior], known_ids={"rec-5"})
     with pytest.raises(RowRuleViolationError):
         rt.write_scd2(
             con,
@@ -103,13 +121,13 @@ def test_changed_value_is_looked_up() -> None:
 
 def test_empty_or_null_issues_no_lookup() -> None:
     for value in ([], None):
-        con = FakeCon(created_lookup=None, known_ids=set())
+        con = _RefCon(created_lookup=None, known_ids=set())
         rt.write_scd2(con, ops_rec_record(dependencies=value), table="ops_recommendations")
         assert _lookups(con) == []
 
 
 def test_lookup_binds_one_placeholder_per_distinct_id() -> None:
-    con = FakeCon(created_lookup=None)
+    con = _RefCon(created_lookup=None)
     rt.write_scd2(con, ops_rec_record(dependencies=["rec-3", "rec-2", "rec-3"]), table="ops_recommendations")
     ((sql, params),) = _lookups(con)
     assert params == ["rec-2", "rec-3"]
