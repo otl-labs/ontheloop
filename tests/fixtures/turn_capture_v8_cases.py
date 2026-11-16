@@ -77,7 +77,7 @@ def host_run_only_withheld_files() -> dict[str, str]:
         tool_result("r1", 3, "tu1", "plan body", pid="p1"),
         assistant("a2", 4, "m2", [text_block("PROCEED")]),
     ]
-    return _with_sidecar(make_files(root), sidecar(policy="withheld", checkout=CHECKOUT_SHA, agent="code-review"))
+    return _with_sidecar(make_files(root), sidecar(policy="withheld", checkout=CHECKOUT_SHA, agent="architectural-review"))
 
 
 def host_run_malformed_files() -> dict[str, str]:

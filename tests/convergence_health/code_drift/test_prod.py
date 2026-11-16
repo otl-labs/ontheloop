@@ -175,6 +175,7 @@ class TestDetectProdCodeDrift:
 
         assert "src/data/handlers" in PROD_SOURCE_PATHSPECS
         assert "config/lambda/data-pipeline" in PROD_SOURCE_PATHSPECS
+        assert "config/lambda/scheduled_workflow_dispatcher" in PROD_SOURCE_PATHSPECS
 
     def test_rec_fields_shape_on_file(self) -> None:
         captured: dict[str, Any] = {}

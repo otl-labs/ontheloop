@@ -54,6 +54,7 @@ from scripts import repo_identity
 from scripts.convergence_health.approvals import _make_github_caller
 from scripts.convergence_health.code_drift import _assert_full_history
 from scripts.convergence_health.record import _parse_utc
+from scripts.convergence_health.sensor_liveness_dispatch import newer_cadence_run
 from scripts.convergence_health.sensor_liveness_episodes import (
     RESOLVED_REC_STATUSES as RESOLVED_REC_STATUSES,  # re-export: tests reach it via sl.RESOLVED_REC_STATUSES
 )
@@ -267,7 +268,9 @@ def _assess_peer(
     --liveness-probe so the two never compute staleness differently. `query_suffix` lets
     sensor_liveness_success.py reuse this arithmetic; the cadence default ("") is unchanged."""
     threshold = _peer_threshold_seconds(crons)
-    run = _query_last_run(loop, caller, api_base, query_suffix=query_suffix)
+    run = newer_cadence_run(
+        _query_last_run(loop, caller, api_base, query_suffix=query_suffix), loop, caller, api_base, query_suffix=query_suffix
+    )
     if run is not None:
         anchor_ts = _parse_utc(str(run.get("created_at") or ""))
         anchor = f"run:{run.get('id')}"
