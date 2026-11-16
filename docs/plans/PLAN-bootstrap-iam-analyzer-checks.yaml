@@ -1,0 +1,611 @@
+schema_version: 5
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "bootstrap-iam-analyzer-checks"
+intent: >-
+  Before the operator taps approve on a terraform/bootstrap CI apply, AWS IAM Access Analyzer checks every IAM policy
+  document the plan creates or changes against a per-class never-list (secret values, Terraform state, IAM writes,
+  credential minting for the agent session user; writes reaching the protected set for CI-writable roles) and every
+  changed role trust for public access, so a grant an agent PR slips past the text-based classifier is refused with
+  AWS's own policy reasoning, checked once per changed document and bound to the applied plan by digest (a dated Update
+  to Decision 257 cl.2, 3 and 8).
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-bootstrap-iam-analyzer-checks.yaml
+phase: >-
+  security_advisory (soft-warn exception category; no tier_item claimed, so the Tier Item Freshness Gate is skipped):
+  the follow-on PLAN-agent-proxy-signed-access's planning thread owed (split agent permission ceilings from grants),
+  re-scoped on blind-consult evidence and the operator's choice of 2026-11-16 to its first step, the invariant checks;
+  the split itself and the other halves are filed follow-on recs. Closes no roadmap criterion.
+scope:
+  - file: terraform/bootstrap/bootstrap_ci_apply.tf
+    action: Modify
+    purpose: >-
+      BUILD PR 1 (protected set: the operator's CloudShell plan and apply). One line only: bootstrap_preview_guard_json's
+      DenyAllButReads NotAction becomes exactly concat(local.bootstrap_plan_read_actions,
+      local.bootstrap_preview_analyzer_actions, ["sts:GetCallerIdentity"]) on its existing single line, its
+      BoolIfExists condition unchanged. The file is at 500 of 500 effective lines (plan_obligations, 2026-11-16), so it
+      gains no line: every new resource and local goes in scope row 2. bootstrap-apply gains nothing: the gated job
+      never calls Access Analyzer (it binds the preview's verdict by digest). No other resource, role, trust or Deny
+      changes.
+  - file: terraform/bootstrap/bootstrap_preview_analyzer.tf
+    action: Create
+    purpose: >-
+      BUILD PR 1. One header comment line naming the preview's analyzer grant (Decision 257 Update 2026-11-16); local
+      bootstrap_preview_analyzer_actions = ["access-analyzer:ValidatePolicy", "access-analyzer:CheckAccessNotGranted",
+      "access-analyzer:CheckNoNewAccess", "access-analyzer:CheckNoPublicAccess"] (never appended to
+      bootstrap_plan_read_actions, which is also DenyDetectorWrite's NotAction on the apply role); local
+      bootstrap_preview_analyzer_json, one statement Sid AccessAnalyzerPolicyChecks, Allow, those four actions on "*"
+      (they read no account resource and return only verdicts); aws_iam_policy.bootstrap_preview_analyzer (name
+      bootstrap-preview-analyzer, the same 6,144 B lifecycle precondition as its siblings in bootstrap_ci_apply.tf) and
+      aws_iam_role_policy_attachment.bootstrap_preview_analyzer on aws_iam_role.bootstrap_preview only. Nothing else.
+      Its name matches the protected bootstrap-* pattern, so any later change to it is a CloudShell sitting.
+  - file: tests/checks/iam_tf/test_bootstrap_ci_roles.py
+    action: Modify
+    purpose: >-
+      BUILD PR 1. preview_problems' exact NotAction expression becomes the three-part concat above (an exact string
+      replaced by the new exact string, never a looser match; planned-change disposition citing acceptance_criteria[0]).
+      No other node changes.
+  - file: tests/checks/iam_tf/test_bootstrap_preview_analyzer.py
+    action: Create
+    purpose: >-
+      BUILD PR 1. Text tests in the iam_tf predicate convention over every terraform/bootstrap/*.tf text (the
+      bootstrap_texts mapping): analyzer_problems(texts) returns problems unless
+      bootstrap_preview_analyzer_actions is exactly the four actions, the analyzer policy holds exactly one Allow
+      statement with those actions on "*", exactly one attachment of it exists and names aws_iam_role.bootstrap_preview,
+      no bootstrap-apply attachment or bootstrap_apply_* local names an access-analyzer action, and
+      bootstrap_plan_read_actions names none. Real-tree node asserts []; a parametrized red node drives one mutation
+      each (a fifth action, a resource other than "*", an attachment to bootstrap_apply, the actions appended to
+      bootstrap_plan_read_actions, a dropped attachment).
+  - file: tests/checks/iam_tf/test_platform_role_metadata_admin_scope.py
+    action: Modify
+    purpose: >-
+      BUILD PR 1. Add _BOOTSTRAP_DIR / "bootstrap_preview_analyzer.tf" to _SCANNED_BOOTSTRAP_FILES (a bootstrap CI
+      identity's grant, scanned for IAM leaks like bootstrap_ci_apply.tf). Without it
+      test_scanned_tuple_is_every_bootstrap_file_outside_the_unscanned_mapping goes red on the new file. No other node
+      changes.
+  - file: config/iam-invariants.json
+    action: Create
+    purpose: >- # pragma: allowlist secret
+      BUILD PR 2. The never-list, read by the analyzer (stdlib json) and the static tests. Exactly: {"schema_version":
+      1, "validate_policy_block": ["ERROR", "SECURITY_WARNING"], "classes": [session, ci_writable]} where each class is
+      {id, role_names, policy_names, user_names, never} with fnmatch name globs and never a list of {id, actions,
+      resources?} (resources omitted = any resource; "{account}" and "{region}" are the only placeholders, filled at
+      run time and never printed). session: role_names [], policy_names ["agent-platform-session-*"], user_names
+      ["agent-platform-session"]; never rows iam_write (iam:CreateRole, DeleteRole, PutRolePolicy, AttachRolePolicy,
+      UpdateAssumeRolePolicy, PassRole, CreatePolicy, CreatePolicyVersion, SetDefaultPolicyVersion, CreateUser,
+      CreateAccessKey, PutUserPolicy, AttachUserPolicy, PutUserPermissionsBoundary, DeleteUserPermissionsBoundary,
+      AddUserToGroup, CreateLoginProfile, UpdateLoginProfile), credential_minting (sts:AssumeRole,
+      AssumeRoleWithWebIdentity, AssumeRoleWithSAML, AssumeRoot, GetFederationToken), secret_values_secretsmanager
+      (secretsmanager:GetSecretValue, BatchGetSecretValue), secret_values_ssm (ssm:GetParameter, GetParameters,
+      GetParametersByPath, GetParameterHistory on arn:aws:ssm:{region}:{account}:parameter/secret/*, Decision 237
+      cl.2's verb set), s3_objects (s3:GetObject, GetObjectVersion, PutObject, DeleteObject, DeleteObjectVersion;
+      Decision 256 cl.2 bars every direct S3 read or write), lambda_direct (lambda:InvokeFunction, InvokeFunctionUrl,
+      GetFunction, GetFunctionConfiguration), kms_decrypt (kms:Decrypt). ci_writable: role_names ["agent-platform-*"],
+      policy_names ["agent-platform-*"], user_names []; never rows protected_role_write (iam:PutRolePolicy,
+      AttachRolePolicy, DeleteRolePolicy, DetachRolePolicy, UpdateAssumeRolePolicy, DeleteRole,
+      PutRolePermissionsBoundary, DeleteRolePermissionsBoundary, PassRole on arn:aws:iam::{account}:role/ PlatformAdmin,
+      PlatformDev, bootstrap-*, github-settings-*, platform-security-* and ducklake-api-*), protected_policy_write
+      (iam:CreatePolicyVersion, DeletePolicyVersion, SetDefaultPolicyVersion, DeletePolicy on
+      arn:aws:iam::{account}:policy/ agent-platform-github-ci-apply-boundary, agent-platform-session-*, bootstrap-* and
+      platform-security-*), user_write (iam:CreateUser, CreateAccessKey, PutUserPolicy, AttachUserPolicy,
+      PutUserPermissionsBoundary, DeleteUserPermissionsBoundary, AddUserToGroup, CreateLoginProfile),
+      credential_minting (sts:AssumeRoot, GetFederationToken), github_settings_key (secretsmanager:GetSecretValue,
+      PutSecretValue on arn:aws:secretsmanager:{region}:{account}:secret:agent-platform-terraform-github-apply-app*),
+      bootstrap_state_write (s3:PutObject, DeleteObject on arn:aws:s3:::agent-platform-bootstrap-tfstate/*). A
+      document matches the first class whose glob matches its policy name (aws_iam_policy), its role
+      (aws_iam_role_policy) or its user (aws_iam_user_policy); no match is class other (ValidatePolicy and
+      CheckNoNewAccess only). No account digits, ARN with an account, ExternalId or host.
+  - file: scripts/ci/terraform_bootstrap_apply_analyzer.py
+    action: Create
+    purpose: >-
+      BUILD PR 2. Stdlib only, run with python3 -I by path (Decision 238 cl.3; the trusted-plan fence's predicate h);
+      loads terraform_bootstrap_apply_classify.py the way the gate does (its Plan, target_names and the new
+      document_digest). CLI: --plan-json P --invariants F --out R --event-name E [--before SHA] [--full-sweep]. Selection
+      (changed-only by default): every resource_change of type aws_iam_policy, aws_iam_role_policy or
+      aws_iam_user_policy whose actions are create or update, its after-document; every aws_iam_role create or update
+      whose assume_role_policy changed, its after-trust; every aws_iam_role_policy_attachment or
+      aws_iam_user_policy_attachment create, the attached customer policy's document from the plan's after values or
+      prior state (an AWS-managed or unresolvable attachment is UNCHECKED); no-op rows are never sent. Full sweep (every
+      such document and trust in prior state and the plan's after values) when --full-sweep is given, the event is not
+      push, --before is empty or all zeros, or the push's changed files (GitHub compare API, GH_TOKEN and
+      GITHUB_REPOSITORY from the environment, the gate's urllib pattern) include config/iam-invariants.json or cannot be
+      read (fail toward checking). Checks, through the aws CLI by subprocess (no SDK: the job forbids third-party
+      Python), each document written to a private temp file deleted after the call, --region from AWS_REGION and the
+      account from aws sts get-caller-identity, neither ever printed: validate-policy --policy-type IDENTITY_POLICY
+      (FAIL on any finding whose findingType is in validate_policy_block); for class session or ci_writable, one
+      check-access-not-granted --policy-type IDENTITY_POLICY per never row with --access holding that row's actions and
+      filled resources (FAIL on result FAIL); for an update with a known prior document, check-no-new-access
+      --policy-type IDENTITY_POLICY (WIDENS on FAIL, never refusing); for a trust, check-no-public-access
+      --resource-type AWS::IAM::AssumeRolePolicyDocument (FAIL on FAIL). A document whose after value is unknown at plan
+      time is UNCHECKED (the classifier already protects it). Output, names only (Decisions 101, 238 cl.4): one line per
+      check "ANALYZER <address> <check> <PASS|FAIL|WIDENS|NEW|UNCHECKED>" with "sid=<statementId>" or
+      "index=<statementIndex>" on a FAIL, never a document, ARN, account, finding description, message or CLI stderr
+      (stderr is captured and dropped); then "ANALYZER_SUMMARY verdict=<PASS|REFUSED> mode=<changed|full>
+      documents=<n> fail=<n> widens=<n> unchecked=<n>". R holds {schema_version, mode, verdict, results: [{address,
+      class, digest, checks}]} with the same names-only content; digest is classify.document_digest of the checked
+      document. Exit 0 PASS, 1 REFUSED, 2 ANALYZER_UNREADABLE (a CLI error, a malformed response, an unreadable plan or
+      invariants file). Under 500 SLOC.
+    new_imports: []
+  - file: scripts/ci/terraform_bootstrap_apply_classify.py
+    action: Modify
+    purpose: >-
+      BUILD PR 2. Add document_digest(doc) -> str: sha256 hex of json.dumps(parsed document, sort_keys=True,
+      separators=(",", ":")), "" for an absent or unknown document; build_rows adds "digest" to each row, the after
+      policy document's digest for aws_iam_policy, aws_iam_role_policy and aws_iam_user_policy rows, the after trust's
+      for aws_iam_role rows whose assume_role_policy changed, else "". No classification or reason changes.
+  - file: scripts/ci/terraform_bootstrap_apply_gate.py
+    action: Modify
+    purpose: >-
+      BUILD PR 2. preview gains a required analyzer argument (CLI --analyzer-json, required; unreadable is
+      BOOTSTRAP_APPLY_UNREADABLE, exit 1). The table gains an Analyzer column (a row's check verdicts, FAIL with its sid
+      or index) and, below it, a full-sweep section listing mode, document count and each FAIL address outside the
+      changed rows. Every row with a non-empty digest must have an analyzer result with the same address and digest,
+      else unreadable (the verdict covers exactly the reviewed document). An analyzer verdict REFUSED makes the run exit
+      1 on every event with has_changes=false and a ::error::ANALYZER_REFUSED line; the verdict is ANALYZER_REFUSED,
+      or CLOUDSHELL_REQUIRED when a protected row is also present (then the operator reads the Analyzer column before
+      any CloudShell apply). _CHECK_KEYS gains "digest", so check refuses as unreviewed any applied row whose document
+      differs from the previewed one. Docstring updated. No other behaviour changes.
+  - file: .github/workflows/terraform-bootstrap-apply.yml
+    action: Modify
+    purpose: >-
+      BUILD PR 2. push paths gain 'config/iam-invariants.json'. The preview job gains, between "Read-only plan" and
+      "Preview", a step "IAM Access Analyzer checks (names and verdicts only)" with env GH_TOKEN (github.token),
+      EVENT_NAME and BEFORE_SHA (github.event.before) running python3 -I
+      scripts/ci/terraform_bootstrap_apply_analyzer.py --plan-json "$RUNNER_TEMP/plan.json" --invariants
+      config/iam-invariants.json --event-name "$EVENT_NAME" --before "$BEFORE_SHA" --out "$RUNNER_TEMP/analyzer.json",
+      printing its lines to the log and the step summary, failing the step only on exit 2; the Preview step passes
+      --analyzer-json "$RUNNER_TEMP/analyzer.json"; the delete step also removes the analyzer files. The header comment
+      gains one sentence. The apply job is unchanged.
+  - file: scripts/checks/ci_guards/validate_bootstrap_apply.py
+    action: Modify
+    purpose: >-
+      BUILD PR 2. PUSH_PATHS gains config/iam-invariants.json; OWNED gains scripts/ci/terraform_bootstrap_apply_analyzer.py
+      and config/iam-invariants.json (predicate g). New predicate (i): the preview job runs the analyzer script after the
+      read-only plan step and before the gate's preview step, which passes --analyzer-json. New predicate (j): no step of
+      the apply job and no line of scripts/ci/terraform_bootstrap_apply.sh names accessanalyzer or access-analyzer.
+      Docstring lists both. It adds no import (its existing re, yaml, _common, registry,
+      validate_trusted_plan_environment and verify_ci_workflow imports suffice).
+    new_imports: []
+  - file: tests/checks/ci_guards/test_validate_bootstrap_apply.py
+    action: Modify
+    purpose: >-
+      BUILD PR 2. Red cases for (i) (analyzer step missing, after the preview step, or --analyzer-json dropped) and (j)
+      (an accessanalyzer call added to the apply job or the shell script); the real-tree node stays green; the exact
+      PUSH_PATHS set gains the one path (an exact set extended to the tracked reality, never loosened).
+  - file: tests/test_terraform_bootstrap_apply_analyzer.py
+    action: Create
+    purpose: >-
+      BUILD PR 2. Hermetic tests with an injected fake runner for the aws CLI and the compare fetch (Decision 212 cl.2),
+      on synthetic plan JSON: changed-only selection (create and update documents sent, no-op skipped, a new attachment
+      pulls its customer policy, an AWS-managed attachment is UNCHECKED, a changed trust sent to check-no-public-access);
+      full sweep on dispatch, on an empty or zero --before, on a compare listing config/iam-invariants.json and on an
+      unreadable compare; class precedence (agent-platform-session-* is session, not ci_writable) and class other;
+      placeholders filled with the faked account and region; one check-access-not-granted call per never row; a FAIL
+      refuses (exit 1) and prints its sid or index; WIDENS never refuses; a CLI error or malformed response exits 2;
+      digests equal classify.document_digest; and no output line or results file holds twelve digits, "arn:", a
+      description or message the fake returned, or document text.
+  - file: tests/test_terraform_bootstrap_apply_gate_analyzer.py
+    action: Create
+    purpose: >-
+      BUILD PR 2. The gate with analyzer results: PASS keeps today's verdicts; REFUSED gives ANALYZER_REFUSED and exit 1
+      on push and dispatch; REFUSED plus a protected row gives CLOUDSHELL_REQUIRED, exit 1 and the ::error:: line; a
+      missing or digest-mismatched result is unreadable; reviewed rows carry digest; check refuses a row whose digest
+      differs from the reviewed one and passes an identical one; the CLI refuses without --analyzer-json.
+  - file: tests/test_terraform_bootstrap_apply_gate.py
+    action: Modify
+    purpose: >-
+      BUILD PR 2. Existing preview call sites pass a PASS analyzer fixture built from the plan's rows (preview's new
+      required argument); hand-built reviewed sets gain the digest their rows now carry. Assertions are unchanged
+      (planned-change disposition citing acceptance_criteria[2]). If the file would pass its SLOC budget the fixture
+      helper goes in the new gate-analyzer test file and is imported, never a budget raise.
+  - file: tests/checks/iam_tf/test_iam_invariants.py
+    action: Create
+    purpose: >-
+      BUILD PR 2. The static, credential-free layer over config/iam-invariants.json: (1) pin: the session class's never
+      row ids are exactly the seven above and secret_values_ssm's actions are exactly Decision 237 cl.2's four verbs on
+      parameter/secret/*, and ci_writable's row ids are exactly the six above, so removing or narrowing a row fails a
+      test (Decision 235); (2) drift: every role/ and policy/ pattern in terraform_bootstrap_apply_classify.py's
+      PROTECTED_NAME_PATTERNS appears in a ci_writable resource; (3) offline: no Allow action in agent_session_user.tf's
+      statements matches a session never action (case-insensitive fnmatch in both directions, Allow statements only);
+      (4) hygiene: only {account} and {region} placeholders, no twelve-digit run, every action has a service prefix.
+  - file: .github/CODEOWNERS
+    action: Modify
+    purpose: >-
+      BUILD PR 2. Add "/config/iam-invariants.json @benjamin-blake" under the Decision 257 block (the analyzer script is
+      already covered by /scripts/ci/terraform_bootstrap_apply*).
+  - file: docs/DECISIONS.md
+    action: Modify
+    purpose: >-
+      BUILD PR 2. Exactly the sidecar's block: a dated "> **Update (2026-11-16):**" annotation after Decision 257's
+      Related line (amendment_forms general_rule; Decision 177 append-only; precedent Decision 248's 2026-11-08 Update).
+  - file: docs/contracts/deploy-paths.yaml
+    action: Modify
+    purpose: >-
+      BUILD PR 2. Exactly the sidecar's two blocks: one sentence at the end of admin_out_of_band.bootstrap_ci_apply's
+      description and one amendment_log row.
+infrastructure_dependencies:
+  - "terraform/bootstrap is admin-only and bootstrap_ci_apply.tf is in Decision 257 cl.3's protected set: BUILD PR 1 gets the operator's ENVIRONMENT CHECK and screened pre-merge CloudShell plan (VP 6-7) and the operator's CloudShell apply in the same sitting as its merge (VP 8). Its own merge push runs the workflow, whose preview ends CLOUDSHELL_REQUIRED neutral (expected). BUILD PR 2 changes no file under terraform/, so it needs no CloudShell plan; its first live contact is its merge push's preview (VP 9)."
+  - "Order: both PRs built to CI green first; then one sitting runs VP 6, VP 7 (which also runs PR 2's analyzer at its head against PR 1's head plan, the full sweep and the live API probes, with the operator's credentials) and, after PR 1 merges, VP 8. PR 2 merges only after VP 8 passes: before that its preview would call Access Analyzer without the grant and exit ANALYZER_UNREADABLE (a red main run)."
+  - "One merged-unapplied bootstrap change at a time: PR 1 merges only when no other bootstrap change is merged and unapplied and the operator can run VP 8 in the same sitting."
+  - "Spend: Access Analyzer custom checks, about $0.002 per paid call (third-party figure; unconfirmed until VP 7's probe and the first billing line). Measured 2026-11-16: 18 terraform/bootstrap .tf commits in 30 days, 23 policy documents. Changed-only, one or two documents per apply, at most eight paid calls each: about 300 calls, $0.60 a month; each full sweep about 190 calls, $0.40; worst case every run a sweep about $7. ValidatePolicy is free. No other running cost."
+  - "No Lambda code changes and no deploy channel. No new repository secret or variable (GH_TOKEN is the job token; the compare API needs contents read, which the preview job holds), so no project-configuration.yaml row."
+acceptance_criteria:
+  - "bootstrap-preview alone may call the four Access Analyzer checks (one Allow on '*', attached only to it), its DenyAllButReads NotAction is exactly reads plus those four plus sts:GetCallerIdentity, bootstrap-apply and the shared reads list hold no access-analyzer action, and test_bootstrap_ci_roles.py and test_bootstrap_preview_analyzer.py pass with each red case red (VP 1); after PR 1's apply, live simulation allows the four for bootstrap-preview and denies them to bootstrap-apply (VP 8)."
+  - "config/iam-invariants.json holds exactly the two classes and thirteen never rows named in scope, test_iam_invariants.py pins them, checks their drift against the classifier's protected names and finds no session Allow matching a never action (VP 4)."
+  - "The analyzer sends only created or updated documents, new attachments' policies and changed trusts on a push that leaves config/iam-invariants.json unchanged, sweeps every document otherwise, refuses on a ValidatePolicy ERROR or SECURITY_WARNING, a granted never row or a public trust, flags widening without refusing, prints names only, and the gate refuses the CI apply on its REFUSED verdict and refuses at apply time any document whose digest differs from the previewed one (VP 4; the existing gate tests unchanged in assertion)."
+  - "Against PR 1's live head plan with the operator's credentials, PR 2's analyzer full sweep reports verdict PASS over every document and trust in the root, and the live probes return FAIL for a session-class document granting s3:GetObject, FAIL for one granting ssm:GetParameter on a parameter/secret/ name, PASS for a CloudWatch read and FAIL for a trust open to every principal (VP 7)."
+  - "PR 2's merge push preview runs a full sweep that ends ANALYZER_SUMMARY verdict=PASS mode=full and BOOTSTRAP_APPLY_PREVIEW verdict=NO_CHANGES; a prove_gate dispatch sweeps again, passes, and its approved apply job prints PROVE_OK without calling Access Analyzer (VP 9-10)."
+  - "DECISIONS.md and deploy-paths.yaml carry exactly the sidecar's words (approved_text verify passes, VP 5)."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: BUILD PR 1. Run the changed and new IAM text tests.
+    command: >-
+      bin/venv-python -m pytest tests/checks/iam_tf/test_bootstrap_ci_roles.py
+      tests/checks/iam_tf/test_bootstrap_preview_analyzer.py
+      tests/checks/iam_tf/test_platform_role_metadata_admin_scope.py -q
+    expected: >-
+      All pass, including each parametrized red case of test_bootstrap_preview_analyzer.py and every existing
+      test_bootstrap_ci_roles.py and test_platform_role_metadata_admin_scope.py node.
+    fix_if: Any failure; fix the Terraform or the test's parsing, never an assertion's meaning (Decision 235).
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      Duplicates PR CI's diff-selected pytest of these files; the test_obligations nodes pin the behaviour, and rec-5149
+      owns graduating the bootstrap IAM text tests as registry shards.
+  - step: 2
+    phase: pre-deploy
+    action: BUILD PR 1. Standing IAM checks and provider-free formatting accept the changed root.
+    command: >-
+      bin/venv-python -m scripts.checks.iam_tf.validate_iam_policy_size && bin/venv-python -c "from
+      scripts.checks.iam_tf.validate_account_portable_names import validate_account_portable_names as v; f = []; v(f);
+      print(chr(10).join(f) or 'PORTABLE_OK'); raise SystemExit(1 if f else 0)" && terraform fmt -check -recursive
+      terraform/bootstrap && echo FMT_OK
+    expected: >-
+      The policy-size check passes counting one more bootstrap policy than main; PORTABLE_OK and FMT_OK print;
+      bootstrap_ci_apply.tf's effective line count is unchanged (500), which VP 3's SLOC check enforces.
+    fix_if: A finding names the resource; fix the Terraform, never the check.
+    hermetic: false
+    graduation: not-applicable
+  - step: 3
+    phase: pre-deploy
+    action: BUILD PR 1 and BUILD PR 2, each before handoff. Fast and full tiers.
+    command: >-
+      bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.validate && bin/venv-python -m
+      scripts.checks.validation_result --verify-head
+    expected: >-
+      Both tiers pass and validation_result verifies the head (the full tier is started in the background from the
+      top-level session).
+    fix_if: Any failure; fix on the branch.
+    hermetic: false
+    graduation: not-applicable
+  - step: 4
+    phase: pre-deploy
+    action: BUILD PR 2. Run the analyzer, gate, invariants and fence tests.
+    command: >-
+      bin/venv-python -m pytest tests/test_terraform_bootstrap_apply_analyzer.py
+      tests/test_terraform_bootstrap_apply_gate_analyzer.py tests/test_terraform_bootstrap_apply_gate.py
+      tests/test_terraform_bootstrap_apply_sh.py tests/checks/iam_tf/test_iam_invariants.py
+      tests/checks/ci_guards/test_validate_bootstrap_apply.py -q && bin/venv-python -m
+      scripts.checks.ci_guards.validate_bootstrap_apply && bin/venv-python -m
+      scripts.checks.ci_guards.validate_trusted_plan_environment
+    expected: >-
+      All tests pass, including every red case named in scope; both fences exit 0 on the real tree (the trusted-plan
+      fence's predicate h accepts the analyzer as a code-owned, python3 -I, stdlib-closure script).
+    fix_if: Any failure; fix the code or the test's parsing, never an assertion's meaning (Decision 235).
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      Duplicates PR CI's diff-selected pytest and the registered --pre fences; the test_obligations nodes pin the
+      behaviour. The new test files have no registry shard; rec-5149 owns graduating bootstrap IAM tests.
+  - step: 5
+    phase: pre-deploy
+    action: BUILD PR 2. The governed files carry exactly the sidecar's words.
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug bootstrap-iam-analyzer-checks --base origin/main
+    expected: >-
+      The verify passes for docs/DECISIONS.md and docs/contracts/deploy-paths.yaml (the {{DATE}} placeholder, if any,
+      filled with the build date).
+    fix_if: A word differs; restore the sidecar's words. A needed wording change is a plan amendment and a new approval run.
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: pre-deploy
+    action: >-
+      BUILD PR 1. ENVIRONMENT CHECK (deploy-paths.yaml admin_out_of_band.pre_merge_live_plan), operator-run in AWS
+      CloudShell in the PROD account as user/platform-breakglass, posted once both PRs are CI green. The "caller-arn
+      check" label is the marker validate_admin_root_premerge_gate reads; no repo helper runs in CloudShell.
+    command: >-
+      ( printf 'caller-arn check: '; aws sts get-caller-identity --query Arn --output text 2> /dev/null | grep -q
+      ':user/platform-breakglass$' && echo ADMIN_CHAIN_OK || echo ADMIN_CHAIN_ABSENT )
+    expected: caller-arn check, ADMIN_CHAIN_OK. The ARN itself is never printed.
+    fix_if: ADMIN_CHAIN_ABSENT; the operator signs in as the break-glass user and re-runs, and VP 7 waits.
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: pre-deploy
+    action: >-
+      BUILD PR 1 + PR 2. PRE-MERGE GATE (ADMIN), operator-run in AWS CloudShell after VP 6. The build writes PR 1's full
+      CI-green head into PR_HEAD_SHA and PR 2's into PR2_SHA. The block (PLAN-bootstrap-ci-gated-apply VP 5's shape):
+      fetches main and PR 1's head into a scratch folder; screens PR 1's head (its terraform/ and config diff from
+      main's tip names only terraform/bootstrap/bootstrap_ci_apply.tf and terraform/bootstrap/bootstrap_preview_analyzer.tf, and its added .tf lines carry no provider,
+      module, required_providers, provisioner, local-exec, external or http data source token); installs the pinned
+      terraform checked against HashiCorp's SHA256SUMS; reads the variables from
+      /secret/agent-platform-terraform-personal-tfvars and the account from the caller, printing neither; inits with
+      the committed lock and plans terraform/bootstrap read-only (-lock=false) to a saved plan and its show -json; then
+      fetches PR2_SHA, checks that its scripts/ci/terraform_bootstrap_apply_analyzer.py, terraform_bootstrap_apply_classify.py,
+      plan_names_core.py and config/iam-invariants.json are the only files it runs, and runs the analyzer with
+      python3 -I, --full-sweep, on that plan JSON with the operator's credentials; then four live probes through the aws
+      CLI on synthetic documents with placeholder-free ARNs built in-shell: check-access-not-granted with the session
+      class's s3_objects row on a document allowing s3:GetObject on "*", with its secret_values_ssm row on a document
+      allowing ssm:GetParameter on parameter/secret/x, with its s3_objects row on a document allowing
+      cloudwatch:GetMetricData, and check-no-public-access on a trust allowing sts:AssumeRole to Principal AWS "*". An
+      EXIT trap deletes the folder; errors go to $HOME/bia-tf.err, read in CloudShell only. The build records the
+      returned lines as a counts-only PR comment on both PRs.
+    command: >-
+      ( set -o pipefail; PR_HEAD_SHA=<full PR 1 head sha>; PR2_SHA=<full PR 2 head sha>; W="${TMPDIR:-/tmp}/bia";
+      L="$HOME/bia-tf.err"; rm -rf "$W"; mkdir -p "$W/bin"; : > "$L"; trap 'rm -rf "$W"' EXIT; unset AWS_PROFILE; for d
+      in repo pr2; do git init -q "$W/$d" 2>> "$L"; done; { git -C "$W/repo" fetch -q --depth 1
+      https://github.com/otl-labs/ontheloop.git +refs/heads/main:refs/o/main && git -C "$W/repo" fetch -q --depth 1
+      https://github.com/otl-labs/ontheloop.git "$PR_HEAD_SHA" && git -C "$W/repo" checkout -q --detach FETCH_HEAD && git
+      -C "$W/pr2" fetch -q --depth 1 https://github.com/otl-labs/ontheloop.git "$PR2_SHA" && git -C "$W/pr2" checkout -q
+      --detach FETCH_HEAD; } 2>> "$L" || { echo CLONE_FAILED; exit 1; }; F=$(git -C "$W/repo" diff --name-only refs/o/main
+      HEAD -- terraform config/aws-region config/terraform-version 2>> "$L" | LC_ALL=C sort | tr '\n' ' '); X=$(git -C
+      "$W/repo" diff refs/o/main HEAD -- 'terraform/*.tf' 2>> "$L" | grep -E '^\+' | grep -cE 'data "(external|http)"|provider
+      "|required_providers|module "|provisioner|local-exec'); [ "$F" = "terraform/bootstrap/bootstrap_ci_apply.tf terraform/bootstrap/bootstrap_preview_analyzer.tf " ] && [
+      "$X" = 0 ] || { echo SCREEN_REFUSED; exit 1; }; echo SCREEN_OK; R=$(tr -d '[:space:]' < "$W/repo/config/aws-region");
+      export AWS_REGION="$R" AWS_DEFAULT_REGION="$R"; V=$(tr -d '[:space:]' < "$W/repo/config/terraform-version"); case
+      "$(uname -m)" in aarch64) P=linux_arm64 ;; *) P=linux_amd64 ;; esac; Z="terraform_${V}_${P}.zip"; { curl -fsSL -o
+      "$W/$Z" "https://releases.hashicorp.com/terraform/$V/$Z" && curl -fsSL -o "$W/sums"
+      "https://releases.hashicorp.com/terraform/$V/terraform_${V}_SHA256SUMS" && ( cd "$W" && grep " $Z\$" sums | sha256sum
+      -c --quiet - ) && unzip -qo "$W/$Z" -d "$W/bin"; } >> "$L" 2>&1 || { echo TERRAFORM_INSTALL_FAILED; exit 1; }; export
+      PATH="$W/bin:$PATH"; command -v jq > /dev/null || { echo JQ_ABSENT; exit 1; }; aws ssm get-parameter --name
+      /secret/agent-platform-terraform-personal-tfvars --with-decryption --query Parameter.Value --output text >
+      "$W/vars.tfvars" 2>> "$L" && test -s "$W/vars.tfvars" || { echo TFVARS_ABSENT; exit 1; }; A=$(aws sts
+      get-caller-identity --query Account --output text 2>> "$L"); test -n "$A" || { echo IDENTITY_FAILED; exit 1; };
+      B="$W/repo/terraform/bootstrap"; terraform -chdir="$B" init -input=false -lockfile=readonly -backend-config="region=$R"
+      > /dev/null 2>> "$L" || { echo INIT_FAILED; exit 1; }; terraform -chdir="$B" plan -lock=false -input=false -no-color
+      -detailed-exitcode -var-file="$W/vars.tfvars" -var "account_id=$A" -var "aws_profile=" -out="$W/head.bin" >
+      "$W/plan.txt" 2>> "$L"; echo "HEAD_PLAN_EXIT $?"; grep -E '^Plan: ' "$W/plan.txt"; terraform -chdir="$B" show -json
+      "$W/head.bin" > "$W/plan.json" 2>> "$L"; jq -r '.resource_changes[] | select(.change.actions != ["no-op"]) |
+      "\(.change.actions | join(",")) \(.address)"' "$W/plan.json" | LC_ALL=C sort; S="$W/pr2/scripts/ci"; python3 -I
+      "$S/terraform_bootstrap_apply_analyzer.py" --plan-json "$W/plan.json" --invariants "$W/pr2/config/iam-invariants.json"
+      --event-name workflow_dispatch --full-sweep --out "$W/aa.json" 2>> "$L" | grep -E '^ANALYZER(_SUMMARY)? ' | grep -vE
+      ' PASS$| NEW$'; echo "ANALYZER_EXIT ${PIPESTATUS[0]}"; D='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"%s","Resource":"%s"}]}';
+      probe() { aws accessanalyzer check-access-not-granted --policy-type IDENTITY_POLICY --policy-document "$(printf "$D"
+      "$2" "$3")" --access "$4" --query result --output text 2>> "$L" | sed "s/^/PROBE $1 /" || echo "PROBE $1 ERROR"; };
+      probe s3_objects s3:GetObject '*' '[{"actions":["s3:GetObject","s3:PutObject"]}]'; probe secret_ssm ssm:GetParameter
+      "arn:aws:ssm:$R:$A:parameter/secret/x" "[{\"actions\":[\"ssm:GetParameter\"],\"resources\":[\"arn:aws:ssm:$R:$A:parameter/secret/*\"]}]";
+      probe metric_read cloudwatch:GetMetricData '*' '[{"actions":["s3:GetObject","s3:PutObject"]}]'; aws accessanalyzer
+      check-no-public-access --resource-type AWS::IAM::AssumeRolePolicyDocument --policy-document
+      '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"}]}' --query
+      result --output text 2>> "$L" | sed 's/^/PROBE public_trust /' || echo "PROBE public_trust ERROR"; echo "PR_HEAD_SHA
+      $PR_HEAD_SHA PR2_SHA $PR2_SHA" )
+    expected: >-
+      SCREEN_OK; HEAD_PLAN_EXIT 2; Plan: 2 to add, 1 to change, 0 to destroy.; exactly three lines: create
+      aws_iam_policy.bootstrap_preview_analyzer, create aws_iam_role_policy_attachment.bootstrap_preview_analyzer, update
+      aws_iam_policy.bootstrap_preview_guard; no ANALYZER line other than ANALYZER_SUMMARY verdict=PASS mode=full
+      documents=<n> fail=0 (n at least 23; widens and unchecked counts printed, unchecked 0 except AWS-managed
+      attachments); ANALYZER_EXIT 0; PROBE s3_objects FAIL; PROBE secret_ssm FAIL; PROBE metric_read PASS; PROBE
+      public_trust FAIL; the two shas.
+    fix_if: >-
+      SCREEN_REFUSED: nothing was initialised; if main moved under terraform/ the build rebases and re-posts, else the
+      head carries files beyond scope and the build stops. A setup line: the operator reads $HOME/bia-tf.err in
+      CloudShell and re-pastes. Any other plan address, or an update or destroy (another merged-unapplied bootstrap
+      change): stop, do not merge, report to the coordinator. An ANALYZER FAIL line on an existing document: either a
+      real grant the never-list forbids (file a rec, and PR 2 waits on a plan amendment that fixes the grant or, with
+      the operator's word, the row; never a silent narrowing of a row, Decision 235) or a ValidatePolicy SECURITY_WARNING
+      on a document that has always carried it (same route). ANALYZER_EXIT 2 or a PROBE ERROR: the aws CLI rejected a
+      parameter shape (for example a wildcard in --access resources, or the AssumeRolePolicyDocument resource type);
+      the build reads the error class from the operator in words, never the text, and this is a plan amendment. A probe
+      with the opposite result: the API semantics differ from the plan's assumption; plan amendment before PR 2 merges.
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: post-deploy
+    action: >-
+      BUILD PR 1. OPERATOR STEP, AWS CloudShell in the PROD account, in the same sitting as PR 1's merge. VP 7's fetch,
+      screen, install, variable and init lines at the merge sha M (screened on the merge commit's own diff, HEAD^..HEAD),
+      then a saved plan applied only when its summary is exactly 2 to add, 1 to change, 0 to destroy and its addresses
+      are exactly VP 7's, a fresh plan, and IAM simulation, all with ARNs built in-shell from the caller's account and
+      never printed. The operator's paste is the direction for the apply (Decision 126 cl.1). No detector filter matches
+      a bootstrap-preview policy or role write (platform_security_alarms.tf), so no detector email is expected; any
+      email is reported and triaged before PR 2 merges.
+    command: >-
+      ( set -o pipefail; M=<full merge sha>; <VP 7's lines from W= through terraform init, with PR_HEAD_SHA replaced by
+      M, a depth-2 fetch, the screen's diff taken HEAD^ HEAD, and no PR 2 fetch>; terraform -chdir="$B" plan
+      -input=false -no-color -var-file="$W/vars.tfvars" -var "account_id=$A" -var "aws_profile=" -out="$W/apply.bin" >
+      "$W/plan.txt" 2>> "$L"; S=$(grep -E '^Plan: ' "$W/plan.txt"); echo "$S"; G=$(terraform -chdir="$B" show -json
+      "$W/apply.bin" | jq -r '.resource_changes[] | select(.change.actions != ["no-op"]) | .address' | LC_ALL=C sort | tr
+      '\n' ' '); [ "$S" = "Plan: 2 to add, 1 to change, 0 to destroy." ] && [ "$G" =
+      "aws_iam_policy.bootstrap_preview_analyzer aws_iam_policy.bootstrap_preview_guard
+      aws_iam_role_policy_attachment.bootstrap_preview_analyzer " ] || { echo APPLY_SKIPPED; exit 1; }; terraform
+      -chdir="$B" apply -input=false -no-color "$W/apply.bin" > /dev/null 2>> "$L" && echo APPLY_DONE || { echo
+      APPLY_FAILED; exit 1; }; terraform -chdir="$B" plan -lock=false -input=false -no-color -detailed-exitcode
+      -var-file="$W/vars.tfvars" -var "account_id=$A" -var "aws_profile=" > /dev/null 2>> "$L"; echo "REPLAN_EXIT $?";
+      for r in bootstrap-preview bootstrap-apply; do aws iam simulate-principal-policy --policy-source-arn
+      "arn:aws:iam::$A:role/$r" --action-names access-analyzer:ValidatePolicy access-analyzer:CheckAccessNotGranted
+      access-analyzer:CheckNoNewAccess access-analyzer:CheckNoPublicAccess iam:CreatePolicy --query
+      'EvaluationResults[].[EvalActionName,EvalDecision]' --output text 2>> "$L" | sed "s/^/SIM $r /"; done; echo "M $M" )
+    expected: >-
+      Plan: 2 to add, 1 to change, 0 to destroy.; APPLY_DONE; REPLAN_EXIT 0; SIM bootstrap-preview allowed for the four
+      access-analyzer actions and explicitDeny for iam:CreatePolicy; SIM bootstrap-apply implicitDeny for the four
+      access-analyzer actions and allowed for iam:CreatePolicy (its IAMManagedPolicyWrite on agent-platform-*; the
+      simulation's resource is "*", so allowed or implicitDeny are both acceptable for that one row); M.
+    fix_if: >-
+      APPLY_SKIPPED: nothing applied; stop and report the summary. APPLY_FAILED or REPLAN_EXIT 2: report the error
+      class in words; a partial apply is finished by a plan amendment's CloudShell block, never by -target. A SIM
+      mismatch on an access-analyzer row: the grant or the guard's NotAction is wrong; plan amendment. PR 2 does not
+      merge until this step passes.
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: post-deploy
+    action: >-
+      BUILD PR 2. First live run: PR 2's merge push starts terraform-bootstrap-apply.yml (config/iam-invariants.json is
+      new in the push, so the analyzer sweeps every document); the build reads the run back.
+    command: >-
+      mcp__github__actions_list(owner="otl-labs", repo="ontheloop", method="list_workflow_runs",
+      resource_id="terraform-bootstrap-apply.yml") for the merge sha, then mcp__github__actions_get and get_job_logs for
+      its preview job
+    expected: >-
+      The preview job concludes success; its analyzer step prints ANALYZER_SUMMARY verdict=PASS mode=full with fail=0
+      and the same document count VP 7 printed (or one more for VP 8's new policy); the gate prints
+      BOOTSTRAP_APPLY_PREVIEW verdict=NO_CHANGES; the apply job is skipped; no log line holds twelve digits or "arn:".
+    fix_if: >-
+      ANALYZER_UNREADABLE with an AccessDenied class: VP 8's grant is missing or wrong; a protected-set fix applied from
+      CloudShell after a plan amendment. A FAIL: as VP 7's fix_if. A digit run or ARN in the log: a Decision 101 leak;
+      revert PR 2 at once and file a rec. A pending change (REVIEWABLE or CLOUDSHELL_REQUIRED): another bootstrap change
+      landed unapplied; stop and report.
+    hermetic: false
+    graduation: not-applicable
+  - step: 10
+    phase: post-deploy
+    action: >-
+      BUILD PR 2. Prove the dispatch path: the build dispatches the workflow from main with prove_gate true; the
+      operator approves the apply job in tf-bootstrap-apply after the preview passes; the build reads the run back.
+    command: >-
+      mcp__github__actions_run_trigger(owner="otl-labs", repo="ontheloop", workflow_id="terraform-bootstrap-apply.yml",
+      ref="main", inputs={"prove_gate": "true"}), then after the approval mcp__github__actions_get and get_job_logs for
+      both jobs
+    expected: >-
+      The preview's analyzer step prints ANALYZER_SUMMARY verdict=PASS mode=full; the preview reports NO_CHANGES; the
+      apply job passes its approvals check, plans no change and prints PROVE_OK, and its log names no Access Analyzer
+      call.
+    fix_if: >-
+      Any refusal; report the token lines to the coordinator. An apply-job Access Analyzer call: fence predicate (j) is
+      wrong; fix on a branch.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: terraform/bootstrap/bootstrap_preview_analyzer.tf
+    behavior: Only bootstrap-preview may call the four Access Analyzer checks; its guard's NotAction admits exactly them beside the reads; the apply role and the shared reads list hold none.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_bootstrap_preview_analyzer.py
+    red_green_expectation: red before (file absent, then every predicate red on the unchanged tree), green after
+  - source: terraform/bootstrap/bootstrap_ci_apply.tf
+    behavior: The preview guard's DenyAllButReads NotAction admits the four analyzer actions beside the reads and nothing else.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_bootstrap_ci_roles.py::test_bootstrap_preview_has_no_write
+    red_green_expectation: red before (the HCL still holds the two-part concat), green after
+  - source: tests/checks/iam_tf/test_bootstrap_ci_roles.py
+    behavior: The preview guard's DenyAllButReads NotAction is pinned to the exact three-part concat.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_bootstrap_ci_roles.py::test_bootstrap_preview_has_no_write
+    red_green_expectation: red before (the HCL still holds the two-part concat), green after
+  - source: tests/checks/iam_tf/test_bootstrap_preview_analyzer.py
+    behavior: The new predicate file itself, red on each mutation.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_bootstrap_preview_analyzer.py
+    red_green_expectation: red before (absent), green after
+  - source: config/iam-invariants.json
+    behavior: Two classes, thirteen never rows, pinned; drift-checked against the classifier's protected names; no session Allow matches a never action.
+    verification_step: 4
+    test_selector: tests/checks/iam_tf/test_iam_invariants.py
+    red_green_expectation: red before (file absent), green after
+  - source: scripts/ci/terraform_bootstrap_apply_analyzer.py
+    behavior: Changed-only selection, full-sweep triggers, class matching, per-row checks, refusal and widening semantics, names-only output, exit codes.
+    verification_step: 4
+    test_selector: tests/test_terraform_bootstrap_apply_analyzer.py
+    red_green_expectation: red before (script absent), green after
+  - source: scripts/ci/terraform_bootstrap_apply_classify.py
+    behavior: Rows carry the canonical digest of their after document or trust, equal to the analyzer's.
+    verification_step: 4
+    test_selector: tests/test_terraform_bootstrap_apply_analyzer.py
+    red_green_expectation: red before (no document_digest or row digest), green after
+  - source: scripts/ci/terraform_bootstrap_apply_gate.py
+    behavior: An analyzer REFUSED verdict refuses the CI apply on every event; a missing or digest-mismatched result is unreadable; check refuses a document that differs from the previewed one.
+    verification_step: 4
+    test_selector: tests/test_terraform_bootstrap_apply_gate_analyzer.py
+    red_green_expectation: red before (preview takes no analyzer results; check ignores documents), green after
+  - source: tests/test_terraform_bootstrap_apply_gate.py
+    behavior: Existing gate behaviour is unchanged under a PASS analyzer fixture.
+    verification_step: 4
+    test_selector: tests/test_terraform_bootstrap_apply_gate.py
+    red_green_expectation: red before (preview's new required argument absent at its call sites), green after
+  - source: .github/workflows/terraform-bootstrap-apply.yml
+    behavior: The preview runs the analyzer between the plan and the gate preview and passes its results; the apply job never calls Access Analyzer.
+    verification_step: 4
+    test_selector: tests/checks/ci_guards/test_validate_bootstrap_apply.py
+    red_green_expectation: red before (predicates i and j fail on the unchanged workflow), green after
+  - source: scripts/checks/ci_guards/validate_bootstrap_apply.py
+    behavior: Predicates i and j, the extended push paths and owned set.
+    verification_step: 4
+    test_selector: tests/checks/ci_guards/test_validate_bootstrap_apply.py
+    red_green_expectation: red before (predicates absent), green after
+  - source: tests/checks/ci_guards/test_validate_bootstrap_apply.py
+    behavior: Red cases for predicates i and j.
+    verification_step: 4
+    test_selector: tests/checks/ci_guards/test_validate_bootstrap_apply.py
+    red_green_expectation: red before (new nodes absent), green after
+  - source: tests/test_terraform_bootstrap_apply_analyzer.py
+    behavior: The analyzer test file itself.
+    verification_step: 4
+    test_selector: tests/test_terraform_bootstrap_apply_analyzer.py
+    red_green_expectation: red before (absent), green after
+  - source: tests/test_terraform_bootstrap_apply_gate_analyzer.py
+    behavior: The gate-analyzer test file itself.
+    verification_step: 4
+    test_selector: tests/test_terraform_bootstrap_apply_gate_analyzer.py
+    red_green_expectation: red before (absent), green after
+  - source: tests/checks/iam_tf/test_iam_invariants.py
+    behavior: The invariants test file itself.
+    verification_step: 4
+    test_selector: tests/checks/iam_tf/test_iam_invariants.py
+    red_green_expectation: red before (absent), green after
+  - source: .github/CODEOWNERS
+    behavior: config/iam-invariants.json is code-owned (fence predicate g).
+    verification_step: 4
+    test_selector: tests/checks/ci_guards/test_validate_bootstrap_apply.py
+    red_green_expectation: red before (the owned set names a path CODEOWNERS does not cover), green after
+  - source: docs/DECISIONS.md
+    behavior: Decision 257 carries exactly the approved Update.
+    verification_step: 5
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug bootstrap-iam-analyzer-checks --base origin/main
+    red_green_expectation: red before (the Update absent), green after
+  - source: docs/contracts/deploy-paths.yaml
+    behavior: bootstrap_ci_apply names the analyzer and its refusal; the amendment_log records it.
+    verification_step: 5
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug bootstrap-iam-analyzer-checks --base origin/main
+    red_green_expectation: red before (the sentence and row absent), green after
+constraints:
+  - "No rescue agents or workaround loops (Decision 55). Never attempt or retry sts:AssumeRole or any other credential-minting call from a session; the session user has no Access Analyzer grant, so the build never calls Access Analyzer itself: live calls run only in CI (bootstrap-preview) and in the operator's CloudShell (VP 7-8)."
+  - "Never write an account id, ARN with an account, ExternalId, key or host into the repo, a PR, a comment, a job log or the shared folder (Decision 101). Analyzer output is names and verdicts only; an Access Analyzer description, message or reason text is never printed (Decision 238 cl.4)."
+  - "The governed files get exactly the sidecar's words (Decision 246). The operator approved this work on 2026-11-16 and asked not to be asked again for final-diff words on approved work; the operator's GitHub approval of the sidecar's run and the operator's own CloudShell pastes (VP 6-8) and the VP 10 approval are the only operator actions."
+  - "No grant beyond scope row 2 and no change to bootstrap-apply, the CI apply boundary, the session user or any Deny other than DenyAllButReads' NotAction. A never row is never removed or narrowed to obtain green (Decision 235); a FAIL on an existing document routes per VP 7's fix_if."
+  - "A PASS is evidence for the operator's review, never a substitute for the tf-bootstrap-apply approval (Decision 92 pt 1); no code path lets a FAIL be waived or skipped."
+context:
+  - "Decision-scout r1 FLAGS_FOUND (/mnt/project-files/ceilings-grants/SCOUT-r1.md). Decisions triaged: 210 of 210. Roadmap items intersected: 6; CONFLICT: 0; RELATED: 6. Serves: NS.9 4/5. CITE: 257, 256, 238, 237, 101, 126, 181, 235, 168, 247. Dispositions: 257 WARN adopted as the sidecar's dated Update covering cl.2, 3 and 8 (precedent 248's 2026-11-08 Update); (b) adopted as a preview-only policy and a separate local, not the shared reads list; (c) adopted as digest binding: the gate requires the analyzer checked each row's exact document and the apply's check refuses a differing one, so the gated job needs no grant; (d) adopted: protected-set plans still show the Analyzer column and a FAIL turns the run red before any CloudShell apply. 235: adapted, the never rows are pinned by test_iam_invariants.py instead of a scope-boundary map entry (the CONTENT map lists surface kinds, not files). 168: n/a, the never-list is config read by stdlib json, not a docs/contracts file. 247 cl.3: one plan, two PRs with VP 8 as the explicit ordering gate."
+  - "Design evidence: /mnt/project-files/ceilings-grants/ADVICE.md (blind Fable consult, two rounds, and the operator's 2026-11-16 direction: changed documents only, digest reuse, attachments count, a never-list change sweeps once). The operator chose 'Access Analyzer checks first' over the originally agreed ceiling/grant split after the recon showed a new API route is a CloudShell sitting whatever the IAM shape (terraform_bootstrap_apply_classify.py protected_reasons 'type') and no access incident involved the session user."
+  - "Follow-on recs filed at planning time (the deferred halves): rec-5207 the session ceiling/grant split (amends Decisions 256 cl.1 and 257 cl.3), rec-5208 enumerated AWS-managed service-role policies, rec-5209 the same checks on terraform/personal's trusted plan (amends Decision 238), rec-5210 read-class grants for the CI apply role, then service-level writes behind these checks."
+  - "Split: one plan, two build PRs, disjoint files. PR 1 (bootstrap_ci_apply.tf's one line, the new bootstrap_preview_analyzer.tf and three tests) is protected-set, so CloudShell plan and apply. PR 2 (everything else) touches nothing under terraform/. PR 2's head is proven against PR 1's live plan in the same sitting (VP 7), then merges after VP 8."
+  - "UNPROVEN until VP 7: the aws CLI's accessanalyzer commands accept wildcard actions and resources in --access and the AWS::IAM::AssumeRolePolicyDocument resource type for check-no-public-access, one access entry per call, and return statementId or statementIndex in reasons (recalled from AWS docs, not fetched); the price per paid call; that every current document passes the never-list and ValidatePolicy. UNPROVEN until VP 9: that the GitHub runner's preinstalled aws CLI carries the accessanalyzer commands and that the compare API answers with the job token."
+  - "Residuals (in the Update): each check reads one document, never its boundary or its principal's other policies (conservative: a grant a boundary would block still fails); an AWS-managed attachment is UNCHECKED; trust policies are checked only for public access, not for which principals they admit."
+  - "V3 resolution: VP 7's operator-run pre-merge plan at PR 1's head substitutes for pre-merge post-deploy evidence for PR 1; PR 2 changes no non-Markdown bootstrap file. Behavioural acceptance is VP 8 (apply and simulation), VP 9 (first preview sweep) and VP 10 (dispatch and approved no-op), with the operator's returned lines labelled operator-reported in counts-only PR comments naming the applied sha."
+  - "Approvals at build start: the operator's direction of 2026-11-16 (Access Analyzer checks first, changed documents only) and the operator's GitHub approval of this plan's approval run, which the plan PR records; no final-diff word is asked (operator, 2026-11-16). The build session holds no AWS identity for these steps; VP 6-8 are the operator's CloudShell blocks and VP 10 the operator's GitHub approval."
+  - "Overlaps: rec-5168 (PR-time trusted plan for terraform/bootstrap) will later need the same analyzer at PR time; rec-5174 (CI simulate) and rec-5169 (gate-role alarm) touch the same workflow and root but no file here; PLAN-wording-approval-routing (#2052, rec-5137) changes how wording approvals route, not this sidecar's shape. No open PR edits a scope file (checked 2026-11-16)."
+  - "Red overlap (scripts.ci_rca.red_overlap, 2026-11-16): verdict blocked; reds rec-5194 (slo_breached, shared none) and rec-5205 (overlap, shared only transitive test residue: test_validate_composite_action_shell_bodies.py, test_validate_composite_action_shape_rosters.py, test_ci_rca_lifecycle_correct_rec_context.py, verify_ci_workflow/test_apply_and_terraform.py). Deferral rationale: this plan repairs neither and edits none of those files; rec-5194's red is owned by the Feedback Loop project and the operator ruled on 2026-11-16 that agents proceed past it; rec-5205 shares no scope file, only tests that import a scoped module transitively. The build re-runs red_overlap at its start and rebases if either red has landed a fix."
+  - "plan_obligations (2026-11-16): no unmet registration obligations; NEAR_CAP terraform/bootstrap/bootstrap_ci_apply.tf 500 of 500 effective lines (hence scope row 2's new file and row 1's one-line edit) and docs/contracts/deploy-paths.yaml 478 of 500 (the sidecar adds one sentence and one amendment_log row, about three lines); every other scope file has 109 or more lines of headroom. validate_bootstrap_apply.py's new imports: none beyond the stdlib it already uses."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Only the plan-cited decision sections (257, 256, 238, 237, 101, 126, 92, 235, 248)
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+  - "Start condition: this plan merged; no other bootstrap change merged and unapplied."
+execution_steps:
+  - "BUILD PR 1. Tests first (scope rows 3-5), seen red on the unchanged tree; then bootstrap_preview_analyzer.tf (row 2) and
+    bootstrap_ci_apply.tf's one line (row 1). Post: VP 1-2 pass; VP 3; push; PR."
+  - "BUILD PR 2, on its own branch from main (no dependency on PR 1's files). Tests first (rows 14-17), then config/iam-invariants.json, the classifier's digest, the analyzer, the gate, the workflow, the fence and CODEOWNERS; hand-apply the sidecar's blocks verbatim ({{DATE}} the build date). Post: VP 4-5 pass; VP 3; push; PR."
+  - "With both PRs CI green: post VP 6 and VP 7 to the operator with both full shas; record the lines on both PRs; merge PR 1 (squash) at the head VP 7 covered; post VP 8 at the merge sha in the same sitting and record its lines."
+  - "Rebase PR 2 onto main after VP 8, re-run VP 3-5 on the new head, merge (squash); then VP 9 and VP 10."
+  - "Execute Verification Plan: run each step; loop until pass; on an unrecoverable V3 failure stop and RCA (Decision 55)."
+  - "Report: what was implemented, the validation_result --verify-head verdicts, the operator-reported lines of VP 6-8, the run ids of VP 9-10 and both merge SHAs."
+rollback: >-
+  PR 2: a revert PR removes the analyzer step, script, config and gate changes and keeps the DECISIONS.md Update
+  (append-only, Decision 177) with a dated note that the checks are off; the preview then behaves as before. PR 1: the
+  analyzer grant is harmless without PR 2; to remove it a reviewed PR drops the policy and attachment and the operator
+  applies it from CloudShell.
