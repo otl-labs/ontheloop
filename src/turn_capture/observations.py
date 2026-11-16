@@ -17,6 +17,7 @@ from typing import Any
 
 from src.turn_capture import witness
 from src.turn_capture.gate_events import build_gate_events
+from src.turn_capture.hook_denials import build_hook_denials
 from src.turn_capture.markers import SIGNATURE_PATTERN
 from src.turn_capture.refs import model_call_ref, role_ref, turn_entity_ref
 from src.turn_capture.scrub import scrub_text
@@ -437,6 +438,7 @@ def build_observations(parsed: ParsedTree, ctx: Ctx, diag: Counter[str], sidecar
             if turn.closed:
                 rows += _turn_rows(ctx, stream, turn, diag, sidecars, spawn_usage.get(stream.key))
                 rows += build_gate_events(ctx, stream, turn, tref, sidecars, diag, _row)
+                rows += build_hook_denials(ctx, stream, turn, diag, _row)
             else:
                 rows.append(_turn_open_row(ctx, stream, turn, tref))
         rows += [_hook_row(ctx, stream, rec) for rec in stream.hooks if rec.turn is None or rec.turn.closed]

@@ -1,8 +1,9 @@
 """Structured gate-failure markers and the pre-commit failure grammar (stdlib only).
 
-Single declared home of three grammars: scripts/validate.py prints gate markers, pre-commit prints
-its own per-hook block, and a repo CLI reports a skip or failure with a STATUS v1 line (the sibling prevention plan's
-CLIs are its only intended emitters). The turn-capture parser reads all three through parse_markers.
+Single declared home of four grammars: scripts/validate.py prints gate markers, pre-commit prints
+its own per-hook block, a repo CLI reports a skip or failure with a STATUS v1 line (the sibling prevention plan's
+CLIs are its only intended emitters), and each blocking hook ends its block message with a HOOK-BLOCK v1 line (rule HB-1).
+The turn-capture parser reads the first three through parse_markers and the fourth through hook_block_stems.
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ STATUS_MARKER_PREFIX = "STATUS"
 STATUS_MARKER_VERSION = 1
 STATUS_RESULTS = ("done", "skipped", "failed")
 STATUS_SOURCE_MAX = 192
+HOOK_BLOCK_PREFIX = "HOOK-BLOCK"
+HOOK_BLOCK_VERSION = 1
 
 _SIGNATURE_RE = re.compile(SIGNATURE_PATTERN)
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -25,6 +28,7 @@ _STATUS_RE = re.compile(
     rf"{STATUS_MARKER_PREFIX} v{STATUS_MARKER_VERSION} source=({SIGNATURE_PATTERN}) "
     rf"result=({'|'.join(STATUS_RESULTS)})(?: reason=({SIGNATURE_PATTERN}))?"
 )
+_HOOK_BLOCK_RE = re.compile(rf"{HOOK_BLOCK_PREFIX} v{HOOK_BLOCK_VERSION} hook=({SIGNATURE_PATTERN})")
 _HOOK_RE = re.compile(rf"- hook id: ({SIGNATURE_PATTERN})")
 _EXIT_RE = re.compile(r"- exit code: (-?[0-9]+)")
 _MODIFIED_LINE = "- files were modified by this hook"
@@ -52,6 +56,21 @@ def format_status_marker(source: str, result: str, reason: str | None = None) ->
         raise ValueError(f"status reason does not fit the signature class: {reason!r}")
     tail = "" if reason is None else f" reason={reason}"
     return f"{STATUS_MARKER_PREFIX} v{STATUS_MARKER_VERSION} source={source} result={result}{tail}"
+
+
+def format_hook_block_marker(stem: str) -> str:
+    if not _SIGNATURE_RE.fullmatch(stem):
+        raise ValueError(f"hook stem does not fit the signature class: {stem!r}")
+    return f"{HOOK_BLOCK_PREFIX} v{HOOK_BLOCK_VERSION} hook={stem}"
+
+
+def hook_block_stems(text: str) -> list[str]:
+    stems: list[str] = []
+    for raw in text.split("\n"):
+        match = _HOOK_BLOCK_RE.fullmatch(_normalise(raw))
+        if match:
+            stems.append(match.group(1))
+    return stems
 
 
 def _status_match(line: str) -> re.Match[str] | None:

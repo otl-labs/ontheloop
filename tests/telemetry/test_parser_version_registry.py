@@ -90,6 +90,8 @@ CASES = (
     "host_run_retry_attempts.json",
     "hook_label_shape.json",
     "hook_status_message_shape.json",
+    "hook_denial_cloud_shape.json",
+    "hook_denial_attachment_twin.json",
 )
 
 
