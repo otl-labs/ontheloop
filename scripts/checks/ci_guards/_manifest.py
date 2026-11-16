@@ -331,6 +331,7 @@ ENTRIES: tuple[Entry, ...] = (
         pre_globs=(
             ".github/workflows/terraform-apply-sandbox.yml",
             ".github/workflows/reconcile.yml",
+            ".github/actions/subagent-plan-review/action.yml",
             "scripts/checks/ci_guards/**",
             "scripts/checks/_common.py",
             "scripts/checks/registry.py",

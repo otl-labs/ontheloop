@@ -82,6 +82,13 @@ def render_message(
             )
         return f"Reconcile's gated apply did NOT converge (RED) for {sha}. Inspect this run's logs directly."
     if job == "apply-sandbox":
+        if routed == "revise":
+            return (
+                f"sandbox subagent plan reviewer REVISEd {head_sha} on push, so it was routed to the tf-gated-apply job "
+                "instead of latching red; read the REVISE reason in this run's apply-sandbox step summary, then approve "
+                "or reject at: Actions -> gated-apply job. The convergence record is unchanged until the gated apply "
+                f"completes (commit_sha becomes {head_sha} on success). (Best-effort wake.)"
+            )
         if routed == "true":
             return (
                 f"sandbox terraform-apply guard routed {head_sha} to the tf-gated-apply job (out-of-budget IAM / trust / "

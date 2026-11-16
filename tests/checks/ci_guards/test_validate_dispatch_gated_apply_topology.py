@@ -5,7 +5,10 @@ Pass-path fixture is the REAL committed workflow (never an inline stand-in, so a
 quietly drifts the real file is caught here too). Every negative deep-copies that real parsed
 workflow and mutates exactly one invariant-relevant field, then patches this module's own `_load`
 binding to return the mutated dict -- so each negative isolates to its own invariant's failure
-label and never trips a sibling invariant by accident.
+label and never trips a sibling invariant by accident -- except invariant (xiii), which reads
+reconcile.yml and the action file through the same `_load`, so under the single-return-value `_run`
+the sandbox dict stands in for both and every existing negative also fails (xiii); that is expected,
+not a regression. TestRevisePathInvariants patches `_load` per path instead.
 """
 
 from __future__ import annotations
@@ -63,7 +66,7 @@ class TestPassPath:
         declaration = registry.pop_declaration()
         assert declaration is not None
         assert declaration.kind == "examined"
-        assert declaration.count == 8
+        assert declaration.count == 13
         assert declaration.unit == "topology_invariants"
 
 
@@ -219,3 +222,135 @@ class TestUnreadableWorkflow:
         assert failed == []
         assert declaration is not None
         assert declaration.kind == "skipped"
+
+
+_RECONCILE_REL_PATH = ".github/workflows/reconcile.yml"
+_ACTION_REL_PATH = ".github/actions/subagent-plan-review/action.yml"
+_DISJUNCT = "github.event_name == 'push' && steps.review.outcome == 'success' && steps.review.outputs.outcome == 'revise'"
+
+
+def _run_by_path(sandbox: dict, reconcile: dict | None = None, action: dict | None = None) -> list[str]:
+    by_path = {
+        _WORKFLOW_REL_PATH: sandbox,
+        _RECONCILE_REL_PATH: reconcile if reconcile is not None else _load(str(_common.ROOT / _RECONCILE_REL_PATH)),
+        _ACTION_REL_PATH: action if action is not None else _load(str(_common.ROOT / _ACTION_REL_PATH)),
+    }
+
+    def fake_load(path: str) -> dict:
+        for rel, data in by_path.items():
+            if path.endswith(rel):
+                return data
+        raise AssertionError(path)
+
+    with patch(f"{_MODULE}._load", side_effect=fake_load):
+        failed: list[str] = []
+        validate_dispatch_gated_apply_topology(failed)
+    return failed
+
+
+def _steps_of(data: dict, job: str = "apply-sandbox") -> list[dict]:
+    return data["jobs"][job]["steps"]
+
+
+def _sandbox() -> dict:
+    return copy.deepcopy(_real_workflow())
+
+
+def _step(data: dict, step_id: str) -> dict:
+    return next(step for step in _steps_of(data) if step.get("id") == step_id)
+
+
+def _only(failed: list[str], label: str) -> None:
+    assert len(failed) == 1 and label in failed[0], failed
+
+
+class TestRevisePathInvariants:
+    def test_real_files_pass_every_new_invariant(self) -> None:
+        assert _run_by_path(_sandbox()) == []
+
+    def test_invariant_ix_fails_when_revise_routes_is_not_push_only(self) -> None:
+        data = _sandbox()
+        _step(data, "review")["with"]["revise-routes"] = "true"
+        _only(_run_by_path(data), "(ix)")
+
+    def test_invariant_x_fails_without_the_proceed_conjunct(self) -> None:
+        data = _sandbox()
+        step = _step(data, "apply")
+        step["if"] = step["if"].replace(" && steps.review.outputs.outcome == 'proceed'", "")
+        _only(_run_by_path(data), "(x)")
+
+    def test_invariant_xi_fails_when_the_job_output_drops_the_disjunct(self) -> None:
+        data = _sandbox()
+        data["jobs"]["apply-sandbox"]["outputs"]["routed"] = "${{ steps.guard.outputs.routed }}"
+        _only(_run_by_path(data), "(xi)")
+
+    def test_invariant_xi_fails_when_record_write_drops_the_disjunct(self) -> None:
+        data = _sandbox()
+        _step(data, "record_write")["with"]["routed"] = "${{ steps.guard.outputs.routed }}"
+        _only(_run_by_path(data), "(xi)")
+
+    def test_invariant_xi_fails_when_the_wake_env_drops_the_disjunct(self) -> None:
+        data = _sandbox()
+        wake = next(s for s in _steps_of(data) if "wake" in str(s.get("name", "")).lower())
+        wake["env"]["ROUTED"] = "${{ steps.guard.outputs.routed }}"
+        _only(_run_by_path(data), "(xi)")
+
+    def test_invariant_xi_fails_when_any_site_drops_the_success_conjunct(self) -> None:
+        weak = _DISJUNCT.replace("steps.review.outcome == 'success' && ", "")
+        for site in ("output", "record_write", "wake"):
+            data = _sandbox()
+            if site == "output":
+                holder, key = data["jobs"]["apply-sandbox"]["outputs"], "routed"
+            elif site == "record_write":
+                holder, key = _step(data, "record_write")["with"], "routed"
+            else:
+                holder = next(s for s in _steps_of(data) if "wake" in str(s.get("name", "")).lower())["env"]
+                key = "ROUTED"
+            holder[key] = holder[key].replace(_DISJUNCT, weak)
+            _only(_run_by_path(data), "(xi)")
+
+    def test_invariant_xii_fails_when_the_emit_step_mentions_the_review(self) -> None:
+        data = _sandbox()
+        step = _step(data, "upload_fresh_plan_sha256")
+        step["if"] += " && steps.review.outputs.outcome == 'revise'"
+        _only(_run_by_path(data), "(xii)")
+
+    def test_invariant_xiii_fails_when_reconcile_passes_revise_routes(self) -> None:
+        reconcile = copy.deepcopy(_load(str(_common.ROOT / _RECONCILE_REL_PATH)))
+        step = next(
+            s
+            for job in reconcile["jobs"].values()
+            for s in job.get("steps", [])
+            if s.get("uses") == "./.github/actions/subagent-plan-review"
+        )
+        step["with"]["revise-routes"] = "true"
+        _only(_run_by_path(_sandbox(), reconcile=reconcile), "(xiii)")
+
+    def test_invariant_xiii_fails_when_the_action_default_flips(self) -> None:
+        action = copy.deepcopy(_load(str(_common.ROOT / _ACTION_REL_PATH)))
+        action["inputs"]["revise-routes"]["default"] = "true"
+        _only(_run_by_path(_sandbox(), action=action), "(xiii)")
+
+    def test_invariant_xiii_fails_and_does_not_skip_when_reconcile_is_unreadable(self) -> None:
+        real = _sandbox()
+
+        def fake_load(path: str) -> dict:
+            if path.endswith(_RECONCILE_REL_PATH):
+                raise OSError("gone")
+            return real if path.endswith(_WORKFLOW_REL_PATH) else _load(path)
+
+        with registry.outcome_scope("validate_dispatch_gated_apply_topology"):
+            with patch(f"{_MODULE}._load", side_effect=fake_load):
+                failed: list[str] = []
+                validate_dispatch_gated_apply_topology(failed)
+            declaration = registry.pop_declaration()
+        _only(failed, "(xiii)")
+        assert declaration is not None and declaration.kind == "examined"
+
+    def test_pre_globs_cover_every_file_read(self) -> None:
+        from fnmatch import fnmatch
+
+        step = next(s for s in registry.pre_sequence() if s.name == "validate_dispatch_gated_apply_topology")
+        assert step.pre_globs is not None
+        for rel in (_ACTION_REL_PATH, _RECONCILE_REL_PATH, _WORKFLOW_REL_PATH):
+            assert any(fnmatch(rel, glob) for glob in step.pre_globs), rel

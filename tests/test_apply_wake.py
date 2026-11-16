@@ -42,6 +42,13 @@ def test_apply_sandbox_routed_message() -> None:
     assert render_message("apply-sandbox", "skipped", "true", SHA, HEAD) == ROUTED_MSG
 
 
+def test_apply_sandbox_revise_route_message() -> None:
+    message = render_message("apply-sandbox", "skipped", "revise", SHA, HEAD)
+    assert "REVISE" in message and "gated-apply" in message and "step summary" in message
+    assert "headsha" in message and "out-of-budget IAM" not in message
+    assert message != ROUTED_MSG
+
+
 def test_apply_sandbox_green_message() -> None:
     assert render_message("apply-sandbox", "success", "", SHA, HEAD) == SANDBOX_GREEN
 
