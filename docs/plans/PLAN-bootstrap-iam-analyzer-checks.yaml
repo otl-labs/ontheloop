@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 handoff_policy:
   full_validation_required_before_commit: true
   timeout_disposition: blocked
@@ -99,62 +99,75 @@ scope:
       PutSecretValue on arn:aws:secretsmanager:{region}:{account}:secret:agent-platform-terraform-github-apply-app*),
       bootstrap_state_write (s3:PutObject, DeleteObject on arn:aws:s3:::agent-platform-bootstrap-tfstate/*). Class
       membership is a union, never first-match: a document is in every class whose glob matches its own policy name
-      or the principal it grants (the role of an aws_iam_role_policy, the user of an aws_iam_user_policy, the role or
+      or a principal it grants (the role of an aws_iam_role_policy, the user of an aws_iam_user_policy, the role or
       user of each attachment of an aws_iam_policy in prior state or the plan's after values, and for an attachment row
-      both its policy's name and its principal), and is checked against the never rows of every class it is in; a
-      document in no class is class other (ValidatePolicy at "other" and CheckNoNewAccess only). A permissions
-      boundary (a policy some aws_iam_role or aws_iam_user names in permissions_boundary, matched by the ARN's
-      ":policy/<name>" suffix) is a ceiling, not a grant: in class ci_writable it skips the never rows and takes
-      ValidatePolicy at "boundary" and CheckNoNewAccess only (the CI apply boundary allows s3:* and secretsmanager:* on
-      "*" by design, github_ci_apply_boundary.tf DataPlaneAllow); in class session it is checked like a grant
-      (Decision 256 cl.1: its ceiling is its grant set). Each class's validate_policy_block list applies to its
-      documents, a document in several classes taking the union; a boundary whose permissions_boundary reference is
-      unknown at plan time is treated as a grant (fail toward checking). No account digits, ARN with an account,
-      ExternalId or host.
+      both its policy's name and its principal), each name resolved from a known value or, when unknown at plan time,
+      through the plan's configuration references to a same-plan resource's planned name (the classifier's _resolve,
+      extended to "user"); a document with a principal or attached policy that resolves to no name is checked against
+      every class's never rows (fail toward checking). A document in no class is class other (ValidatePolicy at
+      "other" and CheckNoNewAccess only). The file also holds "ceilings": ["agent-platform-github-ci-apply-boundary"]
+      (the classifier's BOUNDARY_NAME, a protected name only the operator changes, Decision 257 cl.3): a policy so
+      named that is attached or inline nowhere in prior state or the plan is a ceiling, not a grant, skips the never
+      rows and takes ValidatePolicy at "boundary" and CheckNoNewAccess only (it allows s3:* and secretsmanager:* on "*"
+      by design, github_ci_apply_boundary.tf DataPlaneAllow); a ceiling-named policy that is attached anywhere, and
+      every other policy whatever role or user names it as permissions_boundary, is a grant (so a decoy
+      permissions_boundary reference buys nothing; the session boundary is checked as a grant, Decision 256 cl.1).
+      Each class's validate_policy_block list applies to its documents, a document in several classes taking the
+      union. This file stays at config/ root beside sloc_budgets.yaml and sensitive_value_detectors.yaml, the CI-read
+      precedents; config/agent/ holds agent-consumed config. No account digits, ARN with an account, ExternalId or
+      host.
   - file: scripts/ci/terraform_bootstrap_apply_analyzer.py
     action: Create
     purpose: >-
       BUILD PR 2. Stdlib only, run with python3 -I by path (Decision 238 cl.3; the trusted-plan fence's predicate h);
       loads terraform_bootstrap_apply_classify.py the way the gate does (its Plan, target_names, the new
-      document_digest and plan_names_core.normalise_address). CLI: --plan-json P --invariants F --out R --event-name E
-      [--before SHA] [--full-sweep]. Selection (changed-only by default): every resource_change of type aws_iam_policy,
-      aws_iam_role_policy or aws_iam_user_policy whose actions are create or update, its after-document; every
-      aws_iam_role create or update whose assume_role_policy changed, its after-trust; every
-      aws_iam_role_policy_attachment or aws_iam_user_policy_attachment create, the attached customer policy's document
-      from the plan's after values or prior state (an AWS-managed or unresolvable attachment is UNCHECKED); no-op rows
-      are never sent. Group policies, group attachments and group membership are not selected (a residual: the
-      bootstrap-apply role's Denies already refuse every IAM group write, Decision 257 cl.3). Full sweep (every such
-      document and trust in prior state and the plan's after values) when --full-sweep is given, the event is not
-      push, --before is empty or all zeros, or the push's changed files (GitHub compare API, GH_TOKEN and
-      GITHUB_REPOSITORY from the environment, the gate's urllib pattern) include config/iam-invariants.json or cannot be
-      read (fail toward checking). Classes and boundaries per scope row 6. Checks, through the aws CLI by subprocess
-      (no SDK: the job forbids third-party Python), each document written to a private temp file deleted after the
-      call, --region from AWS_REGION and the account from aws sts get-caller-identity, neither ever printed:
-      validate-policy --policy-type IDENTITY_POLICY (FAIL on any finding whose findingType is in the document's class
-      validate_policy_block list, scope row 6); one check-access-not-granted --policy-type IDENTITY_POLICY per never
-      row of each class the document is in (a ci_writable boundary none), --access holding that row's actions and
-      filled resources (FAIL on result FAIL); for an update with a known prior document, check-no-new-access
-      --policy-type IDENTITY_POLICY (WIDENS on FAIL, never refusing); for a trust, check-no-public-access
-      --resource-type AWS::IAM::AssumeRolePolicyDocument (FAIL on FAIL). A document whose after value is unknown at plan
-      time is UNCHECKED (the classifier already protects it). Results are keyed by the normalised address, as the
-      gate's rows are; a keyed group (count or for_each instances) is one result whose digest is document_digest of the
-      list of its instances' documents sorted by digest, and whose checks are each instance's, the worst verdict
+      checked_document and document_digest, and plan_names_core.normalise_address). CLI: --plan-json P --invariants F
+      --out R --event-name E [--before SHA] [--full-sweep]. Selection (changed mode, the default on every event): the
+      rows classify.checked_document returns a document for (scope row 8), exactly the rows that carry a digest, plus,
+      for each aws_iam_role_policy_attachment or aws_iam_user_policy_attachment create, the attached customer policy's
+      document from the plan's after values or prior state. An AWS-managed attachment is UNCHECKED, except that one
+      whose principal is in class session FAILs (managed_on_session: Decision 256 cl.1 gives the session user only
+      customer-managed policies); an unresolvable attached policy is checked as scope row 6 says. Group policies, group
+      attachments and group membership are not selected (a residual: the bootstrap-apply role's Denies already refuse
+      every IAM group write, Decision 257 cl.3). Full sweep (every policy document and trust in prior state and the
+      plan's after values) only when --full-sweep is given or, on a push, when --before is empty or all zeros, or the
+      push's changed files (GitHub compare API, GH_TOKEN and GITHUB_REPOSITORY from the environment, the gate's urllib
+      pattern) include config/iam-invariants.json or scripts/ci/terraform_bootstrap_apply_analyzer.py, cannot be read,
+      or are truncated (300 or more files): fail toward checking. A dispatch runs in changed mode. Classes, ceilings and
+      principal resolution per scope row 6. Checks, through the aws CLI by subprocess (no SDK: the job forbids
+      third-party Python), each document written to a private temp file deleted after the call, --region from
+      AWS_REGION and the account from aws sts get-caller-identity, neither ever printed: validate-policy --policy-type
+      IDENTITY_POLICY (FAIL on any finding whose findingType is in the document's validate_policy_block list); one
+      check-access-not-granted --policy-type IDENTITY_POLICY per never row of each class the document is in (a ceiling
+      none), --access holding that row's actions and filled resources (FAIL on result FAIL); for an update with a known
+      prior document, check-no-new-access --policy-type IDENTITY_POLICY (WIDENS on FAIL, never refusing); for a trust,
+      check-no-public-access --resource-type AWS::IAM::AssumeRolePolicyDocument (FAIL on FAIL). A document whose after
+      value is unknown at plan time is UNCHECKED and carries no digest (the classifier already protects it). Results
+      are keyed by the normalised address, as the gate's rows are; a keyed group (count or for_each instances) is one
+      result whose digest is the group digest of scope row 8 and whose checks are each instance's, the worst verdict
       shown. Output, names only (Decisions 101, 238 cl.4): one line per check "ANALYZER <address> <check>
-      <PASS|FAIL|WIDENS|NEW|UNCHECKED>" with "sid=<statementId>" or "index=<statementIndex>" on a FAIL, never a
-      document, ARN, account, finding description, message or CLI stderr (stderr is captured and dropped); then
-      "ANALYZER_SUMMARY verdict=<PASS|REFUSED> mode=<changed|full> documents=<n> fail=<n> widens=<n> unchecked=<n>". R
-      holds {schema_version, mode, verdict, results: [{address, classes, digest, checks}]} with the same names-only
-      content; digest is classify.document_digest of the checked document. Exit 0 PASS, 1 REFUSED, 2
-      ANALYZER_UNREADABLE (a CLI error, a malformed response, an unreadable plan or invariants file). Under 500 SLOC.
+      <PASS|FAIL|WIDENS|NEW|UNCHECKED>" with "sid=<statementId>" on a FAIL when the Sid matches [A-Za-z0-9]{1,64}, else
+      "index=<statementIndex>", never a document, ARN, account, finding description, message or CLI stderr (stderr is
+      captured and dropped); then "ANALYZER_SUMMARY verdict=<PASS|REFUSED> mode=<changed|full> documents=<n> fail=<n>
+      widens=<n> unchecked=<n>". R holds {schema_version, mode, verdict, results: [{address, classes, digest,
+      checks}]} with the same names-only content. Exit 0 PASS, 1 REFUSED, 2 ANALYZER_UNREADABLE (a CLI error, a
+      malformed response, an unreadable plan or invariants file). Under 500 SLOC; if it would pass that, the selection
+      and class logic moves to a sibling scripts/ci/terraform_bootstrap_apply_analyzer_select.py loaded by path (as
+      classify loads plan_names_core), added to the fence's OWNED and the CODEOWNERS glob already covering it.
     new_imports: []
   - file: scripts/ci/terraform_bootstrap_apply_classify.py
     action: Modify
     purpose: >-
       BUILD PR 2. Add document_digest(doc) -> str: sha256 hex of json.dumps(parsed document, sort_keys=True,
-      separators=(",", ":")), "" for an absent or unknown document; build_rows adds "digest" to each row, the after
-      policy document's digest for aws_iam_policy, aws_iam_role_policy and aws_iam_user_policy rows, the after trust's
-      for aws_iam_role rows whose assume_role_policy changed, else ""; a keyed group row's digest is document_digest of
-      its instances' documents sorted by digest (the analyzer's rule, scope row 7). No classification or reason
+      separators=(",", ":")), "" for an absent or unknown document; add checked_document(rc) -> the document the
+      analyzer checks for that resource_change, or None: for aws_iam_policy, aws_iam_role_policy and
+      aws_iam_user_policy, the known after policy document of any row build_rows keeps (create, update, replace,
+      import and moved rows alike); for aws_iam_role, the known after trust when the trust is new or differs from
+      before (create, replace, import, moved or update); None for no-op, delete-only and unknown-after rows. build_rows
+      adds "digest" = document_digest(checked_document(rc)) to each row, "" when None; a keyed group row's digest is
+      document_digest of its instances' digests sorted. This one predicate is the analyzer's selection (scope row 7),
+      so every digest has a result. Extend _resolve and target_names to aws_iam_user_policy and
+      aws_iam_user_policy_attachment ("user"), returning names the analyzer needs; no classification or reason
       changes.
   - file: scripts/ci/terraform_bootstrap_apply_gate.py
     action: Modify
@@ -210,8 +223,15 @@ scope:
       prior state are both checked against the session rows and FAIL on an s3:GetObject grant; boundaries: a
       ci_writable boundary allowing s3:* on "*" skips the never rows and passes, a session boundary granting
       ssm:GetParameter on parameter/secret/* FAILs; ValidatePolicy: a SECURITY_WARNING refuses in session and
-      ci_writable and not in other or a ci_writable boundary, an ERROR refuses everywhere; a keyed group yields one
-      normalised result with the sorted-digest rule;
+      ci_writable and not in other or a ceiling, an ERROR refuses everywhere; a keyed group yields one normalised
+      result with the sorted-digest rule; unknown-at-plan references: a policy created in the same plan (policy_arn
+      unknown, a configuration reference) attached to user agent-platform-session, and an inline policy whose role is
+      a same-plan agent-platform-* role, are classed by the resolved principal and FAIL on a never grant, and an
+      unresolvable principal is checked against every class; a decoy role naming an agent-platform-* grant as its
+      permissions_boundary does not exempt that grant, and the ceiling-named policy attached to a role is checked as a
+      grant; an AWS-managed policy attached to the session user FAILs managed_on_session; a dispatch runs in changed
+      mode; a compare listing the analyzer script or 300 files sweeps; a Sid holding a newline, "::" or a space prints
+      as index= (workflow-command injection, precedent test_policy_strings_cannot_inject_workflow_commands_into_the_table);
       placeholders filled with the faked account and region; one check-access-not-granted call per never row; a FAIL
       refuses (exit 1) and prints its sid or index; WIDENS never refuses; a CLI error or malformed response exits 2;
       digests equal classify.document_digest; and no output line or results file holds twelve digits, "arn:", a
@@ -222,7 +242,11 @@ scope:
       BUILD PR 2. The gate with analyzer results: PASS keeps today's verdicts; REFUSED gives ANALYZER_REFUSED and exit 1
       on push and dispatch; REFUSED plus a protected row gives CLOUDSHELL_REQUIRED, exit 1 and the ::error:: line; a
       missing or digest-mismatched result is unreadable; reviewed rows carry digest; check refuses a row whose digest
-      differs from the reviewed one and passes an identical one; the CLI refuses without --analyzer-json.
+      differs from the reviewed one and passes an identical one; the CLI refuses without --analyzer-json. Classifier
+      nodes: build_rows gives a digest to create, update, replace, import and moved policy rows with a known after
+      document and none to no-op, delete-only or unknown-after rows, a keyed group gets the sorted-digest value, and a
+      plan holding an imported, a moved and a replaced policy with matching analyzer results still ends
+      CLOUDSHELL_REQUIRED (today's verdict) and not unreadable.
   - file: tests/test_terraform_bootstrap_apply_gate.py
     action: Modify
     purpose: >-
@@ -264,14 +288,14 @@ infrastructure_dependencies:
   - "terraform/bootstrap is admin-only and bootstrap_ci_apply.tf is in Decision 257 cl.3's protected set: BUILD PR 1 gets the operator's ENVIRONMENT CHECK and screened pre-merge CloudShell plan (VP 6-7) and the operator's CloudShell apply in the same sitting as its merge (VP 8). Its own merge push runs the workflow, whose preview ends CLOUDSHELL_REQUIRED neutral (expected). BUILD PR 2 changes no file under terraform/, so it needs no CloudShell plan; its first live contact is its merge push's preview (VP 9). No unmerged PR code runs under the operator's credentials (Decision 238 cl.3's principle): VP 7 and VP 8 run only terraform at screened heads and inline aws CLI probes written in this plan."
   - "Order: PR 1 built to CI green; one sitting runs VP 6, VP 7 (PR 1's head plan and the live API probes) and, after PR 1 merges, VP 8. PR 2 may be built in parallel and merges only after VP 8 passes: before that its preview would call Access Analyzer without the grant and exit ANALYZER_UNREADABLE (a red main run). PR 2's first full sweep is its merge push (VP 9); a FAIL there on an existing document makes that run red, applies nothing (PR 2 changes no Terraform) and routes per VP 9's fix_if."
   - "One merged-unapplied bootstrap change at a time: PR 1 merges only when no other bootstrap change is merged and unapplied and the operator can run VP 8 in the same sitting."
-  - "Spend: Access Analyzer custom checks, about $0.002 per paid call (third-party figure; unconfirmed until VP 7's probe and the first billing line). Measured 2026-11-16: 18 terraform/bootstrap .tf commits in 30 days, 23 policy documents. Changed-only, one or two documents per apply, at most eight paid calls each: about 300 calls, $0.60 a month; each full sweep about 190 calls, $0.40; worst case every run a sweep about $7. ValidatePolicy is free. No other running cost."
+  - "Spend: Access Analyzer custom checks, about $0.002 per paid call (third-party figure; unconfirmed until VP 7's probe and the first billing line). Measured 2026-11-16: 18 terraform/bootstrap .tf commits in 30 days, 23 policy documents. Changed-only, one or two documents per apply, at most fifteen paid calls each (a session-class document is in both classes: thirteen never rows, one CheckNoNewAccess): about 550 calls, $1.10 a month; each full sweep about 140 paid calls, $0.30; worst case every run a sweep about $7. ValidatePolicy is free. No other running cost."
   - "No Lambda code changes and no deploy channel. No new repository secret or variable (GH_TOKEN is the job token; the compare API needs contents read, which the preview job holds), so no project-configuration.yaml row."
 acceptance_criteria:
   - "bootstrap-preview alone may call the four Access Analyzer checks (one Allow on '*', attached only to it), its DenyAllButReads NotAction is exactly reads plus those four plus sts:GetCallerIdentity, bootstrap-apply and the shared reads list hold no access-analyzer action, and test_bootstrap_ci_roles.py and test_bootstrap_preview_analyzer.py pass with each red case red (VP 1); after PR 1's apply, live simulation allows the four for bootstrap-preview and denies them to bootstrap-apply (VP 8)."
   - "config/iam-invariants.json holds exactly the two classes and thirteen never rows named in scope, test_iam_invariants.py pins them, checks their drift against the classifier's protected names and finds no session Allow granting a never action on a never resource (VP 4)."
   - "The analyzer sends only created or updated documents, new attachments' policies and changed trusts on a push that leaves config/iam-invariants.json unchanged, sweeps every document otherwise, classes each document by its name and the principals it grants (a ci_writable boundary skipping the never rows), refuses on a ValidatePolicy ERROR, on a SECURITY_WARNING in classes session and ci_writable, on a granted never row or on a public trust, flags widening without refusing, prints names only, and the gate refuses the CI apply on its REFUSED verdict and refuses at apply time any document whose digest differs from the previewed one (VP 4; the existing gate tests unchanged in assertion)."
   - "PR 1's head plans exactly its three changes, and the live probes, with the operator's credentials and no PR code, return FAIL for a document granting s3:GetObject against the s3_objects row, FAIL for one granting ssm:GetParameter on a parameter/secret/ name against the secret_values_ssm row, PASS for a CloudWatch read against the s3_objects row and FAIL for a trust open to every principal (VP 7)."
-  - "PR 2's merge push preview runs a full sweep that ends ANALYZER_SUMMARY verdict=PASS mode=full and BOOTSTRAP_APPLY_PREVIEW verdict=NO_CHANGES; a prove_gate dispatch sweeps again, passes, and its approved apply job prints PROVE_OK without calling Access Analyzer (VP 9-10)."
+  - "PR 2's merge push preview runs a full sweep that ends ANALYZER_SUMMARY verdict=PASS mode=full and BOOTSTRAP_APPLY_PREVIEW verdict=NO_CHANGES; a prove_gate dispatch runs in changed mode (ANALYZER_SUMMARY verdict=PASS mode=changed documents=0), and its approved apply job prints PROVE_OK without calling Access Analyzer (VP 9-10)."
   - "DECISIONS.md and deploy-paths.yaml carry exactly the sidecar's words (approved_text verify passes, VP 5)."
 verification_plan:
   - step: 1
@@ -355,7 +379,7 @@ verification_plan:
     phase: pre-deploy
     action: >-
       BUILD PR 1. ENVIRONMENT CHECK (deploy-paths.yaml admin_out_of_band.pre_merge_live_plan), operator-run in AWS
-      CloudShell in the PROD account as user/platform-breakglass, posted once both PRs are CI green. The "caller-arn
+      CloudShell in the PROD account as user/platform-breakglass, posted once PR 1 is CI green. The "caller-arn
       check" label is the marker validate_admin_root_premerge_gate reads; no repo helper runs in CloudShell.
     command: >-
       ( printf 'caller-arn check: '; aws sts get-caller-identity --query Arn --output text 2> /dev/null | grep -q
@@ -379,8 +403,11 @@ verification_plan:
       this plan and running no repository code: check-access-not-granted with the session class's s3_objects row (all
       five actions) on a document allowing s3:GetObject on "*", with its secret_values_ssm row (all five verbs, on
       parameter/secret/*) on a document allowing ssm:GetParameter on parameter/secret/x, with the s3_objects row on a
-      document allowing cloudwatch:GetMetricData, and check-no-public-access on a trust allowing sts:AssumeRole to
-      Principal AWS "*". PR 2's analyzer never runs here (no unmerged code under admin credentials). An EXIT trap
+      document allowing cloudwatch:GetMetricData, two wildcard-overlap probes for the ci_writable rows (a document
+      allowing iam:PutRolePolicy on role/agent-platform-* against access iam:PutRolePolicy on role/bootstrap-*, then
+      the same document on role/*), and check-no-public-access on a trust allowing sts:AssumeRole to Principal AWS
+      "*"; then a free validate-policy pass over every policy document in the head plan's prior state, printing per
+      address only the counts of ERROR and SECURITY_WARNING findings. PR 2's analyzer never runs here (no unmerged code under admin credentials). An EXIT trap
       deletes the folder; errors go to $HOME/bia-tf.err, read in CloudShell only. The build records the returned lines
       as a counts-only PR comment on PR 1.
     command: >-
@@ -414,16 +441,28 @@ verification_plan:
       "$2" "$3")" --access "$4" --query result --output text 2>> "$L" | sed "s/^/PROBE $1 /" || echo "PROBE $1 ERROR"; };
       probe s3_objects s3:GetObject '*' "$S3"; probe secret_ssm ssm:GetParameter "arn:aws:ssm:$R:$A:parameter/secret/x"
       "[{\"actions\":[\"ssm:GetParameter\",\"ssm:GetParameters\",\"ssm:GetParametersByPath\",\"ssm:GetParameterHistory\",\"ssm:PutParameter\"],\"resources\":[\"arn:aws:ssm:$R:$A:parameter/secret/*\"]}]";
-      probe metric_read cloudwatch:GetMetricData '*' "$S3"; aws accessanalyzer check-no-public-access --resource-type
+      probe metric_read cloudwatch:GetMetricData '*' "$S3"; P1='[{"actions":["iam:PutRolePolicy"],"resources":["arn:aws:iam::'"$A"':role/bootstrap-*"]}]';
+      probe role_prefix_disjoint iam:PutRolePolicy "arn:aws:iam::$A:role/agent-platform-*" "$P1"; probe role_star_overlap
+      iam:PutRolePolicy "arn:aws:iam::$A:role/*" "$P1"; aws accessanalyzer check-no-public-access --resource-type
       AWS::IAM::AssumeRolePolicyDocument --policy-document
       '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"}]}' --query
-      result --output text 2>> "$L" | sed 's/^/PROBE public_trust /' || echo "PROBE public_trust ERROR"; echo "PR_HEAD_SHA
-      $PR_HEAD_SHA" )
+      result --output text 2>> "$L" | sed 's/^/PROBE public_trust /' || echo "PROBE public_trust ERROR"; jq -c
+      '.prior_state.values.root_module.resources[]? | select(.type == "aws_iam_policy" or .type == "aws_iam_role_policy" or
+      .type == "aws_iam_user_policy") | {a: .address, p: .values.policy}' "$W/plan.json" > "$W/docs.jsonl" 2>> "$L";
+      echo "VALIDATE_DOCS $(wc -l < "$W/docs.jsonl")"; while IFS= read -r J; do N=$(jq -r .a <<< "$J"); T=$(aws
+      accessanalyzer validate-policy --policy-type IDENTITY_POLICY --policy-document "$(jq -r .p <<< "$J")" --query
+      'findings[].findingType' --output text 2>> "$L") || T=CALL_ERROR; E=$(tr '\t' '\n' <<< "$T" | grep -c '^ERROR$');
+      SW=$(tr '\t' '\n' <<< "$T" | grep -c '^SECURITY_WARNING$'); C=$(tr '\t' '\n' <<< "$T" | grep -c '^CALL_ERROR$'); [
+      "$E$SW$C" = 000 ] || echo "VALIDATE $N error=$E security_warning=$SW call_error=$C"; done < "$W/docs.jsonl"; echo
+      "PR_HEAD_SHA $PR_HEAD_SHA" )
     expected: >-
       SCREEN_OK; HEAD_PLAN_EXIT 2; Plan: 2 to add, 1 to change, 0 to destroy.; exactly three lines: create
       aws_iam_policy.bootstrap_preview_analyzer, create aws_iam_role_policy_attachment.bootstrap_preview_analyzer, update
       aws_iam_policy.bootstrap_preview_guard; PROBE s3_objects FAIL; PROBE secret_ssm FAIL; PROBE metric_read PASS;
-      PROBE public_trust FAIL; the sha.
+      PROBE role_prefix_disjoint PASS; PROBE role_star_overlap FAIL; PROBE public_trust FAIL; VALIDATE_DOCS n (at least
+      23); no VALIDATE line with error above 0 or call_error above 0, and no VALIDATE line with security_warning above 0
+      on an agent_session or github_ci_apply address (class other may show warnings: they are shown, not refused);
+      the sha.
     fix_if: >-
       SCREEN_REFUSED: nothing was initialised; if main moved under terraform/ the build rebases and re-posts, else the
       head carries files beyond scope and the build stops. A setup line: the operator reads $HOME/bia-tf.err in
@@ -432,7 +471,10 @@ verification_plan:
       (for example a wildcard in --access resources, or the AssumeRolePolicyDocument resource type); the build reads
       the error class from the operator in words, never the text, and this is a plan amendment before PR 2 merges. A
       probe with the opposite result: the API semantics differ from the plan's assumption; plan amendment before PR 2
-      merges.
+      merges. A VALIDATE line the expected line excludes: that existing document would refuse every bootstrap run once
+      PR 2 merges; file a rec and fix the document through a reviewed bootstrap change (or, with the operator's word, a
+      plan amendment) before PR 2 merges, never by narrowing a row. VALIDATE_DOCS 0: the plan JSON lacked prior state;
+      report it.
     hermetic: false
     graduation: not-applicable
   - step: 8
@@ -477,13 +519,16 @@ verification_plan:
       -var-file="$W/vars.tfvars" -var "account_id=$A" -var "aws_profile=" > /dev/null 2>> "$L"; echo "REPLAN_EXIT $?";
       for r in bootstrap-preview bootstrap-apply; do aws iam simulate-principal-policy --policy-source-arn
       "arn:aws:iam::$A:role/$r" --action-names access-analyzer:ValidatePolicy access-analyzer:CheckAccessNotGranted
-      access-analyzer:CheckNoNewAccess access-analyzer:CheckNoPublicAccess iam:CreatePolicy --query
+      access-analyzer:CheckNoNewAccess access-analyzer:CheckNoPublicAccess --query
+      'EvaluationResults[].[EvalActionName,EvalDecision]' --output text 2>> "$L" | sed "s/^/SIM $r /"; aws iam
+      simulate-principal-policy --policy-source-arn "arn:aws:iam::$A:role/$r" --action-names iam:CreatePolicy
+      --resource-arns "arn:aws:iam::$A:policy/agent-platform-sim-probe" --query
       'EvaluationResults[].[EvalActionName,EvalDecision]' --output text 2>> "$L" | sed "s/^/SIM $r /"; done; echo "M $M" )
     expected: >-
       SCREEN_OK; Plan: 2 to add, 1 to change, 0 to destroy.; APPLY_DONE; REPLAN_EXIT 0; SIM bootstrap-preview allowed for the four
       access-analyzer actions and explicitDeny for iam:CreatePolicy; SIM bootstrap-apply implicitDeny for the four
-      access-analyzer actions and allowed for iam:CreatePolicy (its IAMManagedPolicyWrite on agent-platform-*; the
-      simulation's resource is "*", so allowed or implicitDeny are both acceptable for that one row); M.
+      access-analyzer actions and allowed for iam:CreatePolicy on an agent-platform-* policy (its
+      IAMManagedPolicyWrite); M.
     fix_if: >-
       SCREEN_REFUSED or a setup line: nothing initialised; as VP 7. APPLY_SKIPPED: nothing applied; stop and report the
       summary. APPLY_FAILED or REPLAN_EXIT 2: report the error
@@ -527,7 +572,8 @@ verification_plan:
       ref="main", inputs={"prove_gate": "true"}), then after the approval mcp__github__actions_get and get_job_logs for
       both jobs
     expected: >-
-      The preview's analyzer step prints ANALYZER_SUMMARY verdict=PASS mode=full; the preview reports NO_CHANGES; the
+      The preview's analyzer step prints ANALYZER_SUMMARY verdict=PASS mode=changed documents=0; the preview reports
+      NO_CHANGES; the
       apply job passes its approvals check, plans no change and prints PROVE_OK, and its log names no Access Analyzer
       call.
     fix_if: >-
@@ -567,9 +613,9 @@ test_obligations:
     test_selector: tests/test_terraform_bootstrap_apply_analyzer.py
     red_green_expectation: red before (script absent), green after
   - source: scripts/ci/terraform_bootstrap_apply_classify.py
-    behavior: Rows carry the canonical digest of their after document or trust, equal to the analyzer's.
+    behavior: checked_document is the one selection predicate; rows carry its canonical digest (import, moved and replace rows included), equal to the analyzer's; user principals resolve.
     verification_step: 4
-    test_selector: tests/test_terraform_bootstrap_apply_analyzer.py
+    test_selector: tests/test_terraform_bootstrap_apply_gate_analyzer.py
     red_green_expectation: red before (no document_digest or row digest), green after
   - source: scripts/ci/terraform_bootstrap_apply_gate.py
     behavior: An analyzer REFUSED verdict refuses the CI apply on every event; a missing or digest-mismatched result is unreadable; check refuses a document that differs from the previewed one.
@@ -637,19 +683,21 @@ context:
   - "Design evidence: /mnt/project-files/ceilings-grants/ADVICE.md (blind Fable consult, two rounds, and the operator's 2026-11-16 direction: changed documents only, digest reuse, attachments count, a never-list change sweeps once). The operator chose 'Access Analyzer checks first' over the originally agreed ceiling/grant split after the recon showed a new API route is a CloudShell sitting whatever the IAM shape (terraform_bootstrap_apply_classify.py protected_reasons 'type') and no access incident involved the session user."
   - "Follow-on recs filed at planning time (the deferred halves): rec-5207 the session ceiling/grant split (amends Decisions 256 cl.1 and 257 cl.3), rec-5208 enumerated AWS-managed service-role policies, rec-5209 the same checks on terraform/personal's trusted plan (amends Decision 238), rec-5210 read-class grants for the CI apply role, then service-level writes behind these checks."
   - "Split: one plan, two build PRs, disjoint files. PR 1 (bootstrap_ci_apply.tf's one line, the new bootstrap_preview_analyzer.tf and three tests) is protected-set, so CloudShell plan and apply. PR 2 (everything else) touches nothing under terraform/ and merges after VP 8; its analyzer first runs in CI at its merge push (VP 9), never under the operator's credentials (critique r1 finding 7; Decision 238 cl.3's principle)."
-  - "UNPROVEN until VP 7: the aws CLI's accessanalyzer commands accept wildcard actions and resources in --access and the AWS::IAM::AssumeRolePolicyDocument resource type for check-no-public-access, one access entry per call, and return statementId or statementIndex in reasons (recalled from AWS docs, not fetched); the price per paid call. UNPROVEN until VP 9: that every current document passes the never-list and ValidatePolicy (an offline read by critique r1 found PlatformAdmin's iam:* on * would draw a ValidatePolicy SECURITY_WARNING, hence class other blocks on ERROR only, and the CI apply boundary's s3:* and secretsmanager:* on *, hence the boundary rule); that the GitHub runner's preinstalled aws CLI carries the accessanalyzer commands and that the compare API answers with the job token."
+  - "UNPROVEN until VP 7: the aws CLI's accessanalyzer commands accept wildcard actions and resources in --access and the AWS::IAM::AssumeRolePolicyDocument resource type for check-no-public-access, one access entry per call, and return statementId or statementIndex in reasons (recalled from AWS docs, not fetched); the price per paid call. UNPROVEN until VP 9 (VP 7's validate pass retires the ValidatePolicy half for prior-state documents): that every current document passes the never-list and ValidatePolicy (an offline read by critique r1 found PlatformAdmin's iam:* on * would draw a ValidatePolicy SECURITY_WARNING, hence class other blocks on ERROR only, and the CI apply boundary's s3:* and secretsmanager:* on *, hence the boundary rule); that the GitHub runner's preinstalled aws CLI carries the accessanalyzer commands and that the compare API answers with the job token."
   - "Residuals (in the Update): each check reads one document, never its boundary or its principal's other policies (conservative: a grant a boundary would block still fails); an AWS-managed attachment, a document unknown until apply and IAM group policies and membership are not checked (bootstrap-apply's Denies refuse every group write); trust policies are checked only for public access, not for which principals they admit; outside classes session and ci_writable a ValidatePolicy security warning is shown, not refused."
   - "V3 resolution: VP 7's operator-run pre-merge plan at PR 1's head substitutes for pre-merge post-deploy evidence for PR 1; PR 2 changes no non-Markdown bootstrap file. Behavioural acceptance is VP 8 (apply and simulation), VP 9 (first preview sweep) and VP 10 (dispatch and approved no-op), with the operator's returned lines labelled operator-reported in counts-only PR comments naming the applied sha."
   - "Approvals at build start: the operator's direction of 2026-11-16 (Access Analyzer checks first, changed documents only) and the operator's GitHub approval of this plan's approval run, which the plan PR records; no final-diff word is asked (operator, 2026-11-16). The build session holds no AWS identity for these steps; VP 6-8 are the operator's CloudShell blocks and VP 10 the operator's GitHub approval."
   - "Overlaps: rec-5168 (PR-time trusted plan for terraform/bootstrap) will later need the same analyzer at PR time; rec-5174 (CI simulate) and rec-5169 (gate-role alarm) touch the same workflow and root but no file here; PLAN-wording-approval-routing (#2052, rec-5137) changes how wording approvals route, not this sidecar's shape. No open PR edits a scope file (checked 2026-11-16)."
   - "Red overlap (scripts.ci_rca.red_overlap, 2026-11-16): verdict blocked; reds rec-5194 (slo_breached, shared none) and rec-5205 (overlap, shared only transitive test residue: test_validate_composite_action_shell_bodies.py, test_validate_composite_action_shape_rosters.py, test_ci_rca_lifecycle_correct_rec_context.py, verify_ci_workflow/test_apply_and_terraform.py); re-run after critique r1 the same, plus rec-5212 disjoint. Deferral rationale: this plan repairs neither and edits none of those files; rec-5194's red is owned by the Feedback Loop project and the operator ruled on 2026-11-16 that agents proceed past it; rec-5205 shares no scope file, only tests that import a scoped module transitively. The build re-runs red_overlap at its start and rebases if either red has landed a fix."
   - "plan_obligations (2026-11-16, re-run after critique r1): no unmet registration obligation once the graduated shard platform-admin-absent-from-ci-write-patterns is named as kept (scope row 5); NEAR_CAP terraform/bootstrap/bootstrap_ci_apply.tf 500 of 500 effective lines (hence scope row 2's new file and row 1's one-line edit), tests/checks/iam_tf/test_platform_role_metadata_admin_scope.py 497 of 500 SLOC (one tuple line, 498) and docs/contracts/deploy-paths.yaml 478 of 500 (the sidecar adds about five lines); every other scope file has 109 or more lines of headroom. validate_bootstrap_apply.py's new imports: none."
+  - "Critique r2 dispositions: (1) one selection predicate, classify.checked_document, gives the digest and the analyzer's selection, import, moved and replace rows included; (2) principals resolve through configuration references, users included, unresolvable ones checked against every class; (3) the ceiling exemption is pinned to the protected CI apply boundary's name and void when that policy is attached anywhere, so a decoy permissions_boundary buys nothing; (4) VP 7 adds two wildcard-overlap probes and a free findingType-count validate pass over prior-state documents; (5) a dispatch runs in changed mode and the Update's words name the fail-toward-checking sweeps; nits 6-10, 13 and 14 adopted; nit 11 (config placement) kept at config/ root with the CI-read precedents; nit 12 (length) is the operator's call on the words."
   - "Why a dated Update and not a new Decision (decision-entry.yaml amendment_forms): the Update adds a check inside clause 2's preview and one read-class grant to clause 3's bootstrap-preview; who approves, the protected set, the root of trust and the CloudShell route are unchanged. It is longer than the 248 precedent because the refusal rule, the never-list's governance and the residuals must be bound in the operator's words; a new Decision would restate clauses 2-3 for no added authority."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
   - {gate: wording-check, round: 1, verdict: PASS, digest: cded55e5865821c6b7c105918e4b7586343eb7734fa37f089fb9bbfb128485e0, base: 4b6dab65cadb5c7797d503bf34b1aa6394c266e4, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 8, nits: 5}
   - {gate: wording-check, round: 2, verdict: PASS, digest: 4c90a391db661f4fd60c1132c27853eb8a9cc13d7ac91865904c8e2b700f0b85, base: f5ce806c4941724483d4c05c46f496db3fdcb264, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 5, nits: 9}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -670,3 +718,4 @@ rollback: >-
   (append-only, Decision 177) with a dated note that the checks are off; the preview then behaves as before. PR 1: the
   analyzer grant is harmless without PR 2; to remove it a reviewed PR drops the policy and attachment and the operator
   applies it from CloudShell.
+cites: [dec:101, dec:126, dec:168, dec:181, dec:235, dec:237, dec:238, dec:247, dec:256, dec:257]
