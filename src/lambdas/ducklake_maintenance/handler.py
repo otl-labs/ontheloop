@@ -36,6 +36,7 @@ import time
 from typing import Any
 
 from src.common import catalog_dr
+from src.common import ducklake_current_compaction as current_compaction
 from src.common import ducklake_gc_ops as gc_ops_body
 from src.common import ducklake_maintenance as maint
 from src.common import ducklake_maintenance_scope as scope
@@ -384,6 +385,17 @@ def action_merge_ops(event: dict[str, Any], _con: Any) -> dict[str, Any]:
         policy = scope.load_policy(semantics)
         resolution = scope.resolve_scope(discovered, verb="merge_ops", policy=policy, registry=table_registry)
         reconciliation = scope.reconcile_catalog(discovered, semantics=semantics, registry=table_registry)
+        compaction = current_compaction.compact_current_tables(
+            con,
+            discovered,
+            semantics=semantics,
+            registry=table_registry,
+            policy=policy,
+            catalog=catalog,
+            meta_schema=meta_schema,
+            emit=emit,
+        )
+        compaction_issues = compaction["failures"] + compaction["refused"]
 
         t0 = time.perf_counter()
         per_table: list[dict[str, Any]] = []
@@ -450,9 +462,9 @@ def action_merge_ops(event: dict[str, Any], _con: Any) -> dict[str, Any]:
             emit("MergeOpsFilesAfterTotal", float(files_after_total))
         emit("MergeOpsTablesCount", float(len(resolution.to_merge)))
         emit("MergeOpsUnclassifiedTables", float(len(resolution.unclassified)))
-        emit("MergeOpsPassFailed", float(len(merge_failures) + len(resolution.unclassified) > 0))
+        emit("MergeOpsPassFailed", float(len(merge_failures) + len(resolution.unclassified) + len(compaction_issues) > 0))
 
-        if merge_failures or resolution.unclassified:
+        if merge_failures or resolution.unclassified or compaction_issues:
             # The per-table error detail is embedded directly in the raised message (not just
             # table names) so it survives into the caller-visible response body -- handler()
             # below catches this and returns {ok: false, error: str(exc)}, which is the ONLY
@@ -461,7 +473,7 @@ def action_merge_ops(event: dict[str, Any], _con: Any) -> dict[str, Any]:
             raise rt.DuckLakeRuntimeError(
                 "merge_ops: pass completed with failures (per-table isolation held; classified "
                 f"tables were still merged) -- merge_failures={merge_failures} "
-                f"unclassified={list(resolution.unclassified)}"
+                f"unclassified={list(resolution.unclassified)} compaction={compaction_issues}"
             )
 
         return {
@@ -479,6 +491,7 @@ def action_merge_ops(event: dict[str, Any], _con: Any) -> dict[str, Any]:
             "count_unavailable": any_count_unavailable,
             "elapsed_ms": round(elapsed_ms, 2),
             "per_table": per_table,
+            "compaction": compaction,
         }
     finally:
         con.close()

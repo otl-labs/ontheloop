@@ -315,13 +315,19 @@ class TestReconcileCatalog:
 
 
 def test_partition_verbs_in_universe_with_control_rewrite_excluded():
-    assert scope.VERB_UNIVERSE == ("merge_ops", "reconcile_partitions", "rewrite_partition_layout")
+    assert scope.VERB_UNIVERSE == (
+        "merge_ops",
+        "reconcile_partitions",
+        "rewrite_partition_layout",
+        "rewrite_current_deletes",
+    )
 
     policy = {
         "scd2": {
             "merge_ops": {"apply": True, "reason": "standard"},
             "reconcile_partitions": {"apply": True, "reason": "standard"},
             "rewrite_partition_layout": {"apply": True, "reason": "standard"},
+            "rewrite_current_deletes": {"apply": True, "reason": "standard"},
         },
         "append_only": {
             "merge_ops": {"apply": True, "reason": "standard"},
@@ -378,3 +384,21 @@ def test_registered_absent_preproduction_status_is_expected():
         "ops_projects",
     ):
         assert absent[table] == "pre_production"
+
+
+def test_rewrite_current_deletes_declared_for_every_class():
+    semantics = scope.load_field_semantics()
+    policy = scope.load_policy(semantics)
+    assert "rewrite_current_deletes" in scope.VERB_UNIVERSE
+    for table_class in scope.class_universe(semantics):
+        cell = policy[table_class]["rewrite_current_deletes"]
+        assert isinstance(cell["apply"], bool) and cell["reason"], table_class
+    applied = {c for c in scope.class_universe(semantics) if policy[c]["rewrite_current_deletes"]["apply"]}
+    assert applied == {"scd2", "smoke_harness"}
+    registry = scope.build_registry(semantics)
+    physical = list(registry)
+    resolution = scope.resolve_scope(physical, verb="rewrite_current_deletes", policy=policy, registry=registry)
+    assert "ops_recommendations_current" in resolution.to_merge
+    assert "ops_entity_counters" not in resolution.to_merge
+    skipped = {s["table"] for s in resolution.skipped}
+    assert "ops_entity_counters" in skipped

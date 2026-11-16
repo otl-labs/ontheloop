@@ -372,16 +372,25 @@ def rewrite(
     con: Any,
     tables: tuple[str, ...] | list[str],
     *,
+    delete_threshold: float,
     catalog: str = CATALOG_ALIAS,
     schema: str = "main",
-) -> None:
-    """Optional: rewrite data files (full compaction / column-store optimisation).
+) -> int:
+    """Rewrite data files carrying deletes; returns the summed files_processed.
 
-    Not included in the default run_merge or run_gc cadences -- invoked explicitly when
-    deep compaction is required. More expensive than merge_adjacent_files.
+    delete_threshold is required: the engine's 0.95 default is never reachable for a Type-1 current
+    projection (a MERGE-maintained file's delete fraction stays far below it), so a caller that
+    leaned on the default would rewrite nothing while looking compacted. Not part of the default
+    run_merge or run_gc cadences; more expensive than merge_adjacent_files.
     """
+    processed = 0
     for table in tables:
-        con.execute(f"SELECT * FROM ducklake_rewrite_data_files('{catalog}', '{table}', schema='{schema}')").fetchall()
+        rows = con.execute(
+            f"SELECT * FROM ducklake_rewrite_data_files('{catalog}', '{table}', "
+            f"delete_threshold={float(delete_threshold)}, schema='{schema}')"
+        ).fetchall()
+        processed += sum(int(r[2]) for r in rows)
+    return processed
 
 
 # ---------------------------------------------------------------------------
