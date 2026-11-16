@@ -2,6 +2,66 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 267: An AWS clock dispatches the three hourly loops through a dedicated GitHub App held inside the agent merge loop -- an accepted residual against Decision 143 clause 1 (Decided)
+
+```yaml
+number: 267
+status: Decided
+decided_date: "2026-11-16"
+kind:
+  value: direction
+  justification: >-
+    Clause 5 exempts a new identity from Decision 143 clause 1's human gate on widening scope, which moves a gate;
+    clauses 1-4 and 6 are the means.
+amends: []
+significance:
+  value: numbered_decision
+  justification: >-
+    A standing exception to Decision 143 clause 1 for a new repository-wide GitHub credential, held by detective
+    controls with reversal triggers. No clause of Decision 143 changes for any other identity.
+```
+
+**Status:** Decided
+**Date:** 2026-11-16
+**Warehouse ID:** dec-267 (per Decision 84 backfill)
+
+**Problem:** GitHub's best-effort cron drops about 80% of the hourly ticks of terraform-drift.yml, convergence-health.yml and main-canary.yml. Starting them from AWS needs a credential that can start a workflow, and GitHub's smallest such grant, Actions write, is repository-wide: it can also cancel, re-run and delete runs, approve fork pull-request runs, disable workflows and rewrite the OIDC subject template every AWS trust keys on. Decision 143 clause 1 wants an identity's scope enforced outside the agent merge loop; here every narrowing control is agent-editable code.
+
+**Decision:**
+1. Clock. One EventBridge rule per row of config/lambda/scheduled_workflow_dispatcher/schedules.yaml invokes the Lambda agent-platform-workflow-dispatcher, which starts that workflow on main through workflow_dispatch unless a run started within the row's skip window. Each workflow keeps its on.schedule as the fallback and stays a deterministic job (Decision 205 cl.1 and cl.3).
+2. Credential. An organisation-owned GitHub App with Actions write and Metadata read only, no webhook, installed on this repository only. Its private key lives only in the SSM SecureString /secret/agent-platform-workflow-dispatcher-app-key, put by the operator (Decision 237); besides PlatformAdmin, only the Lambda's role reads it, by literal ARN. Each run mints a token with those two permissions and revokes it after dispatch.
+3. Allowlist and refusal. The Lambda starts only the register's workflows. Every other workflow that declares workflow_dispatch refuses, on each job that can start work, a workflow_dispatch run whose github.actor is the App's bot (a workflow_run child keeps its upstream's actor and runs), and a test fails a new dispatchable workflow that neither refuses nor is registered.
+4. SIT. SIT builds the same stack switched off: rules disabled, no App key, and the function returns before any secret read. In SIT the alarms have their actions off. The untried mint-and-dispatch path is a residual of the production promotion item (Decision 252 cl.6).
+5. Accepted residual against Decision 143 cl.1. The register, handler, guards and deploy channel all sit inside the agent merge loop, and GitHub has no narrower permission. Accepted as a standing exception held by detective controls: each convergence-health tick checks that the OIDC subject template is GitHub's default, that the bot dispatched or re-ran no workflow outside the register and that no workflow is disabled, filing a workflow_dispatch_integrity rec on a breach; and the first production run proves the token cannot approve a pending deployment (Decision 248 cl.8). With no Contents, Deployments, Environments or Administration permission it cannot change code or a setting or approve a deployment; approving a fork run and deleting runs stay possible and are accepted.
+6. Liveness. loop_liveness_stale counts the bot's dispatches of the register's workflows as cadence. Four alarms watch the AWS side: Lambda errors, and one dead-man per rule (Decision 250 cl.3). After 14 days with no missed tick rec-5126 tightens the floor, and only then does rec-5113 add rows.
+
+**Rationale:** The workflows already accept workflow_dispatch, so only the clock moves. Rules, not Scheduler: CI can already create rules; Scheduler needs new apply grants and a bootstrap apply. A dedicated App, not a personal token, so bot runs are told apart and nothing expires silently. SSM, not Secrets Manager, because Actions write cannot approve a deployment (Decision 248). Rejected: a full lock now (key, role and every change behind an admin apply), which still leaves auto-applied IAM able to grant the key; and no dispatcher in SIT, so production would run code SIT never ran.
+
+**Coverage (Decision 181 cl.2):** cl.1, cl.2 and cl.4 -- tests/checks/iam_tf/test_scheduled_workflow_dispatch.py, validate_secret_parameter_grants and the handler tests; cl.3 -- tests/verify_ci_workflow/test_dispatch_bot_guard.py; cl.5 -- scripts/convergence_health/dispatch_integrity.py's tests and the first-run probe; cl.6 -- the sensor's tests and the stack test. Residuals: a bot re-run of a run older than the read window and a deleted run are unseen, and the reads detect, they do not prevent.
+
+```yaml reversal-conditions
+decision: 267
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: lock-available
+    kind: manual
+    description: "rec-4696 delivers Decision 239 cl.5's change lock, or rec-5029's SCP takes the key read outside the agent merge loop: re-decide clause 5."
+  - id: narrower-permission
+    kind: manual
+    description: "GitHub offers workflow_dispatch without the rest of Actions write: narrow the App and re-decide clause 5."
+  - id: integrity-breach
+    kind: manual
+    description: "A workflow_dispatch_integrity rec records a breach: the operator deletes the App key, and clauses 2 and 5 are re-decided before a new one."
+  - id: probe-approves
+    kind: manual
+    description: "The App's token approves a pending deployment: re-decide clauses 2 and 5 with Decision 248."
+```
+
+**Related:** Decisions 143, 166, 205, 237, 239, 248, 250, 252; rec-4233, rec-5113, rec-5126, rec-5029, rec-4696.
+
+---
+
 ## Decision 266: The 6-hourly merge_ops pass compacts each ops current table in place before merging, under a declared per-table verb, a proof that aborts the pass on mismatch, and a live-file ceiling (amends Decisions 88, 188, 191 and 192) (Decided)
 
 ```yaml

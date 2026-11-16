@@ -32,6 +32,7 @@ from src.telemetry.append import prepare_batch
 from src.telemetry.gate import GateError, RowRuleGateError
 from tests.fixtures.ducklake_fakes import FakeCon, ops_rec_record
 from tests.fixtures.turn_capture_ducklake import load_specs
+from tests.fixtures.write_time_registry_less import REGISTRY_LESS
 
 T0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
 NOW = T0 + timedelta(seconds=30, microseconds=999_999)
@@ -446,11 +447,7 @@ _NON_ROW_WRITING: dict[str, dict[str, str]] = {
         "disposable ducklake_smoke catalog maintenance or provisioning, no caller row",
     ),
 }
-_REGISTRY_LESS = {
-    "src/lambdas/ducklake_catalog_dr/handler.py": "catalog disaster-recovery job: dump and restore, no row write",
-    "src/data/handlers/scheduled_agent_handler.py": "dispatches scheduled agents, writes no warehouse row through the writer",
-    "src/data/handlers/findings_processor_handler.py": "findings processor, writes through the portal, not a writer verb",
-}
+_REGISTRY_LESS = REGISTRY_LESS
 _REGISTRATION_VERBS = {"register_tenant": "ops_tenants", "register_project": "ops_projects"}
 
 
