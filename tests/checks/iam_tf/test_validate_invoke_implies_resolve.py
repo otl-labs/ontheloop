@@ -412,3 +412,51 @@ class TestValidateInvokeImpliesResolve:
         with patch("scripts.checks._common.ROOT", tmp_path):
             validate_invoke_implies_resolve(failed)
         assert failed == []
+
+
+_URL_ARN = "arn:aws:ssm:eu-west-2:1234567890:parameter/agent-platform/ducklake/telemetry_writer_url"
+
+
+@pytest.mark.parametrize(
+    ("read_resource", "also_invoke_writer"),
+    [
+        ("arn:aws:ssm:eu-west-2:1234567890:parameter/agent-platform/ducklake/writer_url", False),
+        ("arn:aws:ssm:eu-west-2:1234567890:parameter/agent-platform/ducklake/telemetry_writer_url*", False),
+        ("arn:aws:ssm:eu-west-2:1234567890:parameter/agent-platform/ducklake/telemetry_writer_ur?", False),
+        (_URL_ARN, True),
+    ],
+    ids=["other-parameter", "star-suffix", "question-mark", "also-invokes-writer"],
+)
+def test_narrow_url_parameter_form_rejections(tmp_path: Path, read_resource: str, also_invoke_writer: bool) -> None:
+    """The narrow form (PLAN-persona-verdict-credential) accepts only the literal telemetry writer URL parameter on a
+    role that invokes nothing but the telemetry writer; every other shape still fails with the broad-read message."""
+    writer = "aws_lambda_function.ducklake_writer.arn, " if also_invoke_writer else ""
+    _write_oidc_tf(
+        tmp_path,
+        f"""
+        data "aws_iam_policy_document" "github_ci_narrow" {{
+          statement {{
+            sid       = "Invoke"
+            effect    = "Allow"
+            actions   = ["lambda:InvokeFunction"]
+            resources = [{writer}aws_lambda_function.ducklake_telemetry_writer.arn]
+          }}
+          statement {{
+            sid       = "UrlRead"
+            effect    = "Allow"
+            actions   = ["ssm:GetParameter"]
+            resources = ["{read_resource}"]
+          }}
+        }}
+
+        resource "aws_iam_role_policy" "github_ci_narrow" {{
+          name   = "agent-platform-github-ci-narrow"
+          role   = aws_iam_role.github_ci_narrow.id
+          policy = data.aws_iam_policy_document.github_ci_narrow.json
+        }}
+        """,
+    )
+    failed: list[str] = []
+    with patch("scripts.checks._common.ROOT", tmp_path):
+        validate_invoke_implies_resolve(failed)
+    assert len(failed) == 1 and "github_ci_narrow" in failed[0] and "lacks ssm:Get*" in failed[0]

@@ -1,13 +1,14 @@
 """CI invoke grants on the telemetry writer, its smoke twin and the telemetry reader (PLAN-telemetry-writer-function,
 PLAN-telemetry-reader-and-smoke-twin).
 
-github_ci_branch is the only CI role that may invoke the telemetry writer: InvokeFunctionUrl and GetFunctionUrlConfig in an
-unconditioned statement, InvokeFunction only behind Bool lambda:InvokedViaFunctionUrl = true. github_ci_pr, github_ci_planner
-and github_ci_deploy get no invoke-class action on it, matched with IAM-wildcard semantics (a prefix wildcard such as
-function:agent-platform-ducklake-* counts). Expected non-invoke coverage is not flagged: the planner's LambdaRead (Get*/List*
-on function:agent-platform-*, for refresh) and github_ci_deploy's UpdateFunctionCode on the same prefix, which the companion
-deploy-wiring plan's governed deploy needs. Every predicate is a pure function of HCL text with its own red case on
-synthetic HCL.
+Of the four PR- and branch-facing CI roles, github_ci_branch is the only one that may invoke the telemetry writer; the
+persona-verdict role's URL-only grant is pinned by tests/checks/iam_tf/test_persona_verdict_role.py. github_ci_branch holds
+InvokeFunctionUrl and GetFunctionUrlConfig in an unconditioned statement, InvokeFunction only behind Bool
+lambda:InvokedViaFunctionUrl = true. github_ci_pr, github_ci_planner and github_ci_deploy get no invoke-class action on it,
+matched with IAM-wildcard semantics (a prefix wildcard such as function:agent-platform-ducklake-* counts). Expected
+non-invoke coverage is not flagged: the planner's LambdaRead (Get*/List* on function:agent-platform-*, for refresh) and
+github_ci_deploy's UpdateFunctionCode on the same prefix, which the companion deploy-wiring plan's governed deploy needs.
+Every predicate is a pure function of HCL text with its own red case on synthetic HCL.
 """
 
 from __future__ import annotations
