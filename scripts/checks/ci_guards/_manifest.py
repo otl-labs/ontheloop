@@ -89,6 +89,23 @@ ENTRIES: tuple[Entry, ...] = (
         full_segment="full_after_lint",
     ),
     Entry(
+        name="validate_persona_trigger_policy",
+        module="scripts.checks.ci_guards.validate_persona_trigger_policy",
+        attr="validate_persona_trigger_policy",
+        pre=True,
+        pre_globs=(
+            ".github/workflows/**",
+            ".github/actions/**",
+            "docs/contracts/project-configuration.yaml",
+            "docs/contracts/executor-personas.yaml",
+            "scripts/checks/ci_guards/validate_persona_trigger_policy.py",
+            "scripts/checks/ci_guards/_persona_llm_signatures.py",
+            "scripts/checks/_common.py",
+            "scripts/checks/registry.py",
+        ),
+        full_segment="full_after_lint",
+    ),
+    Entry(
         name="validate_ci_rca_taxonomy",
         module="scripts.checks.ci_guards.validate_ci_rca_taxonomy",
         attr="validate_ci_rca_taxonomy",

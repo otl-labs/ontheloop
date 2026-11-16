@@ -338,6 +338,13 @@ jobs:
         with:
           working-directory: ${{ env.WORKDIR }}
 
+      - name: Persona dispatch gate (Decision 205 cl.1)
+        id: persona_gate
+        # Fails (refused=true) a dispatch not issued by a maintainer's user identity before the review, so no apply
+        # follows. A push apply never runs it (the Decision 77 hard-block path).
+        if: success() && steps.guard.outputs.routed != 'true' && github.event_name == 'workflow_dispatch'
+        run: python3 scripts/ci/persona_dispatch_gate.py
+
       - name: Subagent plan review (digest-fed, JSON-classified)
         # Second gate: only runs if the guard passed (not routed). rec-2658 forward-fix (T2.39):
         # the reviewer used to be handed only the plan.json FILENAME with nothing on stdin, so it
@@ -354,7 +361,7 @@ jobs:
         # starvation is a reviewer-infra failure, not a plan rejection). An explicit REVISE always
         # fails closed and reds the record, exactly as before.
         id: review
-        if: success() && steps.guard.outputs.routed != 'true'
+        if: success() && steps.guard.outputs.routed != 'true' && steps.persona_gate.outputs.refused != 'true'
         uses: ./.github/actions/subagent-plan-review
         with:
           claude-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -431,6 +438,7 @@ jobs:
           sha: ${{ github.sha }}
           apply-outcome: ${{ steps.apply.outcome }}
           refused: ${{ steps.precond.outputs.refused }}
+          dispatch-refused: ${{ steps.persona_gate.outputs.refused }}
           routed: ${{ steps.guard.outputs.routed }}
           review-outcome: ${{ steps.review.outputs.outcome }}
           review-step-outcome: ${{ steps.review.outcome }}
@@ -741,14 +749,7 @@ jobs:
         working-directory: ${{ env.WORKDIR }}
         env:
           FRESH_PLAN_SHA256: ${{ needs.apply-sandbox.outputs.fresh_plan_sha256 }}
-        run: |
-          set -euo pipefail
-          ACTUAL=$(sha256sum plan.bin | cut -d' ' -f1)
-          if [ "$ACTUAL" != "$FRESH_PLAN_SHA256" ]; then
-            echo "::error::SANDBOX_FRESH_PLAN_ARTIFACT sha256 mismatch: expected ${FRESH_PLAN_SHA256}, got ${ACTUAL}. Refusing to apply a possibly-corrupted plan." >&2
-            exit 1
-          fi
-          echo "SANDBOX_FRESH_PLAN_ARTIFACT sha256 verified: ${ACTUAL}"
+        run: python3 "$GITHUB_WORKSPACE/scripts/ci/verify_plan_sha256.py" --label SANDBOX_FRESH_PLAN_ARTIFACT --plan plan.bin
 
       - name: Fetch saved plan from S3 (gated-apply path, T2.22)
         # Resolve the PR (number + head sha) from the merge commit and fetch the content-addressed
