@@ -21,7 +21,7 @@ TRUSTED_FILE = "oidc_trusted_plan_role.tf"
 TRUSTED_DOC = "github_ci_trusted_plan"
 TRUSTED_GITHUB_FILE = "oidc_trusted_github_plan_role.tf"
 TRUSTED_GITHUB_DOC = "github_ci_trusted_github_plan"
-EXACT_GRANT_DOCS = {TRUSTED_DOC, TRUSTED_GITHUB_DOC}
+EXACT_GRANT_DOCS = {TRUSTED_GITHUB_DOC}
 GRANT_SID = "TfstateGithubRead"
 GRANT_RESOURCE = "${aws_s3_bucket.data_lake.arn}/tfstate/github/terraform.tfstate"
 TARGET_ACTION = "s3:GetObject"
@@ -271,22 +271,16 @@ class TestPlannerStateGrant:
         assert allow_statements_naming_literal(real_texts()) == [
             (PLANNER_FILE, GRANT_SID),
             (TRUSTED_GITHUB_FILE, GRANT_SID),
-            (TRUSTED_FILE, GRANT_SID),
         ]
 
-    def test_trusted_plan_document_may_hold_only_the_exact_grant(self) -> None:
+    def test_trusted_plan_document_holds_no_github_state_grant(self) -> None:
         doc = f'data "aws_iam_policy_document" "{TRUSTED_DOC}" {{\n{GRANT_HCL}}}\n'
         texts = synthetic()
-        texts[TRUSTED_FILE] = strip_comments(doc)
+        texts[TRUSTED_FILE] = strip_comments(f'data "aws_iam_policy_document" "{TRUSTED_DOC}" {{\n}}\n')
         assert planner_violations(texts) == []
-        for broad in (
-            doc.replace("terraform.tfstate", "*"),
-            doc.replace('["s3:GetObject"]', '["s3:GetObject", "s3:PutObject"]'),
-        ):
-            texts[TRUSTED_FILE] = strip_comments(broad)
-            assert planner_violations(texts), broad
-        texts[TRUSTED_FILE] = strip_comments(doc.replace(f'"{TRUSTED_DOC}"', '"other_doc"'))
-        assert planner_violations(texts)
+        for held in (doc, doc.replace("terraform.tfstate", "*")):
+            texts[TRUSTED_FILE] = strip_comments(held)
+            assert planner_violations(texts), held
 
     def test_trusted_github_plan_document_may_hold_only_the_exact_grant(self) -> None:
         doc = f'data "aws_iam_policy_document" "{TRUSTED_GITHUB_DOC}" {{\n{GRANT_HCL}}}\n'

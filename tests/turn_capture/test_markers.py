@@ -146,3 +146,27 @@ def test_status_lines_parse_only_as_whole_lines() -> None:
     ):
         assert parse_markers(bad) == [], bad
     assert parse_markers(f"\x1b[31m{line}\x1b[0m\r\n") == [Marker("status", "tool_a.failed", 0, "failed")]
+
+
+def test_hook_block_marker_round_trips() -> None:
+    line = markers.format_hook_block_marker("edit_scope_guard")
+    assert line == "HOOK-BLOCK v1 hook=edit_scope_guard"
+    assert markers.hook_block_stems(f"a\n{line}\n\nb\n{markers.format_hook_block_marker('x.y-z')}") == [
+        "edit_scope_guard",
+        "x.y-z",
+    ]
+
+
+def test_hook_block_marker_refuses_bad_stems() -> None:
+    for bad in ("", "bad stem", "-lead", "a" * 201):
+        with pytest.raises(ValueError):
+            markers.format_hook_block_marker(bad)
+    assert markers.hook_block_stems("HOOK-BLOCK v1 hook=bad stem\nHOOK-BLOCK v1 hook=" + "a" * 201) == []
+
+
+def test_hook_block_lines_parse_only_as_whole_lines() -> None:
+    line = markers.format_hook_block_marker("tool_a")
+    for bad in (f" {line}", f"> {line}", f"{line} extra", f"x {line}", line.replace(" v1 ", " v2 ")):
+        assert markers.hook_block_stems(bad) == [], bad
+    assert markers.hook_block_stems(f"\x1b[31m{line}\x1b[0m\r\n") == ["tool_a"]
+    assert parse_markers(line) == []

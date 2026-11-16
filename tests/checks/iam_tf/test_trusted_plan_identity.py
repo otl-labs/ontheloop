@@ -42,7 +42,6 @@ _EXPECTED_SIDS = {
         ["ssm:GetParameter"],
         [f"{_SSM_ARN}neon-api-key", f"{_SSM_ARN}ducklake-neon-catalog-dsn"],
     ),
-    "TfstateGithubRead": (["s3:GetObject"], [f"{_BUCKET}/tfstate/github/terraform.tfstate"]),
 }
 _FORBIDDEN_TRUST_TEXT = ("pull_request", "refs/pull", "agent/", "ref:refs/heads")
 _WRITE_PROBES = ("s3:PutObject", "s3:DeleteObject", "s3:DeleteObjectVersion", "s3:PutObjectAcl")
@@ -241,7 +240,7 @@ def test_trust_is_one_environment_and_workflow_bound_statement() -> None:
     assert trust_problems(_read(_ROLE_FILE)) == []
 
 
-def test_policy_sids_are_exactly_the_four() -> None:
+def test_policy_sids_are_exactly_the_expected() -> None:
     assert own_sid_problems(_read(_ROLE_FILE)) == []
 
 
