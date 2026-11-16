@@ -61,7 +61,10 @@ outcome:
 criterion whose status is `met`; a recommendation whose id is listed under `bundled_recommendations:`
 in a plan file under `docs/plans/` (a mention elsewhere in a plan, or under `followon_recs:`, does
 not count); or a recommendation whose own text records a merged implementing pull request. Anything
-else is not in progress.
+else is not in progress. "Built" means the remedy is merged on main at the audited commit. A
+Decision clause that owns a defect is built when something is bound to the rule it states (the
+binding test of Section 11 E1) and is otherwise not in progress. A roadmap
+`candidate_decisions[]` entry is an owner that is not in progress.
 
 A deferred owner (a roadmap item with status `deferred_post_mvp`) is an owner that is not in
 progress. Whether the defect should wait for it is your judgment: if it should not wait, file a
@@ -201,6 +204,9 @@ Candidates (facts are in the G rows named; re-derive before relying on any of th
   decision files, and is what the decision scout reads. `logs/.decisions-index.jsonl` is a
   gitignored local cache of the warehouse table. "The index" in this prompt always means the
   first.
+- Trap 20, look-alike ids. `C1` to `C20` are this prompt's candidates; `c1`, `c2` after a roadmap
+  item id are that item's exit criteria; `cl.1` is a Decision clause. `CFG-nn` are the 2026-08-07
+  audit's finding ids; yours are `CFR-nn`.
 
 ## 4. SCOPE
 
@@ -264,8 +270,10 @@ Out of scope (do not file findings on these):
 - The content of `docs/contracts/north-star.yaml`, Terraform, IAM and deployment.
 
 Trust-nothing clause: obtain every file, line and size by reading the repository at the audited
-commit. Trust no number quoted in this prompt; re-derive it (Section 10 gives a command for every
-numeric row) and record any anchor or number that does not resolve in `meta.stale_anchors` as
+commit. Trust no number quoted in this prompt; re-derive it (Section 10 gives a command for each row
+that git can re-derive; a row quoting the earlier audit is checked against its two files; a row
+dated to an earlier read of a live system -- the preflight report, telemetry, recommendation
+statuses -- is dated evidence, read again only where Section 5, 11 or 13 says to) and record any anchor or number that does not resolve in `meta.stale_anchors` as
 `{anchor, expected, found}`. Ordinary drift between `197c800c` and the audited commit is expected:
 record the new value, not a stale anchor, when the difference is explained by commits in between.
 
@@ -274,18 +282,20 @@ record the new value, not a stale anchor, when the difference is explained by co
 Run these first, in order. NEVER abort on a failure: take the named degraded path.
 
 0. Hook canary (repository rule, `AGENTS.md`). Applies only to a top-level interactive session; a
-   sub-agent, CI job or scheduled agent skips it. If your opening context has no `[hook_canary]`
+   sub-agent, CI job or scheduled agent skips it. A session a person started by handing you this
+   prompt is top-level interactive. If your opening context has no `[hook_canary]`
    line from this repository's hooks, say "repo hooks not loaded" as your first status, write
    nothing, and end the turn. This is the one sanctioned stop in this prompt.
 1. `git fetch origin main` then `git rev-parse --short origin/main`. This sha IS the audited tree;
-   use it in the deliverable filenames, the branch name and `meta.audited_commit`. Then
-   `git switch -c audit/contract-first-retrospective-<sha> origin/main`. After this your working
-   tree is the audited commit. IF that branch already exists (locally per `git branch --list`, or
+   use it in the deliverable filenames, the branch name and `meta.audited_commit`, and write it
+   wherever a later script or command shows `<sha>`. `origin/main` moves while you work (step 3
+   fetches it again) and every figure must come from this one commit, so no later command names
+   `origin/main`. Then `git switch -c audit/contract-first-retrospective-<sha> <sha>`. After this
+   your working tree is the audited commit. IF that branch already exists (locally per `git branch --list`, or
    on the remote per `git ls-remote --heads origin <name>`), append `-r2` (then `-r3`, ...) to the
    branch name only; the deliverable filenames keep `<sha>`. IF fetch fails: use
-   `git rev-parse --short HEAD`, branch off `HEAD`, record "base is local HEAD" in
-   `meta.contract_notes`, set `REF = "HEAD"` at the top of Scripts A, B and C, and read
-   `origin/main` as `HEAD` in every later command. IF `git switch -c` fails for any other reason:
+   `git rev-parse --short HEAD` as `<sha>`, branch off it, and record "base is local HEAD" in
+   `meta.contract_notes`. IF `git switch -c` fails for any other reason:
    record the error in `meta.contract_notes`, stay on the current branch, read every repository
    file with `git show <sha>:<path>` instead of from the working tree, and at Section 16 skip steps
    3-5: leave the two deliverables uncommitted and end the turn with a final message naming their
@@ -373,11 +383,19 @@ For each E1 entry compute `spec_share` = (specification + change-record) / (spec
 rationale + change-record), as a percentage: class (4) is left out so that envelopes and
 annotations, which the baseline entries did not carry, cannot move it. `mean_spec_share` is the
 plain mean of the 12 values. The baseline's value, from its means, is 65 (62 of 95), stated as
-plus or minus 10. `minted_share` is the share of E2 group (a) samples with governing content (any
-classification other than `housekeeping`) that are `would_have_minted_before: yes`. `shifted` when
-`mean_spec_share` is 45 or lower AND `minted_share` is at least one half; `not-shifted` when
-`mean_spec_share` is 55 or higher AND `minted_share` is under one quarter; otherwise
-`partially-shifted`.
+plus or minus 10. A minted share is the share of one E2 group's samples with governing content
+(any classification other than `housekeeping`) that are `would_have_minted_before: yes`:
+`minted_share_p2` over group (a), `minted_share_p0` over group (c), the control. `minted_delta` is
+`minted_share_p2` minus `minted_share_p0`. All three are fractions from 0 to 1; a share is `null`
+when its group has no sample with governing content, and `minted_delta` is `null` when either
+share is. Contract changes with no Decision were already common in P0 (G23), so only the
+difference counts toward a shift. `shifted` when `mean_spec_share` is 45 or lower AND
+`minted_delta` is one third or more; `not-shifted` when `mean_spec_share` is 55 or higher AND
+`minted_delta` is under one third; otherwise `partially-shifted`. IF `minted_delta` is `null`:
+rule on `mean_spec_share` alone (45 or lower `shifted`, 55 or higher `not-shifted`, otherwise
+`partially-shifted`). IF `minted_share_p0` is two thirds or more, the difference cannot reach one
+third whatever P2 shows: say so, and say what `mean_spec_share`, G23 and group (b) then support.
+Both legs rest on small samples (12 entries; 6 and 6 commits): `prose` says so.
 Verdict: `shifted | partially-shifted | not-shifted | cannot-determine`.
 
 **Q2 Context cost.** What does the decision and contract system cost an agent now against before?
@@ -389,11 +407,17 @@ assignment to all three boundaries (a file absent at a boundary contributes 0): 
 `on_demand` (a pointer the run follows only for some plans, or reads in part). Precedence when a
 file fits two bands: `always_read`, then `gate_subagent`, then `on_demand`. Say in `prose` if you
 can see that a file's role changed between boundaries (for example content that left `AGENTS.md`
-for a contract). A file the workflow mandates on every plan that is not among the 16 goes in
-`extra_files` and in `prose`, never in a total. `logs/.preflight-report.json` is not in git and is
+for a contract). A file the workflow tells a planning run to read that is not among the 16 goes in
+`extra_files` and in `prose`, never in a total: at most 12 rows, largest first, each with its
+bytes at the three boundaries, its band and `when` (`every-plan`, or the condition that triggers
+the read). Include files that `.claude/commands/plan.md` and the planning skill named as read
+targets at the 2026-08-07 boundary and that are now gone or no longer named: read those two files
+at that boundary once (`git show <boundary commit>:<path>`, the commit Script A prints). The 16
+were fixed from the workflow as it stood at `197c800c`, so `prose` says which way the
+`extra_files` rows would move the comparison, and C9 is adjudicated with them in view. `logs/.preflight-report.json` is not in git and is
 excluded from every static figure; give its current size in `prose`. `token_estimate` is
 `(always_read_bytes + gate_subagent_bytes) // 4`. (b) Planning context footprint, observed, and
-sessions needing compaction, from telemetry (E5); telemetry begins about 2026-11-01, so there is no
+sessions needing compaction, from telemetry (E5); telemetry begins 2026-10-20, so there is no
 observed "before": say so. Default rule, applied to `always_read_bytes + gate_subagent_bytes` at
 the audited commit against 2026-08-07: `reduced` if lower by more than 10 percent, `grown` if
 higher by more than 10 percent, `held` otherwise. Apply the same three-way rule to `always_read`
@@ -421,9 +445,9 @@ Verdict: `enforced-by-default | mixed | mostly-asserted | cannot-determine`.
 `intervention_ledger` (Section 14); one piece of exercised evidence per row is enough, taken from
 where G19's hint points. The verdict is a summary computed from the ledger. The core purposes are
 the four with the tags `routing`, `entry-size`, `contract-enforcement` and `read-cost` in G19.
-`all-holding`: no row is `eroded` or `retired-without-replacement`. `core-gap`: for at least one
-core purpose, no row carrying that purpose tag is `holding` or `holding-with-side-effect`.
-`core-holding`: anything else.
+Test in this order. `core-gap`: for at least one core purpose, no row carrying that purpose tag
+is `holding` or `holding-with-side-effect`. `all-holding`: no row is `eroded` or
+`retired-without-replacement`. `core-holding`: anything else.
 Verdict: `all-holding | core-holding | core-gap`.
 
 **Q5 Sustainability.** Fill `growth_ledger`: for each record type its stock, its flow per period,
@@ -476,9 +500,13 @@ control is `missed`. EX1-EX13 is a CLOSED list: do not add properties. Verdict, 
 
 **Q8 Reversal-condition reviews.** Three intervention Decisions carry monitored reversal
 conditions whose review dates fall between 2026-11-17 and 2026-12-01 (G14). For each of the eight
-conditions listed in G14, decide from evidence whether it has fired, and recommend a disposition
-(G14 pins how to test the two prose conditions). Fill `condition_reviews` (Section 14). This question's entry carries no verdict of its own; its
-`prose` points at the block.
+conditions listed in G14, decide from evidence whether it has fired, and recommend a disposition.
+G14 gives a test for the two prose conditions and a note on two of the stanza conditions. For
+every stanza condition the test is its own `description` read literally, against the evidence you
+already hold plus at most 2 further repository reads each; where its wording leaves a threshold
+open ("materially", "measured"), state the one you applied in `evidence`. Fill `condition_reviews`
+(Section 14). This question's entry carries no verdict of its own; its `prose` points at the
+block.
 
 **Q9 Improvement path.** Given your answers to Q1-Q8: which changes, in what order, are worth
 their cost? For each of Q1-Q6 that is not at its first-listed verdict (a `cannot-determine` needs
@@ -513,11 +541,13 @@ the seed names its own method; where the repository cannot answer a seed, say so
   arriving at the P2 rate indefinitely?
 - What do the routing and alignment gates cost per plan (rounds, sub-agent runs) against what the
   record shows they catch (G22)?
-- Q2 measures a planning run. For an implementing run: list the repository files that
-  `.claude/commands/implement.md` and `.claude/skills/implement/SKILL.md` name as things to read
-  (contracts, skills, commands), sum their bytes at 2026-08-07, 2026-09-12 and the audited commit
-  with `git cat-file -s <commit>:<path>` (0 when the file is absent), and give the three totals. No
-  bands.
+- Q2 measures a planning run. For an implementing run: take `.claude/commands/implement.md` and
+  `.claude/skills/implement/SKILL.md` as they stand at the audited commit and list every
+  repository file path they name under `docs/contracts/`, under `.claude/`, or at the repository
+  root (conditional reads included; the two files themselves included). Apply that one list to
+  all three dates: sum the files' bytes at 2026-08-07, 2026-09-12 and the audited commit with
+  `git cat-file -s <commit>:<path>` (0 when the file is absent), and give the three totals and the
+  file count. No bands.
 - Did outcomes change, as well as cost and routing? Say what evidence exists here that agents make
   fewer governance mistakes since the intervention (a contradiction merged, rework, a red main with
   a governance cause), and whether the repository can measure that at all.
@@ -535,7 +565,9 @@ structurally apply; never manufacture a rating or a finding to fill a cell.
 - `absent`: nothing on the surface addresses the dimension.
 
 A finding lands on the cell named by its `surface` and `dimension`; a `shared` finding lands on its
-dimension's cell for every surface it names in `title` or `gap`.
+dimension's cell for every surface it names in `gap` that has that cell. Choose a finding's
+`dimension` from those the second table assigns to its surface (for `shared`, to at least one
+surface it names): the table is fixed, and a finding never turns an `n/a` cell into a rating.
 
 | ID | Dimension | Asks | Serves |
 |---|---|---|---|
@@ -599,7 +631,7 @@ boundary is the 16 read-set sizes in the order of `READ_SET`:
 
 ```python
 import re, subprocess
-REF = "origin/main"  # change to "HEAD" only if Section 5 step 1 fell back to local HEAD
+REF = "<sha>"  # the audited commit from Section 5 step 1: replace before running
 def sh(*a):
     return subprocess.run(a, capture_output=True, text=True, encoding="utf-8", errors="replace").stdout
 READ_SET = ["CLAUDE.md", "AGENTS.md", ".claude/commands/plan.md", ".claude/skills/planning/SKILL.md",
@@ -650,7 +682,7 @@ feeds G2, G3). It reads every first-parent version of `docs/DECISIONS.md` since 
 
 ```python
 import collections, re, statistics, subprocess
-REF = "origin/main"  # change to "HEAD" only if Section 5 step 1 fell back to local HEAD
+REF = "<sha>"  # the audited commit from Section 5 step 1: replace before running
 def sh(*a):
     return subprocess.run(a, capture_output=True, text=True, encoding="utf-8", errors="replace").stdout
 HEAD_RE = re.compile(r"^## Decision (\d+):", re.M)
@@ -688,7 +720,7 @@ G10, G11, G13, G14, G22, G23):
 
 ```python
 import collections, json, pathlib, re, subprocess, yaml
-REF = "origin/main"  # change to "HEAD" only if Section 5 step 1 fell back to local HEAD
+REF = "<sha>"  # the audited commit from Section 5 step 1: replace before running
 def sh(*a):
     return subprocess.run(a, capture_output=True, text=True, encoding="utf-8", errors="replace").stdout
 # contracts census
@@ -978,12 +1010,28 @@ after 2026-08-13 (Script B's `first_appearance` list, by number). `fired` when f
 them the entry, its envelope justification, or the message of the commit that added it says that
 decision content (ruling, rationale or reversal conditions) was cut or moved out to fit the cap;
 `not-fired` when that is so for at most 2. (b): look at the two-entry commits Script B lists.
-`fired` when in at least one of them the two entries share a subject (one amends the other, or
-both rule on the same mechanism) and their combined size at first appearance exceeds 6,144 bytes;
-`not-fired` when none does.
+The condition's own words are "specifically to evade the per-entry cap (split-then-recombine)".
+`fired` when at least one commit holds one decision written as two entries: both rule on the same
+mechanism, at least one cannot be applied without the other (name the clause that depends on the
+other entry), and their combined size at first appearance exceeds 6,144 bytes. Two entries on
+related subjects that each stand alone do not fire it. `not-fired` when no commit meets all
+three. At `197c800c` all eight listed commits exceed the combined size (the smallest pair is 8,593
+bytes) and no pair has an `amends` edge between its members, so the first two legs decide it.
 
 Decision 179's `index-read-context-cost` is worded as a problem arising "before T2.56 c1 or T1.5 c1
-lands"; T2.56 c1 is `met` (G1).
+lands"; T2.56 c1 is `met` (G1). That criterion concerns the ambient instruction layer (`AGENTS.md`,
+`CLAUDE.md` and the skills), not the index, and the index grew over the same period (G8). Whether
+the criterion being met forecloses the condition, or only overtakes its wording while the cost it
+names remains, is your judgment; `foreclosed` needs the first.
+
+Decision 167's `mis-routed-past-both-gates` names two gates. An E1 entry classified
+`routable-elsewhere` is a candidate instance, not a firing: it passed the conformance check by
+being merged, and it fires the condition only if its plan file also records a plan-critique
+`PROCEED` (a `gate_rounds` row with `gate: plan-critique`, G22; the row holds the gate's overall
+verdict, not its category-consistency check on its own). Check at most the 2 highest-numbered
+such entries. The plan is `docs/plans/PLAN-<slug>.yaml`, the slug being the text in parentheses in
+the subject of the commit that added the entry. IF that file is absent or has no `gate_rounds`,
+the instance cannot be shown either way.
 
 **G15 Adjacent records** (Script A unless stated).
 
@@ -1011,8 +1059,9 @@ lands"; T2.56 c1 is `met` (G1).
 - Roadmap item T1.5's criterion text describes a "synced hermetic cache" for recommendations; its
   `progress_note` dated 2026-10-10 states that phrasing no longer describes the recs read path.
 
-**G17 Telemetry** (rows begin about 2026-11-01: `sessions_window` returned no rows for 2026-08-05,
-2026-09-15 and 2026-10-14, and rows for 2026-11-01).
+**G17 Telemetry** (rows begin 2026-10-20: read 2026-11-16, `sessions_window` returned no rows for
+2026-08-05, 2026-09-15 and 2026-10-14, 3 root sessions for the seven days 2026-10-18 to
+2026-10-24, the earliest started 2026-10-20, and rows for 2026-11-01).
 - CLI: `bin/venv-python -m scripts.telemetry_usage {models|tools|startup} --from YYYY-MM-DD --to YYYY-MM-DD [--by-root] [--by-agent]`
   (`scripts/telemetry_usage.py:1-12`). `models --by-root` prints one row per session tree and
   model, keyed by `harness_session_key`, with `tokens_input_total`,
@@ -1021,7 +1070,7 @@ lands"; T2.56 c1 is `met` (G1).
   `workflow` column; the underlying verb `model_usage_rollup` returns one.
 - Join key: plan merge commits on main carry a `Claude-Session: https://claude.ai/code/session_...`
   trailer; the trailing `session_...` token equals telemetry's `harness_session_key`. List them:
-  `git log --since=2026-11-01T00:00:00Z --grep='^plan(' --format='%h %cs %s | %(trailers:key=Claude-Session,valueonly,separator=%x20)' origin/main`.
+  `git log --since=2026-10-20T00:00:00Z --grep='^plan(' --format='%h %cs %s | %(trailers:key=Claude-Session,valueonly,separator=%x20)' <sha>`.
 - Dated sample (read 2026-11-16; trees started 2026-11-14): the tree behind merge commit
   `afe42535` -- 188 model calls, uncached input 392, cache-creation 612,227, cache-read 26,531,304,
   5 sessions; behind `52029fb9` -- 142 calls, 289, 425,304, 27,155,059, 3 sessions; behind
@@ -1030,7 +1079,9 @@ lands"; T2.56 c1 is `met` (G1).
 - Workflow values by session tree, for trees started 2026-11-10 to 2026-11-16 (read 2026-11-16;
   126 trees): `claude_code` 83, `implement` 20, `plan` 13, `ci_rca` 9, `audit` 1. Re-derive for any
   window of at most 7 days (one telemetry read):
-  `bin/venv-python -c "import collections,sys; from scripts.aws_profile import resolve_aws_profile; from scripts.telemetry_capture.read_route import TelemetryReader; r=TelemetryReader(profile=resolve_aws_profile('agent_platform')); rows=r.named('model_usage_rollup', day_from=sys.argv[1], day_to=sys.argv[2]); print(dict(collections.Counter({x['root_session_id']: x.get('workflow') for x in rows}.values())))" 2026-11-10 2026-11-16`
+  `bin/venv-python -c "import collections,sys; from scripts.aws_profile import resolve_aws_profile; from scripts.telemetry_capture.read_route import TelemetryReader; r=TelemetryReader(profile=resolve_aws_profile('agent_platform')); rows=r.named('model_usage_rollup', day_from=sys.argv[1], day_to=sys.argv[2]); by={x['root_session_id']: (x.get('harness_session_key'), x.get('workflow')) for x in rows}; print(dict(collections.Counter(w for _, w in by.values()))); print({k: w for k, w in by.values() if k in sys.argv[3:]})" 2026-11-10 2026-11-16 [session_... ...]`
+  The second line it prints gives the workflow of each tree whose `harness_session_key` you pass
+  after the two dates (none passed: `{}`).
 - Dated sample, first model call of a session (`startup --by-agent`, 2026-11-09): root sessions on
   `agent/` branches (n=3) 65,183 to 78,113 input tokens; `general-purpose` sub-agents (n=8) 44,363
   to 49,642. A first call includes the harness's own system prompt and tool definitions as well as
@@ -1162,8 +1213,12 @@ the audited commit.** For each:
    elements class (4) lists are class (4) whatever they say, including dated annotations:
    blockquote lines beginning `> **` and trailing `[Amendment ...]` brackets (these are what C2
    counts); "first match wins" orders classes (1) to (3) for the remaining body text. A fenced
-   `yaml reversal-conditions` stanza is class (3): the rule names reversal conditions there. Record
-   the four shares to the nearest 5 points, and `spec_share` (Q1) from those recorded shares.
+   `yaml reversal-conditions` stanza is class (3): the rule names reversal conditions there. One
+   clarification for body text: a block that does more than one job goes whole to the class most
+   of its bytes serve, and "first match wins" decides only a block split evenly. The baseline
+   recorded the rule and not how it treated such blocks; name that in `prose` as a limit on the
+   comparison with G20. Record the four shares to the nearest 5 points, and `spec_share` (Q1) from
+   those recorded shares.
 2. Bar test. Apply the three questions of `significance.routing_rule`
    (`docs/contracts/decision-entry.yaml:430-437`) to the entry's own clauses and classify:
    `clears-bar` | `bar-met-by-amends-edge-only` (it clears only because it amends an earlier
@@ -1177,30 +1232,39 @@ the audited commit.** For each:
    `none-found`: neither.
 
 Finish all 12 before computing the means; each mean is the plain mean of the 12 recorded values,
-every entry weighted equally. Then set them beside G20.
+every entry weighted equally. Then set them beside G20. State in `prose` the dates the 12 span:
+they show the newest practice, not every entry since Decision 167.
 
-**E2 Contract changes with and without a Decision -- at most 10 commits.** List the P2 `feat(`
+**E2 Contract changes with and without a Decision -- at most 16 commits.** List the `feat(`
 commits on main that changed a contract, newest first, each marked by whether it also changed
-`docs/DECISIONS.md`:
+`docs/DECISIONS.md`. For P2:
 
 ```bash
-for c in $(git log --first-parent --since=2026-09-13T00:00:00Z --format=%h origin/main -- 'docs/contracts/*.yaml'); do if git show --name-only --format= "$c" | grep -q '^docs/DECISIONS.md$'; then m=with-decision; else m=no-decision; fi; git log -1 --format="$m %h %cs %s" "$c"; done | grep ' feat('
+for c in $(git log --first-parent --since=2026-09-13T00:00:00Z --format=%h <sha> -- 'docs/contracts/*.yaml'); do if git show --name-only --format= "$c" | grep -q '^docs/DECISIONS.md$'; then m=with-decision; else m=no-decision; fi; git log -1 --format="$m %h %cs %s" "$c"; done | grep ' feat('
 ```
 
-At `197c800c` this prints 214 commits: 130 `no-decision` and 84 `with-decision`. Group (a): the 3
-newest and the 3 oldest `no-decision` commits. Group (b): the 2 newest and the 2 oldest
-`with-decision` commits. For each sample read what the commit added to the contract or contracts
+At `197c800c` this prints 214 commits: 130 `no-decision` and 84 `with-decision`. For P0, run it
+again with `--since=2026-06-16T00:00:00Z --until=2026-08-07T23:59:59Z` in place of the `--since`
+argument: at `197c800c` that prints 63 commits, 43 `no-decision` and 20 `with-decision`. Group (a):
+the 3 newest and the 3 oldest P2 `no-decision` commits. Group (b): the 2 newest and the 2 oldest
+P2 `with-decision` commits. Group (c), the control: the 3 newest and the 3 oldest P0 `no-decision`
+commits. For each sample read what the commit added to the contract or contracts
 (`git show <sha> -- docs/contracts/`) and classify the main addition: `mechanism-rule` (a rule,
 threshold, procedure or enforcement binding), `field-semantics` (the meaning or constraints of a
 field or key), `operational-fact` (what is currently true, a status or a pointer), or
 `housekeeping` (wording, renames, pin or count updates with no governing content). List any second
 kind of addition in `also`. Quote the added line that best shows what kind of content it is.
 
-Group (a) counterfactual. Read at most 6 of Decisions 157-166 (the entries the baseline
-partitioned) as the comparison set, once, for all six samples. `would_have_minted_before` is `yes`
-when a comparison entry recorded the same kind of content as a numbered Decision (name the entry
-and clause in `evidence`), `no` when no comparison entry holds content of that kind, `unclear`
-when the likeness is arguable. Write `overlap: n/a`.
+Groups (a) and (c), one test. The comparison set is Decisions 161 to 166 as they stand at the
+audited commit, leaving out their dated annotation lines: six of the ten entries (157-166) the
+baseline partitioned. Read them once, for all twelve samples. `would_have_minted_before` is `yes`
+when a comparison entry states content of the sample's classification at a like grain -- a
+threshold with its value, a field with its allowed values, a status with its date (name the entry
+and clause in `evidence`); `no` when no comparison entry holds content of that classification;
+`unclear` when the likeness is arguable; `n/a` for a `housekeeping` sample. For group (c) the
+field asks the same thing of its own time: did Decisions then record content of this kind.
+Classify and test group (c) before group (a), so the control is not judged against what P2
+showed you. Write `overlap: n/a`.
 
 Group (b) overlap. Read the Decision entry the same commit added or changed. `overlap` is `none`
 when the entry gives the reason and points at the contract, `partial` when it restates some of
@@ -1234,8 +1298,10 @@ with the clause.
 telemetry read is any call that reaches the telemetry reader: the CLI, the G17 one-liner, or a
 `ducklake-reads` MCP tool. The Section 5 step 6 probe is the first of the 8. Skip the rest if
 `meta.degraded_telemetry`. Run `models --by-root` (G17) for the 7 UTC days ending on the audit day
-and for the 7 days before that (2 reads), and the G17 workflow one-liner for the 7 days ending on
-the audit day (1 read; evidence for C19). From the
+and for the 7 days before that (2 reads). After choosing the trees below, run the G17 workflow
+one-liner for the 7 days ending on the audit day with the matched trees' keys after the dates (1
+read; evidence for C19: the tally, and the workflow each sampled tree carries; a matched tree that
+started in the earlier 7 days is not printed -- say how many were not). From the
 plan merge commits in those 14 days (G17 command), take the 8 most recent whose subject contains
 `approved plan` and whose trailer key matches a `harness_session_key` in the output; a tree that
 produced several sampled plans counts once and is noted. For each matched tree, summing its rows
@@ -1243,8 +1309,11 @@ across models, record first-time tokens (Trap 15), cache-read tokens, model call
 Report median, minimum and maximum of first-time tokens. A tree may include work other than the
 plan: say so; these are upper bounds for one plan. IF fewer than 3 trees match: report those that
 did (none: `observed: []` and `null` summary fields), note it in `meta.contract_notes`, and do not
-widen the window. Then compaction: with at most 2 further reads of your choice, try to read a
-count of `compact` events for the same trees. IF you find no route: set `meta.compaction_unreadable = true`, write
+widen the window. Then compaction: with at most 2 further reads, try to read a count of `compact` events for the
+same trees. Each read is a named verb of the telemetry reader other than the seven G17 lists
+(`TelemetryReader.named(...)` as in the G17 one-liner; the verbs are listed in
+`scripts/telemetry_capture/read_route.py` and `src/common/ducklake_reader_client.py`). No other
+route: no SQL and no direct table read. IF you find no route: set `meta.compaction_unreadable = true`, write
 `metrics.compaction.readable: false`, and adjudicate C18 on that evidence. Do not write telemetry
 tenant ids, project ids or session ULIDs in either deliverable; identify a sample by its merge
 commit short sha.
@@ -1279,7 +1348,8 @@ IF a dedup command fails mid-run: retry once; if it still fails, set `meta.degra
 and apply Section 5 step 4's rule to every finding not yet deduped.
 
 Record `dedup_search_terms` and `dedup_hit_count` on the finding. An owner is a returned item (an
-open recommendation, a roadmap criterion or a Decision clause) whose subject is this defect,
+open recommendation, a roadmap item, criterion or `candidate_decisions[]` entry, or a Decision
+clause) whose subject is this defect,
 whether or not its remedy would close it; for a Decision clause the remedy is the rule it states.
 `recs_related` always returns its nearest matches, so record the raw returned total in
 `roadmap_crossref.note` and count only owners in `dedup_hit_count`. An owner means
@@ -1332,7 +1402,7 @@ separates allowed values.
 ```yaml
 audit:
   meta:
-    audited_commit: <origin/main short sha>
+    audited_commit: <sha>         # the short sha from Section 5 step 1
     base_branch: main
     model: <your self-reported model name, free text>
     methodology_version: 1
@@ -1358,7 +1428,8 @@ audit:
       static:                     # exactly 3 rows: 2026-08-07, 2026-09-12, the audited commit
         - {boundary: "", read_set_bytes: 0, always_read_bytes: 0, gate_subagent_bytes: 0,
            on_demand_bytes: 0, token_estimate: 0}
-      extra_files: []             # [{file, bytes_now, band, basis}] mandated every plan, outside the 16
+      extra_files: []             # at most 12 read targets outside the 16:
+                                  #   [{file, bytes_0807: 0, bytes_0912: 0, bytes_now: 0, band, when: "", basis}]
       observed: []                # [{merge_commit, plans_in_tree: 1, model_calls: 0, sessions: 0,
                                   #   first_time_tokens: 0, cache_read_tokens: 0, note: ""}]
       observed_summary: {samples: 0, first_time_tokens_median: null, first_time_tokens_min: null,
@@ -1366,7 +1437,8 @@ audit:
     compaction: {readable: true|false, sessions_examined: 0, sessions_with_compact_event: null,
                  method: ""}
   question_answers:
-    - {q: Q1, verdict: shifted|partially-shifted|not-shifted|cannot-determine, basis: [], prose: ""}
+    - {q: Q1, verdict: shifted|partially-shifted|not-shifted|cannot-determine,
+       minted_share_p2: null, minted_share_p0: null, minted_delta: null, basis: [], prose: ""}
     - {q: Q2, verdict: reduced|held|grown|cannot-determine,
        root_agent_direction: reduced|held|grown, gate_subagent_direction: reduced|held|grown,
        basis: [], prose: ""}
@@ -1405,7 +1477,7 @@ audit:
     baseline_means: {specification_pct: 43, rationale_pct: 33, change_record_pct: 19, other_pct: 6,
                      mean_spec_share: 65}
   samples:                        # E2, E3, E4 rows
-    - {id: E2-01, sample_set: E2, group: a|b, subject: "<commit short sha>",
+    - {id: E2-01, sample_set: E2, group: a|b|c, subject: "<commit short sha>",
        classification: mechanism-rule|field-semantics|operational-fact|housekeeping, also: [],
        would_have_minted_before: yes|no|unclear|n/a, overlap: none|partial|restated|n/a, evidence: ""}
     - {id: E3-01, sample_set: E3, subject: "<contract basename>", evaluator: "", statement_tested: "",
@@ -1447,13 +1519,17 @@ audit:
 
 Field rules:
 
+- Write every `yes`, `no` and `n/a` value in double quotes (`"yes"`): unquoted, a YAML loader
+  reads `yes` and `no` as booleans.
 - `condition_reviews.verdict`: `foreclosed` means the condition can no longer fire as written: a
   later Decision removed its trigger, or an event it is conditioned on has passed; cite what
-  foreclosed it. `recommended_disposition` follows the verdict: `fired` -> `re-decide` (send it to
-  a planning session, as the stanza's `on_trigger` says); `foreclosed` -> `retire-condition`;
+  foreclosed it. `recommended_disposition` has a default for each verdict: `fired` -> `re-decide` (send
+  it to a planning session, as the stanza's `on_trigger` says); `foreclosed` -> `retire-condition`;
   `not-fired` or `cannot-determine` -> `re-arm` for a stanza condition (keep it and propose a new
-  review date in `rationale`) or `keep-as-is` for a prose condition. For `cannot-determine`, name
-  in `rationale` the evidence a reviewer would need.
+  review date in `rationale`) or `keep-as-is` for a prose condition. You may recommend another
+  value of the enum where the evidence supports it (for example `re-arm` with new wording for a
+  `foreclosed` condition whose underlying cost remains); `rationale` then says why. For
+  `cannot-determine`, name in `rationale` the evidence a reviewer would need.
 - `improvement_sequence`: a step with `opportunity: false` has at least one finding id in `closes`;
   a step with `opportunity: true` has `closes: []`. `moves` names what it moves, for example
   "Q2 grown -> held" or "EX7 missed -> partial". `practice` is an EX id or a named practice;
@@ -1542,7 +1618,7 @@ if the defect were real (apply the counterfactual to the control itself). A cont
 catch the break neither lowers severity nor justifies dismissal.
 
 Maturity is computed LAST, per surface, top-down, first match wins, counting that surface's
-findings plus `shared` findings:
+findings plus the `shared` findings that name it in `gap`:
 
 - `frontier` = 0 critical and 0 high findings AND every EX1-EX13 property in Q7's
   `external_checklist` rated `met` or `partial` -- never `missed`. The EX clause is repository-wide:
