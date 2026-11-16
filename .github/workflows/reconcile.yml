@@ -307,14 +307,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          VALUE=$(gh api "repos/${REPO}/commits/${RED_SHA}/pulls" --jq '.[0].head.sha' 2>/dev/null || echo "")
-          if [ -z "$VALUE" ] || [ "$VALUE" = "null" ]; then
-            echo "::error::No originating PR resolved for ${RED_SHA}; cannot resolve the content-addressed artifact sha (Decision 77 no-TOCTOU)." >&2
-            exit 1
-          fi
-          echo "value=${VALUE}" >> "$GITHUB_OUTPUT"
+        run: python3 "$GITHUB_WORKSPACE/.dispatch-tooling/scripts/ci/originating_pr_sha.py"
 
       - name: Fetch reviewed DuckLake lambda packages (no rebuild, Decision 154 / rec-2862)
         id: build_ducklake
@@ -366,6 +359,11 @@ jobs:
         with:
           working-directory: ${{ env.WORKDIR }}
 
+      - name: Persona dispatch gate (Decision 205 cl.1)
+        id: persona_gate
+        if: success() && steps.guard.outputs.routed != 'true'
+        run: python3 "$GITHUB_WORKSPACE/.dispatch-tooling/scripts/ci/persona_dispatch_gate.py"
+
       - name: Subagent plan review (digest-fed, JSON-classified) -- saved plan
         # IDENTICAL contract to terraform-apply-sandbox.yml's review step (T2.39): digest on
         # stdin, no tools (--tools ""), --output-format json classified via review_verdict.py, a
@@ -376,7 +374,7 @@ jobs:
         # the routine push path (plan constraint: "nothing auto-applies without an explicit
         # PROCEED token OR explicit human approval").
         id: review
-        if: success() && steps.guard.outputs.routed != 'true'
+        if: success() && steps.guard.outputs.routed != 'true' && steps.persona_gate.outputs.refused != 'true'
         uses: ./.github/actions/subagent-plan-review
         with:
           claude-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -469,11 +467,16 @@ jobs:
         with:
           working-directory: ${{ env.WORKDIR }}
 
+      - name: Persona dispatch gate (Decision 205 cl.1, fresh re-plan)
+        id: persona_gate_fresh
+        if: success() && steps.route.outputs.needs_fresh_plan == 'true' && steps.guard_fresh.outputs.routed != 'true'
+        run: python3 "$GITHUB_WORKSPACE/.dispatch-tooling/scripts/ci/persona_dispatch_gate.py"
+
       - name: Subagent plan review (digest-fed, JSON-classified) -- fresh re-plan
         # Re-runs the SAME digest-fed review gate against the FRESH plan -- guard-PASS never
         # auto-applies without an explicit PROCEED here either.
         id: review_fresh
-        if: success() && steps.route.outputs.needs_fresh_plan == 'true' && steps.guard_fresh.outputs.routed != 'true'
+        if: success() && steps.route.outputs.needs_fresh_plan == 'true' && steps.guard_fresh.outputs.routed != 'true' && steps.persona_gate_fresh.outputs.refused != 'true'
         uses: ./.github/actions/subagent-plan-review
         with:
           claude-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -577,6 +580,7 @@ jobs:
           sha: ${{ env.RED_SHA }}
           apply-outcome: ${{ steps.resolved.outputs.apply_outcome }}
           still-actionable: ${{ steps.recheck.outputs.still_actionable }}
+          dispatch-refused: ${{ steps.persona_gate.outputs.refused == 'true' || steps.persona_gate_fresh.outputs.refused == 'true' }}
           routed: ${{ steps.resolved.outputs.routed }}
           review-outcome: ${{ steps.resolved.outputs.review_outcome }}
           review-step-outcome: ${{ steps.resolved.outputs.review_step_outcome }}
@@ -699,14 +703,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          VALUE=$(gh api "repos/${REPO}/commits/${RED_SHA}/pulls" --jq '.[0].head.sha' 2>/dev/null || echo "")
-          if [ -z "$VALUE" ] || [ "$VALUE" = "null" ]; then
-            echo "::error::No originating PR resolved for ${RED_SHA}; cannot resolve the content-addressed artifact sha (Decision 77 no-TOCTOU)." >&2
-            exit 1
-          fi
-          echo "value=${VALUE}" >> "$GITHUB_OUTPUT"
+        run: python3 "$GITHUB_WORKSPACE/.dispatch-tooling/scripts/ci/originating_pr_sha.py"
 
       - name: Fetch reviewed DuckLake lambda packages (no rebuild, Decision 154 / rec-2862)
         id: build_ducklake
@@ -746,14 +743,7 @@ jobs:
         working-directory: ${{ env.WORKDIR }}
         env:
           FRESH_PLAN_SHA256: ${{ needs.apply-reconcile.outputs.fresh_plan_sha256 }}
-        run: |
-          set -euo pipefail
-          ACTUAL=$(sha256sum plan.bin | cut -d' ' -f1)
-          if [ "$ACTUAL" != "$FRESH_PLAN_SHA256" ]; then
-            echo "::error::RECONCILE_FRESH_PLAN_ARTIFACT sha256 mismatch: expected ${FRESH_PLAN_SHA256}, got ${ACTUAL}. Refusing to apply a possibly-corrupted plan." >&2
-            exit 1
-          fi
-          echo "RECONCILE_FRESH_PLAN_ARTIFACT sha256 verified: ${ACTUAL}"
+        run: python3 "$GITHUB_WORKSPACE/.dispatch-tooling/scripts/ci/verify_plan_sha256.py" --label RECONCILE_FRESH_PLAN_ARTIFACT --plan plan.bin
 
       - name: Fetch saved plan from S3 (gated -- no re-plan)
         id: fetch_plan

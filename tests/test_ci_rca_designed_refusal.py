@@ -16,8 +16,10 @@ import pytest
 
 from scripts.ci_rca.designed_refusal import (
     DESIGNED_REFUSAL_JOBS,
+    PERSONA_GATE_STEP_PREFIX,
     _load_jobs_payload,
     is_designed_refusal,
+    is_persona_gate_refusal,
     main,
     resolve_failing_jobs,
 )
@@ -181,3 +183,72 @@ class TestCliMain:
             runpy.run_module("scripts.ci_rca.designed_refusal", run_name="__main__")
         assert exc_info.value.code == 0
         assert capsys.readouterr().out.strip() == "skip=true"
+
+
+_GATE_STEP = {"name": f"{PERSONA_GATE_STEP_PREFIX} (Decision 205 cl.1)", "conclusion": "failure"}
+_MARKER_LOG = "x\nPERSONA_DISPATCH_REFUSED: dispatch by sender.type=Bot\n"
+
+
+def _gate_jobs(steps: object = None, **job: object) -> dict:
+    job_obj = {"name": "apply-sandbox", "conclusion": "failure", "steps": [_GATE_STEP] if steps is None else steps}
+    job_obj.update(job)
+    return {"jobs": [job_obj]}
+
+
+class TestPersonaGateRefusal:
+    def test_sole_failing_gate_step_with_marker_skips(self) -> None:
+        assert is_persona_gate_refusal(_gate_jobs(), _MARKER_LOG)
+
+    def test_in_progress_job_with_failed_gate_step_skips(self) -> None:
+        assert is_persona_gate_refusal(_gate_jobs(conclusion=None, status="in_progress"), _MARKER_LOG)
+
+    def test_gate_error_without_marker_files(self) -> None:
+        assert not is_persona_gate_refusal(_gate_jobs(), "PERSONA_DISPATCH_GATE_ERROR: RuntimeError")
+
+    def test_unreadable_log_files(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+        p = tmp_path / "jobs.json"
+        p.write_text(json.dumps(_gate_jobs()), encoding="utf-8")
+        argv = ["--jobs-json", str(p), "--workflow-slug", "terraform-apply-sandbox"]
+        assert main([*argv, "--failed-log", str(tmp_path / "missing.log")]) == 0
+        assert capsys.readouterr().out.strip() == "skip=false"
+
+    def test_cli_skips_with_marker_log(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+        p = tmp_path / "jobs.json"
+        p.write_text(json.dumps(_gate_jobs()), encoding="utf-8")
+        log = tmp_path / "failed.log"
+        log.write_text(_MARKER_LOG, encoding="utf-8")
+        assert main(["--jobs-json", str(p), "--workflow-slug", "terraform-apply-sandbox", "--failed-log", str(log)]) == 0
+        assert capsys.readouterr().out.strip() == "skip=true"
+
+    def test_gate_step_plus_another_failed_step_files(self) -> None:
+        steps = [_GATE_STEP, {"name": "Apply", "conclusion": "failure"}]
+        assert not is_persona_gate_refusal(_gate_jobs(steps), _MARKER_LOG)
+
+    def test_missing_steps_array_files(self) -> None:
+        payload = {"jobs": [{"name": "apply-sandbox", "conclusion": "failure"}]}
+        assert not is_persona_gate_refusal(payload, _MARKER_LOG)
+
+    def test_differently_named_failed_step_files(self) -> None:
+        assert not is_persona_gate_refusal(_gate_jobs([{"name": "Apply", "conclusion": "failure"}]), _MARKER_LOG)
+
+    def test_empty_failing_set_files(self) -> None:
+        assert not is_persona_gate_refusal({"jobs": [{"name": "a", "conclusion": "success", "steps": []}]}, _MARKER_LOG)
+        assert not is_persona_gate_refusal({}, _MARKER_LOG)
+
+
+def test_live_designed_refusal_command_uses_only_declared_arguments() -> None:
+    import re
+
+    text = Path(".github/workflows/ci-rca.yml").read_text(encoding="utf-8")
+    line = next(ln for ln in text.splitlines() if "scripts.ci_rca.designed_refusal" in ln)
+    main_text = Path("scripts/ci_rca/designed_refusal.py").read_text(encoding="utf-8")
+    declared = {"--jobs-json", "--workflow-slug"}
+    assert set(re.findall(r"--[a-z-]+", line)) <= declared
+    for arg in declared:
+        assert f'"{arg}"' in main_text
+
+
+def test_persona_gate_refusal_ignores_non_dict_job_entries() -> None:
+    payload = _gate_jobs()
+    payload["jobs"].insert(0, "not-a-job")
+    assert is_persona_gate_refusal(payload, _MARKER_LOG)
