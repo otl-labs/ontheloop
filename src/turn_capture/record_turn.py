@@ -31,10 +31,11 @@ from src.turn_capture.transcript import ROOT, TranscriptTree, read_lines, sessio
 from src.turn_capture.transcripts import Ctx, Sidecars, build_transcripts
 
 PRODUCER = "claude_code"
-PARSER_VERSION = 10
-PRODUCER_VERSION = "turn-capture-10"
+PARSER_VERSION = 11
+PRODUCER_VERSION = "turn-capture-11"
 FULL_OUTPUT_CAP_BYTES = 8388608
 BILLING_SHAPES = ("fixed_non_rollover_allowance",)
+IDENTITY = ("agent_type", "definition_sha256")
 TABLES = ("telemetry_observations", "telemetry_transcripts", "telemetry_agents", "telemetry_sessions")
 
 
@@ -141,6 +142,19 @@ class _Emitter:
                         diverged.add(ref)
                         if diag is not None:
                             diag["cut_content_divergence"] += 1
+        opened = {r["entity_ref"]: r for (t, _), r in out.items() if t == "telemetry_agents" and r["event_kind"] == "open"}
+        for ref, close in list(out.items()):
+            first = (
+                opened.get(close.get("entity_ref"))
+                if ref[0] == "telemetry_agents" and close["event_kind"] == "close"
+                else None
+            )
+            if first is not None and any(close.get(k) != first.get(k) for k in IDENTITY):
+                out[ref] = {k: v for k, v in close.items() if k not in IDENTITY} | {
+                    k: first[k] for k in IDENTITY if k in first
+                }
+                if diag is not None:
+                    diag["close_identity_copied"] += 1
         return out
 
 
