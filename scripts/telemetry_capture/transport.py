@@ -5,11 +5,13 @@ non-200. It reaches the writer over its AWS_IAM Function URL or, where OTL_OPS_V
 over the telemetry/writer route of the IAM-auth REST API; each URL is signed for its own service and region. Every HTTP
 request, blob PUT and SSM call is bounded by the pass budget: each timeout is min(130 s, remaining), and one botocore
 Config (a single attempt, timeouts clamped) is installed as the botocore session's default client config so the SSM
-client and the credential chain behind the profile both inherit it.
+client and the credential chain behind the profile both inherit it. The egress proxy refuses a signed body over 1 MiB
+without X-Amz-Content-Sha256 (502), so every signed request carries that header.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
@@ -246,7 +248,8 @@ def make_client(
     service, region = signing_scope(url, DEFAULT_REGION)
 
     def sign(body: bytes) -> Mapping[str, str]:
-        request = AWSRequest(method="POST", url=url, data=body, headers={"Content-Type": "application/json"})
+        headers = {"Content-Type": "application/json", "X-Amz-Content-Sha256": hashlib.sha256(body).hexdigest()}
+        request = AWSRequest(method="POST", url=url, data=body, headers=headers)
         SigV4Auth(credentials.get_frozen_credentials(), service, region).add_auth(request)
         return dict(request.headers.items())
 

@@ -302,6 +302,8 @@ ENTRIES: tuple[Entry, ...] = (
         pre=True,
         pre_globs=(
             "docs/contracts/project-configuration.yaml",
+            "docs/contracts/executor-personas.yaml",
+            "ontheloop/platform.yaml",
             "docs/contracts/ports.yaml",
             "scripts/CLAUDE.md",
             "docs/ROADMAP-PLATFORM.yaml",

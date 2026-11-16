@@ -1,5 +1,8 @@
 """The in-session warning and alarm for a tree whose turn capture keeps deferring (rec-4941, rules DW-1..DW-3).
 
+Rule DW-1 has three reasons: deferred_no_pin and halted (trigger 2) and stopped (rec-5204, trigger 3: the last three Stop
+passes all ended stopped, warning with the latest stop token).
+
 Stdlib-only at import so the UserPromptSubmit shim can load it before any switch or credential work; every other import is
 lazy inside the function that needs it. Alarm, never a gate (Decision 210 cl.2): nothing here changes a pass outcome, and
 every public function swallows its own failure. Fixed tokens only (Decision 101): no content, ref or session id is printed
@@ -23,10 +26,11 @@ WARNING_MARKER = "capture_warning.json"
 ALARM_MARKER = "unpinned_alarm.json"
 STOP_EVENTS = ("Stop", "StopFailure")
 TRIGGER_PASSES = 2
+STOPPED_TRIGGER_PASSES = 3
 REARM_EVERY = 25
 ALARM_ATTEMPTS = 3
 FILE = "scripts/telemetry_capture/capture_warning.py"
-DEFERRED, HALTED = "deferred_no_pin", "halted"
+DEFERRED, HALTED, STOPPED = "deferred_no_pin", "halted", "stopped"
 DETAIL = "bin/venv-python -m scripts.telemetry_capture status --tree <this session's transcript>"
 TEXTS = {
     DEFERRED: (
@@ -39,6 +43,12 @@ TEXTS = {
         "nothing new from this session reaches the telemetry warehouse. Tell the operator in your next status. Detail: "
         + DETAIL
         + "; an operator clears it with clear-halt after fixing the cause."
+    ),
+    STOPPED: (
+        "[telemetry_capture] WARNING: turn capture is stopping for this session. The last {n} Stop passes ended stopped "
+        "({token}), so new turns are not reaching the telemetry warehouse. Tell the operator in your next status. Detail: "
+        + DETAIL
+        + "."
     ),
 }
 
@@ -71,6 +81,8 @@ def _reason_of(item: dict[str, Any]) -> str | None:
     diag = item.get("diag")
     if item.get("outcome") == "deferred" and isinstance(diag, dict) and diag.get("deferred_no_pin"):
         return DEFERRED
+    if item.get("outcome") == "stopped":
+        return STOPPED
     return HALTED if item.get("outcome") == "halted" else None
 
 
@@ -85,7 +97,8 @@ def _persistent(passes: list[dict[str, Any]]) -> tuple[str | None, int]:
         if _reason_of(item) != reason:
             break
         streak += 1
-    return (reason, streak) if streak >= TRIGGER_PASSES else (None, streak)
+    need = STOPPED_TRIGGER_PASSES if reason == STOPPED else TRIGGER_PASSES
+    return (reason, streak) if streak >= need else (None, streak)
 
 
 def persistent(transcript_path: Path | str, session_id: str) -> tuple[str | None, int]:
@@ -128,6 +141,11 @@ def _latest_version(passes: list[dict[str, Any]]) -> str:
     return str(value) if is_version(value) else "unknown"
 
 
+def _latest_token(passes: list[dict[str, Any]]) -> str:
+    value = passes[-1].get("stop_token") if passes else None
+    return value if isinstance(value, str) and re.fullmatch(r"[a-z0-9_]{1,40}", value) else "unknown"
+
+
 def prompt_warning(transcript_path: Path | str, session_id: str) -> str | None:
     """Rule DW-2: the JSON line to print on a UserPromptSubmit, once per episode, else None."""
     try:
@@ -152,7 +170,7 @@ def prompt_warning(transcript_path: Path | str, session_id: str) -> str | None:
             _write_marker(directory, WARNING_MARKER, {"reason": reason, "streak": streak, "at": int(time.time())})
         except Exception:  # noqa: BLE001, S110 -- a failed write still warns: loud beats silent
             pass
-        text = TEXTS[reason].format(n=streak, version=_latest_version(passes))
+        text = TEXTS[reason].format(n=streak, version=_latest_version(passes), token=_latest_token(passes))
         return json.dumps(
             {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": text}, "systemMessage": text}
         )

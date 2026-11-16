@@ -22,6 +22,7 @@ _CONTRACT = "docs/contracts/project-configuration.yaml"
 _COPIED = (
     _CONTRACT,
     "docs/contracts/ports.yaml",
+    "docs/contracts/executor-personas.yaml",
     "docs/contracts/inference-provider.yaml",
     "docs/ROADMAP-PLATFORM.yaml",
     "docs/ROADMAP-PLATFORM-ARCHIVE.yaml",
@@ -39,6 +40,7 @@ _TOUCHED = (
     "src/turn_capture/transcript.py",
     "scripts/telemetry_capture/runner.py",
     ".claude/settings.json",
+    ".claude/hooks/merge_gate.py",
     "config/aws-region",
 )
 
@@ -287,3 +289,79 @@ def test_entry_resolves_and_is_sequenced() -> None:
     assert registry.resolve("validate_project_configuration") is validate_project_configuration
     assert "validate_project_configuration" in {s.name for s in registry.pre_sequence()}
     assert "validate_project_configuration" in {s.name for s in registry.full_sequence()}
+
+
+# (l) gates.<persona>.verdict_source rows
+def _gates_row(data: dict[str, Any], persona: str) -> dict[str, Any]:
+    return _row(data, f"gates.{persona}.verdict_source")
+
+
+def _seed_every_reader(root: Path) -> None:
+    for row in yaml.safe_load((root / _CONTRACT).read_text(encoding="utf-8"))["settings"]:
+        for reader in row["readers"]:
+            if "/" in reader and not (root / reader).exists():
+                _touch(root, reader)
+
+
+def test_real_contract_passes_rule_l(root: Path) -> None:
+    _seed_every_reader(root)
+    failed: list[str] = []
+    validate_project_configuration(failed, root=root)
+    assert failed == []
+
+
+def test_rejects_missing_gates_row(root: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _mutate(root, lambda d: d["settings"].remove(_gates_row(d, "plan_critic")))
+    _expect_failure(root, capsys, "gates.plan_critic.verdict_source row is missing")
+
+
+def test_rejects_extra_gates_row_for_a_non_verdict_persona(root: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    def add(d: dict[str, Any]) -> None:
+        extra = dict(_gates_row(d, "plan_critic"), id="gates.plan_agent.verdict_source")
+        d["settings"].append(extra)
+
+    _mutate(root, add)
+    _expect_failure(root, capsys, "plan_agent, which is not a verdict persona")
+
+
+def test_rejects_gates_row_with_a_variable(root: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _mutate(root, lambda d: _gates_row(d, "code_reviewer").update(variable="OTL_CODE_REVIEWER_SOURCE"))
+    _expect_failure(root, capsys, "must be kind project with a null variable")
+
+
+def test_rejects_gates_row_with_local_differing_from_cloud(root: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _mutate(root, lambda d: _gates_row(d, "code_reviewer").update(defaults={"local": "actions", "cloud": "in_session"}))
+    _expect_failure(root, capsys, "defaults.local and defaults.cloud must be equal")
+
+
+def test_rejects_gates_row_value_outside_the_enum(root: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _mutate(root, lambda d: _gates_row(d, "decision_scout").update(defaults={"local": "both", "cloud": "both"}))
+    _expect_failure(root, capsys, "defaults must each be in_session or actions")
+
+
+def test_rejects_platform_file_with_an_unread_gates_key(root: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    (root / "ontheloop").mkdir()
+    (root / "ontheloop" / "platform.yaml").write_text(
+        "gates:\n  plan_critic:\n    verdict_source: actions\n", encoding="utf-8"
+    )
+    _expect_failure(root, capsys, "sets a gate no reader reads")
+
+
+def test_rejects_unparseable_platform_file(root: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    (root / "ontheloop").mkdir()
+    (root / "ontheloop" / "platform.yaml").write_text("gates: [unclosed\n", encoding="utf-8")
+    _expect_failure(root, capsys, "ontheloop/platform.yaml does not parse")
+
+
+def test_platform_file_without_a_gates_key_passes(root: Path) -> None:
+    (root / "ontheloop").mkdir()
+    (root / "ontheloop" / "platform.yaml").write_text("other: 1\n", encoding="utf-8")
+    _seed_every_reader(root)
+    failed: list[str] = []
+    validate_project_configuration(failed, root=root)
+    assert failed == []
+
+
+def test_rejects_unreadable_persona_registry(root: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    (root / "docs/contracts/executor-personas.yaml").write_text("personas: [unclosed\n", encoding="utf-8")
+    _expect_failure(root, capsys, "executor-personas.yaml cannot be read for rule (l)")

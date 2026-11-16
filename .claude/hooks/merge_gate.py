@@ -5,7 +5,10 @@ GitHub-specific plumbing only: repository identity, PR resolution, fetch, anonym
 predicate is scripts.session.merge_overlap (refs only). The second, scripts.session.session_trailer.gate_denial,
 requires a merge_pull_request commit_message's Claude-Session trailer keys to equal the PR branch commits' (rec-5004).
 The third, scripts.session.merge_checks (rec-4080, Decision 264), requires every required check's newest GitHub
-Actions run to have succeeded on the exact head, under one 40 s deadline (rec-4891). Later predicates (rec-4755,
+Actions run to have succeeded on the exact head, under one 40 s deadline (rec-4891). The persona leg (T4.32 c5,
+Decision 264 cl.4-5) adds each persona-verdict/<persona> check that an actions gates.<persona>.verdict_source row on
+origin/main selects for the PR's class to that required set, and refuses an agent merge that returns a row from actions
+to in_session. Later predicates (rec-4755,
 rec-4451) extend this seam.
 Fails closed: exit 2 on overlap, an attribution mismatch, a red or unknown check, an unavailable verdict, a failed
 fetch, a spent deadline, malformed input. No override exists.
@@ -23,6 +26,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
@@ -40,6 +44,7 @@ _GIT_CAP = 25.0
 _GET_CAP = 4.0
 _BODY_CAP = 1 << 20
 _FULL_PAGE = 100
+_CONFIG = "docs/contracts/project-configuration.yaml"
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 _clock = time.monotonic
 _urlopen = urllib.request.urlopen
@@ -201,10 +206,14 @@ def _get_json(api: tuple[str, str], rel: str, label: str, dl: _Deadline) -> obje
         raise _Unavailable(f"{label} ({rel}) returned unparseable JSON") from exc
 
 
-def _checks_verdict(root: Path, owner: str, repo: str, sha: str, dl: _Deadline) -> merge_checks.Verdict:
+def _checks_verdict(
+    root: Path, owner: str, repo: str, sha: str, dl: _Deadline, extra: Sequence[str] = ()
+) -> merge_checks.Verdict:
     try:
         api = _origin_api(root, owner, repo, dl)
         required = _required(_get_json(api, "rules/branches/main?per_page=100", "rules", dl))
+        if required is not None:
+            required = required | set(extra)
         rel = f"commits/{sha}/check-runs?per_page=100&filter=all"
         body = _get_json(api, rel if api[0] == "https" else f"check-runs/{sha}.json", "check-runs", dl)
         if not isinstance(body, dict) or not isinstance(body.get("check_runs"), list):
@@ -218,21 +227,77 @@ def _checks_verdict(root: Path, owner: str, repo: str, sha: str, dl: _Deadline) 
         return merge_checks.Verdict(merge_checks.UNAVAILABLE, (f"read failed: {exc}",))
 
 
-def read_checks_verdict(root: Path, owner: str, repo: str, sha: str, seconds: float = 10.0) -> merge_checks.Verdict:
-    return _checks_verdict(root, owner, repo, sha, _Deadline(seconds))
+def read_checks_verdict(
+    root: Path, owner: str, repo: str, sha: str, seconds: float = 10.0, *, extra: Sequence[str] = ()
+) -> merge_checks.Verdict:
+    return _checks_verdict(root, owner, repo, sha, _Deadline(seconds), extra)
 
 
-def _checks_denial(root: Path, owner: str, repo: str, head: str, dl: _Deadline) -> int:
-    verdict = _checks_verdict(root, owner, repo, head, dl)
+_FALLBACK = (
+    " (gates.{persona}.verdict_source reads actions on origin/main; if that persona's Actions lane is down, a PR "
+    "returning the row to in_session is the fallback, merged by the operator)"
+)
+
+
+def _with_fallback(reason: str, extra: Sequence[str]) -> str:
+    for name in extra:
+        if reason.startswith(f"{name} "):
+            return reason + _FALLBACK.format(persona=name.split("/", 1)[1])
+    return reason
+
+
+def _checks_denial(root: Path, owner: str, repo: str, head: str, dl: _Deadline, extra: Sequence[str] = ()) -> int:
+    verdict = _checks_verdict(root, owner, repo, head, dl, extra)
     if verdict.kind == merge_checks.CLEAR:
         return 0
-    why = "; ".join(verdict.reasons)
+    why = "; ".join(_with_fallback(r, extra) for r in verdict.reasons)
     if verdict.kind == merge_checks.REFUSE:
         return _deny(
             f"checks: REFUSE: {why} on {head[:12]}. Fix the check with a new push and wait for its CI-green wake; "
             "never merge past a red required check (Decision 264)"
         )
     return _deny(f"checks: UNAVAILABLE: {why}; retry the merge later, or the operator merges in the GitHub UI")
+
+
+def _show(root: Path, rev: str, dl: _Deadline) -> str | None:
+    out = _git(root, "show", f"{rev}:{_CONFIG}", dl=dl, step="persona config")
+    return out.stdout if out.returncode == 0 else None
+
+
+def _persona_leg(root: Path, head: str, merge_base: str, dl: _Deadline) -> tuple[list[str], str | None]:
+    """The persona checks an actions row adds to this PR's class, or a denial reason."""
+    unavailable = "verdict-source: UNAVAILABLE: {}; retry later, or the operator merges in the GitHub UI"
+    text = _show(root, "refs/remotes/origin/main", dl)
+    sources = (
+        merge_checks.verdict_sources(text)
+        if text is not None
+        else "docs/contracts/project-configuration.yaml is unreadable on origin/main"
+    )
+    if isinstance(sources, str):
+        return [], unavailable.format(sources)
+    diff = _git(root, "diff", "--name-only", "--no-renames", merge_base, head, dl=dl, step="persona diff")
+    if diff.returncode != 0:
+        return [], unavailable.format(f"the PR's changed files could not be read: {diff.stderr.strip()[:200]}")
+    changed = [line for line in diff.stdout.splitlines() if line]
+    if _CONFIG in changed:
+        base_text, head_text = _show(root, merge_base, dl), _show(root, head, dl)
+        base = (
+            merge_checks.verdict_sources(base_text)
+            if base_text is not None
+            else "the merge base's configuration is unreadable"
+        )
+        if isinstance(base, str):
+            return [], unavailable.format(base)
+        new = merge_checks.verdict_sources(head_text) if head_text is not None else "the file is gone"
+        if isinstance(new, str):
+            return [], f"verdict-source: REFUSE: the PR head's gates rows do not read: {new}"
+        back = merge_checks.switch_backs(base, new)
+        if back:
+            return [], (
+                f"verdict-source: REFUSE: this PR returns {', '.join(back)} from actions to in_session; "
+                "the operator merges it in the GitHub UI (Decision 264 cl.5)"
+            )
+    return merge_checks.persona_checks(sources, merge_checks.pr_class(changed)), None
 
 
 @dataclass(frozen=True)
@@ -284,7 +349,10 @@ def _judge(root: Path, call: _Call, dl: _Deadline) -> int:
             )
         if not _HEX40.match(head):
             return _deny(f"checks: UNAVAILABLE: fetched head {head!r} is not a 40-hex sha")
-        return _checks_denial(root, call.owner, call.repo, head, dl)
+        extra, refusal = _persona_leg(root, head, verdict.merge_base, dl)
+        if refusal is not None:
+            return _deny(refusal)
+        return _checks_denial(root, call.owner, call.repo, head, dl, extra)
     if verdict.kind == merge_overlap.OVERLAP:
         sys.stderr.write(
             _OVERLAP_MSG.format(files=", ".join(verdict.files), base=verdict.merge_base[:12], behind=verdict.behind) + "\n"
