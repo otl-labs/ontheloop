@@ -15,7 +15,8 @@
 
 locals {
   trusted_plan_environment = "tf-trusted-plan"
-  # The second entry is pre-staged for the GitHub-root plan's move to this role (rec-4638).
+  # The second entry is a leftover: no job assumes this role under it (the github job assumes its own role, predicate (j)),
+  # but its subject still matches until removed; it leaves in rec-4640's admin split-apply (rec-4638).
   trusted_plan_workflow_refs = [
     "otl-labs/ontheloop/.github/workflows/terraform-plan-trusted.yml@refs/heads/main",
     "otl-labs/ontheloop/.github/workflows/terraform-github-plan.yml@refs/heads/main",
@@ -97,13 +98,6 @@ data "aws_iam_policy_document" "github_ci_trusted_plan" {
     ]
   }
 
-  statement {
-    # The GitHub-root plan reads that root's state: the ONE state object, no write (plans run -lock=false).
-    sid       = "TfstateGithubRead"
-    effect    = "Allow"
-    actions   = ["s3:GetObject"]
-    resources = ["${aws_s3_bucket.data_lake.arn}/tfstate/github/terraform.tfstate"]
-  }
 }
 
 resource "aws_iam_role_policy" "github_ci_trusted_plan" {

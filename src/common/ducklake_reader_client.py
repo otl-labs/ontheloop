@@ -260,6 +260,7 @@ VERB_FIELDS: dict[str, tuple[str, ...] | object] = {
         "exception_total",
         "label_counts",
         "unmapped_count",
+        "absorbed_count",
         "classifier_version",
         *_STAMP_FIELDS,
     ),

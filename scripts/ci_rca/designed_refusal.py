@@ -22,6 +22,11 @@ CLI usage (invoked by ci-rca.yml's designed-refusal skip step):
     bin/venv-python -m scripts.ci_rca.designed_refusal \\
         --jobs-json /tmp/ci-rca-jobs.json --workflow-slug deploy-ducklake-lambdas
 Prints skip=true|false.
+
+PLAN-persona-trigger-policy adds a step-granular refusal for any watched slug: a run whose only failure is the
+persona dispatch gate step (Decision 205 cl.1), with the gate's refusal marker in the failed log, is a designed
+refusal. The new --failed-log argument defaults to /tmp/ci-rca-failed.log so the existing command is unchanged
+and an older checkout (which lacks the argument) simply files, fail-closed.
 """
 
 from __future__ import annotations
@@ -31,6 +36,9 @@ import json
 import sys
 from pathlib import Path
 from typing import Optional, cast
+
+PERSONA_GATE_STEP_PREFIX = "Persona dispatch gate"
+PERSONA_GATE_REFUSAL_MARKER = "PERSONA_DISPATCH_REFUSED:"
 
 # Declared workflow slug -> designed-refusal job NAME set. The job NAME is checked (not a step
 # name) because the failing-job granularity is what the jobs JSON exposes; none of
@@ -74,6 +82,45 @@ def is_designed_refusal(workflow_slug: str, jobs_payload: dict) -> bool:
     return failing.issubset(declared)
 
 
+def _is_failed(entry: object) -> bool:
+    return isinstance(entry, dict) and entry.get("conclusion") == "failure"
+
+
+def is_persona_gate_refusal(jobs_payload: dict, failed_log_text: str) -> bool:
+    """True iff the only failure of every failing job is one persona dispatch gate step and the log shows its marker.
+
+    A failing job is one with conclusion failure or, while still in progress, a failed step. Fail-closed: no
+    marker, a job with no steps array, any other failed step, or an empty failing set returns False.
+    """
+    if PERSONA_GATE_REFUSAL_MARKER not in failed_log_text or not isinstance(jobs_payload, dict):
+        return False
+    jobs = jobs_payload.get("jobs")
+    if not isinstance(jobs, list):
+        return False
+    failing = 0
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        steps = job.get("steps")
+        in_progress_failed = job.get("status") == "in_progress" and isinstance(steps, list) and any(map(_is_failed, steps))
+        if not (_is_failed(job) or in_progress_failed):
+            continue
+        if not isinstance(steps, list):
+            return False
+        failed_steps = [s for s in steps if _is_failed(s)]
+        if len(failed_steps) != 1 or not str(failed_steps[0].get("name", "")).startswith(PERSONA_GATE_STEP_PREFIX):
+            return False
+        failing += 1
+    return failing > 0
+
+
+def _load_failed_log(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
 def _load_jobs_payload(jobs_json: Path) -> dict:
     """Read + parse the jobs JSON file. Any read/parse failure resolves to {} (fail-closed)."""
     try:
@@ -100,10 +147,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         required=True,
         help="The slugified workflow name (ci-rca.yml's Resolve run metadata workflow_slug output).",
     )
+    parser.add_argument(
+        "--failed-log",
+        type=Path,
+        default=Path("/tmp/ci-rca-failed.log"),
+        help="Path to the failed-step log written before this step; read for the persona gate refusal marker.",
+    )
     args = parser.parse_args(argv)
 
     jobs_payload = _load_jobs_payload(args.jobs_json)
-    skip = is_designed_refusal(args.workflow_slug, jobs_payload)
+    skip = is_designed_refusal(args.workflow_slug, jobs_payload) or is_persona_gate_refusal(
+        jobs_payload, _load_failed_log(args.failed_log)
+    )
     print(f"skip={'true' if skip else 'false'}")
     return 0
 

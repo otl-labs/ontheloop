@@ -133,6 +133,40 @@ def test_the_shipped_config_records_the_rec_5055_lost_window() -> None:
     assert (edge.lost_window, edge.missing) == (0, 1)
 
 
+def test_the_shipped_config_records_the_rec_5144_lost_window() -> None:
+    config = sp.load_config(ROOT)
+    sp.check_config(config)
+    rows = [w for w in config["lost_windows"] if w.get("owner") == "rec-5144"]
+    assert len(rows) >= 1
+    row = rows[0]
+    start, end = datetime.fromisoformat(row["from"]), datetime.fromisoformat(row["to"])
+    assert start == datetime(2026, 11, 12, 20, 54, 23, tzinfo=timezone.utc)
+    assert end == datetime(2026, 11, 14, 12, 24, 48, tzinfo=timezone.utc)
+    red_prs = [
+        "2026-11-13T05:12:38Z",
+        "2026-11-13T17:24:42Z",
+        "2026-11-13T17:43:08Z",
+        "2026-11-13T19:01:53Z",
+        "2026-11-13T21:29:08Z",
+    ]
+    commits = [commit(n, f"K{n}") for n in range(1, 6)]
+    shipped = run(commits, Roots([]), config, pr=created(dict(zip(range(1, 6), red_prs))))
+    assert (shipped.lost_window, shipped.missing, shipped.status) == (5, 0, "green")
+    others = [w for w in config["lost_windows"] if w is not row and w.get("owner") != "rec-5144"]
+    for stamp in red_prs:
+        moment = datetime.fromisoformat(stamp)
+        for other in others:
+            lo = datetime.fromisoformat(other["from"]) if "from" in other else None
+            assert not ((lo is None or lo <= moment) and moment < datetime.fromisoformat(other["to"]))
+    pr = created({6: row["from"], 7: (end - timedelta(seconds=1)).isoformat()})
+    first = run([commit(6, "AAA")], Roots([]), config, pr=pr)
+    last = run([commit(7, "BBB")], Roots([]), config, pr=pr)
+    assert (first.lost_window, first.missing) == (1, 0) and (last.lost_window, last.missing) == (1, 0)
+    only = {**config, "lost_windows": [row]}
+    edge = run([commit(8, "CCC")], Roots([]), only, pr=created({8: row["to"]}))
+    assert (edge.lost_window, edge.missing) == (0, 1)
+
+
 def test_an_untrailered_commit_is_counted_not_red() -> None:
     result = run([commit(1, None), commit(2, "AAA")], Roots(["AAA"]))
     assert (result.status, result.untrailered) == ("green", 1)

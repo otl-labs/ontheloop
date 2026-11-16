@@ -40,6 +40,8 @@ If a real incident occurs from any of these, harden then.
 Set CLAUDE_HOOK_BRANCH_OVERRIDE=main to simulate being on main without
 actually switching branches. This is a TEST-ONLY escape hatch - never
 set this env var in your shell rc.
+
+Rule HB-1: every block message ends with its own versioned marker line; src/turn_capture/markers.py holds the grammar.
 """
 
 from __future__ import annotations
@@ -165,6 +167,7 @@ def main() -> int:
         "verify with: git branch --show-current\n"
         "If the result is still 'main', stop and tell the operator; agents never create their own branch.\n"
         "See docs/contracts/git-ops.yaml for the full branching topology.\n"
+        "HOOK-BLOCK v1 hook=never_on_main\n"
     )
     return 2
 
