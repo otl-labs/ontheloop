@@ -153,87 +153,71 @@ verbs:
       version_mismatch: "DuckDB/extension version mismatch (500)"
   merge_ops:
     payload_schema_ref: >-
-      event envelope {action: "merge_ops", data_path (s3://), meta_schema}. SCHEDULED (EventBridge
-      cron(30 */6 * * ? *) against PRODUCTION ducklake_ops, params supplied by the EventBridge target) AND
-      human-invokable. Non-destructive merge scoped by catalog enumeration crossed with a declared
-      per-class per-verb maintenance_policy matrix (config/lambda/ducklake/field_semantics.static.yaml,
-      compaction-scope-policy-matrix / Decision 191) -- NOT a naming-convention predicate. For a non-ops
-      catalog its metrics carry a MetaSchema dimension and only the CATALOG_METRICS names (the ops series stays
-      undimensioned). Every table
-      the catalog enumeration discovers (unfiltered information_schema, no LIKE filter) is classified
-      (scd2 | append_only | control | smoke_harness -- the last declared from field_semantics'
-      `tables:` block, Decision 191 amendment, never a name pattern) via the field_semantics
-      registry and merged iff its class's
-      merge_ops policy cell is apply=true; a table absent from the registry is unclassifiable and
-      collected rather than silently skipped. No expire/cleanup/orphan.
+      event envelope {action: "merge_ops", data_path (s3://), meta_schema}. SCHEDULED (EventBridge cron(30 */6 * * ? *) against PRODUCTION ducklake_ops, params supplied by the
+      EventBridge target) AND human-invokable. Non-destructive merge scoped by catalog enumeration crossed with a declared per-class per-verb maintenance_policy matrix
+      (config/lambda/ducklake/field_semantics.static.yaml, compaction-scope-policy-matrix / Decision 191) -- NOT a naming-convention predicate. For a non-ops catalog its
+      metrics carry a MetaSchema dimension and only the CATALOG_METRICS names (the ops series stays undimensioned). Every table the catalog enumeration discovers (unfiltered
+      information_schema, no LIKE filter) is classified (scd2 | append_only | control | smoke_harness -- the last declared from field_semantics' `tables:` block, Decision 191
+      amendment, never a name pattern) via the field_semantics registry and merged iff its class's merge_ops policy cell is apply=true; a table absent from the registry is
+      unclassifiable and collected rather than silently skipped. No expire/cleanup/orphan. Before the merge loop the pass runs the rewrite_current_deletes step (Decision 266,
+      src/common/ducklake_current_compaction.py): for each current-side table whose class's rewrite_current_deletes cell is apply=true (scd2, smoke_harness; smoke_harness
+      first as the in-pass canary, then largest delete-file count first) it rewrites the delete-bearing files at the explicit delete threshold 0.0 in one transaction under a
+      unique commit-message token, then proves row count and full-row digest equal at the commit's immediate predecessor snapshot and the commit. It also re-proves each
+      table's latest prior rewrite commit on every pass while that predecessor snapshot exists (an expired predecessor is a recorded skip and the rewrite proceeds; a re-proof
+      error isolates that table as a failure and skips its rewrite). A history side is a recorded skip, a table with legacy-scheme files under an active partition scheme is a
+      collected refusal, and append_only, control and the telemetry catalog are no-ops. A 450 s time budget (half the 900 s function timeout, also checked before every OCC
+      retry) defers unstarted tables, and a table whose rewrite committed no attempt counts as unstarted; a quiet table (no file processed, no snapshot for its token) is
+      clean. Classified non-destructive: it supersedes files the way merge does, every row is unchanged and the old files stay reachable until gc_ops, unlike
+      rewrite_partition_layout's DELETE plus INSERT. A persistent catalog-level error in the step (an unclassified table, or a missing rewrite_current_deletes cell) takes the
+      same catalog-level failure path as a transient one until fixed: it is recorded, every table still merges and the pass fails. MergeOpsFilesBeforeTotal and per_table
+      files_before are counted after compaction, not at pass start (a step change at the deploy). control_health asserts at most CURRENT_LIVE_FILE_CEILING (200) live data
+      files per current table every 6 h and emits OpsCurrentLiveFilesMax.
     response_codes:
       200: >-
-        merged; body {ok, tables, skipped, unclassified, reconciliation, files_before, files_after,
-        elapsed_ms, per_table, count_unavailable}. `tables` lists only the tables actually merged
-        (apply=true for their class); `skipped` lists classified tables whose policy cell is
-        apply=false, each with its declared reason; `unclassified` lists catalog tables absent from
-        the registry. `reconciliation` carries {registered_absent, catalog_unregistered} from
-        comparing the enumerated catalog against the registry (registered_absent tables are
-        dispositioned by their own registry `status`: a dormant/smoke table's physical absence from
-        production is expected, not a defect). files_before/files_after and each per_table entry's
-        files_before/files_after are null and count_unavailable is true when a file-count
-        introspection read failed for either side of that table's pair -- BOTH sides are nulled
-        together, never an asymmetric one-null-one-real pair (rec-3785); the merge itself still ran
-        for every table with a readable count (guard vs observability split: a transient count
-        failure degrades loudly rather than aborting this every-6h production cadence). Each
-        per_table entry also carries `error` and `merge_unavailable` keys, but in a 200 response
-        BOTH ARE ALWAYS null/false FOR EVERY ENTRY: a 200 is only ever returned when the whole
-        pass had zero per-table merge failures (see 500 below) -- a non-null `error` is never an
-        observable 200-response state; the keys exist for shape uniformity with the internal
-        per-table record, not because a 200 caller ever sees a populated one. Every pass (200 or
-        the 500 aggregate below) additionally emits, BEFORE the aggregate raise: MergeOpsDurationMs,
-        MergeOpsFilesBeforeTotal/MergeOpsFilesAfterTotal (when no count was unavailable),
-        MergeOpsTablesCount, MergeOpsUnclassifiedTables (the unclassified count), and
-        MergeOpsPassFailed (1.0 when merge_failures OR unclassified is non-empty, else 0.0) --
-        PLAN-ducklake-smoke-harness-classification (rec-3864): a scheduled async invoke's 500 body
-        is discarded, so these two pass-outcome metrics are the only agent-readable signal of a
-        scheduled pass's success or failure.
+        merged; body {ok, tables, skipped, unclassified, reconciliation, files_before, files_after, elapsed_ms, per_table, count_unavailable, compaction}. `tables` lists only
+        the tables actually merged (apply=true for their class); `skipped` lists classified tables whose policy cell is apply=false, each with its declared reason;
+        `unclassified` lists catalog tables absent from the registry. `reconciliation` carries {registered_absent, catalog_unregistered} from comparing the enumerated catalog
+        against the registry (registered_absent tables are dispositioned by their own registry `status`: a dormant/smoke table's physical absence from production is expected,
+        not a defect). files_before/files_after and each per_table entry's files_before/files_after are null and count_unavailable is true when a file-count introspection read
+        failed for either side of that table's pair -- BOTH sides are nulled together, never an asymmetric one-null-one-real pair (rec-3785); the merge itself still ran for
+        every table with a readable count (guard vs observability split: a transient count failure degrades loudly rather than aborting this every-6h production cadence). Each
+        per_table entry also carries `error` and `merge_unavailable` keys, but in a 200 response BOTH ARE ALWAYS null/false FOR EVERY ENTRY: a 200 is only ever returned when
+        the whole pass had zero per-table merge failures (see 500 below) -- a non-null `error` is never an observable 200-response state; the keys exist for shape uniformity
+        with the internal per-table record, not because a 200 caller ever sees a populated one. Every pass (200 or the 500 aggregate below) additionally emits, BEFORE the
+        aggregate raise: MergeOpsDurationMs, MergeOpsFilesBeforeTotal/MergeOpsFilesAfterTotal (when no count was unavailable), MergeOpsTablesCount, MergeOpsUnclassifiedTables
+        (the unclassified count), and MergeOpsPassFailed (1.0 when merge_failures OR unclassified is non-empty, else 0.0) -- PLAN-ducklake-smoke-harness-classification
+        (rec-3864): a scheduled async invoke's 500 body is discarded, so these two pass-outcome metrics are the only agent-readable signal of a scheduled pass's success or
+        failure. `compaction` carries {meta_schema, per_table, skipped, refused, deferred, failures, elapsed_ms} and is also printed as one value-free CURRENT_COMPACTION log
+        line; the step emits CurrentCompactionFilesRewritten, CurrentCompactionFailures, CurrentCompactionRefused, CurrentCompactionDeferred and CurrentCompactionDurationMs
+        (ops series only), MergeOpsDurationMs still measures the merge loop only, and MergeOpsPassFailed is 1.0 when compaction failures or refusals exist.
       500: >-
-        DuckLakeRuntimeError: missing/non-s3 data_path, missing meta_schema, no tables discovered at
-        all, OR the pass completed with one or more per-table merge failures and/or unclassified
-        tables (the aggregate post-loop raise -- classified tables were still merged before it
-        fires). This is the ONLY place a per-table merge failure's diagnostic detail is
-        observable: the structured `per_table`/`reconciliation` objects are NOT returned on this
-        path (the raise short-circuits the response body entirely), so the failure detail --
-        which table, and the underlying merge_adjacent_files exception text for each -- is
-        embedded directly in the `error` string message instead, alongside the unclassified table
-        names. / VersionMismatchError
+        DuckLakeRuntimeError: missing/non-s3 data_path, missing meta_schema, no tables discovered at all, OR the pass completed with one or more per-table merge failures
+        and/or unclassified tables (the aggregate post-loop raise -- classified tables were still merged before it fires). This is the ONLY place a per-table merge failure's
+        diagnostic detail is observable: the structured `per_table`/`reconciliation` objects are NOT returned on this path (the raise short-circuits the response body
+        entirely), so the failure detail -- which table, and the underlying merge_adjacent_files exception text for each -- is embedded directly in the `error` string message
+        instead, alongside the unclassified table names. Compaction failures and refusals (table + error class) join the same aggregate. A CurrentCompactionProofError (a
+        row-count or digest difference at the commit's predecessor, or files processed with no snapshot for the token) aborts the pass before any merge as a breaker 500
+        (MaintenanceBreakerTrip). / VersionMismatchError
     typed_errors:
+      breaker: "rewrite_current_deletes proof failure, before any merge (500)"
       runtime: >-
-        missing s3:// data_path / meta_schema, no tables discovered at all, or a post-loop
-        aggregate raise naming per-table merge failures (table + underlying error text) and/or
-        unclassified tables (500)
+        missing s3:// data_path / meta_schema, no tables discovered at all, or a post-loop aggregate raise naming per-table merge failures (table + underlying error text),
+        compaction failures and refusals, and/or unclassified tables (500)
       version_mismatch: "DuckDB/extension version mismatch (500)"
   gc_ops:
     payload_schema_ref: >-
-      event envelope {action: "gc_ops", data_path (s3://), meta_schema, dry_run? (default false)}.
-      SCHEDULED (EventBridge cron(45 3 ? * SUN *) against PRODUCTION ducklake_ops; rule ENABLED
-      per gc-ops-baseline-gate-and-schedule-enable, after the pre-enablement baseline gate and the
-      governed CD deploy both cleared -- a re-enabling after any future rollback to DISABLED is
-      gated the same way) AND human-invokable. For a non-ops catalog its metrics and the breaker trip carry a
-      MetaSchema dimension and only the CATALOG_METRICS names. Production destructive-GC pass
-      (src/common/ducklake_gc_ops.py): a universal
-      catalog live-set collection (every table, no policy input, never scope.resolve_scope), no
-      per-table prelude (merge_ops already compacts every table 6-hourly), a PRE-PASS storage
-      listing (taken here, in dry_run too, catalog-first/storage-second at both read pairs --
-      Decision 192 pt 3) passed as G4's REQUIRED candidate_size_source, then run_guarded_gc
-      UNMODIFIED (the G1-G4 fail-closed guard set, Decision 188, amended by Decision 193: G4 sizes
-      STRICT from the declared source and bounds the POST-expiry candidate set, draining partially
-      or deferring wholesale over budget) followed by an INDEPENDENT referenced-missing safety
-      check against the same storage listing (re-taken post-pass) and a value-scanning read-path
-      re-read at the pass-start catalog snapshot id. dry_run=true performs NO deletion and NO write
-      of any kind (a LIST is a read) -- it still computes and emits GcReferencedMissing and
-      GcWouldDeleteFiles (pre-expiry, from the same local probe as always) from the read-only
-      dry-run primitives, plus reports would_delete_bytes (re-sourced from storage, never the dead
-      catalog-live-set join), unsized_candidates, and drain_probe_counts (a read-only run of the
-      same bracketing ladder G4's drain walk uses), so the baseline safety gate -- and now a
-      byte-and-drain-aware pre-enablement canary -- can be taken without running the destructive
-      pass it exists to gate.
+      event envelope {action: "gc_ops", data_path (s3://), meta_schema, dry_run? (default false)}. SCHEDULED (EventBridge cron(45 3 ? * SUN *) against PRODUCTION ducklake_ops;
+      rule ENABLED per gc-ops-baseline-gate-and-schedule-enable, after the pre-enablement baseline gate and the governed CD deploy both cleared -- a re-enabling after any
+      future rollback to DISABLED is gated the same way) AND human-invokable. For a non-ops catalog its metrics and the breaker trip carry a MetaSchema dimension and only the
+      CATALOG_METRICS names. Production destructive-GC pass (src/common/ducklake_gc_ops.py): a universal catalog live-set collection (every table, no policy input, never
+      scope.resolve_scope), no per-table prelude (merge_ops already compacts every table 6-hourly), a PRE-PASS storage listing (taken here, in dry_run too,
+      catalog-first/storage-second at both read pairs -- Decision 192 pt 3) passed as G4's REQUIRED candidate_size_source, then run_guarded_gc UNMODIFIED (the G1-G4
+      fail-closed guard set, Decision 188, amended by Decision 193: G4 sizes STRICT from the declared source and bounds the POST-expiry candidate set, draining partially or
+      deferring wholesale over budget) followed by an INDEPENDENT referenced-missing safety check against the same storage listing (re-taken post-pass) and a value-scanning
+      read-path re-read at the pass-start catalog snapshot id. dry_run=true performs NO deletion and NO write of any kind (a LIST is a read) -- it still computes and emits
+      GcReferencedMissing and GcWouldDeleteFiles (pre-expiry, from the same local probe as always) from the read-only dry-run primitives, plus reports would_delete_bytes
+      (re-sourced from storage, never the dead catalog-live-set join), unsized_candidates, and drain_probe_counts (a read-only run of the same bracketing ladder G4's drain
+      walk uses), so the baseline safety gate -- and now a byte-and-drain-aware pre-enablement canary -- can be taken without running the destructive pass it exists to gate.
     response_codes:
       200: >-
         pass complete (or dry-run measurement complete); body {ok, action, dry_run, tables,
@@ -446,7 +430,7 @@ audit_invariants:
   - "Scheduled merge/gc/hot_merge operate on the SMOKE catalog (ducklake_smoke); merge_ops and gc_ops are ALSO EventBridge-scheduled (every 6h / weekly respectively) but target the PRODUCTION catalog (ducklake_ops) with data_path+meta_schema supplied by the EventBridge target -- gc_ops's rule is ENABLED (gc-ops-baseline-gate-and-schedule-enable). The human-invoked operational actions (catalog_reinit/restore_drill/catalog_stats/reconcile_columns/reconcile_partitions/rewrite_partition_layout) target production via explicit params and refuse no-arg invokes; provision_telemetry_login, provision_catalog_owner and provision_telemetry_catalog take only closed confirm tokens and are non-destructive to data."
   - "GC (both gc and gc_ops) is guarded by the fail-closed G1-G4 guard set (reachability, retention floor, catalog sanity, an absolute per-pass deletion bound); a G1/G2/G3 trip raises DuckLakeMaintenanceError, emits MaintenanceBreakerTrip=1, and deletes nothing, while a G4 over-budget pass defers the whole destructive step instead. The forced-trip breaker_probe action (out of contract scope) exists to prove G1. gc_ops additionally runs an INDEPENDENT post-pass safety check (referenced_missing against a real storage listing, plus a value-scanning read-path re-read) that G1-G4 do not perform, because gc_ops's live set is UNIVERSAL (every table, no policy input) rather than scoped by maintenance_policy."
   - "Three destructive paths exist: catalog_reinit is CATALOG-STRUCTURE destructive (meta-schema drop + reinit; confirm=<meta_schema>-guarded; IRREVERSIBLE); gc / gc_ops are DATA-FILE destructive (snapshot expiry + orphan-file deletion on the happy path), guarded by the G1-G4 guard set, not a confirm token (gc_ops additionally supports dry_run=true); and rewrite_partition_layout is ROW-PRESERVING but DATA-FILE destructive until snapshot expiry (the legacy-scheme files are superseded, not deleted), confirm=<table>-guarded, history tables only (Decision 204)."
-  - "maintenance_policy governs PER-TABLE-SCOPED verbs only -- its production consumers are merge_ops, reconcile_partitions and rewrite_partition_layout (Decision 204); gc_ops NEVER reads it or calls scope.resolve_scope, because a catalog-wide destructive verb takes no policy cell (filtering its live set would narrow what the guards can SEE, never what gets deleted)."
+  - "maintenance_policy governs PER-TABLE-SCOPED verbs only -- its production consumers are merge_ops (including its rewrite_current_deletes resolution, Decision 266), reconcile_partitions and rewrite_partition_layout (Decision 204); gc_ops NEVER reads it or calls scope.resolve_scope, because a catalog-wide destructive verb takes no policy cell (filtering its live set would narrow what the guards can SEE, never what gets deleted)."
   - "Telemetry catalog maintenance (Decision 236 cl.5): ten alarms read only the MetaSchema=ducklake_telemetry series (eight maintenance, two writer); the ops series stays undimensioned and receives no telemetry datapoint. G4 headroom: weekly dead files are about 7 x D against G4_MAX_DELETE_FILES 20,000, and above about 2,850 files a day every pass drains partially (GcDeferredFiles, Decision 193). Neon storage growth is detected by the stats-rows alarm on the dominant catalog table and egress driver (Decision 88 cl.1(iii)); no compute cap is claimed for storage (Decision 214 cl.3 caps compute; its Terraform limit is pending under rec-4220)."
   - "An unknown `action` returns 400 with the sorted action allow-list (dispatcher-level; not a per-verb outcome)."
 amendment_log:
@@ -509,4 +493,12 @@ amendment_log:
       closed four-login table with the wider scope block and the reader's read_only_attach, and made catalog_stats emit only for
       the ops catalog. Real behaviour: both catalog verbs are additionally invokable by an ADMIN-container agent under explicit
       human direction (Decision 81 cl.6 carve-outs four and five); catalog_stats and ensure_catalog_indexes stay human-invoked only.
+  - date: "2026-11-16"
+    semantic_break: true
+    change_class: field_add
+    summary: >-
+      PLAN-ops-current-table-compaction (Decision 266, amending Decisions 88, 188, 191 and 192): merge_ops gains the per-table rewrite_current_deletes step before
+      its merge loop, a `compaction` response key, five CurrentCompaction metrics and a breaker-500 path on a proof failure; control_health gains the 200-file
+      current-table ceiling and OpsCurrentLiveFilesMax; maintenance_policy gains the rewrite_current_deletes cell for every class. Non-destructive: files are
+      superseded, every row is unchanged.
 previous_versions: []

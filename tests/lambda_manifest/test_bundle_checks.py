@@ -312,6 +312,20 @@ def test_maintenance_scope_module_bundled_and_excluded():
     assert scope_module in set(data_pipeline.excludes), "data-pipeline manifest must exclude the scope module"
 
 
+def test_current_compaction_module_bundled_and_excluded(tmp_path):
+    module = "src/common/ducklake_current_compaction.py"
+    manifests = load_all()
+    maintenance = manifests["ducklake_maintenance"]
+    data_pipeline = manifests["data-pipeline"]
+    assert module in set(maintenance.includes), "ducklake_maintenance manifest must bundle the current-compaction module"
+    assert module in set(data_pipeline.excludes), "data-pipeline manifest must exclude the current-compaction module"
+
+    stage_dir = tmp_path / "stage"
+    stage_dir.mkdir()
+    stage_bundle(data_pipeline, stage_dir, skip_pip=True)
+    assert not (stage_dir / module).exists(), "the current-compaction module leaked into the data-pipeline bundle"
+
+
 # ---------------------------------------------------------------------------
 # PLAN-telemetry-kernel-identity-append: src/telemetry stays out of data-pipeline (Decision 79
 # runtime-import intent, V2 ground) -- the kernel has no writer/reader Lambda yet.

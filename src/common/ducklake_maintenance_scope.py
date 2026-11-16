@@ -27,7 +27,12 @@ from src.common.ducklake_scd2_schema import load_field_semantics
 # reconcile_partitions / rewrite_partition_layout join as PER-TABLE verbs (Decision 204, amends
 # Decision 192 cl.2's literal ("merge_ops",) pin while keeping its rule: catalog-wide verbs such
 # as gc_ops stay out -- see the matrix's own "CATALOG-WIDE VERBS TAKE NO CELL" header).
-VERB_UNIVERSE: tuple[str, ...] = ("merge_ops", "reconcile_partitions", "rewrite_partition_layout")
+VERB_UNIVERSE: tuple[str, ...] = (
+    "merge_ops",
+    "reconcile_partitions",
+    "rewrite_partition_layout",
+    "rewrite_current_deletes",
+)
 
 # The production-resident smoke-harness pair's maintenance class (Decision 191 amendment,
 # PLAN-ducklake-smoke-harness-classification): sourced from field_semantics' `tables:` block

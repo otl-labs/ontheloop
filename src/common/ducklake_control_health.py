@@ -19,6 +19,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from src.common.ducklake_maintenance import DuckLakeMaintenanceError, _count_files
+from src.common.ducklake_maintenance_scope import build_registry
 from src.common.ducklake_runtime import (
     CATALOG_ALIAS,
     control_table_names,
@@ -42,6 +43,13 @@ CONTROL_LIVE_FILE_CEILING: dict[str, int] = {
     "ops_entity_counters": 200,
 }
 
+# Per-current-table live-file ceiling (PLAN-ops-current-table-compaction, rec-5179): every registry current-side
+# table present in the catalog is checked each run. The busiest merge-to-merge window of 2026-11-08..15 carried
+# 104 ops writes, and a multi-row write can land up to 8 files (one per bucket), so 200 leaves headroom the
+# 6-hourly compaction and merge keep it under; tuning it to pass is a Decision-55 violation. A breach raises the
+# existing ControlTableInvariantViolation alarm, described as a control-class table invariant.
+CURRENT_LIVE_FILE_CEILING = 200
+
 
 def _writer_keyspace_tables() -> list[str]:
     """ops_* tables with a writer-owned entity keyspace (id_keyspace=writer, any id_scheme) -- each
@@ -61,6 +69,19 @@ def _present_history_tables(con: Any, catalog: str) -> set[str]:
     """Physical table names in *catalog* (one information_schema read, Decision 88 egress-cheap)."""
     rows = con.execute(f"SELECT table_name FROM information_schema.tables WHERE table_catalog = '{catalog}'").fetchall()
     return {r[0] for r in rows}
+
+
+def _present_current_tables(con: Any, catalog: str) -> list[str]:
+    """Registry current-side tables (ops pairs and the smoke-harness pair) present in *catalog*."""
+    present = _present_history_tables(con, catalog)
+    registry = build_registry(load_field_semantics())
+    return sorted(t for t, classified in registry.items() if classified.side == "current" and t in present)
+
+
+def _file_counts(con: Any, catalog: str, table: str) -> tuple[int, int]:
+    """(live data files, live data files carrying a delete file) for *table*; raises on introspection failure."""
+    row = con.execute(f"SELECT count(*), count(delete_file) FROM ducklake_list_files('{catalog}', '{table}')").fetchone()
+    return int(row[0]), int(row[1])
 
 
 def _expected_counter_tables(con: Any, catalog: str) -> tuple[list[str], list[str]]:
@@ -92,7 +113,9 @@ def control_health(
     value BELOW it means the counter was stranded, Decision 84 I-2 corruption); ulid scheme -- at or
     above the owning current table's row count. Live-file ceiling: the table's live DuckLake
     file count stays below CONTROL_LIVE_FILE_CEILING (docs/contracts/ops_entity_counters.yaml's
-    health.live_file_ceiling prose).
+    health.live_file_ceiling prose). Every registry current-side table present in the catalog also reports its live and
+    delete-bearing file counts, and a live count above CURRENT_LIVE_FILE_CEILING is a violation; OpsCurrentLiveFilesMax
+    is emitted whenever any current table is present.
 
     `metric_sink`, when provided, ALWAYS receives ControlTableInvariantViolation (0 on a clean
     pass) BEFORE any raise, so the metric/alarm signal survives the exception -- the caller
@@ -158,8 +181,21 @@ def control_health(
             "live_file_ceiling": ceiling,
         }
 
+    current_tables: dict[str, Any] = {}
+    for table in _present_current_tables(con, catalog):
+        live_files, delete_files = _file_counts(con, catalog, table)
+        current_tables[table] = {
+            "live_file_count": live_files,
+            "delete_file_count": delete_files,
+            "live_file_ceiling": CURRENT_LIVE_FILE_CEILING,
+        }
+        if live_files > CURRENT_LIVE_FILE_CEILING:
+            violations.append(f"{table}: live file count {live_files} exceeds ceiling {CURRENT_LIVE_FILE_CEILING}")
+
     if metric_sink is not None:
         metric_sink("ControlTableInvariantViolation", float(len(violations)))
+        if current_tables:
+            metric_sink("OpsCurrentLiveFilesMax", float(max(c["live_file_count"] for c in current_tables.values())))
 
     if violations:
         raise DuckLakeMaintenanceError(
@@ -170,6 +206,7 @@ def control_health(
         "ok": True,
         "action": "control_health",
         "tables": per_table,
+        "current_tables": current_tables,
         "absent_tables": sorted(absent_tables),
         "violations": [],
     }

@@ -2,6 +2,96 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 266: The 6-hourly merge_ops pass compacts each ops current table in place before merging, under a declared per-table verb, a proof that aborts the pass on mismatch, and a live-file ceiling (amends Decisions 88, 188, 191 and 192) (Decided)
+
+```yaml
+number: 266
+status: Decided
+decided_date: "2026-11-16"
+kind:
+  value: mechanism
+  justification: >-
+    Only the means: clauses 1-4 change how the merge_ops pass compacts current tables and handles a failure; clause 3's
+    restore rule restates Decision 55 (stop and RCA, no improvised repair) and Decision 81 cl.8 (current rebuilds from
+    history), so undoing them changes no goal, human gate or data commitment.
+amends: [88, 188, 191, 192]
+significance:
+  value: numbered_decision
+  justification: >-
+    It widens two ratified exact sets (Decision 192's VERB_UNIVERSE literal and Decision 191 cl.3's isolation sites)
+    and adds an abort path with reversal conditions; a dated amendment_forms note (considered) cannot widen an exact
+    set or add a carve-out (Decision 216, the Decision 204 cl.4 precedent), and docs/contracts/ducklake_maintenance.yaml
+    (considered) states verb contracts, not which carve-outs the Decisions sanction. Its note on 204 interprets cl.3
+    and amends nothing.
+```
+
+**Status:** Decided
+**Date:** 2026-11-16
+**Warehouse ID:** dec-266 (per Decision 84 backfill)
+
+**Problem:** Every write to an ops current table deletes the superseded row from an existing file, and
+merge_adjacent_files consolidates only delete-free files, so merge_ops never bounds a current table: on 2026-11-15
+ops_recommendations_current held 580 live data files, 563 with a delete file, for 3,880 rows, and a first full read
+on a fresh connection took 84-106 s against the 120 s limit (audit LAT-01, rec-5179).
+
+**Intent:** A current table stays a handful of files after every pass, without changing a row, a partition spec or the
+agent-free schedule.
+
+**Decision:**
+1. **Verb.** rewrite_current_deletes is a per-table maintenance verb: VERB_UNIVERSE reads ("merge_ops",
+   "reconcile_partitions", "rewrite_partition_layout", "rewrite_current_deletes"), every class declares its cell, and
+   a catalog-wide verb still takes none (Decision 192 cl.2). It runs only inside the scheduled merge_ops pass, before
+   the merge, with no agent invocation (Decision 81 cl.6). It rewrites a current table's delete-bearing files in place
+   under the table's live partition spec with ducklake_rewrite_data_files at an explicit delete threshold of 0.0, never
+   the engine default; this in-place compaction is licensed here and is not a re-lay (Decision 204 cl.3). It skips a
+   non-current table and refuses a table holding legacy-scheme files under an active partition scheme.
+2. **Proof.** After commit, the row count and full-row NULL-explicit digest at the commit's immediate predecessor
+   snapshot equal those at the commit snapshot (Decision 204 cl.1's row-count and digest measure). Before rewriting a
+   table, each pass re-proves its latest rewrite_current_deletes commit, found by its commit-message token, so a
+   commit whose pass ended before its proof is still proven while its predecessor is retained (30 days, gc_ops's
+   catalog-wide retention); a rewrite that processed files but whose token resolves no snapshot is a proof failure.
+3. **Failures.** Decision 191 cl.3's isolation carve-out gains a fourth site, the rewrite_current_deletes step: a
+   transient failure of a table's rewrite or of the step's catalog-level scope and layout reads is recorded, every
+   table still merges, and the pass ends non-successfully via the same post-loop aggregate raise; a legacy-scheme
+   refusal is collected the same way. A table whose rewrite the pass's time budget leaves unstarted is deferred to the
+   next pass and recorded, never failed. A proof mismatch is not transient: it aborts the pass before any merge as a
+   breaker trip (Decision 188's guard-violation shape), suspending Decision 88 cl.1(iii)'s merges until the verb's
+   cells read apply false; nothing is auto-restored, and the table is rebuilt from its history table (Decision 81
+   cl.8) by a separately planned procedure.
+4. **Ceiling.** control_health asserts every 6 h that each current table holds no more than 200 live data files (the
+   busiest merge-to-merge window of 2026-11-08..15 carried 104 ops writes).
+
+**Rationale:** The native rewrite at an explicit threshold is the smallest change that bounds a Type-1 projection. Rejected: folding the rewrite into the merge_ops cell (it would
+exclude other classes by absence, Decision 191 cl.1); a separate schedule (the
+rewrite must precede the merge); rebuilding current from history on a schedule (a new write path); an in-transaction proof (a compaction is
+invisible inside its own transaction).
+
+**Coverage (Decision 181 cl.2):** clause 1's cells by validate_maintenance_policy_matrix and its threshold by a unit test;
+clauses 2 and 3 by the compaction module's unit tests and a committed real-engine evidence fixture; the real-engine
+tests themselves run before merge and are an unenforced CI residual until rec-4071 gates them; clause 4 by
+control_health and the ControlTableInvariantViolation alarm. The rebuild procedure clause 3 relies on is owned by
+rec-5202 and is unenforced until it lands.
+
+```yaml reversal-conditions
+decision: 266
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: catalog-stats-growth
+    kind: manual
+    description: "After the first gc_ops that can reclaim superseded current files, file_column_stats rows reach 1.5x the pre-deploy baseline (rec-5200): reopen the 0.0 threshold."
+  - id: proof-mismatch
+    kind: manual
+    description: "Any rewrite_current_deletes proof mismatch: set its scd2 and smoke_harness cells to apply false until the cause is known."
+  - id: ceiling-breach
+    kind: manual
+    description: "control_health reports a current table over 200 live files while merge_ops passes succeed: the rewrite no longer bounds that table."
+```
+
+**Related:** Decisions 81, 84, 88, 99, 128, 143, 188, 191, 192, 204, 214, 216.
+
+---
+
 ## Decision 265: A sandbox plan-reviewer REVISE on a push waits for the tf-gated-apply approval instead of latching the convergence record red (amends Decisions 154 and 183) (Decided)
 
 ```yaml
@@ -4195,6 +4285,8 @@ Roadmap refs: rec-4070, rec-4094, rec-4095, rec-4098.
 
 [Amendment 2026-09-28: live measurement (PLAN-ducklake-partition-layout-remediation, rec-4070; raw responses in tests/fixtures/partition_rewrite_evidence.json). The ALTER ran at 19:45Z on the five history tables; the four with legacy files were re-laid 21:00Z-21:03Z, each on the first attempt with rows_pre == rows_commit and digest_pre == digest_commit (ops_priority_queue_history had none and was skipped). Rows preserved: ops_recommendations_history 5008 (snapshots 15313 -> 15314), ops_decisions_history 6842 (15314 -> 15316), ops_execution_plans_history 1 (15317 -> 15318), ops_smoke_events_history 4 (15318 -> 15319). Live files, pre-ALTER readout to post-rewrite readout: recommendations 104 -> 134, decisions 81 -> 64, priority_queue 0 -> 0, execution_plans 1 -> 1, smoke_events 3 -> 1 (includes writer commits landing between the readouts). catalog_stats before -> after: catalog_metadata_bytes 50397184 -> 50692096, file_column_stats_rows_est 203353 -> 207475 (1.02x), metadata_table_count 195 -> 200. Against the reversal conditions above: the highest history live file count is 134 (limit 365) and file_column_stats is 1.02x the baseline (limit 2x), so neither is met. The rewritten-out files stay catalogued until snapshot expiry and GC, so the post-GC figure is rec-4095's re-measure. The first step-18 invoke halted on two unclassified production-resident smoke-harness tables with nothing mutated; the Decision 191 amendment (PR #1311) classified them before this run resumed.]
 
+> **Update (2026-11-16):** cl.3's "re-lay" means a partition-layout rewrite (cl.1); in-place compaction of a current table under its live spec is Decision 266's rewrite_current_deletes, not a re-lay. The history tables are the true, append-only record: every write appends, no write changes a recorded row, and every current table can always be rebuilt from its history table (Decision 81 cl.8; the procedure is owned by rec-5202).
+
 ---
 
 ## Decision 203: Fail-closed PreToolUse handoff-evidence gate at the agent push / GitHub remote-write boundary -- an IDENTITY gate, not a verdict gate; no agent override (Related: 163, 181) (Decided)
@@ -5145,6 +5237,8 @@ reads `("merge_ops", "reconcile_partitions", "rewrite_partition_layout")` -- whi
 clause's rule that a catalog-wide verb (`gc_ops`) takes no maintenance_policy cell; the two new
 verbs are PER-TABLE-SCOPED, same as `merge_ops`.]
 
+[Amendment 2026-11-16, Decision 266: `VERB_UNIVERSE` now reads `("merge_ops", "reconcile_partitions", "rewrite_partition_layout", "rewrite_current_deletes")`; clause 2's rule that a catalog-wide verb takes no maintenance_policy cell is unchanged.]
+
 ---
 
 ## Decision 191: Maintenance scope is catalog enumeration crossed with declared class policy; a naming convention never determines what gets maintained (Decided)
@@ -5166,6 +5260,8 @@ significance:
 **Status:** Decided
 **Date:** 2026-09-14
 **Warehouse ID:** dec-191
+
+> **Amended by Decision 266 (2026-11-16):** cl.3's isolation carve-out gains a fourth site, the rewrite_current_deletes step (a table's rewrite and the step's catalog-level reads); a failed proof there aborts the pass instead.
 
 **Problem:**
 `action_merge_ops` discovered scope with `table_name LIKE 'ops_%_history' OR ... LIKE
@@ -5443,6 +5539,8 @@ significance:
 > and bounds the POST-expiry candidate set; an over-budget pass drains partially before deferring
 > wholesale. G1-G3 and the rest of clause 2 (reachability before/after, retention floor, catalog
 > sanity) are unchanged.
+
+> **Amended by Decision 266 (2026-11-16):** a failed rewrite_current_deletes proof aborts the merge_ops pass as a breaker trip, and pt 3's carve-out reaches a fourth site, that step's rewrite and catalog-level reads, through Decision 191 cl.3.
 
 **Problem:**
 Decision 81 clause 6's GC circuit breaker aborts a pass that would delete >20% of tracked files or
@@ -11742,6 +11840,8 @@ The free-tier breach proved the cap is real and the access pattern, not the work
 > `ListMetrics`. Direct CloudWatch reads are no longer IAM-blocked from the dev role; this is what
 > production-gc-and-storage-stability's VP14/VP16 `aws cloudwatch get-metric-data --profile
 > agent_platform` read-back depends on.
+
+> **Amended by Decision 266 (2026-11-16):** clause 1(iii)'s every-table merge pauses after a failed rewrite_current_deletes proof, until that verb's cells read apply false.
 
 [Amendment 2026-10-09, Decision 214: invariant (v) -- the ducklake_file_column_stats (table_id, column_id) index is present and valid on every catalog schema, reported by control_health; cl.3's 7-day PITR is now true in Terraform.]
 

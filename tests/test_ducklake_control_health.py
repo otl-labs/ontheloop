@@ -158,3 +158,51 @@ def test_control_health_skips_event_entries():
     tables = ch._writer_keyspace_tables()
     assert not [t for t in tables if t.startswith("telemetry_")]
     assert {"ops_recommendations", "ops_tenants", "ops_projects"} <= set(tables)
+
+
+def _current_con(live: dict[str, tuple[int, int]]) -> FakeCon:
+    """A healthy control table plus the named current tables present in the catalog; list_files counts keyed by the
+    table named in the SQL (a FakeCon fetchone map matches by substring, so one key per table)."""
+    return FakeCon(
+        fetchall_map={
+            "SELECT counter_name, current_value": [("ops_recommendations", 5000)],
+            "information_schema.tables": [(t,) for t in live],
+        },
+        fetchone_map={
+            **{f"count(delete_file) FROM ducklake_list_files('ops_catalog', '{t}')": counts for t, counts in live.items()},
+            "coalesce(max(": (5000,),
+            "ducklake_list_files": (10,),
+        },
+    )
+
+
+def test_current_table_over_ceiling_is_a_violation():
+    assert ch.CURRENT_LIVE_FILE_CEILING == 200
+    con = _current_con({"ops_recommendations_current": (201, 150), "ops_decisions_current": (16, 0)})
+    emitted: list[tuple[str, float]] = []
+    with pytest.raises(DuckLakeMaintenanceError, match="ops_recommendations_current: live file count 201 exceeds ceiling 200"):
+        ch.control_health(con, metric_sink=lambda n, v: emitted.append((n, v)))
+    assert ("ControlTableInvariantViolation", 1.0) in emitted
+    healthy = ch.control_health(_current_con({"ops_recommendations_current": (200, 150)}))
+    assert healthy["ok"] is True
+
+
+def test_current_tables_reported_per_table():
+    result = ch.control_health(_current_con({"ops_recommendations_current": (16, 3), "ops_decisions_current": (9, 0)}))
+    assert result["tables"]["ops_entity_counters"]["live_file_count"] == 10
+    assert result["current_tables"] == {
+        "ops_recommendations_current": {"live_file_count": 16, "delete_file_count": 3, "live_file_ceiling": 200},
+        "ops_decisions_current": {"live_file_count": 9, "delete_file_count": 0, "live_file_ceiling": 200},
+    }
+
+
+def test_ops_current_live_files_max_emitted():
+    emitted: list[tuple[str, float]] = []
+    ch.control_health(
+        _current_con({"ops_recommendations_current": (16, 3), "ops_decisions_current": (9, 0)}),
+        metric_sink=lambda n, v: emitted.append((n, v)),
+    )
+    assert ("OpsCurrentLiveFilesMax", 16.0) in emitted
+    absent: list[tuple[str, float]] = []
+    ch.control_health(_current_con({}), metric_sink=lambda n, v: absent.append((n, v)))
+    assert "OpsCurrentLiveFilesMax" not in {n for n, _ in absent}

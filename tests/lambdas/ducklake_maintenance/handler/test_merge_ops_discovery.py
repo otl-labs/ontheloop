@@ -19,6 +19,10 @@ from tests.fixtures.ducklake_maintenance_handler import _FULL_DSN
 pytestmark = pytest.mark.unit
 
 
+_NO_COMPACTION_CELL = {"rewrite_current_deletes": {"apply": False, "reason": "fixture: compaction is out of scope here"}}
+_NO_COMPACTION_BODY = {"failures": [], "refused": [], "per_table": [], "skipped": [], "deferred": []}
+
+
 def _semantics() -> dict:
     return {
         "ops_tables": {
@@ -38,9 +42,9 @@ def _semantics() -> dict:
             },
         },
         "maintenance_policy": {
-            "scd2": {"merge_ops": {"apply": True, "reason": "standard"}},
-            "control": {"merge_ops": {"apply": True, "reason": "rec-3762"}},
-            "append_only": {"merge_ops": {"apply": True, "reason": "standard"}},
+            "scd2": {"merge_ops": {"apply": True, "reason": "standard"}, **_NO_COMPACTION_CELL},
+            "control": {"merge_ops": {"apply": True, "reason": "rec-3762"}, **_NO_COMPACTION_CELL},
+            "append_only": {"merge_ops": {"apply": True, "reason": "standard"}, **_NO_COMPACTION_CELL},
         },
     }
 
@@ -196,6 +200,7 @@ def test_smoke_schema_tables_never_surface_unclassified_in_production():
         patch.object(h.rt, "fetch_dsn", return_value=_FULL_DSN),
         patch.object(h.rt, "open_connection", return_value=con),
         patch.object(h.rt, "load_field_semantics", return_value=real_semantics),
+        patch.object(h.current_compaction, "compact_current_tables", return_value=_NO_COMPACTION_BODY),
         patch.object(h.maint, "_count_files", return_value=1),
         patch.object(h.maint, "merge_adjacent_files"),
         patch.object(h, "_emit_maintenance_metric") as mock_emit,
@@ -225,6 +230,7 @@ def test_pass_outcome_metrics_flag_an_unclassified_table():
         patch.object(h.rt, "fetch_dsn", return_value=_FULL_DSN),
         patch.object(h.rt, "open_connection", return_value=con),
         patch.object(h.rt, "load_field_semantics", return_value=real_semantics),
+        patch.object(h.current_compaction, "compact_current_tables", return_value=_NO_COMPACTION_BODY),
         patch.object(h.maint, "_count_files", return_value=1),
         patch.object(h.maint, "merge_adjacent_files"),
         patch.object(h, "_emit_maintenance_metric") as mock_emit,
