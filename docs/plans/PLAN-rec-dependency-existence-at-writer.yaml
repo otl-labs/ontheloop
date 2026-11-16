@@ -15,8 +15,8 @@ verification_tier: V3
 plan_path: docs/plans/PLAN-rec-dependency-existence-at-writer.yaml
 phase: >-
   ad_hoc_rec (soft-warn exception category; no tier_item claimed, so the Tier Item Freshness Gate is skipped). Operator
-  work item from the 2026-11-12 rec read/write audit; T2.29 c9 (writer artifact change: per-Lambda build, deploy and
-  smoke, V3) applies and is met by steps 9-10.
+  work item from the 2026-11-12 rec read/write audit. Decision 79 (per-Lambda build, deploy and smoke for an active
+  artifact) makes it V3, met by steps 9-10; T2.29 c9 is a standing conditional obligation this plan does not close.
 closes_criteria: []
 amends: [dec:210]
 cites: [dec:210, dec:81, dec:84, dec:207, dec:88, dec:177, dec:254, dec:167, dec:79, dec:235, dec:181, dec:214, dec:246, dec:70]
@@ -90,9 +90,10 @@ scope:
   - file: scripts/checks/contracts/_rule_grammar.py
     action: Modify
     purpose: >-
-      An array_element_reference leg needs no write_time_exemptions entry on an SCD2 contract (the writer looks it up);
-      on an event contract it still needs one (the telemetry writer runs no cross-row lookup); the class binding table
-      is unchanged (cross_row stays bound to array_element_reference for a table that cannot do the lookup).
+      An array_element_reference leg needs no write_time_exemptions entry on an SCD2 contract (the writer looks it up).
+      The relaxation is SCD2-vocabulary only: the event vocabulary (field_semantics_event_projection.py) has no
+      array_element_reference, so an event contract declaring the leg still fails "outside the event vocabulary"; the
+      class binding table is unchanged.
     new_imports: []
   - file: scripts/checks/contracts/validate_write_time_enforcement_conformance.py
     action: Modify
@@ -105,7 +106,8 @@ scope:
     purpose: >-
       A non-exempt array_element_reference is reported on its own WRITER-LOOKUP line (the writer enforces it per write;
       the dq_check path has no array-reference kind, rec-4166 owns the backstop) instead of raising "no census check
-      kind", and is excluded from the compiled count.
+      kind", and leaves both declared_non_exempt and the compiled checks, so census() still exits CLEAN (0); the test
+      asserts the exit code.
     new_imports: []
   - file: scripts/ops_portal/write_validators.py
     action: Modify
@@ -140,7 +142,8 @@ scope:
     purpose: >-
       Real local DuckLake catalog (integration mark): a dangling file_scd2 insert is rejected and leaves the counter and
       both tables unchanged; a valid dependency on an existing rec commits; an update of a row whose stored dangling
-      value is unchanged commits.
+      value is unchanged commits; an update that changes dependencies to a dangling id is rejected and leaves both
+      tables unchanged.
   - file: tests/row_rules/test_rules_references.py
     action: Create
     purpose: >-
@@ -221,7 +224,7 @@ verification_plan:
       tests/test_field_semantics_rule_projection.py::test_dependencies_projects_writer_reference
       tests/test_contract_rules.py::test_dependencies_reference_leg_is_not_exempt
       tests/checks/contracts/test__rule_grammar.py::test_scd2_reference_leg_needs_no_exemption
-      tests/checks/contracts/test__rule_grammar.py::test_event_reference_leg_still_needs_exemption
+      tests/checks/contracts/test__rule_grammar.py::test_event_reference_leg_outside_event_vocabulary
     expected: Seven passed.
     fix_if: Edit the contract and regenerate field_semantics.yaml; never hand-edit the projection.
     hermetic: true
@@ -234,7 +237,7 @@ verification_plan:
       bin/venv-python -m pytest -q
       tests/checks/contracts/test_validate_write_time_enforcement_conformance.py::test_references_mismatch_fails
       tests/checks/contracts/test_validate_write_time_enforcement_conformance.py::test_event_reference_without_exemption_fails_closed
-      tests/checks/contracts/test_validate_write_time_enforcement_conformance.py::test_real_tree_passes
+      tests/checks/contracts/test_validate_write_time_enforcement_conformance.py::test_the_registered_check_passes_on_the_real_tree
       tests/test_contract_rule_census.py::test_writer_lookup_leg_reported_not_compiled
     expected: Four passed.
     fix_if: The conformance arm must compare the declared columns with RowRules.references exactly.
@@ -276,7 +279,7 @@ verification_plan:
     command: >-
       bin/venv-python -m pytest -q -m integration tests/common/test_ducklake_write_rules_integration.py -p no:randomly
       -rs
-    expected: Every test passed and none skipped, including the three dependency nodes.
+    expected: Every test passed and none skipped, including the four dependency nodes.
     fix_if: >-
       A dangling insert that commits, or a counter that moves on a rejection, is a design defect: stop and RCA before
       any deploy (Decision 55).
@@ -323,8 +326,11 @@ verification_plan:
       The governed deploy shipped the merge: deploy-ducklake-lambdas.yml deploys the newest commit a passing full-tier
       run covers and pauses while main is red (Decision 254), so read with mcp__github__actions_list the first run whose
       gate sha is $MERGE_SHA or a first-parent descendant of it, and save its jobs to $DEPLOY_JOBS_JSON. The writer,
-      the shared row-rule engine and the regenerated field_semantics.yaml ship in the serving and telemetry functions,
-      so every deploy and smoke job counts.
+      the shared row-rule engine and the regenerated field_semantics.yaml reach every affected active artifact
+      (compute_affected_artifacts: ducklake_writer, ducklake_reader, ducklake_catalog_dr via deploy-serving and smoke;
+      ducklake_maintenance and ducklake_maintenance_smoke via deploy-maintenance and maintenance-smoke;
+      ducklake_telemetry_writer and ducklake_telemetry_reader via the telemetry jobs), so every deploy and smoke job
+      counts.
     command: >-
       test -s "$DEPLOY_JOBS_JSON" && bin/venv-python -c "import json,os;j=json.load(open(os.environ['DEPLOY_JOBS_JSON']));
       jobs={x['name']:x.get('conclusion') for x in (j.get('jobs') if isinstance(j,dict) else j)};print(jobs);
@@ -341,8 +347,10 @@ verification_plan:
       for the smoke job of step 9's run) to $SMOKE_LOG.
     command: >-
       grep -E "LAMBDA_ROW_RULES OK [0-9]+ cases" "$SMOKE_LOG" | bin/venv-python -c "import re,sys;t=sys.stdin.read();
-      n=int(re.search(r'LAMBDA_ROW_RULES OK (\d+) cases',t).group(1));print(n);assert n==5,n;print('DEPENDENCY_GATE_OK')"
-    expected: The gate reports 5 cases (4 before this change), then DEPENDENCY_GATE_OK.
+      n=int(re.search(r'LAMBDA_ROW_RULES OK (\d+) cases',t).group(1));print(n);assert n>=5,n;print('DEPENDENCY_GATE_OK')"
+    expected: >-
+      The gate reports at least 5 cases (4 before this change) and the log names array_element_reference, then
+      DEPENDENCY_GATE_OK.
     fix_if: Four cases means the deployed gate predates this change; a FAIL line names the rule the writer answered.
     hermetic: false
     graduation: not-applicable
@@ -351,21 +359,38 @@ verification_plan:
     action: >-
       The writer's per-invocation wall p95 held after the lookup shipped (the Decision's lookup-cost reversal signal;
       Decision 214 cl.4: wall time is the latency signal, CommitLatencyMs is attribution): AWS/Lambda Duration p95 for
-      agent-platform-ducklake-writer over the 7 days after the deploy against the 7 days before. Probe 2026-11-16 (7
-      days to 18:00 UTC): wall p95 24,530 ms, CommitLatencyMs p95 7,614 ms, both already past Decision 82's 2,000 ms
-      (Decision 214's own reversal watch), so the bound is relative. Duration mixes warm and cold-attach invocations
-      (214 cl.4 pins them apart); the before/after comparison accepts that mix.
+      agent-platform-ducklake-writer over the 7 days after the deploy against the 7 days before. Set DEPLOY_HOUR to the
+      step 9 deploy-serving job's completion, rounded down to the hour, in ISO 8601 UTC; both windows are whole
+      hour-aligned 7-day periods, so each returns one datapoint. Probe 2026-11-16 (7 days to 18:00 UTC): wall p95
+      24,530 ms, CommitLatencyMs p95 7,614 ms, both already past Decision 82's 2,000 ms (Decision 214's own reversal
+      watch), so the bound is relative. Duration mixes warm and cold-attach invocations (214 cl.4 pins them apart) and
+      about one write in ten carries dependencies, so this is a coarse tripwire, not an attribution of the lookup's
+      cost.
     command: >-
-      for w in before after; do aws cloudwatch get-metric-statistics --profile agent_platform --region eu-west-2
-      --namespace AWS/Lambda --metric-name Duration --dimensions
-      Name=FunctionName,Value=agent-platform-ducklake-writer --start-time "$(eval echo \$${w^^}_START)" --end-time
-      "$(eval echo \$${w^^}_END)" --period 604800 --extended-statistics p95 --query 'Datapoints[0].ExtendedStatistics.p95'
-      --output text; done | bin/venv-python -c "import sys;b,a=[float(x) for x in sys.stdin.read().split()];print(b,a);
-      assert a<=b*1.2,(b,a);print('LATENCY_HELD')"
+      R=$(tr -d '[:space:]' < config/aws-region); D=$(date -u -d "$DEPLOY_HOUR" +%s);
+      for w in "$((D-604800)) $D" "$D $((D+604800))"; do set -- $w; aws cloudwatch get-metric-statistics
+      --profile agent_platform --region "$R" --namespace AWS/Lambda --metric-name Duration --dimensions
+      Name=FunctionName,Value=agent-platform-ducklake-writer --start-time "$(date -u -d @$1 +%FT%TZ)" --end-time
+      "$(date -u -d @$2 +%FT%TZ)" --period 604800 --extended-statistics p95 --query
+      'Datapoints[0].ExtendedStatistics.p95' --output text; done | bin/venv-python -c "import sys;
+      b,a=[float(x) for x in sys.stdin.read().split()];print(b,a);assert a<=b*1.2,(b,a);print('LATENCY_HELD')"
     expected: The after p95 is at most 1.2 times the before p95, then LATENCY_HELD.
     fix_if: >-
       A breach fires the Decision's lookup-cost reversal condition: read CommitLatencyMs for the same windows as
       attribution, file a rec with all four figures and re-decide; never loosen the bound.
+    hermetic: false
+    graduation: not-applicable
+  - step: 12
+    phase: post-deploy
+    action: >-
+      rec-4166 re-scoped as a backstop (execution step 8): read it back with the ducklake_reader recs_by_ids verb through
+      scripts.ops_data_portal's reader client and save the returned row as JSON to $REC_4166_JSON.
+    command: >-
+      test -s "$REC_4166_JSON" && bin/venv-python -c "import json,os;r=json.load(open(os.environ['REC_4166_JSON']));
+      r=r[0] if isinstance(r,list) else r;print(r.get('status'));assert r.get('status')=='open',r.get('status');
+      assert 'backstop' in (r.get('context') or '').lower();print('REC_4166_BACKSTOP')"
+    expected: Status open and the context names it a backstop, then REC_4166_BACKSTOP.
+    fix_if: Re-run the update_rec through the portal; never write the warehouse directly.
     hermetic: false
     graduation: not-applicable
 test_obligations:
@@ -450,22 +475,19 @@ constraints:
     Graduated shards kept (node ids unchanged; only assertions in their files change, all green after): dependencies-reference-reader-loud-fail, executor-loop-kernel-path-not-automatable, growth-safe-snapshot-pins, ops-contract-rule-table, ops-row-rules-contracts, ops-row-rules-engine, ops-row-rules-projection, ops-row-rules-ratchet, ops-row-rules-wiring, ops-rule-census-dq-kinds, ops-rule-source-records, portal-gate-is-the-writer-gate, portal-producer-rules-follow-exemptions, portal-removal-ledger-by-mutation, portal-update-gate-never-stricter, rec-portal-glossary-lint-new-text-only, rec-portal-glossary-lint-refuses, repair-dependency-tokens-dry-run-safe, row-rules-gate-refuses-dormant-tables, row-rules-glossary-lint-producer-side, row-rules-record-row-local-exemption, telemetry-kernel-row-rules, telemetry-name-rule-engine, write-time-conformance-arms-fail-closed, write-time-enforcement-decision-declared, ops-row-rules-writer, rule-grammar-bans-enforced.
 context:
   - >-
-    Decision-scout r1: FLAGS_FOUND -- WARN 167 (resolved: a numbered Decision amends 210 cl.2(a)), NOTE 70 (resolved:
-    the Decision states the deletion caveat).
+    Decision-scout r1-r4, resolved: WARN 167 (a numbered Decision, not an annotation, amends 210 cl.2(a)); NOTE 70 (the
+    deletion caveat, backstopped by rec-4166); NOTE 235 (the grammar relaxation is named in scope and replaced by the
+    conformance references arm); NOTE 214 (wall p95 is the latency signal, relative because it already exceeds 2,000
+    ms); 207's grain lookup stated as not widened. SPIRIT NOTE 88 accepted with deferral: no session path reads catalog
+    egress by source; capped catalog compute (rec-4220) and the RDS move (Decision 253) bound it.
   - >-
-    Decision-scout r2: FLAGS_FOUND -- NOTE 235 (resolved: the grammar relaxation and exemption drop are named in scope
-    and replaced by the conformance references arm), SPIRIT NOTE 88 (see r3). New CITE 167, 79.
-  - >-
-    Decision-scout r3 (after the scope fix): FLAGS_FOUND -- NOTE 214 (cl.4: wall time is the latency signal, commit
-    latency attribution; resolved: the lookup-cost condition and step 11 key on the writer's wall p95, relative, since
-    it already exceeds 2,000 ms), SPIRIT NOTE 88 (accepted with deferral: no session path reads egress by source; the
-    catalog's capped compute (rec-4220) and its move to RDS (Decision 253) bound it). New CITE 235, 181; the Decision
-    now says 207's grain lookup is not widened. Wording check r3 PASS on the changed sidecar; the first approval run
-    is cancelled and re-dispatched.
-  - >-
-    Decision-scout r4: FLAGS_FOUND -- CONTRADICT none; SPIRIT NOTE 88 only, accepted with deferral as in r3. Decisions
-    triaged: 215 of 215. Roadmap items intersected: 14; CONFLICT: 0; RELATED: 14. Serves: NS.5 5/5. CITE 210, 207, 81,
-    84, 88, 214, 167, 177, 235, 181, 79, 254, 246, 70.
+    Decision-scout r5 (after critique r1): FLAGS_FOUND -- NOTE 246 (the build merge waits on an operator message for
+    the rule line outside the sidecar, where 246 cl.1 says a chat word alone no longer binds wording). Accepted with
+    note: the line's exact content is fixed here (scope part 2), so no wording is open at build; the message is the
+    "own word" coordinator.yaml standing_authorisation keeps for always_ask content a sidecar does not bind, and 246
+    cl.4's no-re-ask covers sidecar-bound text only. The line cannot be a sidecar block (it reddens the fast tier
+    before the build's code, wording check r1). SPIRIT NOTE 88 as above. Decisions triaged: 215 of 215. Roadmap items
+    intersected: 14; CONFLICT: 0; RELATED: 14. Serves: NS.5 5/5.
   - >-
     Operator: 2026-11-16 adopted the blind consult's advice (/mnt/project-files/rec-write-path-audit/advisor-brief/ADVICE.md),
     including the Decision 210 cl.2(a) amendment; chose plan A plus a guardrail hook (plan F) over moving the glossary
@@ -502,9 +524,12 @@ gate_rounds:
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:3066ed5845c9dca54f36a8c93d96de90b376f35178b3b0e16fb76ded9bcdedfd'}  # pragma: allowlist secret
   - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:e45621bd92d9860adad309aa0ea267fc05374ebf7f9c9197c0a78b1de8f2292b'}  # pragma: allowlist secret
   - {gate: decision-scout, round: 4, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:d513a94ba76f075f1a1704c348e10d6b8e0edda2e396ce0ae5c09ac19cc665b0'}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 5, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:9d1a00bab266a12a422787b5fa489e38168e8e38038f3cd3050e6d168eed249a'}  # pragma: allowlist secret
   - {gate: wording-check, round: 1, verdict: FAIL, digest: e040251b10809868d4a9627d67abce135dfaf9c1d61f80590d40248fb1856e2d, base: c5f35c775bb1faf230428ef8c0fbcace99cf8fe0, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 2, verdict: PASS, digest: a30c9be8a6726ea1ad3b40d4c87bf98812b253115347958ecfcd9cdb78bdd46a, base: c5f35c775bb1faf230428ef8c0fbcace99cf8fe0, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 3, verdict: PASS, digest: c843437d3618a5dcda527d03e29fc28fdab8acca6ff710df3bec88eec1ffdfda, base: f826f1adcf6e8c5125ff82c90addbac73552cbd2, selection: complete}  # pragma: allowlist secret
+  - {gate: wording-check, round: 4, verdict: PASS, digest: faeb7f7e3d2851b3f0d448de46f2748a1fafee0edccfd4d33f9c1e91fba3d954, base: f826f1adcf6e8c5125ff82c90addbac73552cbd2, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 1, nits: 10}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -512,6 +537,9 @@ pre_implementation_checklist:
   - All files in scope located and readable
   - Acceptance criteria understood and verifiable
   - red_overlap re-run clear against this plan, or the operator rules to proceed (Decision 254 cl.6)
+  - >-
+    The build PR's merge waits for the operator's message naming the ops_recommendations.yaml dependencies dq_intent
+    rule line (outside the sidecar; coordinator.yaml standing_authorisation covers sidecar-bound text only)
 execution_steps:
   - >-
     src/row_rules/rules.py references and its tests; scripts/field_semantics_rule_projection.py; step 2's engine and
@@ -536,8 +564,10 @@ execution_steps:
     Decision {{N}} and for Decision 70 deletions (status stays open); read back with recs_by_ids.
   - >-
     CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; rebase on
-    origin/main; steps 1-8; code review in a fresh context; push, PR, CI green by event-driven wake, squash-merge on
-    code review PROCEED and green CI under the sidecar's standing authorisation.
+    origin/main; steps 1-8; code review in a fresh context; push, PR, CI green by event-driven wake. The sidecar's
+    standing authorisation covers only its eight blocks: the docs/contracts/ops_recommendations.yaml dependencies
+    dq_intent rule line is always-ask contract text outside it, so squash-merge only after code review PROCEED, green
+    CI and the operator's own message naming that line, cited by message id in the PR body.
   - >-
     Post-deploy: steps 9 and 10 on the governed deploy; schedule a wake 7 days after the deploy for step 11 (never
     poll) and record its figures on the PR.
