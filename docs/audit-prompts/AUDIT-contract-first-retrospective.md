@@ -78,8 +78,9 @@ Candidates (facts are in the G rows named; re-derive before relying on any of th
 - C2 Growth after landing (G3). Many entries are larger now than when they first appeared; the
   channel that grows them is metered at WARN tier only. Readings: sanctioned dated annotations doing
   their job; or an unbounded second inflow channel.
-- C3 Entry rate (G2). New entries per day and per plan file, by period. Readings: the rate moved
-  with the intervention; or it tracks work volume and the intervention did not change it.
+- C3 Entry rate (G2, G23). New entries per day and per plan file, and the share of
+  contract-changing commits that also change the decision file, by period. Readings: the rates
+  moved with the intervention; or they track work volume and the intervention did not change them.
 - C4 Routing claim (G4). Every entry carrying an envelope claims `numbered_decision`. Readings: the
   claim is a recorded audit trail and the real routing happens upstream at planning time; or nothing
   observable distinguishes a correctly routed entry from a misrouted one.
@@ -128,10 +129,11 @@ Candidates (facts are in the G rows named; re-derive before relying on any of th
 - C19 Planning-session attribution (G17). Some session trees carry `workflow: plan`; the three
   trees sampled for merged plans carried `workflow: claude_code`. Readings: attribution follows how
   the session was started and both are correct; or per-workflow cost cannot be read for planning.
-- C20 Gate activity (G22). Plan files record gate rounds; plan-critique returned REVISE more often
-  than PROCEED and the decision scout returned flags on most recorded rounds. Readings: the gates
-  catch real problems at a cost worth paying; or rounds are a standing cost whose catch is
-  unmeasured.
+- C20 Gate activity (G22). In the plan files that record gate rounds and contain a Decision
+  header, plan-critique returned REVISE more often than PROCEED and the decision scout returned
+  flags on all but one recorded round. Readings: the gates catch real problems at a cost worth
+  paying; or rounds are a standing cost whose catch is unmeasured. Stay with the routing and
+  alignment gates; the planning workflow's burden as a whole is out of scope.
 
 ## 3. READ FIRST: disambiguation traps
 
@@ -164,7 +166,9 @@ Candidates (facts are in the G rows named; re-derive before relying on any of th
 - Trap 10, deletion event. Decision 178 (2026-08-27) deleted adopter product code, plans and
   audits. Raw counts of plans, tests and scripts cross that event; a fall between 2026-08-07 and
   2026-09-12 in those counts is the deletion, not a trend. No decision entry was removed or
-  renumbered by it (Decision 178 clause 3).
+  renumbered by it (Decision 178 clause 3). The work mix changed too: after it the repository
+  holds no adopter product work, so P0 and P2 rates are not like-for-like in what the plans were
+  about; say so wherever you compare rates across that date.
 - Trap 11, numbering and order. Entries in `docs/DECISIONS.md` are mostly, not strictly, newest
   first; select entries by number, never by position. Numbers have gaps (for example 219, 259, 260
   and 261 have no header in either file). The count of live entries is the count of headers, never
@@ -193,6 +197,10 @@ Candidates (facts are in the G rows named; re-derive before relying on any of th
 - Trap 18, periods and phases. P0, P1 and P2 are time periods (Section 4). The steps of Section 12
   are called Phase 1 to Phase 10. Roadmap items are written `T2.56`, `T1.5` and so on; traps are
   written "Trap N".
+- Trap 19, two index files. `docs/decisions-index.json` is committed, generated from the two
+  decision files, and is what the decision scout reads. `logs/.decisions-index.jsonl` is a
+  gitignored local cache of the warehouse table. "The index" in this prompt always means the
+  first.
 
 ## 4. SCOPE
 
@@ -242,7 +250,8 @@ Vocabulary:
 
 Out of scope (do not file findings on these):
 
-- Whether any individual Decision's ruling is right.
+- Whether any individual Decision's ruling is right, except the items Section 13 lists as OPEN TO
+  CHALLENGE.
 - CI run time, the fast-tier budget, merge throughput and test-suite design (owned by
   `audits/fast-tier-optimisation-3560909.md`, `audits/ci-merge-throughput-scaling-269e630a.yaml`,
   `audits/validate-test-suite-4df4d48.yaml`).
@@ -280,9 +289,10 @@ Run these first, in order. NEVER abort on a failure: take the named degraded pat
    record the error in `meta.contract_notes`, stay on the current branch, read every repository
    file with `git show <sha>:<path>` instead of from the working tree, and at Section 16 skip steps
    3-5: leave the two deliverables uncommitted and end the turn with a final message naming their
-   paths and the error. IF the current branch is `main`, or you cannot write under `audits/`, write
-   the two deliverables to `/tmp/contract-first-retrospective/` instead, skip Section 16 and end the
-   turn with a final message naming those paths and the reason.
+   paths and the error. IF the switch failed and the branch you are left on is `main`, or at any
+   point you cannot write under `audits/`: write the two deliverables to
+   `/tmp/contract-first-retrospective/` instead, skip Section 16 and end the turn with a final
+   message naming those paths and the reason.
 2. History depth: `git rev-parse --is-shallow-repository`. IF it prints `true`, run
    `git fetch --unshallow origin main` once. IF it still prints `true`: set
    `meta.shallow_history = true`; every period figure you cannot derive becomes `null`; use the
@@ -290,7 +300,9 @@ Run these first, in order. NEVER abort on a failure: take the named degraded pat
    `confidence: HYPOTHESIS`.
 3. `bin/venv-python -m scripts.session.preflight --roadmap-detail full` -- writes
    `logs/.preflight-report.json` (gitignored; expected). IF it fails: record the error in
-   `meta.contract_notes` and continue; read the roadmap directly (step 5).
+   `meta.contract_notes` and continue; read the roadmap directly (step 5); use the preflight
+   figures quoted in G14 and G15 as dated evidence; write `null` for the `open_recommendations`
+   stock; leave the report's size out of Q2; and mark what rests on them `confidence: HYPOTHESIS`.
 4. Recommendation dedup probe (recommendations have no local cache; dedup reads the live reader):
    `bin/venv-python -m scripts.recs_related --terms "decision corpus significance contract" --limit 5 --table`.
    IF it fails: do NOT abort -- set `meta.degraded_dedup = true`, set every finding whose owner
@@ -329,9 +341,9 @@ a pattern to match. Where two pull against each other, say so and argue the trad
 - B3 One home per fact. Specification lives where its enforcer reads it; the reason for a choice
   lives in the Decision; what changed in one landing lives in the commit or PR. The same fact stated
   in two places will drift.
-- B4 Growth is governed at the flow. A corpus is sustainable when what each change may add is
-  bounded and the cost of using the corpus does not grow with its size. A limit on the total that is
-  raised when reached governs nothing.
+- B4 Growth is governed. A record type is sustainable when something bounds what it costs to use
+  as it grows: a bound on what each change may add, a bound on the total, or a read path whose cost
+  does not depend on the total. Which of these fits a record type is for you to argue.
 - B5 The why survives. A reader can recover, by identifier, why a choice was made and what would
   reverse it, and can tell from the record itself whether it still governs.
 - B6 Human attention is spent where it decides something. Direction and approval stay with the
@@ -348,17 +360,24 @@ missing.
 
 Verdict rules. Where a question gives a default rule, apply it; you may depart from it only by
 stating in `prose` the evidence that outweighs it. Where a question says the verdict is your
-judgment, `prose` states the threshold you applied, so a reader can re-apply it.
+judgment, `prose` states the threshold you applied, so a reader can re-apply it. The verdicts of
+Q2, Q4, Q6 and Q7 are measurements or summaries computed from your own tables: say so in `prose`.
+A computed verdict is not a finding; whether what it measures is a defect is decided through the
+candidates. A `basis` list may be empty.
 
 **Q1 Routing effect.** Has what is written as a numbered Decision changed since the intervention,
 and is the content it was meant to displace reaching contracts, code or the change record?
 Evidence: the content partition of the newest entries against the 2026-08-07 baseline (E1), the
-bar test on the same entries (E1), the contract-change samples (E2), and C1-C4. Default rule: let S
-be the E1 mean of the specification share plus the change-record share (the baseline's S was 62,
-stated as plus or minus 10), and let Y be the share of E2 samples with governing content (any
+bar test on the same entries (E1), the contract-change samples (E2), G23, and C1-C4. Default rule.
+For each E1 entry compute `spec_share` = (specification + change-record) / (specification +
+rationale + change-record), as a percentage: class (4) is left out so that envelopes and
+annotations, which the baseline entries did not carry, cannot move it. `mean_spec_share` is the
+plain mean of the 12 values. The baseline's value, from its means, is 65 (62 of 95), stated as
+plus or minus 10. `minted_share` is the share of E2 group (a) samples with governing content (any
 classification other than `housekeeping`) that are `would_have_minted_before: yes`. `shifted` when
-S is 42 or lower AND Y is at least one half; `not-shifted` when S is 52 or higher AND Y is under
-one quarter; otherwise `partially-shifted`.
+`mean_spec_share` is 45 or lower AND `minted_share` is at least one half; `not-shifted` when
+`mean_spec_share` is 55 or higher AND `minted_share` is under one quarter; otherwise
+`partially-shifted`.
 Verdict: `shifted | partially-shifted | not-shifted | cannot-determine`.
 
 **Q2 Context cost.** What does the decision and contract system cost an agent now against before?
@@ -379,27 +398,33 @@ observed "before": say so. Default rule, applied to `always_read_bytes + gate_su
 the audited commit against 2026-08-07: `reduced` if lower by more than 10 percent, `grown` if
 higher by more than 10 percent, `held` otherwise. Apply the same three-way rule to `always_read`
 alone and record it as `root_agent_direction` (the root agent's context is the one compaction acts
-on), and to `gate_subagent` alone as `gate_subagent_direction`.
+on), and to `gate_subagent` alone as `gate_subagent_direction`. These three directions are
+arithmetic on your band assignment; the judgment in Q2 is the assignment itself and what `prose`
+says about which intake a planning run needs and which it could fetch on demand.
 Verdict: `reduced | held | grown | cannot-determine`.
 
 **Q3 Enforcement.** The original complaint was that Decisions were rarely enforced. For entries
 landed since Decision 167 and for Class D contracts: is each bound to something that fails, or that
 an agent is instructed to apply at a defined trigger, when it is violated? Evidence: the evaluator
-samples (E3), the deletion counterfactual in E1, C11 and C14. Default rule: let A be the share of
-E3 samples classified `asserts-this-statement`, `asserts-other-content` or
-`instructs-agent-at-trigger`, and D the number of E1 entries (of 12) whose deletion counterfactual
-names an artifact. `enforced-by-default` when A is at least three quarters AND D is at least 9;
-`mostly-asserted` when A is under one half OR D is under 5; otherwise `mixed`.
+samples (E3), the binding test in E1, C11 and C14. Default rule. Call an E3 sample "enforcing" when
+it is classified `asserts-this-statement`, `asserts-other-content` or `instructs-agent-at-trigger`.
+`enforcing_share` weights the two evaluator kinds by their population: (N_check x the enforcing
+share among your `check` samples + N_surface x the enforcing share among your `agent_surface`
+samples) / (N_check + N_surface), where N_check and N_surface are the Class D counts Script C
+prints (41 and 12 at `197c800c`). `bound_count` is the number of E1 entries (of 12) whose binding
+test is `bound`. `enforced-by-default` when `enforcing_share` is at least three quarters AND
+`bound_count` is at least 9; `mostly-asserted` when `enforcing_share` is under one half OR
+`bound_count` is under 5; otherwise `mixed`.
 Verdict: `enforced-by-default | mixed | mostly-asserted | cannot-determine`.
 
 **Q4 Component ledger.** For each intervention component L1-L21 (G19), what state is it in? Fill
 `intervention_ledger` (Section 14); one piece of exercised evidence per row is enough, taken from
-where G19's hint points. The verdict follows from the ledger. The core purposes are the four with
-the tags `routing`, `entry-size`, `contract-enforcement` and `read-cost` in G19. `intact`: no row
-is `eroded` or `retired-without-replacement`. `materially-eroded`: for at least one core purpose,
-no row carrying that purpose tag is `holding` or `holding-with-side-effect`. `intact-with-erosion`:
-anything else.
-Verdict: `intact | intact-with-erosion | materially-eroded`.
+where G19's hint points. The verdict is a summary computed from the ledger. The core purposes are
+the four with the tags `routing`, `entry-size`, `contract-enforcement` and `read-cost` in G19.
+`all-holding`: no row is `eroded` or `retired-without-replacement`. `core-gap`: for at least one
+core purpose, no row carrying that purpose tag is `holding` or `holding-with-side-effect`.
+`core-holding`: anything else.
+Verdict: `all-holding | core-holding | core-gap`.
 
 **Q5 Sustainability.** Fill `growth_ledger`: for each record type its stock, its flow per period,
 what governs it, how agents pay for it, and whether a hard limit (Section 4) binds within 30 days.
@@ -408,10 +433,13 @@ the result is under 30 days; `no` when it is 30 days or more, or the P2 rate is 
 `n/a` when the record type has no hard limit. A ratchet that by design equals the current size
 (`config/prose_budgets.yaml`) is recorded as `governor: stock` with `binds_within_30_days: n/a`.
 Whether having no limit is itself a problem is your judgment under B4. Then answer for the system
-as a whole: project the live entry count and Q2's `token_estimate` at 90, 180 and 365 days from the
-audited commit, linearly at P2 daily rates, in `projections`; and say whether the cost of one
-planning run stays flat as stock grows. The verdict is your judgment, with one pinned floor:
-`unsustainable-on-current-trajectory` is required when any ledger row binds within 30 days.
+as a whole. Fill `projections` at 90, 180 and 365 days from the audited commit, linearly: live
+entries = Script A `live_headers` at the audited commit plus the P2 `entries_per_day` times the
+horizon; `token_estimate` = its value at the audited commit plus its P2 daily change (its value at
+the audited commit minus its value at 2026-09-12, divided by the P2 days) times the horizon. Say
+whether the cost of one planning run stays flat as stock grows. The verdict is your judgment, with
+one pinned floor that is arithmetic: `unsustainable-on-current-trajectory` is required when any
+ledger row binds within 30 days.
 Verdict: `sustainable | sustainable-with-named-gaps | unsustainable-on-current-trajectory | cannot-determine`.
 
 **Q6 Gap ownership.** For the defects you filed: does an owner already exist for each, and would
@@ -452,22 +480,24 @@ conditions listed in G14, decide from evidence whether it has fired, and recomme
 Fill `condition_reviews` (Section 14). This question's entry carries no verdict of its own; its
 `prose` points at the block.
 
-**Q9 Improvement path.** Given your answers to Q1-Q8: what ordered set of changes would move each
-of Q1-Q6 that is not at its first-listed verdict to that verdict? Each step names the industry
-practice it applies (an EX id, or another named practice with a source) and the existing repository
-mechanism it reuses, if any. Separately, name what is worth doing beyond closing defects, if
-anything. Fill `improvement_sequence` (Section 14): at most 10 steps -- do NOT exceed -- of which
-at most 4 may be opportunities with no finding behind them. You need not have a step for every EX
-property; list in `prose` each EX property rated `partial` or `missed` that no step advances, with
-one line on why. An empty sequence is a valid result when the evidence supports it. Do not propose
-a step the DO NOT FLAG list (Section 13) excludes.
-Verdict: `path-identified` (every one of Q1-Q6 below its first-listed verdict has at least one
-step), `path-partial` (some have none; say which and why), `no-change-warranted` (Q1-Q6 are all at
-their first-listed verdict, or you judge no change worth its cost).
+**Q9 Improvement path.** Given your answers to Q1-Q8: which changes, in what order, are worth
+their cost? For each of Q1-Q6 that is not at its first-listed verdict (a `cannot-determine` needs
+nothing), either give a step that would move it, or say in `prose` why no step is worth its cost:
+a verdict can be acceptable as it stands. Each step names the industry practice it applies (an EX
+id, or another named practice with a source) and the existing repository mechanism it reuses, if
+any. Separately, name what is worth doing beyond closing defects, if anything. Fill
+`improvement_sequence` (Section 14): at most 10 steps -- do NOT exceed -- of which at most 4 may be
+opportunities with no finding behind them. You need not have a step for every EX property; list in
+`prose` each EX property rated `partial` or `missed` that no step advances, with one line on why.
+An empty sequence is a valid result when the evidence supports it. Do not propose a step the DO
+NOT FLAG list (Section 13) excludes.
+Verdict: `path-identified` (the sequence has at least one step), `no-change-warranted` (it has
+none; `prose` says why).
 
 **Q10 Questions the requester did not think to ask.** Answer each seed below AND add any you
 judge the requester will wish had been asked (at most 4 additions). Shape:
-`{question, answer, basis: [finding ids]}`.
+`{question, answer, basis: [finding ids]}`. Answer from the evidence you gathered for Q1-Q9 unless
+the seed names its own method; where the repository cannot answer a seed, say so in one line.
 
 - Does the 6,144-byte cap now shape how entries are written (compression, abbreviation, clause
   packing) in a way that makes them harder for an agent to read correctly?
@@ -476,21 +506,36 @@ judge the requester will wish had been asked (at most 4 additions). Shape:
 - Do contracts now show the growth pattern the decision corpus showed in P0, and is the
   500-effective-line budget changing how they are written?
 - What share of entries landed since Decision 167 are themselves about governing decisions,
-  contracts or this corpus?
+  contracts or this corpus? Judge from the titles in `docs/decisions-index.json` only.
 - At what number of live entries does one plan's decision-scout triage stop being reliable or
   affordable, and what in the repository would show it happening?
 - What would a steady state look like: what must leave, or stop costing, for entries to keep
   arriving at the P2 rate indefinitely?
 - What do the routing and alignment gates cost per plan (rounds, sub-agent runs) against what the
   record shows they catch (G22)?
-- Q2 measures a planning run. By the same static measure, what do `.claude/commands/implement.md`
-  and `.claude/skills/implement/SKILL.md` send an implementing agent to read, and has that grown?
+- Q2 measures a planning run. For an implementing run: list the repository files that
+  `.claude/commands/implement.md` and `.claude/skills/implement/SKILL.md` name as things to read
+  (contracts, skills, commands), sum their bytes at 2026-08-07, 2026-09-12 and the audited commit
+  with `git cat-file -s <commit>:<path>` (0 when the file is absent), and give the three totals. No
+  bands.
+- Did outcomes change, as well as cost and routing? Say what evidence exists here that agents make
+  fewer governance mistakes since the intervention (a contradiction merged, rework, a red main with
+  a governance cause), and whether the repository can measure that at all.
 
 ## 8. RUBRIC
 
-Rate each surface on each dimension: `strong | adequate | weak | absent | n/a`. `n/a` is correct
-and costless where a dimension does not structurally apply; never manufacture a rating or a
-finding to fill a cell. For `adjacent_records` rate VD4 and VD7 only; every other cell is `n/a`.
+Rate each surface on the dimensions the second table assigns to it: `strong | adequate | weak |
+absent`. Every other cell is `n/a`: `n/a` is correct and costless where a dimension does not
+structurally apply; never manufacture a rating or a finding to fill a cell.
+
+- `strong`: a mechanism answers the dimension's question and you found it working; no finding of
+  medium severity or higher lands on the cell.
+- `adequate`: the question is mostly answered; findings on the cell are low or medium.
+- `weak`: a high or critical finding lands on the cell, or the property rests on convention alone.
+- `absent`: nothing on the surface addresses the dimension.
+
+A finding lands on the cell named by its `surface` and `dimension`; a `shared` finding lands on its
+dimension's cell for every surface it names in `title` or `gap`.
 
 | ID | Dimension | Asks | Serves |
 |---|---|---|---|
@@ -502,6 +547,15 @@ finding to fill a cell. For `adjacent_records` rate VD4 and VD7 only; every othe
 | VD6 | Authoring and operator burden | What does writing it correctly cost the author and the human (B6, B7)? | Q9, Q10 |
 | VD7 | Measurability | Can the system show whether this property holds or is regressing (B7)? | Q2, Q5, Q8 |
 
+| Surface | Dimensions to rate |
+|---|---|
+| `corpus` | VD1, VD2, VD3, VD4, VD5, VD6, VD7 |
+| `routing_gates` | VD1, VD2, VD6, VD7 |
+| `contracts` | VD1, VD2, VD3, VD4, VD5, VD6, VD7 |
+| `read_path` | VD3, VD4, VD6, VD7 |
+| `lifecycle` | VD2, VD4, VD5, VD6, VD7 |
+| `adjacent_records` | VD4, VD7 |
+
 ## 9. DEEP-DIVES
 
 - DD-A Flow arithmetic (feeds Q1, Q5, Q8). Run Scripts A and B. Produce the `metrics` block with
@@ -510,18 +564,20 @@ finding to fill a cell. For `adjacent_records` rate VD4 and VD7 only; every othe
   `corpus_bytes_added` is the change in `decisions_bytes + archive_bytes`. `days` is 53 for P0, 36
   for P1, and for P2 the whole days from 2026-09-12 to the audited commit's committer date.
   `plan_files_added` comes from Script B. Also split inflow into bytes of entries at first
-  appearance and bytes added to entries after they landed (Script B). State what the per-plan rate
-  shows that the per-day rate does not.
+  appearance and bytes added to entries after they landed (Script B's
+  `first_appearance_bytes_total` and `bytes_added_after_landing`; both go in `metrics.cap`). State
+  what the per-plan rate shows that the per-day rate does not.
 - DD-B What the newest entries contain (feeds Q1, Q3). Section 11 E1.
 - DD-C Where displaced content went (feeds Q1). Section 11 E2.
 - DD-D Whether evaluators evaluate (feeds Q3). Section 11 E3.
 - DD-E Planning context footprint (feeds Q2, Q5). Trace what a planning run reads: start at
   `.claude/commands/plan.md`, follow each instruction to read, load or dispatch, and assign each of
   the 16 read-set files to a band (Q2). Then the observed pass (Section 11 E5).
-- DD-F Contract trajectory (feeds Q5, Q10). From G10 and the files themselves: is the contracts
-  class absorbing content at a rate its governor bounds; what happens when a file reaches 500
-  effective lines (look at the three files over budget and at two files within 10 lines of it);
-  what share of a large contract is `amendment_log`.
+- DD-F Contract trajectory (feeds Q5, Q10). For five files -- the three with a raised budget (G10)
+  and the two with the highest effective-line count at or under 500 (ties by basename) -- record
+  effective lines, budget, and the share of effective lines that sit under `amendment_log`, in
+  `metrics.contracts_near_budget`. Then say, in Q5's `prose`, whether the contracts class is
+  absorbing content at a rate its governor bounds and what a file does when it reaches its budget.
 
 ## 10. GROUNDING MAP
 
