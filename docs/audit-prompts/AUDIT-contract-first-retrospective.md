@@ -390,7 +390,7 @@ plus or minus 10. Rule: bounds, then judgment. `mean_spec_share` is the one meas
 like-for-like baseline, so it bounds the verdict as a default rule: at 55 or higher `shifted` is
 not available; at 45 or lower `not-shifted` is not available; between the two all three are.
 Inside the bounds the verdict is your judgment over the E1 bar test, the two E2 comparisons
-(`rule_share` and `restating_share`, each P2 against P0), G23 and C1-C4. `prose` states the
+(`rule_share` and `carrying_share`, each P2 against P0), G23 and C1-C4. `prose` states the
 threshold you applied, which inputs carried the verdict, and each input that points the other
 way. Contract changes with no Decision were already common in P0 (G23), so their presence in P2
 is not by itself evidence of a shift; only a difference from P0 is. The samples are small (12
@@ -519,7 +519,7 @@ control is `missed`. EX1-EX13 is a CLOSED list: do not add properties. Verdict, 
 **Q8 Reversal-condition reviews.** Three intervention Decisions carry monitored reversal
 conditions whose review dates fall between 2026-11-17 and 2026-12-01 (G14). For each of the eight
 conditions listed in G14, decide from evidence whether it has fired, and recommend a disposition.
-G14 gives a test for the two prose conditions and a note on two of the stanza conditions. For
+G14 gives a test for the two prose conditions and notes on the stanza conditions that need one. For
 every stanza condition the test is its own `description` read literally, against the evidence you
 already hold plus at most 2 further repository reads each (G14 gives one condition 4); where
 its wording leaves a threshold open ("materially", "measured"), state the one you applied in
@@ -1032,7 +1032,11 @@ How to test the two prose conditions. (a): take the first 10 entries that first 
 after 2026-08-13 (Script B's `first_appearance` list, by number). `fired` when for more than 2 of
 them the entry, its envelope justification, or the message of the commit that added it says that
 decision content (ruling, rationale or reversal conditions) was cut or moved out to fit the cap;
-`not-fired` when that is so for at most 2. (b): look at the two-entry commits Script B lists.
+`not-fired` when that is so for at most 2. You may answer `cannot-determine` instead where the
+record is silent and entries landed close under the cap (Script B's first sizes): closeness is
+not proof that content was cut, so say what would settle it. The ten are a closed set and the
+condition cannot fire again after this review, so `retire-condition` is open as a disposition
+whatever the verdict. (b): look at the two-entry commits Script B lists.
 The condition's own words are "specifically to evade the per-entry cap (split-then-recombine)".
 `fired` when at least one commit holds one decision written as two entries: both rule on the same
 mechanism, at least one cannot be applied without the other (name the clause that depends on the
@@ -1041,18 +1045,23 @@ related subjects that each stand alone do not fire it. `not-fired` when no commi
 three. At `197c800c` all eight listed commits exceed the combined size (the smallest pair is 8,593
 bytes), so the first two legs decide it.
 
-Decision 179's `index-read-context-cost` is worded as a problem arising "before T2.56 c1 or T1.5 c1
-lands"; T2.56 c1 is `met` (G1). Read as written, the window the description names has closed,
-which is what `foreclosed` means (Section 14 field rules), unless you find the problem was
-already measured before that criterion was met: that is `fired`. Two facts bear on the
-disposition, not on the verdict. T2.56 c1 concerns the ambient instruction layer (`AGENTS.md`,
-`CLAUDE.md` and the skills), not the index. The index's size at the three boundaries is in G8.
-Whether a concern of the kind this condition names applies at the audited commit is for you to
-establish under Q2; it decides between `retire-condition` and `re-arm` with new wording.
+Decision 179's `index-read-context-cost` is worded as a problem arising
+"before T2.56 c1 or T1.5 c1 lands". Facts. T2.56 c1 is `met` (G1) and concerns the ambient
+instruction layer (`AGENTS.md`, `CLAUDE.md` and the skills), not the index. T1.5 is
+`not_started`. Decision 179 clause 5 records the index-read residual as
+"owned by T2.56 c1 and T1.5 c1"; roadmap item T4.24 criterion c7 has since named T4.24 its owner
+(G8). The index's size at the three boundaries is in G8. The wording has two readings: the
+window closed when the first of the two criteria landed, or it stays open until T1.5 c1 lands.
+Choose one, and say which and why in `evidence`. Under the first, the verdict is `foreclosed`,
+or `fired` if the problem was measured before T2.56 c1 was met. Under the second, it is `fired`
+or `not-fired` on what Q2 measures at the audited commit. Every value of the disposition enum is
+open for this row.
 
 Decision 179's `inflow-unguarded` reads "Inflow rises materially with no stock guard". Decision
 179 is dated 2026-08-31, inside P1, so the base for "rises" is P1's `entries_per_day` and the
-comparison is P2's against it (DD-A). Give P0's rate beside them: P1 was the migration window.
+comparison is P2's against it (DD-A). Give beside them P0's rate and each period's
+`new_entries_per_plan_file`: P1 was the migration window, and the volume of work differed
+between periods.
 "Materially" is the threshold you state. Whether a stock guard exists is a fact to read at the
 audited commit (G21).
 
@@ -1074,7 +1083,9 @@ For at most the 2 highest-numbered instances, look for the plan behind the entry
 repository reads for this condition). `fired`: at least one instance whose plan records a
 plan-critique `PROCEED`. `cannot-determine`: instances exist and no plan could be identified or
 none records the gate. `not-fired`: no instance among the 12 entries E1 examined (say that the
-sample was 12).
+sample was 12). A `fired` here rests on one reader's bar test: set `confidence: HYPOTHESIS`
+unless a second source (a recommendation, a later Decision or a recorded review) names the same
+entry as mis-routed.
 
 **G15 Adjacent records** (Script A unless stated).
 
@@ -1319,7 +1330,11 @@ argument: at `197c800c` that prints 63 commits, 43 `no-decision` and 20 `with-de
 
 Four groups, two comparisons, each P2 against P0. Group (a): the 6 newest P2 `no-decision`
 commits. Group (c): the 6 newest P0 `no-decision` commits. Group (b): the 4 newest P2
-`with-decision` commits. Group (d): the 4 newest P0 `with-decision` commits. The newest of each
+`with-decision` commits that add an entry. Group (d): the 4 newest P0 `with-decision` commits
+that add an entry. A commit adds an entry when
+`git show <sample commit> -- docs/DECISIONS.md | grep -c '^+## Decision '` prints 1 or more; walk
+each list newest first until you have 4 (a commit that fails this test is not a sample and does
+not count toward the 20). The newest of each
 period are taken so that each group shows practice at the end of its period: now, and just
 before the intervention (early P0 held a different set of contracts, Trap 17). Work through
 groups (c) and (d) before (a) and (b), so P0 is not judged against what P2 showed you.
@@ -1328,7 +1343,9 @@ For each sample read what the commit added to the contract or contracts
 (`git show <sample commit> -- docs/contracts/`) and classify the main addition: `mechanism-rule` (a rule,
 threshold, procedure or enforcement binding), `field-semantics` (the meaning or constraints of a
 field or key), `operational-fact` (what is currently true, a status or a pointer), or
-`housekeeping` (wording, renames, pin or count updates with no governing content). List any second
+`housekeeping` (wording, renames, pin or count updates with no governing content). Rows added
+under `amendment_log` and version or date bumps are `housekeeping`: classify by what else the
+commit added, and a commit that added nothing else is `housekeeping`. List any second
 kind of addition in `also`. Quote the added line that best shows what kind of content it is.
 
 Groups (a) and (c): write `overlap: n/a`. `rule_share` is the share of a group's samples whose
@@ -1339,11 +1356,13 @@ Groups (b) and (d): also read what the same commit added to the decision file
 (`git show <sample commit> -- docs/DECISIONS.md`; where it touched several entries, the one with
 the most added lines). `overlap` is `none` when the entry gives the reason and points at the
 contract, `partial` when it restates some of the specification the commit put in the contract,
-`restated` when the same specification is in both, and `n/a` when the commit added only
-annotation or status lines to the decision file. `restating_share` is the share of a group's
-samples, leaving out `n/a`, whose `overlap` is `partial` or `restated`: `restating_share_p2` over
-group (b), `restating_share_p0` over group (d). It asks whether a Decision still carries the
-specification of the contract it lands with.
+`restated` when the same specification is in both, `entry-only` when the entry states
+specification that the commit did not put in any contract, and `n/a` when the entry the commit
+added holds no ruling of its own. An entry that both restates and states more takes the value
+covering more of it. `carrying_share` is the share of a group's samples, leaving out `n/a`, whose
+`overlap` is `partial`, `restated` or `entry-only`: `carrying_share_p2` over group (b),
+`carrying_share_p0` over group (d). It asks whether a Decision still carries specification, with
+or without a contract beside it.
 
 All four shares are fractions from 0 to 1, `null` for a group with nothing to count. Write them
 in Q1's entry.
@@ -1521,7 +1540,7 @@ audit:
                  method: ""}
   question_answers:
     - {q: Q1, verdict: shifted|partially-shifted|not-shifted|cannot-determine,
-       rule_share_p2: null, rule_share_p0: null, restating_share_p2: null, restating_share_p0: null,
+       rule_share_p2: null, rule_share_p0: null, carrying_share_p2: null, carrying_share_p0: null,
        basis: [], prose: ""}
     - {q: Q2, verdict: reduced|held|grown|cannot-determine,
        root_agent_direction: reduced|held|grown, gate_subagent_direction: reduced|held|grown,
@@ -1567,7 +1586,7 @@ audit:
   samples:                        # E2, E3, E4 rows
     - {id: E2-01, sample_set: E2, group: a|b|c|d, subject: "<commit short sha>",
        classification: mechanism-rule|field-semantics|operational-fact|housekeeping, also: [],
-       overlap: none|partial|restated|n/a, evidence: ""}
+       overlap: none|partial|restated|entry-only|n/a, evidence: ""}
     - {id: E3-01, sample_set: E3, subject: "<contract basename>", evaluator: "", statement_tested: "",
        classification: asserts-this-statement|asserts-other-content|reads-structure-only|instructs-agent-at-trigger|mention-only,
        evidence: "file:line"}
