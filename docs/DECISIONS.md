@@ -2,10 +2,10 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
-## Decision 265: Wording approval follows a declared gated set -- north stars, direction Decisions, every Intent line and the text that defines a gate keep the operator's per-change approval, and other wording is settled with notice on a ladder lane (amends Decisions 83, 165, 187, 243 and 246) (Decided)
+## Decision 266: Wording approval follows a declared gated set -- north stars, direction Decisions, every Intent line and the text that defines a gate keep the operator's per-change approval, and other wording is settled with notice on a ladder lane (amends Decisions 83, 165, 187, 243 and 246) (Decided)
 
 ```yaml
-number: 265
+number: 266
 status: Decided
 decided_date: "2026-11-16"
 kind:
@@ -25,7 +25,7 @@ significance:
 
 **Status:** Decided
 **Date:** 2026-11-16
-**Warehouse ID:** dec-265 (per Decision 84 backfill)
+**Warehouse ID:** dec-266 (per Decision 84 backfill)
 
 **Problem:** Decision 243 gave every new Decision a kind, but kind "grants and gates nothing", so all Decision text
 and an undefined "governing contract text" still needed a Decision 246 run: 71 runs from 2026-11-06 to 2026-11-12,
@@ -71,7 +71,7 @@ and it earns autonomy on evidence and loses it on a misroute.
 notice-digest job and the check's demotion read; reading the digest is procedural (follow-on rec).
 
 ```yaml reversal-conditions
-decision: 265
+decision: 266
 review_by: 2027-05-31
 on_trigger: "re-decide via /plan; until then the lane returns to read_all"
 conditions:
@@ -1423,7 +1423,7 @@ conditions:
 
 **Related:** Decisions 73, 76, 83, 101, 170, 181, 187, 233, 234, 238, 239; rec-2827, rec-4080, rec-4695, rec-4769, rec-4907.
 
-> **Amended by Decision 265 (2026-11-16):** Which wording needs a sidecar is now docs/contracts/approval-routing.yaml's gated set; text outside it needs no run, even where an earlier approval bound it (clause 2), and validate_approval_routing is a third check beside clause 3's two.
+> **Amended by Decision 266 (2026-11-16):** Which wording needs a sidecar is now docs/contracts/approval-routing.yaml's gated set; text outside it needs no run, even where an earlier approval bound it (clause 2), and validate_approval_routing is a third check beside clause 3's two.
 
 > **Update (2026-11-12, PLAN-merge-requires-green-checks):** Clause 6's residual "an agent can still merge on red through the admin bypass (rec-4080)" is covered by Decision 264: the merge gate refuses an agent merge whose required checks, pr-validate among them, have not concluded success.
 
@@ -1613,7 +1613,7 @@ conditions:
 
 **Related:** Decisions 57, 78, 84, 86, 117, 126, 171, 175, 177, 184, 185, 194, 195, 196, 197, 200, 209, 210, 211, 212, 221, 224, 231, 232, 233, 234, 235, 240; T4.21, T4.24, T4.36; rec-3959.
 
-> **Amended by Decision 265 (2026-11-16):** Clause 8's "direction and intent are pinned at human approval" now binds through Decision 265: a direction entry is approved whole and a mechanism entry's Intent line is approved word for word, so kind routes approvals and a label can only escalate.
+> **Amended by Decision 266 (2026-11-16):** Clause 8's "direction and intent are pinned at human approval" now binds through Decision 266: a direction entry is approved whole and a mechanism entry's Intent line is approved word for word, so kind routes approvals and a label can only escalate.
 
 ---
 
@@ -5708,7 +5708,7 @@ gate is ungated in `--pre`), Decision 55 (a missing and a passing oracle must ne
 > blocking, shadow, drop and dropping a shadowed check needs that record; below it clause 5 stands.
 > This body is otherwise unedited.
 
-> **Amended by Decision 265 (2026-11-16):** The cited Decision in clauses 3-4 must also meet Decision 265 clause 5: an entry numbered above Decision 265 authorizes only if it is direction. This body is otherwise unedited.
+> **Amended by Decision 266 (2026-11-16):** The cited Decision in clauses 3-4 must also meet Decision 266 clause 5: an entry numbered above Decision 266 authorizes only if it is direction. This body is otherwise unedited.
 
 ---
 
@@ -7261,7 +7261,7 @@ T1.5 (the STRATEGIC, CD.17-frozen portal cutover that eventually retires `docs/d
 
 **Related:** Decision 128 (the raise-marker mechanism this amends clause 3 of), Decision 159 (coverage tamper guard amended), Decision 161 (mypy tamper guard amended, including clause 4's first implementation), Decision 162 (composite R3 amended), Decision 149 (the compaction lifecycle whose compact-in-place interaction the supersession hop closes), Decision 151 (the forward-conformance precedent this retroactive scope departs from, bounded by the empty grandfather hook), Decision 134 (the shared decisions_md.py parser this module consumes, DAF-03 / clause 3), Decision 104 (`_common.py`'s five-primitive reservation; this module's top-level placement), Decision 86/127 (contract-vs-Decision routing this entry and `docs/contracts/marker-grammar.yaml` follow), Decision 130 (whole-repo SLOC scope; the raise-approved grammar's precedent), Decision 153 (composite guard's subprocess-free fast-tier budget, preserved). Bundled: rec-2974. Roadmap ref: audits/size-governance-expansion-3dee4a5.yaml finding SGE-07 (not a DECISIONS.md entry).
 
-> **Amended by Decision 265 (2026-11-16):** A cited entry numbered above Decision 265 authorizes a marker only if its kind is direction (docs/contracts/approval-routing.yaml lane.kind_floor); the shared marker guard enforces it for every token. This body is otherwise unedited.
+> **Amended by Decision 266 (2026-11-16):** A cited entry numbered above Decision 266 authorizes a marker only if its kind is direction (docs/contracts/approval-routing.yaml lane.kind_floor); the shared marker guard enforces it for every token. This body is otherwise unedited.
 
 ---
 
@@ -12075,7 +12075,7 @@ conditions:
 
 > **Update (2026-11-05):** Decision 246 clause 5 narrows it again for pull requests that add or change approved text: such a PR stays red until the operator approves the wording on GitHub, and an operator merge in the GitHub UI stays the release valve.
 
-> **Update (2026-11-16):** Decision 265 clause 4 narrows it for pull requests that change gated text (docs/contracts/approval-routing.yaml) with no declared plan's approved sidecar binding it: such a PR stays red, and an operator merge in the GitHub UI stays the release valve.
+> **Update (2026-11-16):** Decision 266 clause 4 narrows it for pull requests that change gated text (docs/contracts/approval-routing.yaml) with no declared plan's approved sidecar binding it: such a PR stays red, and an operator merge in the GitHub UI stays the release valve.
 
 > **Update (2026-11-12, PLAN-merge-requires-green-checks):** Decision 264 narrows it a third time for agent merges: the merge gate refuses a merge unless every required check, and every persona check a verdict_source row selects, concluded success on the merge-time head. The ruleset configuration above is unchanged.
 
