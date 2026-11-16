@@ -24,7 +24,8 @@ scope:
     purpose: >-
       rec-5231. In local bootstrap_apply_guard_json's DenyProviderAndAccountWrite, sts:SetSecurityTokenServicePreferences
       becomes iam:SetSecurityTokenServicePreferences. One token; the line count is unchanged (the file is at 500 of 500
-      effective lines).
+      effective lines). NEAR_CAP needs no decomposition, relief or raise: bin/venv-python -m scripts.roadmap.plan_obligations
+      --plan docs/plans/PLAN-bootstrap-guard-analyzer-findings.yaml reports 500/500 and the swap changes no line count.
   - file: terraform/bootstrap/platform_dev_policies.tf
     action: Modify
     purpose: >-
@@ -36,13 +37,23 @@ scope:
     purpose: >-
       rec-5232. The session guard's copy of DenyStateAndConvergenceVersionList gets the same StringNotLike condition,
       equal to DailyOps' after whitespace normalisation (the mirror test_agent_session_carries_platform_dev_denies requires it).
-  - file: tests/checks/iam_tf/test_bootstrap_ci_roles.py
-    action: Modify
+  - file: tests/checks/iam_tf/test_bootstrap_apply_guard_actions.py
+    action: Create
     purpose: >-
-      rec-5231. A new test requires DenyProviderAndAccountWrite to contain today's 18 iam: provider and account
-      actions plus iam:SetSecurityTokenServicePreferences (a required subset, so a later addition does not break it) and
-      every sts: action anywhere in bootstrap_apply_guard_json to be one of DenyCredentialMinting's; a mutation case
-      swapping the token back to sts: is red on both.
+      rec-5231, named by its acceptance command. test_every_guard_action_is_a_real_iam_action reads the Action lists of
+      local bootstrap_apply_guard_json (Action only, never Condition keys) and requires: DenyProviderAndAccountWrite
+      contains today's 18 iam: provider and account actions plus iam:SetSecurityTokenServicePreferences (a required
+      subset, so a later addition does not break it); every sts: action in the guard is one of DenyCredentialMinting's;
+      and every literal (non-wildcard) iam: or sts: action names an operation in botocore's model of that service, with
+      a named allowlist for permission-only actions (iam:PassRole). A mutation case swapping the token back to sts: is
+      red on all three predicates.
+  - file: tests/checks/iam_tf/test_agent_session_guard_s3_prefix.py
+    action: Create
+    purpose: >-
+      rec-5232, named by its acceptance command. test_no_s3_prefix_in_negative_context parses the session guard and
+      DailyOps from the HCL and requires that no Deny carries s3:prefix under a positive string operator (StringLike,
+      StringEquals and their IfExists and ForAnyValue/ForAllValues forms) and no Allow carries it under a negated one.
+      Red cases: today's StringLike deny, and an Allow switched to StringNotLike.
   - file: tests/checks/iam_tf/test_platform_dev_data_lake_read_fence.py
     action: Modify
     purpose: >-
@@ -51,7 +62,7 @@ scope:
       fixture's list deny moves to the new shape. A new assertion resolves the StringNotLike values against the
       file's own locals (it parses ducklake_prod_data_prefix and ducklake_smoke_data_prefix and pins them to "ducklake"
       and "ducklake-neon-smoke"), then requires that no concrete state prefix (convergence/personal/, tfplan/personal/,
-      tfstate/personal/x and the short tf) matches any resolved value under fnmatch, so the state prefixes stay denied
+      tfstate/personal/x and the short tf) matches any resolved value under fnmatch.fnmatchcase (IAM's StringLike is case-sensitive), so the state prefixes stay denied
       even if a local is changed. New red cases: the old StringLike-over-state-prefixes deny, a StringNotLike set that
       differs from the Allow's, and a local mutated to tfstate/personal (both the pin and the fnmatch assertion fail).
       Measured 2026-11-16: fnmatch against the unresolved ${local...}/* text is always False, hence the resolution. Declared re-authoring of a graduated row's node file, approved with
@@ -79,24 +90,26 @@ acceptance_criteria:
   - >-
     bootstrap-apply-guard's DenyProviderAndAccountWrite denies iam:SetSecurityTokenServicePreferences and holds no sts:
     action; its required actions are pinned as a subset, and every sts: action in the guard is a credential-minting one
-    (test_bootstrap_ci_roles.py, VP 1); live, bootstrap-apply simulates explicitDeny for
+    and every literal iam:/sts: action is a real operation (test_bootstrap_apply_guard_actions.py, VP 1); live, bootstrap-apply simulates explicitDeny for
     iam:SetSecurityTokenServicePreferences (VP 6).
   - >-
     DailyOps' and the session guard's DenyStateAndConvergenceVersionList are Denies, equal after whitespace normalisation, of s3:ListBucketVersions
     on the data-lake bucket with StringNotLike s3:prefix equal to DataLakeVersionListRead's two values, and no
-    StringLike (test_platform_dev_data_lake_read_fence.py and test_agent_session_user.py, VP 1); live, PlatformDev
+    StringLike, and no s3:prefix sits in a negative context in either document (test_platform_dev_data_lake_read_fence.py,
+    test_agent_session_user.py and test_agent_session_guard_s3_prefix.py, VP 1); live, PlatformDev
     simulates allowed for prefix ducklake/ and ducklake-neon-smoke/, and explicitDeny for tfstate/personal/, tf and no
     prefix; the session user simulates explicitDeny with no prefix (VP 6).
   - >-
     ValidatePolicy returns no ERROR and no SECURITY_WARNING for the planned (VP 5) and live (VP 6)
     bootstrap-apply-guard and agent-platform-session-guard documents, and no S3_PREFIX_IN_NEGATIVE_CONTEXT for DailyOps.
-  - "rec-5231 and rec-5232 read back closed (VP 7)."
+  - "rec-5231 and rec-5232 read back closed by the implementation merge's Resolves trailer (VP 7)."
 verification_plan:
   - step: 1
     phase: pre-deploy
     action: Run the changed IAM text tests.
     command: >-
-      bin/venv-python -m pytest tests/checks/iam_tf/test_bootstrap_ci_roles.py
+      bin/venv-python -m pytest tests/checks/iam_tf/test_bootstrap_apply_guard_actions.py
+      tests/checks/iam_tf/test_agent_session_guard_s3_prefix.py tests/checks/iam_tf/test_bootstrap_ci_roles.py
       tests/checks/iam_tf/test_platform_dev_data_lake_read_fence.py tests/checks/iam_tf/test_agent_session_user.py
       tests/checks/iam_tf/test_platform_dev_plan_and_state_fence.py -q
     expected: >-
@@ -184,9 +197,10 @@ verification_plan:
       sort; jq -c '.resource_changes[] | select(.change.actions == ["update"]) | {a: .address, b: .change.before.policy,
       p: .change.after.policy}' "$W/plan.json" > "$W/docs.jsonl"; for PN in $(aws iam list-role-policies --role-name
       PlatformDev --query PolicyNames --output text 2>> "$L"); do [ "$PN" = DailyOps ] && continue; C=$(aws iam
-      get-role-policy --role-name PlatformDev --policy-name "$PN" --query PolicyDocument --output json 2>> "$L" | jq '[.Statement[]? |
-      select(.Effect == "Allow") | (.Action | if type == "string" then [.] else . end)[]? |
-      select(test("^(\\*|s3:\\*|s3:List\\*|s3:ListBucketVersions)$"))] | length'); echo "EXTRA $PN s3list_lines=$C"; done; echo "ATTACHED $(aws iam
+      get-role-policy --role-name PlatformDev --policy-name "$PN" --query PolicyDocument --output json 2>> "$L" | jq '[(.Statement | if type == "object" then [.] else . end)[]? |
+      select(.Effect == "Allow") | (.Action | if type == "string" then [.] else . end)[]? | ascii_downcase |
+      gsub("\\*"; ".*") | gsub("\\?"; ".") | . as $g |
+      select("s3:listbucketversions" | test("^" + $g + "$"))] | length'); echo "EXTRA $PN s3list_lines=$C"; done; echo "ATTACHED $(aws iam
       list-attached-role-policies --role-name PlatformDev --query 'length(AttachedPolicies)' --output text 2>> "$L")"; while IFS= read -r J; do N=$(jq -r .a <<< "$J"); for
       K in b p; do D=$(jq -r ".$K" <<< "$J"); T=$(aws accessanalyzer validate-policy --policy-type IDENTITY_POLICY
       --policy-document "$D" --query "findings[?findingType=='ERROR'||findingType=='SECURITY_WARNING'].[findingType,issueCode]"
@@ -282,28 +296,38 @@ verification_plan:
       session_none implicitDeny instead of explicitDeny: the simulator treats the absent key differently from the IAM
       reference; record it, do not close rec-5232, and route the question to the operator (a live no-prefix
       ListObjectVersions needs PlatformDev's ExternalId trust, so any such probe is a plan amendment with its own
-      written CloudShell block).
+      written CloudShell block). Any failed SIM or LIVE line (the recs already closed at the merge by their trailer): the
+      build files a forward-fix rec naming the merge sha and the failing line, so a closed rec never hides a failed live
+      check.
       PLAN-bootstrap-iam-analyzer-checks PR 2 does not merge until this step passes.
     hermetic: false
     graduation: not-applicable
   - step: 7
     phase: post-deploy
     action: >-
-      After VP 6 passes, close rec-5231 and rec-5232 with update_rec (status closed, naming the merge sha and VP 6's
-      result), then read them back. The squash commit carries no Resolves trailer, so nothing closes them before VP 6.
+      Read back the trailer closure. The implementation commit on the branch carries "Resolves: rec-5231, rec-5232";
+      scripts.session.merge_step premerge runs before the merge, merge_pull_request gets that explicit commit_message
+      and the expectedHeadSha premerge checked, and scripts.session.merge_step readback confirms the trailer after it.
+      ci.yml's trailer-census, trailer-acceptance-evaluate and trailer-closure jobs then close both recs at the merge
+      sha; this step reads them back after VP 6.
     command: >-
       bin/venv-python -c "from src.common import ducklake_reader_client as rc; rows, missing =
       rc.fetch_recs_by_ids(rc.make_reader(), ['rec-5231', 'rec-5232']); print(sorted((r['id'], r['status']) for r in
       rows), missing)"
     expected: Both rows with status closed; missing empty.
-    fix_if: A row still open; re-run the update_rec and re-read; a portal failure is reported, never retried in a loop.
+    fix_if: >-
+      A row still open: readback found the trailer missing, so run scripts.session.merge_step recover at the merge sha
+      (census and sandboxed evaluate, closing only with a verdict record); an acceptance-verdict refusal goes to a
+      fix-forward PR whose trailer names the rec, never a manual close (git-ops.yaml resolves_trailer). A manual
+      update_rec close only after a transport failure or a merge-leg refusal. A portal failure is reported, never
+      retried in a loop.
     hermetic: false
     graduation: not-applicable
 test_obligations:
   - source: terraform/bootstrap/bootstrap_ci_apply.tf
     behavior: "DenyProviderAndAccountWrite contains the 18 existing actions and iam:SetSecurityTokenServicePreferences, and the guard's only sts: actions are credential-minting ones."
     verification_step: 1
-    test_selector: tests/checks/iam_tf/test_bootstrap_ci_roles.py
+    test_selector: tests/checks/iam_tf/test_bootstrap_apply_guard_actions.py::test_every_guard_action_is_a_real_iam_action
     red_green_expectation: red before (the HCL still names sts:SetSecurityTokenServicePreferences), green after
   - source: terraform/bootstrap/platform_dev_policies.tf
     behavior: DailyOps' version-list deny is StringNotLike over exactly the Allow's two DuckLake prefixes, with no StringLike.
@@ -315,11 +339,16 @@ test_obligations:
     verification_step: 1
     test_selector: tests/checks/iam_tf/test_agent_session_user.py::test_agent_session_carries_platform_dev_denies
     red_green_expectation: red if only DailyOps changes, green when both change
-  - source: tests/checks/iam_tf/test_bootstrap_ci_roles.py
-    behavior: "The required subset and the sts: rule each reject a swap back to sts:."
+  - source: tests/checks/iam_tf/test_bootstrap_apply_guard_actions.py
+    behavior: "The required subset, the sts: rule and the real-operation rule each reject a swap back to sts:."
     verification_step: 1
-    test_selector: tests/checks/iam_tf/test_bootstrap_ci_roles.py::test_bootstrap_ci_predicates_are_red_on_each_mutation
-    red_green_expectation: the new sts_prefs mutation case is red against the predicate, green on the real tree
+    test_selector: tests/checks/iam_tf/test_bootstrap_apply_guard_actions.py
+    red_green_expectation: the sts_prefs mutation case is red against each predicate, green on the real tree
+  - source: terraform/bootstrap/agent_session_user.tf
+    behavior: No Deny carries s3:prefix under a positive operator and no Allow under a negated one, in the session guard or DailyOps.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_agent_session_guard_s3_prefix.py::test_no_s3_prefix_in_negative_context
+    red_green_expectation: red before (StringLike deny), green after; its red cases fail the predicate
   - source: tests/checks/iam_tf/test_platform_dev_data_lake_read_fence.py
     behavior: The old StringLike deny, a StringNotLike set unequal to the Allow's, and a DuckLake prefix local changed to a state prefix are all rejected.
     verification_step: 1
@@ -331,7 +360,7 @@ constraints:
   - "No change to any statement but the two named; Sid names stay; no grant changes. PlatformDev's S3List (unconditioned s3:ListBucket on the bucket) is out of scope: filed as rec-5240 (2026-11-16)."
   - "No assertion is loosened (Decision 235): the fence test's list-deny assertion is re-authored to a strictly broader deny, approved with this plan (operator, 2026-11-16)."
 context:
-  - "Decision-scout r1 NO_FLAGS (fingerprint in gate_rounds). Decisions triaged: 214 of 214. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2 (T4.15, T4.23; neither touched). Serves: NS.9 3/5. CITE: 257, 256, 223, 238, 235, 244, 126. 235 cl.5 and 244 cl.5: the fence test guards a terraform/ boundary path and is a graduated node file, so its re-authored list-deny assertion needs the operator's recorded word before the build starts (handoff names it). 238 cl.1: VP 6 dev_tfstate, dev_short and dev_none prove state-prefix listings stay denied. 223 cl.2: no -target."
+  - "Decision-scout r2 NO_FLAGS (fingerprint in gate_rounds; r1 NO_FLAGS before the scope gained the two acceptance-named test files). Decisions triaged: 215 of 215. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2 (T4.15, T4.23; neither touched). Serves: NS.9 3/5. CITE: 257, 256, 223, 238, 235, 244, 126. 235 cl.5 and 244 cl.5: the fence test guards a terraform/ boundary path and is a graduated node file, so its re-authored list-deny assertion needs the operator's recorded word before the build starts (handoff names it). 238 cl.1: VP 6 dev_tfstate, dev_short and dev_none prove state-prefix listings stay denied. 223 cl.2: no -target."
   - "SIT (Decision 252 cl.7, RELATED): these files carry no SIT-only gating; SIT's bootstrap root is not yet applied (rec-5027), so the fix reaches SIT with its first apply."
   - "Findings: operator's CloudShell validate-policy read, 2026-11-16 (bootstrap-apply-guard ERROR INVALID_ACTION Statement 4; agent-platform-session-guard SECURITY_WARNING S3_PREFIX_IN_NEGATIVE_CONTEXT Statement 7); filed as rec-5231 and rec-5232 by the PLAN-bootstrap-iam-analyzer-checks build. Statement 4 is DenyProviderAndAccountWrite, statement 7 DenyStateAndConvergenceVersionList (0-based, read from the HCL)."
   - "Fork (IAM, operator's call 2026-11-16): StringNotLike on both documents chosen over an unconditional session-only deny (breaks the mirror, leaves DailyOps' warning) and dropping the Sid (loosens the mirror). Advice: /mnt/project-files/guard-policy-fixes/ADVICE.md (blind Fable consult)."
@@ -339,13 +368,17 @@ context:
   - "Graduated rows: platformdev-state-convergence-denies-intact keeps passing (Sid names and the three state prefixes in DenyStateAndConvergenceVersionRead are unchanged); platform-dev-data-lake-read-fence's node file is re-authored here; its guard_target still names terraform/personal (rec-4047's residual)."
   - "Ordering: PLAN-bootstrap-iam-analyzer-checks PR 2 merges only after VP 6 passes; the build tells that build thread when it does. Main gained #2079 (github_ci_apply_reads.tf, a CI-applied bootstrap change) after this plan was drafted: the build confirms its tf-bootstrap-apply run completed before merging, since VP 6 applies only an exact three-update plan."
   - "Approvals at build start: none for the build session. It runs no secret read, admin credential or terraform command; VP 4-6 are the operator's own CloudShell blocks, and the rec reads in VP 7 use the routine agent_platform profile."
-  - "Approvals given in planning: the operator chose StringNotLike on both documents (decision card, 2026-11-16) and said 'write the plan' on 2026-11-16 after the draft of this plan, naming the fence test's re-authored list-deny assertion (scope row 5), was shown to him; that is the human confirmation Decision 235 cl.1 and cl.5 and Decision 244 cl.5 require. The message ids are in the handoff note, never the repository. No final-diff word is asked for work he has approved (operator, 2026-11-16)."
+  - "Approvals given in planning: the operator chose StringNotLike on both documents (decision card, 2026-11-16) and said 'write the plan' on 2026-11-16 after the draft of this plan, naming the fence test's re-authored list-deny assertion (scope row 5), was shown to him; that is the human confirmation Decision 235 cl.1 and cl.5 and Decision 244 cl.5 require. The message ids are in the handoff note, never the repository. The diff is IAM, so the operator's word on the final diff is still asked once, in the same message as VP 4-5, and the merge waits for it."
+  - "Closure (critique r4 B1): the recs close by the implementation merge's Resolves trailer (git-ops.yaml resolves_trailer TRANSPORT; validate_merge_step requires the branch trailers to equal bundled_recommendations). Their acceptance commands are static HCL tests, so trailer-acceptance-evaluate passes at the merge sha before VP 6 runs; VP 6's fix_if files a forward-fix rec for any failed live line, and PR 2 waits on VP 6 either way. The two new test files are the ones the recs' own acceptance commands name."
+  - "Declined (critique r4 N4): an early operator validate-policy run on the proposed session-guard document would add a CloudShell sitting for a check VP 5 already makes before merge, and a VP 5 finding on the StringNotLike shape already stops the merge and returns the fork to the operator."
   - "V3 resolution: VP 5's operator-run pre-merge plan at the PR head substitutes for pre-merge post-deploy evidence; behavioural acceptance is VP 6, operator-reported in a counts-only PR comment naming the applied sha."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:563103130e6c94361753148b70e62fb6d7203a1a13d5a06916e56193891fe669'}  # pragma: allowlist secret
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 8}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 4}
   - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 4}
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 4}
+  - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:494ddb9a97742b72d00654645d0e52c615ac68e318110c9fbd2242d316b54169'}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -354,9 +387,9 @@ pre_implementation_checklist:
   - Acceptance criteria understood and verifiable
   - "Start condition: this plan merged; no other bootstrap change merged and unapplied."
 execution_steps:
-  - "Tests first (scope rows 4-5), seen red on the unchanged tree; then the three Terraform edits. Post: VP 1-2 pass."
-  - "VP 3; push; PR; CI green."
-  - "Post VP 4 and VP 5 to the operator with the full head sha; record the lines on the PR; merge (squash) at the head VP 5 covered; post VP 6 at the merge sha in the same sitting and record its lines."
+  - "Tests first (scope rows 4-6), seen red on the unchanged tree; then the three Terraform edits. Post: VP 1-2 pass."
+  - "Commit with the trailer block 'Resolves: rec-5231, rec-5232' (git-ops.yaml resolves_trailer PLACEMENT); VP 3; push; PR; CI green."
+  - "Post VP 4 and VP 5 to the operator with the full head sha and ask the operator's word on the final diff (IAM) in the same message; record the lines on the PR; once both are in, run scripts.session.merge_step premerge, then merge (squash) at the head VP 5 covered with the explicit commit_message and expectedHeadSha, then merge_step readback; post VP 6 at the merge sha in the same sitting and record its lines."
   - "VP 7; tell the PLAN-bootstrap-iam-analyzer-checks build thread that its PR 2 may merge."
   - "Execute Verification Plan: run each step; loop until pass; on an unrecoverable V3 failure stop and RCA (Decision 55)."
   - "Report: what was implemented, the validation_result --verify-head verdict, VP 5-6's operator-reported lines and the merge SHA."
