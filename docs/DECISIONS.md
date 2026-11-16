@@ -2,10 +2,10 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
-## Decision 265: The 6-hourly merge_ops pass compacts each ops current table in place before merging, under a declared per-table verb, a proof that aborts the pass on mismatch, and a live-file ceiling (amends Decisions 88, 188, 191 and 192) (Decided)
+## Decision 266: The 6-hourly merge_ops pass compacts each ops current table in place before merging, under a declared per-table verb, a proof that aborts the pass on mismatch, and a live-file ceiling (amends Decisions 88, 188, 191 and 192) (Decided)
 
 ```yaml
-number: 265
+number: 266
 status: Decided
 decided_date: "2026-11-16"
 kind:
@@ -27,7 +27,7 @@ significance:
 
 **Status:** Decided
 **Date:** 2026-11-16
-**Warehouse ID:** dec-265 (per Decision 84 backfill)
+**Warehouse ID:** dec-266 (per Decision 84 backfill)
 
 **Problem:** Every write to an ops current table deletes the superseded row from an existing file, and
 merge_adjacent_files consolidates only delete-free files, so merge_ops never bounds a current table: on 2026-11-15
@@ -73,7 +73,7 @@ control_health and the ControlTableInvariantViolation alarm. The rebuild procedu
 rec-5202 and is unenforced until it lands.
 
 ```yaml reversal-conditions
-decision: 265
+decision: 266
 review_by: 2027-05-31
 on_trigger: "re-decide via /plan"
 conditions:
@@ -4285,7 +4285,7 @@ Roadmap refs: rec-4070, rec-4094, rec-4095, rec-4098.
 
 [Amendment 2026-09-28: live measurement (PLAN-ducklake-partition-layout-remediation, rec-4070; raw responses in tests/fixtures/partition_rewrite_evidence.json). The ALTER ran at 19:45Z on the five history tables; the four with legacy files were re-laid 21:00Z-21:03Z, each on the first attempt with rows_pre == rows_commit and digest_pre == digest_commit (ops_priority_queue_history had none and was skipped). Rows preserved: ops_recommendations_history 5008 (snapshots 15313 -> 15314), ops_decisions_history 6842 (15314 -> 15316), ops_execution_plans_history 1 (15317 -> 15318), ops_smoke_events_history 4 (15318 -> 15319). Live files, pre-ALTER readout to post-rewrite readout: recommendations 104 -> 134, decisions 81 -> 64, priority_queue 0 -> 0, execution_plans 1 -> 1, smoke_events 3 -> 1 (includes writer commits landing between the readouts). catalog_stats before -> after: catalog_metadata_bytes 50397184 -> 50692096, file_column_stats_rows_est 203353 -> 207475 (1.02x), metadata_table_count 195 -> 200. Against the reversal conditions above: the highest history live file count is 134 (limit 365) and file_column_stats is 1.02x the baseline (limit 2x), so neither is met. The rewritten-out files stay catalogued until snapshot expiry and GC, so the post-GC figure is rec-4095's re-measure. The first step-18 invoke halted on two unclassified production-resident smoke-harness tables with nothing mutated; the Decision 191 amendment (PR #1311) classified them before this run resumed.]
 
-> **Update (2026-11-16):** cl.3's "re-lay" means a partition-layout rewrite (cl.1); in-place compaction of a current table under its live spec is Decision 265's rewrite_current_deletes, not a re-lay. The history tables are the true, append-only record: every write appends, no write changes a recorded row, and every current table can always be rebuilt from its history table (Decision 81 cl.8; the procedure is owned by rec-5202).
+> **Update (2026-11-16):** cl.3's "re-lay" means a partition-layout rewrite (cl.1); in-place compaction of a current table under its live spec is Decision 266's rewrite_current_deletes, not a re-lay. The history tables are the true, append-only record: every write appends, no write changes a recorded row, and every current table can always be rebuilt from its history table (Decision 81 cl.8; the procedure is owned by rec-5202).
 
 ---
 
@@ -5237,7 +5237,7 @@ reads `("merge_ops", "reconcile_partitions", "rewrite_partition_layout")` -- whi
 clause's rule that a catalog-wide verb (`gc_ops`) takes no maintenance_policy cell; the two new
 verbs are PER-TABLE-SCOPED, same as `merge_ops`.]
 
-[Amendment 2026-11-16, Decision 265: `VERB_UNIVERSE` now reads `("merge_ops", "reconcile_partitions", "rewrite_partition_layout", "rewrite_current_deletes")`; clause 2's rule that a catalog-wide verb takes no maintenance_policy cell is unchanged.]
+[Amendment 2026-11-16, Decision 266: `VERB_UNIVERSE` now reads `("merge_ops", "reconcile_partitions", "rewrite_partition_layout", "rewrite_current_deletes")`; clause 2's rule that a catalog-wide verb takes no maintenance_policy cell is unchanged.]
 
 ---
 
@@ -5261,7 +5261,7 @@ significance:
 **Date:** 2026-09-14
 **Warehouse ID:** dec-191
 
-> **Amended by Decision 265 (2026-11-16):** cl.3's isolation carve-out gains a fourth site, the rewrite_current_deletes step (a table's rewrite and the step's catalog-level reads); a failed proof there aborts the pass instead.
+> **Amended by Decision 266 (2026-11-16):** cl.3's isolation carve-out gains a fourth site, the rewrite_current_deletes step (a table's rewrite and the step's catalog-level reads); a failed proof there aborts the pass instead.
 
 **Problem:**
 `action_merge_ops` discovered scope with `table_name LIKE 'ops_%_history' OR ... LIKE
@@ -5540,7 +5540,7 @@ significance:
 > wholesale. G1-G3 and the rest of clause 2 (reachability before/after, retention floor, catalog
 > sanity) are unchanged.
 
-> **Amended by Decision 265 (2026-11-16):** a failed rewrite_current_deletes proof aborts the merge_ops pass as a breaker trip, and pt 3's carve-out reaches a fourth site, that step's rewrite and catalog-level reads, through Decision 191 cl.3.
+> **Amended by Decision 266 (2026-11-16):** a failed rewrite_current_deletes proof aborts the merge_ops pass as a breaker trip, and pt 3's carve-out reaches a fourth site, that step's rewrite and catalog-level reads, through Decision 191 cl.3.
 
 **Problem:**
 Decision 81 clause 6's GC circuit breaker aborts a pass that would delete >20% of tracked files or
@@ -11841,7 +11841,7 @@ The free-tier breach proved the cap is real and the access pattern, not the work
 > production-gc-and-storage-stability's VP14/VP16 `aws cloudwatch get-metric-data --profile
 > agent_platform` read-back depends on.
 
-> **Amended by Decision 265 (2026-11-16):** clause 1(iii)'s every-table merge pauses after a failed rewrite_current_deletes proof, until that verb's cells read apply false.
+> **Amended by Decision 266 (2026-11-16):** clause 1(iii)'s every-table merge pauses after a failed rewrite_current_deletes proof, until that verb's cells read apply false.
 
 [Amendment 2026-10-09, Decision 214: invariant (v) -- the ducklake_file_column_stats (table_id, column_id) index is present and valid on every catalog schema, reported by control_health; cl.3's 7-day PITR is now true in Terraform.]
 
