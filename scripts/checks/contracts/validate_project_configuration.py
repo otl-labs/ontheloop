@@ -16,7 +16,11 @@ project/machine rows carry a null variable or one matching ^OTL_[A-Z0-9_]+$; exp
 ^[A-Z][A-Z0-9_]*$; (f) every reader is an existing repository path or an owning item that
 resolves; (g) this_repository shape, status and current_home/home consistency; (h) enforcement is
 "advisory" or a registered check name; (i) every semantics key names a row field or a top-level
-key; (j) ambient_trigger exists and names this contract; (k) a row id fits its applies_when.
+key; (j) ambient_trigger exists and names this contract; (k) a row id fits its applies_when; (l) the
+gates.<persona>.verdict_source row ids name exactly the kind-verdict personas of
+docs/contracts/executor-personas.yaml, one row each, each kind project with a null variable and equal local and
+cloud defaults in {in_session, actions}; and an ontheloop/platform.yaml carrying a gates key while a gates row's
+this_repository.current_home is null is a finding (no reader reads it yet), as is one that does not parse.
 """
 
 from __future__ import annotations
@@ -248,6 +252,49 @@ def _ports_map(root: Path) -> dict[str, set[str]]:
     return {p["id"]: {a["id"] for a in p["adapters"]} for p in data["ports"]}
 
 
+_GATE_ID = re.compile(r"^gates\.([A-Za-z0-9_]+)\.verdict_source$")
+_GATE_VALUES = ("in_session", "actions")
+
+
+def _verdict_personas(root: Path) -> set[str]:
+    data = yaml.safe_load((root / "docs" / "contracts" / "executor-personas.yaml").read_text(encoding="utf-8"))
+    return {p["persona"] for p in data["personas"] if p.get("kind") == "verdict"}
+
+
+def _check_gate_rows(body: ProjectConfigurationBody, root: Path) -> list[str]:
+    rows: dict[str, list[Setting]] = {}
+    for row in body.settings:
+        match = _GATE_ID.match(row.id)
+        if match:
+            rows.setdefault(match.group(1), []).append(row)
+    try:
+        personas = _verdict_personas(root)
+    except (OSError, yaml.YAMLError, KeyError, TypeError) as exc:
+        return [f"docs/contracts/executor-personas.yaml cannot be read for rule (l): {exc}"]
+    out = [f"gates.{p}.verdict_source row is missing for verdict persona {p}" for p in sorted(personas - rows.keys())]
+    out += [f"gates.{p}.verdict_source names {p}, which is not a verdict persona" for p in sorted(rows.keys() - personas)]
+    for persona, group in sorted(rows.items()):
+        for row in group:
+            if row.kind != "project" or row.variable is not None:
+                out.append(f"setting {row.id}: must be kind project with a null variable")
+            local, cloud = row.defaults.local, row.defaults.cloud
+            if local not in _GATE_VALUES or cloud not in _GATE_VALUES:
+                out.append(f"setting {row.id}: defaults must each be in_session or actions")
+            elif local != cloud:
+                out.append(f"setting {row.id}: defaults.local and defaults.cloud must be equal")
+    unread = [r for g in rows.values() for r in g if r.this_repository and r.this_repository.current_home is None]
+    platform = root / "ontheloop" / "platform.yaml"
+    if platform.is_file():
+        try:
+            parsed = yaml.safe_load(platform.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError) as exc:
+            out.append(f"ontheloop/platform.yaml does not parse ({exc}); a gates key there would go unread")
+        else:
+            if unread and isinstance(parsed, dict) and "gates" in parsed:
+                out.append("ontheloop/platform.yaml sets a gate no reader reads (T4.24 c16 moves the reader first)")
+    return out
+
+
 def _rule_findings(body: ProjectConfigurationBody, root: Path) -> list[str]:
     items, decs = _roadmap_criteria(root), _dec_numbers(root)
     return [
@@ -259,6 +306,7 @@ def _rule_findings(body: ProjectConfigurationBody, root: Path) -> list[str]:
         *_check_enforcement(body),
         *_check_semantics(body),
         *_check_trigger(body, root),
+        *_check_gate_rows(body, root),
     ]
 
 

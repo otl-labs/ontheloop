@@ -231,3 +231,12 @@ class TestTelemetryFieldRealizationRegistered:
             "scripts/contracts_schema.py",
         ):
             assert needed in globs
+
+
+class TestProjectConfigurationRuleLInputs:
+    """Rule (l) reads executor-personas.yaml and ontheloop/platform.yaml: a diff touching only either reruns the check."""
+
+    @pytest.mark.parametrize("path", ["docs/contracts/executor-personas.yaml", "ontheloop/platform.yaml"])
+    def test_rule_l_input_matches_a_pre_glob(self, path: str) -> None:
+        globs = next(e for e in _manifest.ENTRIES if e.name == "validate_project_configuration").pre_globs or ()
+        assert any(fnmatch(path, glob) for glob in globs)
