@@ -89,7 +89,7 @@ class PersonaRow(_Strict):
     contract: str
     rendered_prompt: str
     implementation: dict[str, Any]
-    registry_key: str | None = None
+    registry_key: str
 
 
 class PersonaIndex(_Strict):
