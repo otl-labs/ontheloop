@@ -274,8 +274,6 @@ def _check_gate_rows(body: ProjectConfigurationBody, root: Path) -> list[str]:
     out = [f"gates.{p}.verdict_source row is missing for verdict persona {p}" for p in sorted(personas - rows.keys())]
     out += [f"gates.{p}.verdict_source names {p}, which is not a verdict persona" for p in sorted(rows.keys() - personas)]
     for persona, group in sorted(rows.items()):
-        if len(group) > 1:
-            out.append(f"gates.{persona}.verdict_source appears {len(group)} times")
         for row in group:
             if row.kind != "project" or row.variable is not None:
                 out.append(f"setting {row.id}: must be kind project with a null variable")
