@@ -14,6 +14,9 @@ name: terraform-bootstrap-apply
 # Fail closed: preview, when it would ask for approval, checks that the apply job's Environment exists with required
 # reviewers and no admin bypass; apply, right after its checkout and before any credential step, checks that the run
 # holds a recorded approval for its Environment by a listed reviewer (scripts/ci/environment_reviewer_preflight.py).
+# The preview also runs IAM Access Analyzer checks on the plan's changed IAM documents (every document when the
+# never-list or the checking code changes) between the plan and the gate's preview; the gate refuses on its REFUSED
+# verdict and binds each document by digest (Decision 257 Update 2026-11-16). The apply job never calls Access Analyzer.
 # validate_bootstrap_apply fences this file; validate_trusted_plan_environment governs the preview job.
 # Configuration: repository variable TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS; the two roles live in
 # terraform/bootstrap/bootstrap_ci_apply.tf.
@@ -26,6 +29,7 @@ on:
       - '.github/workflows/terraform-bootstrap-apply.yml'
       - 'scripts/ci/terraform_bootstrap_apply*'
       - 'scripts/ci/plan_names_core.py'
+      - 'config/iam-invariants.json'
       - 'scripts/ci/environment_reviewer_preflight.py'
       - 'scripts/ci/terraform_hcl_screen.py'
       - 'scripts/ci/terraform_hcl_screen_policy.py'
@@ -112,6 +116,17 @@ jobs:
           bash "$q" "$RUNNER_TEMP/tf.log" --stdout "$RUNNER_TEMP/plan.json" -- terraform -chdir=terraform/bootstrap show -json plan.bin
           rm -f terraform/bootstrap/plan.bin
 
+      - name: IAM Access Analyzer checks (names and verdicts only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          python3 -I scripts/ci/terraform_bootstrap_apply_analyzer.py --plan-json "$RUNNER_TEMP/plan.json" --invariants config/iam-invariants.json --event-name "$EVENT_NAME" --before "$BEFORE_SHA" --out "$RUNNER_TEMP/analyzer.json" > "$RUNNER_TEMP/analyzer.txt" || rc=$?
+          cat "$RUNNER_TEMP/analyzer.txt" >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/analyzer.txt"
+          [ "${rc:-0}" != 2 ] || exit 1
+
       - name: Preview (names, actions and flags only)
         id: gate
         env:
@@ -119,7 +134,7 @@ jobs:
         run: |
           rc=0
           python3 -I scripts/ci/terraform_bootstrap_apply_gate.py preview --plan-json "$RUNNER_TEMP/plan.json" \
-            --github-output "$GITHUB_OUTPUT" --event-name "$EVENT_NAME" > "$RUNNER_TEMP/preview.md" || rc=$?
+            --analyzer-json "$RUNNER_TEMP/analyzer.json" --github-output "$GITHUB_OUTPUT" --event-name "$EVENT_NAME" > "$RUNNER_TEMP/preview.md" || rc=$?
           cat "$RUNNER_TEMP/preview.md" >> "$GITHUB_STEP_SUMMARY"
           cat "$RUNNER_TEMP/preview.md"
           exit "$rc"
@@ -133,7 +148,7 @@ jobs:
 
       - name: Delete plan files (never persisted or uploaded)
         if: always()
-        run: rm -f terraform/bootstrap/plan.bin "$RUNNER_TEMP/plan.json" terraform/personal/terraform.personal.tfvars
+        run: rm -f terraform/bootstrap/plan.bin "$RUNNER_TEMP/plan.json" "$RUNNER_TEMP"/analyzer.* terraform/personal/terraform.personal.tfvars
 
   apply:
     needs: preview

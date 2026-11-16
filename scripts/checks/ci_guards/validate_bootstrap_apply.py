@@ -16,6 +16,9 @@ loads the real tree.
       name these two Environments
   (g) .github/CODEOWNERS covers the workflow, both scripts and this check
   (h) each job runs the gate's screen step before any credential or terraform step
+  (i) the preview job runs the analyzer script after the read-only plan and before the gate's preview step, which passes
+      --analyzer-json
+  (j) no step of the apply job and no line of terraform_bootstrap_apply.sh names accessanalyzer or access-analyzer
 """
 
 from __future__ import annotations
@@ -43,6 +46,9 @@ OWNED = (
     GATE_SCRIPT,
     "scripts/ci/terraform_bootstrap_apply_classify.py",
     "scripts/ci/terraform_bootstrap_apply_screen.py",
+    "scripts/ci/terraform_bootstrap_apply_analyzer.py",
+    "scripts/ci/terraform_bootstrap_apply_analyzer_select.py",
+    "config/iam-invariants.json",
     "scripts/checks/ci_guards/validate_bootstrap_apply.py",
 )
 MAIN_REF = f"otl-labs/ontheloop/.github/workflows/{WORKFLOW}@refs/heads/main"
@@ -52,6 +58,7 @@ PUSH_PATHS = frozenset(
         f".github/workflows/{WORKFLOW}",
         "scripts/ci/terraform_bootstrap_apply*",
         "scripts/ci/plan_names_core.py",
+        "config/iam-invariants.json",
         "scripts/ci/environment_reviewer_preflight.py",
         "scripts/ci/terraform_hcl_screen.py",
         "scripts/ci/terraform_hcl_screen_policy.py",
@@ -198,6 +205,29 @@ def check_screen_first(wf: dict[str, Any] | None) -> list[str]:
     return out
 
 
+def check_analyzer_step(wf: dict[str, Any] | None) -> list[str]:
+    steps = _steps(_jobs(wf or {}).get("preview", {}))
+
+    def where(match: Any) -> int:
+        return next((i for i, s in enumerate(steps) if match(s)), -1)
+
+    plan = where(lambda s: s.get("id") == "plan")
+    analyzer = where(lambda s: "terraform_bootstrap_apply_analyzer.py" in str(s.get("run", "")))
+    preview = where(lambda s: "terraform_bootstrap_apply_gate.py preview" in str(s.get("run", "")))
+    if 0 <= plan < analyzer < preview and "--analyzer-json" in str(steps[preview].get("run", "")):
+        return []
+    return [
+        "i: the preview job must run the analyzer after the plan and before the gate's preview, which passes --analyzer-json"
+    ]
+
+
+def check_apply_no_analyzer(wf: dict[str, Any] | None, script_text: str) -> list[str]:
+    texts = [str(s.get("run", "")) for s in _steps(_jobs(wf or {}).get("apply", {}))] + [script_text]
+    if any(re.search(r"access-?analyzer", t, re.I) for t in texts):
+        return ["j: the apply job and its shell script must never call Access Analyzer"]
+    return []
+
+
 def run_all(wf: dict[str, Any] | None, others: dict[str, str], hcl: str, codeowners: str, script_text: str) -> list[list[str]]:
     return [
         check_triggers(wf),
@@ -208,6 +238,8 @@ def run_all(wf: dict[str, Any] | None, others: dict[str, str], hcl: str, codeown
         check_hcl(hcl),
         check_codeowners(codeowners),
         check_screen_first(wf),
+        check_analyzer_step(wf),
+        check_apply_no_analyzer(wf, script_text),
     ]
 
 
@@ -255,4 +287,4 @@ def validate_bootstrap_apply(failed: list[str]) -> None:
         failed.append(f"bootstrap-apply: {violation}")
     registry.examined(len(groups), unit="invariants")
     if not violations:
-        print("  PASS: predicates (a)-(h)")
+        print("  PASS: predicates (a)-(j)")
