@@ -6,7 +6,8 @@ name: terraform-apply-sandbox
 # runs scripts/terraform_apply_guard.py (deterministic, fail-closed) over the plan JSON, then a
 # subagent plan review, then applies the SAME plan file the guard inspected (no re-plan -- avoids
 # TOCTOU). Branch protection is now active (main-protection ruleset, Decision 83 / CD.20), but
-# deliberately non-wedging -- the guard plus the subagent review ARE the plan-content gate, and both fail closed.
+# deliberately non-wedging -- the guard plus the subagent review ARE the plan-content gate; the
+# guard fails closed and a push REVISE routes to tf-gated-apply (Decision 265).
 #
 # CD.35 / T2.20 (Wave 1) adds the server-side convergence anchor on top of the above:
 #   - A read-PRECONDITION before apply REFUSES (distinguishable marker CONVERGENCE_RED, record NOT
@@ -107,7 +108,7 @@ jobs:
       # job to fetch the SAME plan (saved, on push; the fresh SANDBOX_FRESH_PLAN_ARTIFACT, on a
       # routed workflow_dispatch) and wait for human approval. The convergence record is NOT
       # touched while routed (anti-masking, T2.22 / Decision 55).
-      routed: ${{ steps.guard.outputs.routed }}
+      routed: ${{ steps.guard.outputs.routed == 'true' || (github.event_name == 'push' && steps.review.outcome == 'success' && steps.review.outputs.outcome == 'revise') }}
       # artifact_sha: the SAME content-addressed sha the plan.bin (saved or fresh) was built
       # against -- gated-apply's artifact_sha step echoes this verbatim instead of re-resolving it
       # (Decision 183; a re-resolution would fail on a dispatch commit with no originating PR).
@@ -358,20 +359,21 @@ jobs:
         # reviewer exactly ONCE at the SAME budget (never a larger one, T2.39 c2); a still-STARVED
         # outcome after the retry blocks apply and is surfaced via steps.review.outputs.outcome so
         # the record-write step below can skip the red write (Decision 55 anti-masking --
-        # starvation is a reviewer-infra failure, not a plan rejection). An explicit REVISE always
-        # fails closed and reds the record, exactly as before.
+        # starvation is a reviewer-infra failure, not a plan rejection). An explicit REVISE on a push
+        # routes to tf-gated-apply (Decision 265, revise-routes); on a dispatch it fails closed and reds the record.
         id: review
         if: success() && steps.guard.outputs.routed != 'true' && steps.persona_gate.outputs.refused != 'true'
         uses: ./.github/actions/subagent-plan-review
         with:
           claude-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           working-directory: ${{ env.WORKDIR }}
+          revise-routes: ${{ github.event_name == 'push' }}
 
       - name: Terraform apply (same plan file the guard inspected)
         id: apply
         # Gated on success() of all prior steps (precondition + guard + subagent review). Applies
         # plan.bin -- the exact artefact the guard parsed via plan.json -- with no intervening
-        # re-plan (no TOCTOU). Skipped when routed=true: the gated-apply job handles the apply
+        # re-plan (no TOCTOU). Runs only on an explicit PROCEED (Decision 265). Skipped when routed=true: the gated-apply job handles the apply
         # after human approval via the tf-gated-apply Environment (Decision 92).
         #
         # Wrapped via scripts/ci/stale_plan_signature.py's --wrap mode (Decision 59 scope
@@ -387,7 +389,7 @@ jobs:
         # instead of a generic failure_category=unknown. FAILS CLOSED exactly as before this
         # wrapper existed -- no same-run fresh-replan fallthrough is added (Decision 77 no-TOCTOU
         # is preserved by design at this push-path site).
-        if: success() && steps.guard.outputs.routed != 'true'
+        if: success() && steps.guard.outputs.routed != 'true' && steps.review.outputs.outcome == 'proceed'
         working-directory: ${{ env.WORKDIR }}
         run: bash "$GITHUB_WORKSPACE/scripts/ci/neon_api_key.sh" run -- python3 "$GITHUB_WORKSPACE/scripts/ci/stale_plan_signature.py" --wrap -- terraform apply -input=false -lock-timeout=120s plan.bin
 
@@ -422,7 +424,7 @@ jobs:
         # `if: always()`; it SKIPS the S3 write when the precondition refused, the guard routed, OR
         # the subagent reviewer was STARVED (T2.39 / rec-2658 -- see below), so none of those cases
         # overwrite/corrupt the record. green iff apply succeeded; red on any genuine non-success
-        # (plan/guard internal error/an explicit REVISE/apply failure). Guard BLOCK (exit 2 ->
+        # (plan/guard internal error/a dispatch REVISE/apply failure; a push REVISE routes, Decision 265). Guard BLOCK (exit 2 ->
         # routed=true) is NOT a failure -- the record is not latched red on this path; the
         # gated-apply job writes the record after the human-approved apply (Decision 55 anti-masking).
         # Decision 154 / rec-2862: pre-apply-failure is the CLOSED-allow-list conjunction, computed
@@ -430,7 +432,7 @@ jobs:
         # critical: if it ran, infrastructure may have been mutated and the record must latch red)
         # AND (b) one of {artifact_sha, tfvars, tf_init, build_ducklake, fetch_plan} reports
         # 'failure'. `plan` and `guard`/`review` are deliberately EXCLUDED -- they must keep
-        # latching red (a plan failure, a fail-closed guard verdict, or an explicit reviewer
+        # latching red (a plan failure, a fail-closed guard verdict, or a fail-closed reviewer
         # REVISE are not infra errors).
         if: always()
         uses: ./.github/actions/write-convergence-record
@@ -439,7 +441,7 @@ jobs:
           apply-outcome: ${{ steps.apply.outcome }}
           refused: ${{ steps.precond.outputs.refused }}
           dispatch-refused: ${{ steps.persona_gate.outputs.refused }}
-          routed: ${{ steps.guard.outputs.routed }}
+          routed: ${{ steps.guard.outputs.routed == 'true' || (github.event_name == 'push' && steps.review.outcome == 'success' && steps.review.outputs.outcome == 'revise') }}
           review-outcome: ${{ steps.review.outputs.outcome }}
           review-step-outcome: ${{ steps.review.outcome }}
           pre-apply-failure: >-
@@ -462,7 +464,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.event_name == 'push' && github.sha || github.event.inputs.acknowledge_red_commit }}
-          ROUTED: ${{ steps.guard.outputs.routed }}
+          ROUTED: ${{ (github.event_name == 'push' && steps.review.outcome == 'success' && steps.review.outputs.outcome == 'revise') && 'revise' || steps.guard.outputs.routed }}
           APPLY_OUTCOME: ${{ steps.apply.outcome }}
           HEAD_SHA: ${{ github.sha }}
         run: python3 -m scripts.ci.apply_wake --job apply-sandbox

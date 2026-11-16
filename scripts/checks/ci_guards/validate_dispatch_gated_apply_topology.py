@@ -8,7 +8,7 @@ stayed latched. Decision 183 makes gated-apply DISPATCH-REACHABLE: reachable fro
 with the fresh plan.bin handed over as a run-scoped SANDBOX_FRESH_PLAN_ARTIFACT (mirrors
 reconcile.yml's RECONCILE_FRESH_PLAN_ARTIFACT hand-off verbatim) instead of being fetched from S3.
 
-Eight invariants, asserted over the PARSED workflow (never a whole-file grep, matching the sibling
+Thirteen invariants, asserted over the PARSED workflow (never a whole-file grep, matching the sibling
 scripts.verify_ci_workflow._check_recovery_workflow_topology shape this guard is modelled on):
 
   (i)   gated-apply's `if` contains the routed signal and NO LONGER contains the push conjunct --
@@ -64,6 +64,12 @@ _FRESH_PLAN_PENDING = "needs.apply-sandbox.outputs.fresh_plan_pending == 'true'"
 _FRESH_PLAN_NOT_PENDING = "needs.apply-sandbox.outputs.fresh_plan_pending != 'true'"
 _ACK_INPUT = "acknowledge_red_commit"
 _ARTIFACT_MARKER = "SANDBOX_FRESH_PLAN_ARTIFACT"
+_REVISE_DISJUNCT = (
+    "github.event_name == 'push' && steps.review.outcome == 'success' && steps.review.outputs.outcome == 'revise'"
+)
+_REVIEW_ACTION = "./.github/actions/subagent-plan-review"
+_RECONCILE_PATH = ".github/workflows/reconcile.yml"
+_ACTION_PATH = ".github/actions/subagent-plan-review/action.yml"
 
 
 def _report(failed: list[str], label: str, ok: bool, detail: str = "") -> None:
@@ -249,10 +255,64 @@ def _check_invariant_viii(failed: list[str], apply_sandbox_job: dict[str, Any]) 
     )
 
 
+def _check_invariants_ix_to_xii(failed: list[str], apply_sandbox: dict[str, Any], steps: list[dict[str, Any]]) -> None:
+    review = _find_step(steps, "review")
+    revise_routes = str((review or {}).get("with", {}).get("revise-routes", ""))
+    _report(
+        failed,
+        "(ix) apply-sandbox's review step passes revise-routes only on a push",
+        revise_routes == "${{ github.event_name == 'push' }}",
+        repr(revise_routes),
+    )
+    apply_if = str((_find_step(steps, "apply") or {}).get("if", ""))
+    _report(
+        failed,
+        "(x) apply-sandbox's apply step runs only on an explicit PROCEED",
+        "steps.review.outputs.outcome == 'proceed'" in apply_if,
+        repr(apply_if),
+    )
+    sites = {
+        "job output routed": str((apply_sandbox.get("outputs") or {}).get("routed", "")),
+        "record_write routed input": str((_find_step(steps, "record_write") or {}).get("with", {}).get("routed", "")),
+        "wake ROUTED env": str(
+            next((s for s in steps if "wake" in str(s.get("name", "")).lower()), {}).get("env", {}).get("ROUTED", "")
+        ),
+    }
+    bad = [name for name, text in sites.items() if _REVISE_DISJUNCT not in text or "steps.guard.outputs.routed" not in text]
+    _report(failed, "(xi) the routed signal carries the push REVISE disjunct at all three sites", not bad, f"{bad}")
+    handoff = [str((_find_step(steps, "upload_fresh_plan_sha256") or {}).get("if", ""))]
+    handoff += [str(s.get("if", "")) for s in steps if _ARTIFACT_MARKER in str(s.get("name", ""))]
+    _report(
+        failed,
+        "(xii) the dispatch fresh-plan hand-off steps do not depend on the review",
+        not any("steps.review" in text for text in handoff),
+        repr(handoff),
+    )
+
+
+def _check_invariant_xiii(failed: list[str]) -> None:
+    label = "(xiii) reconcile.yml passes no revise-routes and the action defaults it to false"
+    try:
+        reconcile = _load(str(_common.ROOT / _RECONCILE_PATH))
+        action = _load(str(_common.ROOT / _ACTION_PATH))
+    except Exception as exc:
+        _report(failed, label, False, f"unreadable: {exc}")
+        return
+    uses = [
+        step
+        for job in (reconcile.get("jobs") or {}).values()
+        for step in _steps(job)
+        if str(step.get("uses", "")) == _REVIEW_ACTION
+    ]
+    passing = [step.get("id") for step in uses if "revise-routes" in (step.get("with") or {})]
+    default = ((action.get("inputs") or {}).get("revise-routes") or {}).get("default")
+    _report(failed, label, bool(uses) and not passing and default == "false", f"passing={passing}, default={default!r}")
+
+
 @registry.register("validate_dispatch_gated_apply_topology", owner="platform")
 def validate_dispatch_gated_apply_topology(failed: list[str]) -> None:
     """Assert terraform-apply-sandbox.yml's dispatch-reachable gated-apply topology (Decision 183;
-    rec-2918 part (c)). See module docstring for the eight invariants."""
+    rec-2918 part (c)). See module docstring for the thirteen invariants."""
     print("\n=== dispatch-gated-apply topology guard ===")
     try:
         data = _load(str(_common.ROOT / _WORKFLOW_PATH))
@@ -283,5 +343,7 @@ def validate_dispatch_gated_apply_topology(failed: list[str]) -> None:
     _check_invariant_vi(failed, gated_steps)
     _check_invariant_vii(failed, apply_sandbox_steps, gated_steps)
     _check_invariant_viii(failed, apply_sandbox)
+    _check_invariants_ix_to_xii(failed, apply_sandbox, apply_sandbox_steps)
+    _check_invariant_xiii(failed)
 
-    registry.examined(8, unit="topology_invariants")
+    registry.examined(13, unit="topology_invariants")

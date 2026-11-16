@@ -2,6 +2,63 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 265: A sandbox plan-reviewer REVISE on a push waits for the tf-gated-apply approval instead of latching the convergence record red (amends Decisions 154 and 183) (Decided)
+
+```yaml
+number: 265
+status: Decided
+decided_date: "2026-11-16"
+kind:
+  value: direction
+  justification: >-
+    Clause 1 moves a human gate: a REVISE on a push to main now waits for the operator's tf-gated-apply approval
+    instead of failing red until a heal dispatch runs the reviewer again; undone, the red latch returns.
+amends: [154, 183]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable and reversal-relevant: it widens the tf-gated-apply Environment's reach and re-decides what a reviewer
+    REVISE does to the sole hard block, across two prior entries. Not an environment-taxonomy.yaml governance note:
+    Decisions 158 and 183 each recorded an Environment-reach change as a numbered Decision and rejected that note
+    for it. Not amendment_forms: two prior entries are amended.
+```
+
+**Status:** Decided
+**Date:** 2026-11-16
+**Warehouse ID:** dec-265 (per Decision 84 backfill)
+
+**Problem:** terraform-apply-sandbox run 43871111764 failed when the subagent plan reviewer REVISEd an intentional, approved IAM Sid removal (TfstateGithubRead, PR #2051). Decision 154 point 4 latches a REVISE red, and the only recovery is a heal dispatch that runs the reviewer again; the operator's dispatch 43874628757 got PROCEED on the same Terraform change. The verdict is sampled, so a red latch on it halts the sandbox pipeline on noise, and clearing it by sampling again is verdict shopping. Decision 92 point 5 already says the review advises and never locks, and Decision 126 point 5 took the reviewer's STARVED class out of the red-latch path (rec-5205).
+
+**Intent:** A sandbox REVISE on a push becomes a question for the operator, answered in the tf-gated-apply Environment: never a silent apply, never a red latch.
+
+**Decision:**
+1. **A push REVISE routes (amends Decision 154 point 4).** On a push to main, when the deterministic guard passes and the subagent plan reviewer returns REVISE, apply-sandbox routes the saved plan.bin to the gated-apply job exactly as a guard exit 2 does: the job succeeds, the convergence record keeps its status and gains the pending_gated marker, and gated-apply applies the same plan.bin only after the operator approves the tf-gated-apply Environment. The REVISE reason is in the apply-sandbox step summary, and the PR wake comment points to it.
+2. **Only a PROCEED auto-applies.** The sandbox apply step runs only on an explicit PROCEED verdict, not merely on the review step's success.
+3. **What does not change.** A STARVED verdict still blocks without writing the record (Decision 126 point 5). On the acknowledge-and-retry dispatch and at both of reconcile.yml's review sites a REVISE still fails closed and latches red: routing there needs the fresh-plan artifact hand-offs, which publish plan.bin (rec-4230), and at Reconcile a fourth terminal route (Decision 158); rec-5213 owns them. No REVISE is retried. An Environment rejection or expiry is not a veto: the record keeps its status with pending_gated set until stale_gated_approval escalates, and a later push's saved plan still carries the change, so a PROCEED on that push applies it. The operator vetoes a REVISEd change by reverting it in a PR.
+4. **What widens (amends Decision 183 point 3).** The tf-gated-apply Environment's reach grows by one more cell, a guard-PASS saved plan the reviewer REVISEd on a push, adjudicated by the operator at plan time. No second approval mechanism is introduced.
+5. **Decision 235 clause 1.** This is an operator-confirmed change to a gate's outcome: the Environment approval replaces the red latch for that cell, and no test or assertion is loosened.
+6. **Coverage (Decision 181 cl.2).** Clauses 1-3: review.sh's opt-in revise-routes input and its tests; validate_dispatch_gated_apply_topology pins the PROCEED conjunct, the push-only routed disjunct and that reconcile.yml passes no revise-routes. Residual: a REVISE-routed episode files no ci-rca rec, since the run succeeds; the warning annotation and the stale_gated_approval escalation are its signals. Nothing stops a later PROCEED from applying a rejected change (clause 3).
+
+```yaml reversal-conditions
+decision: 265
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: rubber-stamp
+    kind: manual
+    description: "Most of the first ten REVISE-routed runs are approved: decide whether the reviewer still discriminates, or whether the Environment that also guards guard blocks is being rubber-stamped."
+  - id: missed-defect
+    kind: manual
+    description: "An approved REVISE-routed apply breaks the sandbox: restore the red latch for that change class, or make the approver's reading of the REVISE reason a recorded step."
+  - id: rejected-reapplied
+    kind: manual
+    description: "A change the operator rejected in the Environment is applied on a later PROCEED before any revert: make a rejection hold the next push's apply for that change, or restore the red latch."
+```
+
+**Related:** Decisions 55, 77, 92, 126, 154, 158, 162, 181, 183, 190, 226, 235; rec-5205, rec-5213, rec-4230, rec-2816.
+
+---
+
 ## Decision 264: An agent merge is refused unless every required check, and every persona check a verdict_source row selects, concluded success on the merge-time head -- fail closed, no agent override, an operator merge stays the release valve (amends Decision 83) (Decided)
 
 ```yaml
@@ -5876,6 +5933,8 @@ letting the one human approval clear the whole incident.
 
 > **Update (2026-10-17):** Point 4's split-apply no longer arises for PlatformDev, PlatformAdmin or their inline policies, which Decision 223 places in terraform/bootstrap; the same split still applies to the remaining terraform/personal actions the CI apply role cannot execute by design (including trust on agent-platform-* roles other than branch and pr, OIDC provider lifecycle and SNS Unsubscribe), which rec-3583 owns flagging. Reversal (b)'s terraform/CLAUDE.md recovery row was amended in the same change.
 
+> **Update (2026-11-16, PLAN-sandbox-reviewer-revise-route):** Decision 265 widens point 3's reach by one more cell, a guard-PASS saved plan the subagent reviewer REVISEd on a push, adjudicated by the operator at plan time; point 2's dispatch hand-off is unchanged.
+
 ---
 
 
@@ -7747,6 +7806,8 @@ The sandbox convergence record's red status means "an apply ran and left infrast
 > **Update (2026-10-17):** rec-4372 showed point 1's push-path canary premise was wrong: its window has no upper bound, running from the PR's last speculative plan to the merge (about 30 minutes there), so the PR-time reference goes stale when main changes a packaged file in between (#1519's zips predated #1520's edit to `src/common/ducklake_handler_errors.py`). The speculative-plan job now records each artifact's inputs at `lambda-packages/<PR head sha>/inputs.json`. When every difference at merge traces to an input that moved on main (`DUCKLAKE_ZIP_INPUTS_MOVED`), the push run applies the saved plan.bin unchanged, writes the rebuilt zips to the fixed key and `lambda-packages/<merge sha>/`, and leaves a `superseded-by.json` pointer beside the untouched PR-time zips. Point 1's fetch follows that pointer one hop: gated-apply and Reconcile copy bytes fixed at push time, before any approval wait, whose identity rests on the input attribution rather than a PR-time byte match. Any other difference, or a missing reference or record, still fails closed as `DUCKLAKE_ZIP_MISMATCH`; the check is now a same-inputs canary, and a pre-merge double-build canary stays with rec-4194.
 
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
+> **Update (2026-11-16, PLAN-sandbox-reviewer-revise-route):** Decision 265 narrows point 4 for a reviewer REVISE on a push to main: it routes the saved plan.bin to tf-gated-apply and leaves the record's status unchanged with a pending_gated marker instead of latching red. A REVISE on the acknowledge-and-retry dispatch or in reconcile.yml still latches red.
 
 ## Decision 153: Fast-tier budget assertion waives a full-suite-forced --pre run (warn, not hard-fail) bounded by a forced-run ceiling derived from the pr-validate job timeout (amends Decision 73 enforcement + Decision 135) (Decided)
 
