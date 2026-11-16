@@ -30,11 +30,12 @@ scope:
       current-side table is scoped (the telemetry catalog reads nothing). Order: smoke_harness tables
       first (the in-pass canary), then the rest by delete-file count, largest first. A scoped history-side table is a recorded skip. A table with
       an active scheme and legacy_scheme_files > 0 is a collected refusal. Per table: re-prove its latest
-      rewrite_current_deletes commit (token "rewrite_current_deletes:<table>:<uuid>", the Decision 204 verb's
-      set_commit_message precedent) at its immediate predecessor snapshot (snapshot id commit - 1, which must exist)
-      vs the commit, only when that commit is younger than REPROOF_HORIZON_H (12: two pass intervals, so an older commit
-      has had its own pass and the next to prove it, and a quiet table does not re-read its pre-compaction state every
-      pass); an expired predecessor is a recorded skip and the table's rewrite still proceeds; a re-proof that errors
+      rewrite_current_deletes commit (token "rewrite_current_deletes:<table>:<uuid>", found by an exact starts_with
+      prefix match, never LIKE, since _ in a table name is a LIKE wildcard; the Decision 204 verb's set_commit_message
+      precedent) at its immediate predecessor snapshot (snapshot id commit - 1) vs the commit, on every pass while that
+      predecessor exists (no age horizon: approved clause 2 and the Decision 88 pause depend on it); reproof is none
+      when the table has no prior commit and expired when its predecessor is gone, the latter a recorded skip after
+      which the table's rewrite still proceeds; a re-proof that errors
       (not a mismatch) isolates the table as a failure and skips its rewrite, so an unproven commit is never
       superseded; a re-proof is not started once past the budget (the table is deferred); then, unless elapsed time passes COMPACTION_TIME_BUDGET_S (450, half the 900 s function
       timeout, pinned by a test against terraform/personal/ducklake_maintenance.tf; checked before every OCC retry
@@ -126,7 +127,9 @@ scope:
       split, breaker mapping, the `compaction` body key, metrics) classified non-destructive with the reason (it
       supersedes files the way merge does, every row unchanged and old files reachable until gc_ops, unlike
       rewrite_partition_layout's DELETE plus INSERT); the control_health ceiling
-      sentence; the audit_invariants line naming maintenance_policy's production consumers; a note that
+      sentence; that an unclassified table, although persistent, takes the catalog-level failure path (recorded, every
+      table merges, the pass fails) until it is classified; the audit_invariants line naming maintenance_policy's
+      production consumers; a note that
       MergeOpsFilesBeforeTotal and per_table files_before are now counted after compaction, not at pass start (a step
       change at the deploy); one amendment_log row.
       Relief first (NEAR_CAP).
@@ -158,7 +161,8 @@ scope:
       merge leaves at most 8 files and no delete file, with the token lookup, predecessor resolution and AT VERSION
       proof equal; both update-race directions conflict and the writer's error classifies as an OCC collision; a
       concurrent new-key insert commits without conflict and the predecessor proof still holds; a second compaction
-      of the compacted, delete-free table processes 0 files and commits no snapshot. With
+      of the compacted, delete-free table processes 0 files and commits no snapshot. The predecessor, race and
+      second-compaction nodes run on both the file catalog and the Postgres stage (ducklake_pg_stage). With
       CURRENT_COMPACTION_EVIDENCE_OUT set it writes its measured counts (files and delete files before and after,
       files_processed under the default and the explicit threshold and on the second compaction, row counts and digest
       equality) to that path.
@@ -219,8 +223,8 @@ acceptance_criteria:
     table (no file processed, no snapshot) is clean; a proof mismatch, or a rewrite that processed files but whose
     token resolves no snapshot, aborts the pass before any merge as a breaker trip.
   - >-
-    Each pass re-proves a table's latest rewrite_current_deletes commit before rewriting it again; the time budget
-    defers unstarted tables and stops OCC retries.
+    Each pass re-proves a table's latest rewrite_current_deletes commit, whatever its age, while its predecessor
+    snapshot exists, before rewriting it again; the time budget defers unstarted tables and stops OCC retries.
   - The committed engine evidence shows at most 8 files, no delete file and equal rows and digest after compaction.
   - >-
     control_health fails a current table whose live file count exceeds CURRENT_LIVE_FILE_CEILING, reports every one
@@ -267,7 +271,7 @@ verification_plan:
       tests/common/test_ducklake_current_compaction.py::test_largest_delete_count_first_after_canary
       tests/common/test_ducklake_current_compaction.py::test_reproof_not_started_past_budget
       tests/common/test_ducklake_current_compaction.py::test_reproof_error_skips_rewrite
-      tests/common/test_ducklake_current_compaction.py::test_reproof_skipped_for_commit_older_than_horizon
+      tests/common/test_ducklake_current_compaction.py::test_commit_older_than_twelve_hours_is_still_reproved
     expected: Twenty-five passed.
     fix_if: A failure names the branch; fix the module, never the assertion.
     hermetic: true
@@ -326,10 +330,11 @@ verification_plan:
   - step: 6
     phase: pre-deploy
     action: >-
-      Real-engine conformance on the pinned engine (needs duckdb and a network INSTALL of the ducklake extension). When
-      DUCKLAKE_TEST_PG_ADMIN_DSN names a local Postgres 16, the predecessor and race nodes also run on the
-      tests/fixtures/ducklake_pg_stage.py catalog (production's Postgres OCC and snapshot-id path); the evidence fixture
-      records which backends ran.
+      Real-engine conformance on the pinned engine (needs duckdb, a network INSTALL of the ducklake extension, and a
+      local Postgres 16 named by DUCKLAKE_TEST_PG_ADMIN_DSN, the tests/fixtures/ducklake_pg_stage.py precedent; a skip
+      is a FAIL, rec-4071). The predecessor, race and second-compaction nodes run on both the local file catalog and
+      the Postgres stage (production's Postgres OCC and snapshot-id path); the evidence fixture records both
+      backends.
     command: >-
       CURRENT_COMPACTION_EVIDENCE_OUT=tests/fixtures/current_compaction_engine_evidence.json bin/venv-python -m pytest -q
       -m integration tests/common/test_ducklake_current_compaction_engine.py -p no:randomly -rs
@@ -633,7 +638,7 @@ context:
     rules to proceed.
   - >-
     Not bundled: rec-2216, rec-2218, rec-2220, rec-5181, rec-5182; T2.18 is a cross-reference only (its intent names
-    the optional rewrite). rec-5179's stale_target verdict is only its to-be-created file. Ops MergeOpsPassFailed is unalarmed (rec-5185), so a refusal pages through the ceiling.
+    the optional rewrite; for c8's G4 co-tuning, about 2,000 superseded files per 30 days against 20,000 per pass). rec-5179's stale_target verdict is only its to-be-created file. Ops MergeOpsPassFailed is unalarmed (rec-5185), so a refusal pages through the ceiling.
   - >-
     Size: handler.py 484/500 SLOC, the contract 497/500 lines (NEAR_CAP; re-measure at build). PLAN-sit-restore-spike
     (unbuilt) scopes the same handler, manifest and contract; the second to build rebases.
@@ -655,6 +660,7 @@ gate_rounds:
   - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 2, nits: 7}
   - {gate: plan-critique, round: 7, verdict: REVISE, blocking: 1, nits: 6}
   - {gate: plan-critique, round: 8, verdict: PROCEED, blocking: 0, nits: 12}
+  - {gate: plan-critique, round: 9, verdict: REVISE, blocking: 1, nits: 6}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -704,7 +710,9 @@ execution_steps:
     If SIT stands before this build (Decision 252 cl.6: PROD becomes promote-only), the merge deploys to SIT and PROD
     receives it by promotion; steps 11-16 then read the first PROD pass after promotion.
   - >-
-    Post-deploy sequence: step 11; ask the operator for the first pass, AWS_MAX_ATTEMPTS=1 aws lambda invoke
+    Post-deploy sequence: step 11; ask the operator for the first pass in a quiet write window (on the first pass a
+    writer MERGE into a table being rewritten conflicts the whole rewrite and each OCC retry repeats it; a deferral
+    after OCC retries is expected, not a defect), AWS_MAX_ATTEMPTS=1 aws lambda invoke
     --function-name agent-platform-ducklake-maintenance --region eu-west-2 --cli-read-timeout 960
     --cli-binary-format raw-in-base64-out --payload
     '{"action":"merge_ops","data_path":"<prod data path>","meta_schema":"ducklake_ops"}' out.json (the default 60 s
