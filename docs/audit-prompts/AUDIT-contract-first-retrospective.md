@@ -192,7 +192,7 @@ Candidates (facts are in the G rows named; re-derive before relying on any of th
   calls.
 - Trap 16, the earlier audit. `audits/contract-first-governance-33c8667.yaml` and `.md` (audited
   2026-08-07) are the baseline. Their numbers describe the tree at that date. They are evidence
-  about then, not about now.
+  about then, not about now. Its surfaces are numbered S1 to S5 and are not this prompt's six.
 - Trap 17, the 2026-06-15 boundary. At that date several record types did not exist in their
   present form: contracts were mostly Markdown files outside Script A's pattern, the decisions
   index did not exist, and checks were not yet split into modules under `scripts/checks/`. Script
@@ -448,6 +448,18 @@ the four with the tags `routing`, `entry-size`, `contract-enforcement` and `read
 Test in this order. `core-gap`: for at least one core purpose, no row carrying that purpose tag
 is `holding` or `holding-with-side-effect`. `all-holding`: no row is `eroded` or
 `retired-without-replacement`. `core-holding`: anything else.
+Then the earlier audit's own findings. For each of CFG-01 to CFG-11 (G24), decide whether the
+defect it described still holds at the audited commit, and fill `baseline_findings` (Section 14).
+Test the defect, not the paperwork: read the finding's `current_behavior` and `acceptance` in the
+earlier audit, then look for that behavior at the audited commit, with at most 3 repository reads
+per row beyond what you already hold. `closed`: the behavior no longer occurs (cite what you
+observed). `partly-closed`: part of it still occurs (say which part). `open`: it occurs as
+described. `superseded`: a later Decision removed the premise, so the finding no longer applies as
+written (cite the Decision and clause). `cannot-determine`: say what would settle it. A row is
+not a finding. IF a defect it names is one you file, list that finding's id in the row's
+`findings`; IF the row is `open` or `partly-closed` and you file nothing, `note` says why (an
+owner has it, it is not a defect now, or it is out of scope). These rows do not change this
+question's verdict; `prose` gives the count per disposition.
 Verdict: `all-holding | core-holding | core-gap`.
 
 **Q5 Sustainability.** Fill `growth_ledger`: for each record type its stock, its flow per period,
@@ -800,7 +812,7 @@ way.
 **G1 The intervention's own record.**
 - Earlier audit: `audits/contract-first-governance-33c8667.yaml` and `.md` (audited 2026-08-07).
   Its blocks `migration_sequence` (8 steps), `end_state.forcing_functions` (3 mechanisms) and
-  `findings` (CFG-01 to CFG-11) state what was proposed.
+  `findings` (CFG-01 to CFG-11; G24) state what was proposed.
 - Roadmap item T2.56 "Normative / contract / ADR layering": `status: complete`,
   `completed_at: '2026-09-12'`, criteria c1 and c2 `met`.
 - Decision 167 (2026-08-07): clause 1 envelope, clause 2 required significance claim, clause 3
@@ -1182,6 +1194,31 @@ raised it.
 changed any file under `docs/contracts/`, and how many of those also changed `docs/DECISIONS.md`:
 P0 81 and 27; P1 59 and 27; P2 237 and 90 (to `197c800c`).
 
+**G24 The earlier audit's findings** (`audits/contract-first-governance-33c8667.yaml`; severity
+and subject are that audit's, as of 2026-08-07). Each entry starts at the line given and has
+`current_behavior`, `ideal_behavior`, `proposed_change` and `acceptance` fields.
+
+| ID | Line | Severity then | Subject, in that audit's words | Commits naming the id |
+|---|---|---|---|---|
+| CFG-01 | 716 | high | "Size governance is stock-only: no built lever reduces the first-binding ceiling's quantity faster than inflow" | 2 |
+| CFG-02 | 740 | medium | "The interventions self-consume their ration" (the growth-governance entries' share of the live file) | 0 |
+| CFG-03 | 764 | high | "The significance bar -- the only front-door control -- is self-certified: no evaluator, no recording obligation" | 2 |
+| CFG-04 | 788 | medium | "The ritual taxonomy has no mechanism class, so every mechanism contract is free-form" | 1 |
+| CFG-05 | 812 | medium | "Parallel and contradictory assertion across the free-form population is undetectable and not well-posed: no contract declares its subject" | 3 |
+| CFG-06 | 836 | medium | "Typed-projection field extractors encode grammars that measurably diverge from the prose conventions they parse" | 3 |
+| CFG-07 | 860 | medium | "The routing rule is silent on the standing-commitment class and on the within-entry split" | 2 |
+| CFG-08 | 884 | low | "The change-record surface lacks a stated content rule, and the PR template's conventions comment omits the audit prefix" | 2 |
+| CFG-09 | 908 | high | "The migration destination for mechanism content is governance-weaker than the source on most compared properties" | 1 |
+| CFG-10 | 932 | medium | "The citation-stranded superseded class (Decision 37 shape) is unprocessable by every built mechanism" | 1 |
+| CFG-11 | 956 | medium | "The two .md contracts -- one the sole SoT for the apply model -- sit outside every contract-population gate" | 2 |
+
+The last column counts first-parent commits on main whose message contains the id, at `197c800c`:
+`git log --first-parent --format='%h %cs %s' --grep='CFG-03' <sha>` lists them for one id, and
+`--grep='CFG-[0-9]'` prints 13 commits for all ids together. The subjects of `b0cab73c` and
+`70410a42` say they close CFG-06 and CFG-08. What a commit, plan or Decision says it closed tells
+you where to look; it is not a disposition, and a count of 0 says nothing about whether the
+behavior remains.
+
 ## 11. EMPIRICAL PASS
 
 Tag every finding `evidence_kind`: `observed` when it rests on a sample row from E1-E5, a telemetry
@@ -1325,7 +1362,8 @@ commit short sha.
 - Phase 2: run Scripts A, B and C; fill `metrics` (DD-A); record mismatches with Section 10.
 - Phase 3: trace the planning read path (DD-E) and the contract trajectory (DD-F).
 - Phase 4: empirical pass E1-E5.
-- Phase 5: fill `intervention_ledger`, `growth_ledger` and `condition_reviews`.
+- Phase 5: fill `intervention_ledger`, `baseline_findings`, `growth_ledger` and
+  `condition_reviews`.
 - Phase 6: dedup every prospective finding (Section 13); assign severity (Section 15); then
   adjudicate candidates C1-C20 (Section 2).
 - Phase 7: rate the rubric (Section 8).
@@ -1351,6 +1389,7 @@ Record `dedup_search_terms` and `dedup_hit_count` on the finding. An owner is a 
 open recommendation, a roadmap item, criterion or `candidate_decisions[]` entry, or a Decision
 clause) whose subject is this defect,
 whether or not its remedy would close it; for a Decision clause the remedy is the rule it states.
+A finding of the earlier audit (CFG-nn) is not an owner; whatever took it up is.
 `recs_related` always returns its nearest matches, so record the raw returned total in
 `roadmap_crossref.note` and count only owners in `dedup_hit_count`. An owner means
 `planned-insufficient` (its remedy would not close the defect), `planned-unbuilt` (it would, and
@@ -1462,6 +1501,10 @@ audit:
        state: holding|holding-with-side-effect|eroded|retired-with-replacement|retired-without-replacement|never-exercised,
        exercised_evidence: "file:line|commit|sample id|G row", side_effect: "", basis: [],
        confidence: CONFIRMED|HYPOTHESIS}
+  baseline_findings:              # exactly 11 rows, CFG-01..CFG-11 (Q4, G24)
+    - {id: CFG-01, disposition: closed|partly-closed|open|superseded|cannot-determine,
+       evidence: "file:line|commit|sample id|G row", closed_by: "", findings: [], note: "",
+       confidence: CONFIRMED|HYPOTHESIS}
   growth_ledger:                  # exactly 8 rows, in the order of the record_type enum
     - {record_type: decision_entries|decision_index|contracts|ambient_instruction_layer|plans|roadmap|open_recommendations|checks_and_tests,
        unit: "", stock_now: 0, flow_p0_per_day: null, flow_p1_per_day: null, flow_p2_per_day: null,
@@ -1572,15 +1615,17 @@ Invariants (state them as checked in the report's Intake section):
 - COUNTING INVARIANT: `findings[]` is the SOLE enumerated list of defects. `total_findings =
   len(findings) = novel_count + planned_insufficient_count + planned_unbuilt_count`. Candidates that
   are covered, false or not defects live in `rejected_candidates`, NOT in findings. `metrics`,
-  `question_answers`, `candidate_adjudication`, `intervention_ledger`, `growth_ledger`,
+  `question_answers`, `candidate_adjudication`, `intervention_ledger`, `baseline_findings`,
+  `growth_ledger`,
   `content_partition`, `samples`, `condition_reviews`, `improvement_sequence` and `rubric_ratings`
   are systems of record referenced FROM findings by id, never re-counted. `top_improvements` and
-  every `basis`, `closes`, `top_gaps`, `depends_on` and `candidate_adjudication.findings` entry MUST
-  be finding ids.
+  every `basis`, `closes`, `top_gaps`, `depends_on`, `candidate_adjudication.findings` and
+  `baseline_findings.findings` entry MUST be finding ids.
 - COVERAGE: `candidate_adjudication` has exactly 20 rows. A row with outcome `finding` names at
   least one finding id. A row with outcome `not-a-defect`, `false` or `covered` has exactly one
   `rejected_candidates` row with the same `candidate`. A row with outcome `undetermined` has
-  neither. `intervention_ledger` has 21 rows, `growth_ledger` 8, `condition_reviews` 8,
+  neither. `intervention_ledger` has 21 rows, `baseline_findings` 11, `growth_ledger` 8,
+  `condition_reviews` 8,
   `external_checklist` 13.
 - `control_property_match` is REQUIRED whenever a compensating control is the reason for dismissal:
   name the property the control exercises, cite where it operates (mechanism or file:line), and
@@ -1591,7 +1636,7 @@ Invariants (state them as checked in the report's Intake section):
 Deliverable 2, `audits/contract-first-retrospective-<sha>.md`: the executive layer a human reads
 first. At most 2,000 words by `wc -w` on the whole file. Sections, in order: Intake (audited
 commit, set `meta` flags and their consequences, invariants checked); Verdicts (a table of the Q1-Q7
-and Q9 verdicts, one line of basis each); What held and what did not (from the ledger); Cost and
+and Q9 verdicts, one line of basis each); What held and what did not (from the ledger and the earlier findings' dispositions); Cost and
 growth (the pinned metrics, before and after); Reviews falling due (Q8's eight condition verdicts);
 Improvement path (Q9); Not asked (Q10); What this audit did not file (rejected candidates in one
 paragraph). Plain ASCII, no emojis.
