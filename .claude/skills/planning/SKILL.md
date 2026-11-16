@@ -176,7 +176,7 @@ author a local init/validate/plan VP command. See `terraform/CLAUDE.md`, Decisio
 **VP Design Rationale:**
 When writing Verification Plan steps, ask: "If this feature had a subtle bug (wrong column name, missing permission, off-by-one filter), would this step catch it?" If no, the step is too shallow.
 
-**Assertion carrier (schema_version 5):** never quote a backtick literal inside a hermetic step's
+**Assertion carrier (schema_version 5+):** never quote a backtick literal inside a hermetic step's
 `expected` free-prose field -- validate_vp_replay's replay-time check reads it, but nothing at
 authoring time confirms the literal is emittable by the step's own `command`. See
 `docs/contracts/vp-red-before.yaml#carrier_rule` for the full walk (MANDATORY read-trigger --
@@ -246,7 +246,7 @@ numbering-race note. Do not re-author it here. Ratification is a first-class lan
 
 ## Decision Scout Gate (Workflow Step 6, project alignment recon)
 
-This gate fires BEFORE the alignment sign-off presentation to the human. Its job is to surface any active decisions the proposed approach must cite, contradict, or pivot around -- without paying the cost of loading the full DECISIONS.md (large -- near its Decision 134 size ceiling) into the planning agent.
+This gate fires BEFORE the alignment sign-off. It surfaces the active decisions the approach must cite, contradict or pivot around, without loading DECISIONS.md into the planning agent.
 
 **Example prompt body:**
 > "You are running the decision-scout gate in a fresh context window. Invoke the `decision-scout` skill via the Skill tool. The skill needs the following inputs (use them in your scout analysis):
@@ -256,7 +256,7 @@ This gate fires BEFORE the alignment sign-off presentation to the human. Its job
 > - Verification Tier: [V1 | V2 | V3]
 > - Explicitly cited decisions: [list of IDs the human mentioned, or 'none']
 >
-> Return the skill's `## Decision Scout Report` output verbatim, including the final `Verdict:` line. Do not edit any files."
+> Return the skill's `## Decision Scout Report` output verbatim, including the final `Verdict:` line, then run `bin/venv-python -m scripts.roadmap.plan_fingerprint --plan [draft] --with-cites dec:N,...` (one dec:N per CITE id) and print that command and its output. Do not edit any files."
 
 **Subagent-dispatch mode:** if you are a subagent (`SUBAGENT CONTEXT` header, or no `Agent` tool, or
 a nesting error), do not dispatch inline -- gate-request (status `GATE_REQUEST`, `gate:
@@ -267,18 +267,18 @@ subagent-dispatch division of labor; schema: `docs/contracts/overseer-dispatch.y
 - `subagent_type: "general-purpose"` (needs `Skill`, `Read` access)
 - `description: "Decision scout gate"`
 - `prompt:` self-contained per the Example body above -- Intent: Step 3; approach: Steps 3-5;
-  scope: Step 4; tier: Step 5; cited decisions: the human.
+  scope: Step 4; tier: Step 5; cited decisions: the human; draft: Step 6.
 
 **Verdict handling** (add a `gate_rounds` row per scout round):
 - **NO_FLAGS** -> Proceed to the alignment sign-off. Include the scout's CITE list in the presentation as "Decisions this plan must reference." Record in the plan template's `context:` list: "Decision-scout verdict + CITE list (verbatim decision ids)".
-- **FLAGS_FOUND** -> Surface each WARN/NOTE flag to the human in the sign-off presentation under a "Decision Flags" section. Human chooses per-flag: pivot, defer with note, or accept-as-is. If the human pivots on any flag in a way that changes the proposed approach materially, re-dispatch this gate against the revised approach before re-presenting.
-- **BLOCK** -> STOP. Do NOT present the original approach for confirmation. Surface the BLOCK contradiction and propose pivots, then re-dispatch the gate against the revised approach. Confirming a known-blocking approach would invite the human to ratify a plan that contradicts an active decision.
-- **Gate-error:** if the gate subagent errors or returns output missing the required `Verdict:` line, the gate has NOT completed -- re-dispatch; never proceed past an incomplete gate. Likewise, if the report's "Decisions triaged: N of M" line is missing, or N != M, treat the gate as incomplete and re-dispatch -- a mismatch means the scout truncated its read of DECISIONS.md.
+- **FLAGS_FOUND** -> Surface each WARN/NOTE flag to the human in the sign-off presentation under a "Decision Flags" section. Human chooses per-flag: pivot, defer with note, or accept-as-is. A pivot re-scouts per the Convergence rule.
+- **BLOCK** -> STOP. Do NOT present the original approach for confirmation. Surface the BLOCK contradiction and propose pivots, then re-dispatch the gate against the revised approach. Never ask the human to ratify a plan that contradicts an active decision.
+- **Gate-error:** the gate has NOT completed if the subagent errors, its output lacks the `Verdict:` line, lacks "Decisions triaged: N of M" or shows N != M (a truncated read), or lacks the fingerprint line or shows FINGERPRINT-ERROR -- re-dispatch; never proceed past an incomplete gate.
 
-**Convergence rule -- findings, not rounds:** re-dispatch after each pivot; escalate at once when a pivot is re-BLOCKed on the same decision id, naming whether the intent contradicts it (re-scope) or it needs revisiting (file a rec; record accept-with-deferral). Carrier (AskUserQuestion, chat or GATE_REQUEST) and stop as in Step 9.
+**Convergence rule -- findings, not rounds:** each row records the printed `scout_input_fingerprint`; the plan's `cites` holds the `dec:` tokens fed to `--with-cites`; re-dispatch after a BLOCK pivot or when the fingerprint moves (project-alignment task_sequencing), never otherwise; escalate at once when a pivot is re-BLOCKed on the same decision id, naming whether the intent contradicts it (re-scope) or it needs revisiting (file a rec; record accept-with-deferral); only admin bypass merges it. Carrier (AskUserQuestion, chat or GATE_REQUEST) and stop as in Step 9.
 
 ## Alignment Sign-off (Workflow Step 6, project alignment)
-Wait for explicit 'write the plan'; anything else is feedback -- incorporate it, re-run the Decision Scout if material to decision alignment, re-present, ask again.
+Wait for explicit 'write the plan'; anything else is feedback -- incorporate it, re-run the Decision Scout if the fingerprint moved, re-present, ask again.
 IT IS **CRITICAL** THAT YOU DO NOT PROCEED UNTIL THE HUMAN CONFIRMS THE PLAN.
 Class each design fork: consistency-only is decided-with-notice, else ask in the pinned shape --
 `docs/contracts/overseer-dispatch.yaml#autonomy_tiers.plan_fork_classification`.
@@ -300,7 +300,7 @@ Derive the plan slug from the task, not the branch. Author only `docs/plans/PLAN
 ## PLAN-{slug}.yaml Template (Workflow Step 8)
 The plan is a YAML document validated against the `PlanDocument` Pydantic schema (`scripts/roadmap/plan_document.py`, enforced by `validate.py` in both tiers). Unknown keys FAIL validation (`extra="forbid"`). Use exactly this structure -- comments document field semantics:
 ```yaml
-schema_version: 5 # required on every NEW plan; historical versions 1-4 stay valid
+schema_version: 6 # NEW plans: the newest version on main; versions 1-5 stay valid
 handoff_policy:
   full_validation_required_before_commit: true # exact literal; commit/PR waits for completed full exit 0
   timeout_disposition: blocked # exact literal; resume later and rerun full from the start
@@ -312,6 +312,7 @@ verification_tier: V2 # V1 | V2 | V3
 plan_path: docs/plans/PLAN-{slug}.yaml # must match the filename slug exactly
 phase: >- # tier_item id from docs/ROADMAP-PLATFORM.yaml
   ...
+cites: [] # the human's dec:N ids plus the scout's CITE ids; scout rows add scout_input_fingerprint
 scope: # min 1 entry; only files listed here may be modified
   - file: path/to/file.py
     action: Create # Create | Modify | Delete
@@ -327,10 +328,10 @@ verification_plan: # min 1 step; step ids must be unique
     phase: pre-deploy # pre-deploy | post-deploy
     action: exercise the feature
     command: executable shell command # REQUIRED non-empty -- prose-only VP steps fail the schema
-    expected: specific expected result # v5 hermetic steps: NEVER a backtick literal here -- see below
+    expected: specific expected result # v5+ hermetic steps: NEVER a backtick literal here -- see below
     fix_if: what failure looks like
     hermetic: true # a hermetic step's expected assertions are programmatically checked
-    expected_literals: [] # v5 ONLY, hermetic steps: the sole assertion carrier (empty/absent both fine)
+    expected_literals: [] # v5+, hermetic steps: the sole assertion carrier (empty/absent both fine)
 test_obligations: # v4 IMPLEMENTATION: one row per behavior-capable scope file
   - source: path/to/file.py # must equal a scope[].file
     behavior: what must stay guarded
@@ -397,7 +398,7 @@ Scope rows name hand-edited files only: generator-touched files are sanction_row
 triggered, do not invoke `plan-critique` inline (same-context bias); return `GATE_REQUEST`
 (`gate: plan-critique`) and resume via `SendMessage` on verdict.
 
-Launch a zero-context Claude subagent via the `Agent` tool to run the `plan-critique` skill in a fresh context window. The fresh-context requirement is non-negotiable: it eliminates the cognitive bias the planning agent has from authoring the artefact. Do NOT invoke the `plan-critique` skill in the current session via the `Skill` tool (same context = same bias). Do not use `scripts.agent_development.run_skill` -- it is broken per rec-568; dispatch the gate via the `Agent` tool + `Skill` instead.
+Launch a zero-context Claude subagent via the `Agent` tool to run the `plan-critique` skill in a fresh context window. Fresh context is non-negotiable: it removes the author's bias. Do NOT invoke the `plan-critique` skill in the current session via the `Skill` tool (same context = same bias). Never use `scripts.agent_development.run_skill` (broken, rec-568).
 
 **Invocation shape:**
 - `subagent_type: "general-purpose"` (needs `Skill`, `Read`, and `Grep` access)

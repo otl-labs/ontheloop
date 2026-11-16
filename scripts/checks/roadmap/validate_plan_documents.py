@@ -8,7 +8,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from scripts.checks import _common, registry
-from scripts.checks.roadmap import _plan_sidecar_approval
+from scripts.checks.roadmap import _plan_rescout_wiring, _plan_sidecar_approval
 from scripts.roadmap import approved_text_provenance as prov
 
 _NON_BEHAVIOR_PREFIXES = ("tests/", "docs/plans/")
@@ -24,6 +24,7 @@ _DOCUMENTATION_SUFFIXES = {".md", ".rst", ".txt"}
 _MIN_NEW_PLAN_SCHEMA_VERSION = 5
 _APPROVAL_ADVISORY_MARKS = ("MISSING (advisory)", "UNVERIFIED (advisory)")
 _TEST_OBLIGATION_MIN_SCHEMA_VERSION = 4
+_newest_schema_version = _plan_rescout_wiring.newest_schema_version
 
 
 def _added_plan_names() -> set[str]:
@@ -182,7 +183,10 @@ def _test_obligation_failures(path: Path, doc: Any) -> list[str]:
 
 @registry.register("validate_plan_documents", owner="platform")
 def validate_plan_documents(
-    failed: list[str], plans_dir: Path | None = None, added_plan_names: set[str] | None = None
+    failed: list[str],
+    plans_dir: Path | None = None,
+    added_plan_names: set[str] | None = None,
+    modified_plan_names: set[str] | None = None,
 ) -> None:
     """Validate every docs/plans/PLAN-*.yaml against the PlanDocument Pydantic schema (T1.11 / CD.22).
 
@@ -192,7 +196,8 @@ def validate_plan_documents(
     files are out of scope -- only the YAML artefact class is schema-governed.
 
     plans_dir overrides the scanned directory and added_plan_names overrides the git-derived
-    new-plan set (test seams for malformed-fixture and new-plan proofs).
+    new-plan set (test seams for malformed-fixture and new-plan proofs); modified_plan_names is the
+    matching seam for plans the re-scout barrier treats as modified, used only when plans_dir is given.
     """
     print("\n=== Plan document schema validation ===")
 
@@ -222,6 +227,7 @@ def validate_plan_documents(
         in_push = _common.push_context_base(_common.ROOT) is not None
         deadline = prov.Deadline(prov.DEADLINE_SECONDS)
         sidecar_unchecked = False
+        docs: dict[str, Any] = {}
         for path in plan_paths:
             # One parse per plan feeds both the schema verdict and the semantic gates -- this
             # check rides the --pre tier, so a second load() per passing plan is pure waste.
@@ -230,6 +236,7 @@ def validate_plan_documents(
             except Exception as exc:  # noqa: BLE001 -- any parse/validation error is a failure verdict
                 errors.append(f"{path.name}: {exc}")
                 continue
+            docs[path.name] = doc
             errors.extend(_new_plan_version_failures(path, doc, added_names))
             errors.extend(_test_obligation_failures(path, doc))
             if wording_base is None and doc.schema_version >= _MIN_NEW_PLAN_SCHEMA_VERSION:
@@ -252,6 +259,20 @@ def validate_plan_documents(
             advisories.append(
                 "no merge base resolves, so no wording-check row or approval lookup is required (planning SKILL.md Step 8b)"
             )
+        seam_names = _plan_rescout_wiring.seam_names(plans_dir, added_plan_names, modified_plan_names)
+        rescout_failures, rescout_warnings, rescout_line = _plan_rescout_wiring.run(
+            docs=docs,
+            plan_paths=plan_paths,
+            root=_common.ROOT,
+            base=wording_base,
+            push_context=in_push,
+            event=os.environ.get("GITHUB_EVENT_NAME"),
+            floor=_MIN_NEW_PLAN_SCHEMA_VERSION,
+            **seam_names,
+        )
+        errors += rescout_failures
+        advisories += rescout_warnings
+        print(rescout_line)
         registry.examined(len(plan_paths), unit="plan_documents")
         for advisory in advisories:
             print(f"  WARN: {advisory}")

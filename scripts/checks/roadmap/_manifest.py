@@ -99,6 +99,8 @@ ENTRIES: tuple[Entry, ...] = (
             "scripts/checks/roadmap/**",
             "scripts/checks/_common.py",
             "scripts/checks/registry.py",
+            "scripts/decisions_md.py",
+            "scripts/platform_roadmap*.py",
         ),
         full_segment="full_after_lint",
     ),
