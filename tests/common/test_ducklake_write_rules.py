@@ -14,7 +14,13 @@ from scripts.ducklake_smoke import core
 from scripts.ducklake_smoke.lambda_ops_gates import ROW_RULES_BASE, ROW_RULES_CASES, ops_read_your_write
 from scripts.ops_portal.writer_transport import _project_ops_record
 from src.common import ducklake_runtime as rt
-from src.common.ducklake_write_rules import RowRuleViolationError, check_write, existing_row_select, rules_for
+from src.common.ducklake_write_rules import (
+    RowRuleViolationError,
+    check_references,
+    check_write,
+    existing_row_select,
+    rules_for,
+)
 from src.row_rules.rules import RowRules
 from tests.fixtures.ducklake_fakes import FakeCon, ops_rec_fields, ops_rec_record
 from tests.fixtures.ducklake_smoke_fakes import _Resp
@@ -66,6 +72,7 @@ def test_select_widens_only_with_dated_rules() -> None:
     sql, columns = existing_row_select(SPEC, RULES, True)
     assert columns[:2] == ("created_timestamp", "status")
     dated = {"title", "source", "effort", "priority", "automatable", "risk", "file", "context", "acceptance", "tags"}
+    dated |= {"dependencies"}  # the reference column joins the widened select (Decision 268)
     assert set(columns[2:]) == dated and list(columns[2:]) == sorted(dated)
     assert sql == f"SELECT {', '.join(columns)} FROM ops_catalog.ops_recommendations_current WHERE id = ?"
     assert ";" not in sql and sql.count("SELECT") == 1  # one statement (Decision 88)
@@ -157,10 +164,41 @@ def test_smoke_probe_records_pass(monkeypatch) -> None:
 def test_row_rule_gate_cases_trip_their_rule() -> None:
     base = {**ROW_RULES_BASE, "id": "test-rr-0123456789ab"}
     _check(base)  # the gate's own base record is rule-clean, so the first production run cannot false-red
-    assert [c[0] for c in ROW_RULES_CASES] == ["accepted_values", "min_length", "array_element_format", "pattern"]
+    assert [c[0] for c in ROW_RULES_CASES] == [
+        "accepted_values",
+        "min_length",
+        "array_element_format",
+        "pattern",
+        "array_element_reference",
+    ]
     for rule, overrides, column in ROW_RULES_CASES:
+        if rule == "array_element_reference":
+            record = {**base, **overrides}
+            _check(record)  # a row-local pass: the lookup is the writer adapter's, not the engine's
+            with pytest.raises(RowRuleViolationError) as raised:
+                check_references(_NoRowsCon(), SPEC, RULES, record, None)
+            assert (raised.value.rule, raised.value.column) == (rule, column)
+            continue
         error = _violation({**base, **overrides})
         assert (error.rule, error.column) == (rule, column)
+
+
+class _NoRowsCon:
+    def execute(self, sql, params=None):
+        return self
+
+    def fetchall(self):
+        return []
+
+
+def test_check_references_names_rule_and_column_without_values() -> None:
+    leaked = "rec-424242424"
+    with pytest.raises(RowRuleViolationError) as raised:
+        check_references(_NoRowsCon(), SPEC, RULES, ops_rec_record(dependencies=[leaked]), None)
+    error = raised.value
+    assert (error.table, error.rule, error.column) == ("ops_recommendations", "array_element_reference", "dependencies")
+    assert leaked not in str(error) and leaked not in repr(error.args)
+    check_references(_NoRowsCon(), SPEC, None, ops_rec_record(dependencies=[leaked]), None)  # no rules: nothing to look up
 
 
 def test_portal_normalized_update_of_an_older_row_passes() -> None:

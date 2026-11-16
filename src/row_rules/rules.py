@@ -39,6 +39,7 @@ _COLUMN_KEYS = frozenset(
         "not_null",
         "min_length",
         "array_element_format",
+        "array_element_reference",
         "exclude_before",
         "write_time_exemptions",
     }
@@ -48,6 +49,7 @@ _DATEABLE_KINDS = frozenset(
 )
 _TWO_COLUMN_KINDS = frozenset({"not_before", "at_most"})
 PRODUCER_SIDE_KINDS = frozenset({"acceptance_lint", "array_element_reference", "glossary_lint"})
+WRITER_REFERENCE_KINDS = frozenset({"array_element_reference"})
 _TABLE_KEYS = frozenset({"exactly_one_of", "payload"})
 _CONTENT_KEYS = frozenset({"inline", "uri", "sha", "size", "threshold", "cap", "integrity"})
 EXEMPTABLE_LEGS = frozenset({"inline_within_threshold", "uri_above_threshold", "within_cap", "integrity"})
@@ -114,6 +116,7 @@ class RowRules:
     exemptions: Mapping[str, tuple[str, str]] = field(default_factory=dict)
     representation_only: frozenset[str] = frozenset()
     waived: Mapping[tuple[str, str], tuple[str, str]] = field(default_factory=dict)
+    references: frozenset[str] = frozenset()
 
     @classmethod
     def from_projection(
@@ -139,6 +142,7 @@ class RowRules:
         exemptions: dict[str, tuple[str, str]] = {}
         representation_only: set[str] = set()
         waived: dict[tuple[str, str], tuple[str, str]] = {}
+        references: set[str] = set()
         for name, spec in columns.items():
             unknown = set(spec) - _COLUMN_KEYS
             if unknown:
@@ -167,6 +171,7 @@ class RowRules:
             if "representation_of" in spec:
                 representation_only.add(name)
             _collect_exemptions(name, spec, exemptions, producer, waived)
+            _collect_reference(name, spec, producer, references)
             if "exclude_before" in spec:
                 dated[name] = _exclude_before(name, spec)
         groups = tuple(tuple(group) for group in table_rules.get("exactly_one_of", ()))
@@ -194,6 +199,7 @@ class RowRules:
             exemptions=exemptions,
             representation_only=frozenset(representation_only),
             waived=waived,
+            references=frozenset(references),
         )
 
 
@@ -258,6 +264,18 @@ def _collect_exemptions(
             producer[(column, leg)] = recorded
         else:
             exemptions[leg] = recorded
+
+
+def _collect_reference(
+    column: str, spec: Mapping[str, Any], producer: Mapping[tuple[str, str], Any], references: set[str]
+) -> None:
+    if "array_element_reference" not in spec:
+        return
+    if spec["array_element_reference"] is not True:
+        raise RuleProjectionError(f"{column}: array_element_reference must be true")
+    if (column, "array_element_reference") in producer:
+        raise RuleProjectionError(f"{column}: array_element_reference is exempt and must not also ship as a rule")
+    references.add(column)
 
 
 def _collect_formats(
@@ -472,5 +490,6 @@ __all__ = [
     "RowRuleError",
     "RowRules",
     "RuleProjectionError",
+    "WRITER_REFERENCE_KINDS",
     "check_row",
 ]

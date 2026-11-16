@@ -10,7 +10,7 @@ import pytest
 import yaml
 
 from scripts.checks.contracts import _rule_grammar as grammar
-from src.row_rules.rules import EXEMPTABLE_LEGS, PRODUCER_SIDE_KINDS, WAIVABLE_KINDS
+from src.row_rules.rules import EXEMPTABLE_LEGS, PRODUCER_SIDE_KINDS, WAIVABLE_KINDS, WRITER_REFERENCE_KINDS
 
 _ROOT = Path(__file__).resolve().parents[3]
 _WHY = {"class": "temporary", "reason": "staged", "owner": "rec-1", "review_by": "2027-01-31"}
@@ -153,8 +153,18 @@ def test_exemption_grammar() -> None:
 
 
 def test_a_producer_side_rule_needs_its_exemption() -> None:
-    for kind in sorted(PRODUCER_SIDE_KINDS):
+    for kind in sorted(PRODUCER_SIDE_KINDS - WRITER_REFERENCE_KINDS):
         assert any("needs a write_time_exemptions entry" in e for e in _errors({kind: {}})), kind
+
+
+def test_scd2_reference_leg_needs_no_exemption() -> None:
+    assert _errors({"array_element_reference": {}}) == []
+
+
+def test_event_reference_leg_outside_event_vocabulary() -> None:
+    errors = _errors({"array_element_reference": {}}, cls="event")
+    assert any("outside the event vocabulary" in e for e in errors), errors
+    assert grammar.PRODUCER_CLASS["array_element_reference"] == "cross_row"  # class binding unchanged
 
 
 def test_class_is_bound_to_the_exempted_kind() -> None:

@@ -52,12 +52,13 @@ def existing_row_select(spec: ScdTableSpec, rules: RowRules | None, include_stat
     """The one existing-row SELECT and the column names it returns, in order.
 
     created_timestamp, status when the table has a status DAG, and -- only when the rules carry a dated leg -- every
-    column a dated rule reads: the only prior values the changed-column test needs.
+    column a dated rule reads, plus every reference column: the only prior values the changed-column tests need.
     """
     columns = ["created_timestamp"]
     if include_status:
         columns.append("status")
-    columns.extend(c for c in _dated_columns(rules) if c not in columns)
+    wanted = {*_dated_columns(rules), *(rules.references if rules is not None else ())}
+    columns.extend(c for c in sorted(wanted) if c not in columns)
     sql = f"SELECT {', '.join(columns)} FROM {CATALOG_ALIAS}.{spec.current_table} WHERE {spec.merge_key} = ?"
     return sql, tuple(columns)
 
@@ -90,3 +91,26 @@ def check_write(
     except RowRuleError as exc:
         since = rules.exclude_before.get(exc.column, {}).get(exc.rule)
         raise RowRuleViolationError(spec.table, exc.rule, exc.column, since.date().isoformat() if since else None) from exc
+
+
+def check_references(
+    con: Any, spec: ScdTableSpec, rules: RowRules | None, record: dict[str, Any], prior: dict[str, Any] | None
+) -> None:
+    """Reject an element of a reference column that names no existing merge key of this table (Decision 268).
+
+    Runs on the caller's open transaction: one SELECT of the merge key from the current table, one placeholder per distinct
+    element. It binds on an insert (prior None) or when the write changes the column, so an unchanged stored value is never
+    re-read. The error names the table, rule and column and carries no value.
+    """
+    if rules is None:
+        return
+    for column in sorted(rules.references):
+        value = record.get(column)
+        if not value or (prior is not None and value == prior.get(column)):
+            continue
+        wanted = sorted({str(e) for e in value})
+        marks = ", ".join("?" for _ in wanted)
+        sql = f"SELECT {spec.merge_key} FROM {CATALOG_ALIAS}.{spec.current_table} WHERE {spec.merge_key} IN ({marks})"
+        found = {row[0] for row in con.execute(sql, wanted).fetchall()}
+        if not set(wanted) <= found:
+            raise RowRuleViolationError(spec.table, "array_element_reference", column)

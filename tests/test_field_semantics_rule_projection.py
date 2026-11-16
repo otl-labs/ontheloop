@@ -40,6 +40,8 @@ def _expected_value(rule: DeclaredRule):
         return list(rule.params["values"])
     if rule.kind == "array_element_format":
         return rule.params["pattern"]
+    if rule.kind == "array_element_reference":
+        return True
     return rule.params["value"]
 
 
@@ -140,7 +142,7 @@ def test_projects_every_declared_rule_once() -> None:
 def test_exemptions_and_unknown_kinds() -> None:
     columns = _columns("ops_recommendations")
     assert set(columns["acceptance"]["write_time_exemptions"]) == {"acceptance_lint"}
-    assert set(columns["dependencies"]["write_time_exemptions"]) == {"array_element_reference"}
+    assert "write_time_exemptions" not in columns["dependencies"]
     assert columns["dependencies"]["array_element_format"] == "^rec-[0-9]+$"
     base = {"id": {"role": "input", "sql_type": "VARCHAR", "nullable": False}}
     unknown = DeclaredRule("t", "id", "mystery", {"value": 1})
@@ -251,3 +253,10 @@ def test_malformed_sidecar_rule_fails_the_generator(tmp_path) -> None:
     with patch.object(generator, "_SIDECAR_PATH", broken):
         with pytest.raises(RuleProjectionError, match="min_length must be a non-negative integer"):
             generate()
+
+
+def test_dependencies_projects_writer_reference() -> None:
+    columns = _columns("ops_recommendations")
+    assert columns["dependencies"]["array_element_reference"] is True
+    assert "write_time_exemptions" not in columns["dependencies"]
+    assert generate()["ops_tables"]["ops_recommendations"]["columns"]["dependencies"]["array_element_reference"] is True

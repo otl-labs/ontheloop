@@ -114,3 +114,14 @@ def test_json_output_lists_each_rule(monkeypatch: pytest.MonkeyPatch, capsys: py
     assert census.main(["--table", "ops_recommendations", "--json"]) == 0
     out = capsys.readouterr().out
     assert '"rule": "not_null"' in out and '"violators": 0' in out
+
+
+def test_writer_lookup_leg_reported_not_compiled(monkeypatch: pytest.MonkeyPatch) -> None:
+    rules = (_rule("not_null"), _rule("array_element_reference", column="d"))
+    monkeypatch.setattr(census, "declared_rules", lambda table: rules)
+    plan = census.build_plan("ops_recommendations")
+    assert [r.kind for r in plan.writer_lookup] == ["array_element_reference"]
+    assert [c.test_type for c in plan.checks] == ["not_null"] and plan.declared_non_exempt == 1
+    code, lines, _ = census.census(("ops_recommendations",), dry_run=True)
+    assert code == census.EXIT_OK
+    assert sum(line.startswith("WRITER-LOOKUP  ops_recommendations.d") for line in lines) == 1

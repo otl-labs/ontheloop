@@ -25,7 +25,14 @@ import yaml
 from scripts import contract_rules
 from scripts.checks import _common, registry
 from src.common import ducklake_control_tables as control
-from src.row_rules.rules import EXEMPTABLE_LEGS, PRODUCER_SIDE_KINDS, WAIVABLE_KINDS, RowRules, RuleProjectionError
+from src.row_rules.rules import (
+    EXEMPTABLE_LEGS,
+    PRODUCER_SIDE_KINDS,
+    WAIVABLE_KINDS,
+    WRITER_REFERENCE_KINDS,
+    RowRules,
+    RuleProjectionError,
+)
 
 _FS_REL = "config/lambda/ducklake/field_semantics.yaml"
 _STATIC_REL = "config/lambda/ducklake/field_semantics.static.yaml"
@@ -83,6 +90,10 @@ def _expected_and_actual(
         )
     for kind in ("not_before", "at_most", "max_after_write_seconds"):
         out[kind] = ({r.column: r.params["value"] for r in by_kind(kind)}, dict(getattr(rules, kind)))
+    out["array_element_reference"] = (
+        {r.column: True for r in live if r.kind in WRITER_REFERENCE_KINDS},
+        dict.fromkeys(sorted(rules.references), True),
+    )
     out["representation_of"] = (
         frozenset(r.column for r in by_kind("representation_of")),
         frozenset(rules.representation_only),

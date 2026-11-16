@@ -51,6 +51,7 @@ class FakeCon:
         hard_fail_substr: str | None = None,
         read_rows: list | None = None,
         rollback_raises: bool = False,
+        known_ids: set | None = None,
     ):
         self.executed: list[tuple[str, list | None]] = []
         # None/[] -> insert path; [(ts,)] -> update path. A scripted prior is a tuple (created_timestamp[, status], padded
@@ -62,6 +63,8 @@ class FakeCon:
         self._read_rows = read_rows or []
         self._rollback_raises = rollback_raises
         self._last = ""
+        self._last_params: list | None = None
+        self._known_ids = known_ids  # None: every id a reference lookup asks for exists
         self.description = [
             ("ulid",),
             ("rec_id",),
@@ -73,6 +76,7 @@ class FakeCon:
 
     def execute(self, sql, params=None):
         self._last = sql
+        self._last_params = params
         self.executed.append((sql, params))
         if self._rollback_raises and sql == "ROLLBACK":
             raise RuntimeError("no active transaction")
@@ -88,6 +92,8 @@ class FakeCon:
         if self._last.startswith("SELECT created_timestamp"):
             columns = [c.strip() for c in self._last[len("SELECT ") : self._last.index(" FROM ")].split(",")]
             return [self._prior_row(row, columns) for row in (self._created_lookup or [])]
+        if self._last.startswith("SELECT ") and " IN (" in self._last:
+            return [(p,) for p in (self._last_params or []) if self._known_ids is None or p in self._known_ids]
         if self._last.startswith("SELECT ulid"):
             return self._read_rows
         return []
