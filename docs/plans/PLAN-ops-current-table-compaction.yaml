@@ -15,8 +15,7 @@ verification_tier: V3
 plan_path: docs/plans/PLAN-ops-current-table-compaction.yaml
 phase: >-
   ad_hoc_rec (soft-warn exception category; no tier_item claimed, so the Tier Item Freshness Gate is skipped).
-  Executes rec-5179 (audit LAT-01). Cross-reference only: T2.18's intent names "(+ optional rewrite for compaction)";
-  none of its criteria is claimed or touched.
+  Executes rec-5179 (audit LAT-01).
 closes_criteria: []
 scope:
   - file: src/common/ducklake_current_compaction.py
@@ -27,11 +26,11 @@ scope:
       and reads read_partition_layout once; a catalog-level error there (a scope error, a layout read error or an
       unclassified table) is one recorded failure, never a raise, so the merge still runs; the layout is read only when a
       current-side table is scoped (the telemetry catalog reads nothing). Order: smoke_harness tables
-      first (the in-pass canary), then the rest by name. A scoped history-side table is a recorded skip. A table with
+      first (the in-pass canary), then the rest by delete-file count, largest first. A scoped history-side table is a recorded skip. A table with
       an active scheme and legacy_scheme_files > 0 is a collected refusal. Per table: re-prove its latest
       rewrite_current_deletes commit (token "rewrite_current_deletes:<table>:<uuid>", the Decision 204 verb's
       set_commit_message precedent) at its immediate predecessor snapshot vs the commit, a predecessor past retention
-      being a recorded skip; then, unless elapsed time passes COMPACTION_TIME_BUDGET_S (450, half the 900 s function
+      being a recorded skip (the re-proof also counts against the budget); then, unless elapsed time passes COMPACTION_TIME_BUDGET_S (450, half the 900 s function
       timeout; checked before every OCC retry too, deferring rather than retrying once past it), one transaction under
       that token runs maint.rewrite at CURRENT_REWRITE_DELETE_THRESHOLD (0.0) under the writer's bounded OCC policy; the proof is decided by token lookup, not by files_processed; post-commit row count +
       full-row digest at the commit's immediate predecessor vs the commit (never the in-transaction pre snapshot: a
@@ -40,7 +39,10 @@ scope:
       by the budget is recorded under deferred. Every other per-table error is an isolated failure. Emits
       CurrentCompactionFilesRewritten, CurrentCompactionFailures, CurrentCompactionRefused and
       CurrentCompactionDurationMs (ops series undimensioned; non-ops catalogs through the CATALOG_METRICS filter) and
-      prints one value-free CURRENT_COMPACTION line (table names, counts, snapshot ids, proof verdicts; no row value).
+      prints one value-free line per pass: the literal prefix CURRENT_COMPACTION then one JSON object with keys
+      per_table (each {table, files_before, delete_files_before, files_processed, files_after, attempts, duration_ms,
+      pre_snapshot_id, commit_snapshot_id, proof}, proof one of equal | none | reproved), skipped, refused, deferred,
+      failures and elapsed_ms; no row value. files_processed 0 with no snapshot for the token is clean (proof none).
     new_imports:
       - src.common.ducklake_maintenance
       - src.common.ducklake_maintenance_scope
@@ -118,8 +120,10 @@ scope:
     action: Create
     purpose: >-
       Unit tests with connection doubles (mirror file; full branch coverage of the new module), plus
-      test_engine_evidence_bounds_files_and_preserves_rows, which reads the committed evidence fixture and is
-      rec-5179's acceptance (hermetic, so CI measures it).
+      test_engine_evidence_bounds_files_and_preserves_rows, which reads the committed evidence fixture, asserts its
+      duckdb version equals config/lambda/ducklake/version.yaml (a Decision 99 bump re-runs step 6) and is rec-5179's
+      acceptance (hermetic, so CI measures it); test_compaction_line_keys_and_value_free pins the line schema. If the
+      file nears 500 SLOC, split it into a mirror package, never a budget registration.
   - file: tests/common/test_ducklake_current_compaction_engine.py
     action: Create
     purpose: >-
@@ -135,8 +139,9 @@ scope:
   - file: tests/fixtures/current_compaction_engine_evidence.json
     action: Create
     purpose: >-
-      The step-6 engine run's measured counts, committed as evidence (Decision 204 cl.5 and 251 cl.5 precedent):
-      CI never runs integration tests (the full tier deselects them under --disable-socket; rec-4071).
+      The step-6 engine run's measured counts and the duckdb and ducklake extension versions it ran on, committed as
+      evidence (Decision 204 cl.5 and 251 cl.5 precedent): CI never runs integration tests (the full tier deselects
+      them under --disable-socket; rec-4071).
   - file: tests/lambdas/ducklake_maintenance/handler/test_merge_ops_compaction.py
     action: Create
     purpose: >-
@@ -148,7 +153,9 @@ scope:
     purpose: Test semantics builders declare the new verb's cells apply=false; real-registry tests patch compact_current_tables.
   - file: tests/lambdas/ducklake_maintenance/handler/test_operational_actions.py
     action: Modify
-    purpose: Same fixture change for its two semantics builders (_merge_ops_semantics and _telemetry_semantics).
+    purpose: >-
+      _merge_ops_semantics declares the new cells apply=false, and _run_merge_ops also patches compact_current_tables
+      (it patches h.scope.resolve_scope module-wide, which the compaction's own resolution would otherwise read).
   - file: tests/common/test_ducklake_maintenance_scope.py
     action: Modify
     purpose: VERB_UNIVERSE pin and the declared cells per class.
@@ -182,8 +189,9 @@ acceptance_criteria:
     recorded skip, a legacy-scheme table a collected refusal, and the telemetry catalog a no-op.
   - >-
     A transient per-table failure, a refusal or a catalog-level compaction error is recorded, every table still merges
-    and the pass ends non-successfully; a table the time budget leaves unstarted is deferred, not failed; a proof
-    mismatch or an unresolvable token aborts the pass before any merge as a breaker trip.
+    and the pass ends non-successfully; a table the time budget leaves unstarted is deferred, not failed; a quiet
+    table (no file processed, no snapshot) is clean; a proof mismatch, or a rewrite that processed files but whose
+    token resolves no snapshot, aborts the pass before any merge as a breaker trip.
   - >-
     Each pass re-proves a table's latest rewrite_current_deletes commit before rewriting it again; the time budget
     defers unstarted tables and stops OCC retries.
@@ -194,8 +202,8 @@ acceptance_criteria:
   - The new module ships in the maintenance bundle and is excluded from data-pipeline and every other bundle.
   - The new Decision, the two notes and the two pointers match the approved-text sidecar.
   - >-
-    After the deploy, the operator's first pass logs CURRENT_COMPACTION with files rewritten and proof equal for
-    ops_recommendations_current and ops_decisions_current, MergeOpsFilesAfterTotal falls below 400 (946 at
+    After the deploy, no pass logs a compaction failure or refusal, and the first pass that rewrote each of
+    ops_recommendations_current and ops_decisions_current logs files rewritten and proof equal; MergeOpsFilesAfterTotal falls below 400 (946 at
     2026-11-15T06:30Z), a first count_by_status on a fresh connection spends under 5,000 ms outside connect, and the
     next control_health is clean.
   - >-
@@ -225,7 +233,8 @@ verification_plan:
       tests/common/test_ducklake_current_compaction.py::test_append_only_catalog_rewrites_nothing
       tests/common/test_ducklake_current_compaction.py::test_compaction_line_keys_and_value_free
       tests/common/test_ducklake_current_compaction.py::test_engine_evidence_bounds_files_and_preserves_rows
-    expected: Eighteen passed.
+      tests/common/test_ducklake_current_compaction.py::test_noop_rewrite_without_snapshot_is_not_a_failure
+    expected: Nineteen passed.
     fix_if: A failure names the branch; fix the module, never the assertion.
     hermetic: true
     graduation: graduate
@@ -376,16 +385,21 @@ verification_plan:
     command: >-
       aws logs filter-log-events --profile agent_platform --region eu-west-2 --log-group-name
       /aws/lambda/agent-platform-ducklake-maintenance --start-time "$DEPLOY_EPOCH_MS" --filter-pattern
-      '"CURRENT_COMPACTION"' --query 'events[-1].message' --output text > "$COMPACTION_LINE_FILE" && bin/venv-python -c
-      "import json,os;t=open(os.environ['COMPACTION_LINE_FILE']).read();d=json.loads(t[t.index('{'):]);
-      p={r['table']:r for r in d['per_table']};print(p, d.get('skipped'), d.get('deferred'));
-      assert not d['failures'] and not d['refused'],(d['failures'],d['refused']);
-      assert all(p[x]['files_processed']>0 and p[x]['proof']=='equal' for x in ['ops_recommendations_current','ops_decisions_current']),p;
+      '"CURRENT_COMPACTION"' --query 'events[].message' --output json > "$COMPACTION_LINE_FILE" && bin/venv-python -c
+      "import json,os;ms=json.load(open(os.environ['COMPACTION_LINE_FILE']));
+      ps=[json.loads(m[m.index('{'):]) for m in ms];assert ps,'no CURRENT_COMPACTION line yet';
+      [print(d['elapsed_ms'],'ms of 900000;',[(r['table'],r['files_processed'],r['proof'],r['duration_ms']) for r in d['per_table']],d['deferred']) for d in ps];
+      assert all(not d['failures'] and not d['refused'] for d in ps),[(d['failures'],d['refused']) for d in ps];
+      assert all(any(r['table']==x and r['files_processed']>0 and r['proof']=='equal' for d in ps for r in d['per_table']) for x in ['ops_recommendations_current','ops_decisions_current']);
       print('COMPACTION_LIVE_OK')"
-    expected: No failure or refusal; both tables rewrote files and proved equal, then COMPACTION_LIVE_OK.
+    expected: >-
+      Every pass since the deploy free of failures and refusals, each target table rewritten and proved equal in some
+      pass, each pass's elapsed time printed against the 900 s timeout, then COMPACTION_LIVE_OK.
     fix_if: >-
       A deferred table means the first pass hit the time budget: let the next scheduled pass finish it and re-read. A
-      proof failure has already paged (MaintenanceBreakerTrip): STOP and file a Critical rec naming both snapshot ids;
+      pass with no CURRENT_COMPACTION line but a Task timed out REPORT line in the log group means the pass outran 900
+      s: read the last per-table durations, file a rec, and let the idempotent re-proof finish it. A proof failure has
+      already paged (MaintenanceBreakerTrip): STOP and file a Critical rec naming both snapshot ids;
       restoration is a rebuild of current from history (Decision 81 cl.8; rec-5202), separately planned.
     hermetic: false
     graduation: not-applicable
@@ -541,7 +555,7 @@ context:
     Fable consult after critique r1 (adopted): a legacy-scheme table is a collected refusal, only under an active
     scheme; no production-copy rehearsal (Decision 251 cl.3: no maintenance verb on a restored catalog; clone_catalog
     writes the production data path), the production-resident smoke_harness current table compacts first as the canary;
-    each pass re-proves a table's latest commit, plus a 420 s budget that defers unstarted tables.
+    each pass re-proves a table's latest commit, plus a 450 s budget that defers unstarted tables.
   - >-
     Local rehearsal 2026-11-15, DuckDB 1.5.4: default threshold rewrote 0 of 45 delete-bearing files, 0.0 all, merge
     then 8 files with rows and digest equal; rewrite and merge in one transaction left 16; a no-op rewrite commits no
@@ -551,7 +565,7 @@ context:
     Live probes 2026-11-15 (agent_platform): metrics and the maintenance and reader log groups readable, Logs Insights
     denied; ducklake_invocation lines are compact JSON. Writer: 516 writes in 7 days, busiest merge-to-merge window
     104, median 9 (the ceiling basis). UNPROVEN: the first pass's duration (about 100 s per full read at threads=1;
-    the 420 s budget bounds it).
+    the 450 s budget bounds it).
   - >-
     Operator, CloudShell: before the merge, catalog_stats and a reconcile_partitions dry run; after step 11, one
     merge_ops invoke (command in the post-deploy execution step; without it the first control_health at :15 sees 580
@@ -560,8 +574,8 @@ context:
     ci-rca deferral: red_overlap blocked on rec-5194 (Critical, past its 4 h SLO; telemetry-arrival, PR #2045's session
     missing, config/telemetry/arrival.yaml). Shared files: none; the build waits for its repair (Decision 226).
   - >-
-    Not bundled: rec-2216, rec-2218, rec-2220, rec-5181, rec-5182. rec-5179's stale_target verdict is only its
-    to-be-created file. Ops MergeOpsPassFailed is unalarmed (rec-5185), so a refusal pages through the ceiling.
+    Not bundled: rec-2216, rec-2218, rec-2220, rec-5181, rec-5182; T2.18 is a cross-reference only (its intent names
+    the optional rewrite). rec-5179's stale_target verdict is only its to-be-created file. Ops MergeOpsPassFailed is unalarmed (rec-5185), so a refusal pages through the ceiling.
   - >-
     Size: handler.py 484/500 SLOC, the contract 497/500 effective lines (NEAR_CAP; re-measure on main at build time).
     Overlap: unbuilt PLAN-sit-restore-spike scopes the same handler, manifest and contract; second to build rebases.
@@ -575,6 +589,7 @@ gate_rounds:
   - {gate: wording-check, round: 4, verdict: PASS, digest: 79cdcfcd3a4b579c890a4bd6e866cd54a940b351ac6d03ac787ea9340d506d6e, base: ec2948e4cf7808f1b78f3a23f1b150b806e9121a, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 10, nits: 18}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 5, nits: 9}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 2, nits: 7}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
