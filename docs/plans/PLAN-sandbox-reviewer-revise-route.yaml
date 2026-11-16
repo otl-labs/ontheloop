@@ -1,0 +1,441 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: sandbox-reviewer-revise-route
+intent: >-
+  Stop a sampled LLM verdict from halting the sandbox pipeline: on a push to main, a subagent plan-review REVISE routes
+  the saved plan to the operator's tf-gated-apply approval, the way a deterministic-guard block already does, instead
+  of latching the convergence record red with re-sampling as its only exit (rec-5205; NS.9: a human holds the gate, the
+  engine never silently applies).
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-sandbox-reviewer-revise-route.yaml
+phase: >-
+  ci_rca (soft-warn exception category): Track B preventive repair of rec-5205 under
+  docs/contracts/red-main-recovery.yaml (Decision 226). No tier_item is targeted and no exit criterion is closed, so
+  closes_criteria is empty.
+closes_criteria: []
+cites: [dec:55, dec:77, dec:92, dec:126, dec:154, dec:158, dec:162, dec:167, dec:181, dec:183, dec:190, dec:226, dec:235, dec:246]
+scope:
+  - file: .github/actions/subagent-plan-review/action.yml
+    action: Modify
+    purpose: >-
+      New input revise-routes (required false, default "false"; description, with Decision {{N}} filled with its
+      number and no "${{" anywhere in it, since the composite-action manifest check reads it as metadata: "'true' makes a REVISE exit 0 with
+      outcome=revise so the caller can route it to tf-gated-apply (Decision {{N}}); any other value keeps today's
+      fail-closed exit 1. STARVED is unaffected.") passed to review.sh as env REVISE_ROUTES. The outcome output and
+      every other input are unchanged. The description block names the input.
+    new_imports: []
+  - file: .github/actions/subagent-plan-review/review.sh
+    action: Modify
+    purpose: >-
+      Header contract lists REVISE_ROUTES. In the REVISE case only: when "${REVISE_ROUTES:-}" is exactly "true" (the
+      :- default is required: review.sh already runs under set -uo pipefail), print
+      "Subagent returned REVISE; routing to tf-gated-apply for operator approval." to stderr instead of the
+      failing-closed line, write the reason line and the existing summary block exactly as today, append to the step
+      summary a line "Routed to the tf-gated-apply Environment: approve only after reading the reason above
+      (rec-5205).", emit "::warning::[SUBAGENT-REVIEW] REVISE routed to tf-gated-apply (rec-5205)", write
+      outcome=revise and exit 0. Any other REVISE_ROUTES value (unset, empty, false, TRUE, yes) runs today's REVISE
+      branch byte for byte, exit 1. PROCEED, STARVED, the pre-written outcome=starved, the same-budget STARVED retry
+      and every early-exit path are untouched; no retry on REVISE in either mode.
+    new_imports: []
+  - file: .github/workflows/terraform-apply-sandbox.yml
+    action: Modify
+    purpose: >-
+      apply-sandbox only. (1) The review step passes `revise-routes: ${{ github.event_name == 'push' }}`. (2) The apply
+      step's if becomes `success() && steps.guard.outputs.routed != 'true' && steps.review.outputs.outcome ==
+      'proceed'`. (3) The job output routed becomes `${{ steps.guard.outputs.routed == 'true' || (github.event_name == 'push' && steps.review.outcome == 'success' && steps.review.outputs.outcome == 'revise')
+      }}`, and the record_write step's routed input the same expression, so the record keeps its status and gains
+      the existing pending_gated marker. The steps.review.outcome == 'success' conjunct is load-bearing: review.sh's
+      default REVISE branch writes outcome=revise and then exits 1, so without it a REVISE that failed closed (a wiring
+      omission, or a fault after the outcome write) would mark the record pending_gated while gated-apply, which needs
+      apply-sandbox success, never runs; with it such a REVISE still latches red. (4) The wake step's ROUTED env
+      becomes `${{ (github.event_name == 'push' && steps.review.outcome == 'success' && steps.review.outputs.outcome == 'revise') && 'revise' || steps.guard.outputs.routed }}`; its if and every other env line are
+      unchanged. (5) The EMIT and
+      upload steps (the dispatch fresh-plan hand-off) are unchanged, so a dispatch REVISE still fails red and uploads
+      nothing. The comments on the review, apply and record_write steps, the file's header comment ("the guard plus the
+      subagent review ARE the plan-content gate, and both fail closed") and the record_write comment's "an explicit
+      REVISE" failure list say a push REVISE routes (Decision {{N}}); comments are zero effective lines.
+      gated-apply, advisory-status and ducklake-artifacts jobs are unchanged. The record_write step's routed branch
+      (write-convergence-record) still logs "Guard routed" on a REVISE route; rec-5220 owns that line. No new inline run step (composite-action body baseline r3 rows
+      unchanged). Size: the file is at 407 of its 409 effective-line budget (NEAR_CAP, measured
+      2026-11-16); these edits add exactly one effective line (the revise-routes `with:` line), every expression staying
+      on the line it replaces. Relief: measure with plan_obligations on the build's base; if headroom there is below 1,
+      stop with a plan-defect report, never a budget raise.
+    new_imports: []
+  - file: scripts/ci/apply_wake.py
+    action: Modify
+    purpose: >-
+      render_message for job apply-sandbox: when routed == "revise" (the workflow's wake ROUTED value for a push
+      REVISE route), return a distinct message: "sandbox subagent plan reviewer REVISEd {head_sha} on push, so it was routed to the tf-gated-apply job
+      instead of latching red; read the REVISE reason in this run's apply-sandbox step summary, then approve or reject
+      at: Actions -> gated-apply job. The convergence record is unchanged until the gated apply completes (commit_sha
+      becomes {head_sha} on success). (Best-effort wake.)". Every other branch, including the guard-routed message
+      for routed == "true", is unchanged. The gated-apply job's own success wake ("gated-apply converged GREEN ... (IAM/trust/destroy
+      change applied in CD after reviewer approval)") is not edited, so it misnames a REVISE-routed apply; rec-5220
+      owns that wording with the routed log line, since both need the route cause.
+    new_imports: []
+  - file: scripts/checks/ci_guards/validate_dispatch_gated_apply_topology.py
+    action: Modify
+    purpose: >-
+      Five more invariants beside the eight, over the same parsed workflow (scripts.verify_ci_workflow._load), with the
+      module docstring and the function docstring listing them and registry.examined(13, unit="topology_invariants");
+      each failure appends one distinct "dispatch-gated-apply-topology: <label>" entry: (ix) apply-sandbox's review
+      step (id review) passes revise-routes exactly "${{ github.event_name == 'push' }}"; (x) apply-sandbox's apply
+      step if contains "steps.review.outputs.outcome == 'proceed'"; (xi) the job output routed, the record_write
+      step's routed input and the wake step's ROUTED env each contain "github.event_name == 'push' &&
+      steps.review.outcome == 'success' && steps.review.outputs.outcome == 'revise'" and "steps.guard.outputs.routed"; (xii) the upload_fresh_plan_sha256 EMIT step and the SANDBOX_FRESH_PLAN_ARTIFACT
+      upload step ifs do not mention steps.review (invariant (iv) already pins their guard-routed conjunct); (xiii) in
+      .github/workflows/reconcile.yml (read through the same _load) no step whose uses is ./.github/actions/subagent-plan-review passes
+      revise-routes, and .github/actions/subagent-plan-review/action.yml declares revise-routes with default "false".
+      If reconcile.yml or the action file cannot be read, (xiii) fails with its label (never a skip, since the
+      sandbox workflow was read). The file stays a single module well under 500 SLOC (242 today; measure with
+      plan_obligations on the build's base).
+    new_imports: []
+  - file: scripts/checks/ci_guards/_manifest.py
+    action: Modify
+    purpose: >-
+      The validate_dispatch_gated_apply_topology Entry's pre_globs gain ".github/actions/subagent-plan-review/action.yml"
+      (reconcile.yml and terraform-apply-sandbox.yml are already listed), so an edit to the action's input reaches the
+      check in --pre. No other Entry changes.
+    new_imports: []
+  - file: tests/fixtures/review_sh_harness.py
+    action: Create
+    purpose: >-
+      Importable harness (tests/fixtures is exempt from the cross-test-import guard) that runs review.sh under
+      GitHub's composite argv `bash --noprofile --norc -e -o pipefail` with shimmed claude/python3/sudo/npm and the
+      real scripts/ci/claude_p_retry.sh, exposing outcome (last GITHUB_OUTPUT write), rc, stderr, the step summary,
+      claude invocation count and the retry transcript; the python3 shim passes review_verdict.py calls, including
+      --reason, through to the real scripts/ci/review_verdict.py, so verdict exit codes and the reason line come from
+      the real classifier, and stubs terraform_plan_digest.py with a fixed digest (a workdir plan.json of "{}"), as
+      tests/test_subagent_review_wiring.py's harness does; any other python3 call runs the real interpreter. That file is not edited.
+    new_imports: []
+  - file: tests/test_subagent_plan_review_route.py
+    action: Create
+    purpose: >-
+      Nodes: test_revise_routes_with_opt_in (REVISE_ROUTES=true: outcome revise, rc 0, one claude call, no retry
+      transcript, summary carries the reason and the routed line, stderr the ::warning:: line);
+      test_revise_fails_closed_without_opt_in parametrised over unset, "", "false", "TRUE", "yes" (rc 1, outcome
+      revise, stderr carries "Subagent returned REVISE; failing closed.", summary lacks the routed line);
+      test_starved_still_blocks_with_opt_in (STARVED twice: rc 1, outcome starved, retry ran once);
+      test_proceed_unchanged_with_opt_in (rc 0, outcome proceed);
+      test_action_maps_revise_routes_env (action.yml parsed with yaml: runs.steps[0].env.REVISE_ROUTES is exactly
+      "${{ inputs.revise-routes }}" and inputs.revise-routes.default is "false", in the style of
+      tests/test_subagent_review_wiring.py's TestActionAdapter); test_rec_5205_sid_removal_routes (the reviewer's
+      recorded run-43871111764 REVISE reason as the transcript result: rc 0, outcome revise, reason in the summary).
+      The reason text is saved at /mnt/project-files/reviewer-revise-route/REVISE-reason-run-43871111764.txt (copied
+      from that run's apply-sandbox log). The builder strips its "[SUBAGENT-REVIEW] REVISE reason: " log prefix,
+      replaces the em dash with a hyphen (ASCII-only code) and uses "REVISE " plus that reason as the stub's result,
+      since review_verdict.py classifies a result without a leading REVISE token as STARVED; if the file is gone, the
+      reason is its opening sentence, "`aws_iam_role_policy.github_ci_trusted_plan` is losing the `TfstateGithubRead`
+      SID - this removes Terraform-state read access from the CI plan role.". The summary assertion compares against
+      the reason as review.sh renders it (backticks turned into apostrophes, after revise_reason's redaction).
+    new_imports: [tests.fixtures.review_sh_harness]
+  - file: tests/checks/ci_guards/test_validate_dispatch_gated_apply_topology.py
+    action: Modify
+    purpose: >-
+      TestPassPath::test_examined_count_is_eight_topology_invariants asserts count 13 in place of 8; its name is kept,
+      though it now misstates the count, so the edit is one assertion-changed candidate, recorded under weakening_dispositions as planned-change. Additive
+      nodes, in a new class TestRevisePathInvariants: for each of invariants (ix)-(xiii) a mutated in-memory copy fails with that invariant's label and only
+      it; dropping the steps.review.outcome == 'success' conjunct from any one of the three (xi) sites fails (xi).
+      Because (xiii) reads reconcile.yml and the action file through the same _load, the new nodes patch _load with a
+      path-keyed side_effect (the sandbox, reconcile and action dicts by path), not the module's single
+      return_value _run; the existing nodes and _run are not edited. Under the unedited _run every existing negative
+      also fails (xiii), since the sandbox dict stands in for reconcile.yml and the action; no existing assert breaks
+      ("(i)", "(ii)" and "(iii)" are not substrings of "(xiii)"), but the module docstring's "never trips a sibling
+      invariant" no longer holds for those nodes: the builder updates that docstring sentence to say so, and this is
+      expected, not a regression. One more new node, test_pre_globs_cover_every_file_read, asserts that
+      .github/actions/subagent-plan-review/action.yml, .github/workflows/reconcile.yml and
+      .github/workflows/terraform-apply-sandbox.yml each match some fnmatch pattern in the
+      validate_dispatch_gated_apply_topology Entry's pre_globs (scripts.checks.ci_guards._manifest), since
+      validate_pre_glob_closure follows import edges only and never sees a YAML file the check reads. reconcile.yml passing revise-routes "true" at one review
+      site fails (xiii); the action's default flipped to "true" fails (xiii); an unreadable reconcile.yml fails (xiii)
+      and does not skip. No other existing node or assert line changes.
+    new_imports: []
+  - file: tests/test_apply_wake.py
+    action: Modify
+    purpose: >-
+      One additive node, test_apply_sandbox_revise_route_message (routed "revise": the new message names REVISE,
+      gated-apply and the step summary, and not "out-of-budget IAM"); the existing guard-routed nodes already pin the
+      routed "true" message. No existing node or assert line changes; the
+      graduated shard gated-apply-wake-names-refusal, which names this file, is kept unchanged.
+    new_imports: []
+  - file: tests/checks/decisions/test_revise_route_decision_records.py
+    action: Create
+    purpose: >-
+      Scoped to the new Decision's own block (found by its header text, never a file-wide grep): its yaml envelope
+      has amends [154, 183] and kind direction, its reversal-conditions block names rubber-stamp, missed-defect and
+      rejected-reapplied; Decision 154's and 183's blocks each carry an Update naming
+      PLAN-sandbox-reviewer-revise-route; environment-taxonomy.yaml's sandbox_gated_apply text names the push REVISE
+      route.
+    new_imports: []
+  - file: docs/DECISIONS.md
+    action: Modify
+    purpose: >-
+      Exactly the sidecar's blocks d01-decision-entry (the new Decision, newest first), d02-decision-154-note and
+      d03-decision-183-note. {{N}} is the next free Decision number on the build's base, {{DATE}} the build date UTC.
+    new_imports: []
+  - file: docs/decisions-index.json
+    action: Modify
+    purpose: Regenerated with bin/venv-python -m scripts.decisions_index --write after the DECISIONS.md edit (companion, never hand-edited).
+    new_imports: []
+  - file: docs/contracts/environment-taxonomy.yaml
+    action: Modify
+    purpose: >-
+      Exactly the sidecar's blocks e01-sandbox-apply-gating, e02-sandbox-gated-apply and e04-amendment-row, the last
+      being a new amendment_log entry (governance_note_add) for this Class D contract. The file is at 477 of 500
+      effective lines (NEAR_CAP); the blocks add about 7. Relief: measure on the build's base; if it has no headroom,
+      stop with a plan-defect report, never a budget raise.
+    new_imports: []
+bundled_recommendations: [rec-5205]
+followon_recs: [rec-5213, rec-5220]
+infrastructure_dependencies:
+  - "No terraform/** change and no IAM change: gated-apply's environment OIDC sub is already trusted by github_ci_apply (Decision 94), and the push REVISE route fetches the saved plan.bin from S3 exactly as the guard route does."
+acceptance_criteria:
+  - "On a push run, a REVISE from the subagent reviewer leaves apply-sandbox green with outcome revise, skips its apply step, sets the job output routed to true, writes the pending_gated marker with the prior status unchanged, and lets gated-apply apply the saved plan.bin only after a tf-gated-apply approval."
+  - "On a workflow_dispatch run and at both reconcile.yml review sites, a REVISE still exits 1 and latches red exactly as before; review.sh without revise-routes 'true' is byte-identical in behaviour."
+  - "The sandbox apply step runs only on an explicit PROCEED; a STARVED verdict still blocks without writing the record."
+  - "validate_dispatch_gated_apply_topology passes on the committed workflows in --pre with examined(13) and fails each of invariants (ix)-(xiii) alone on a mutated copy."
+  - "DECISIONS.md and environment-taxonomy.yaml equal main plus the approved sidecar's blocks, word for word."
+  - "rec-5205 reads closed after the merge, with its acceptance repointed to tests/test_subagent_plan_review_route.py::test_revise_routes_with_opt_in."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: "Precondition: this plan and its sidecar are on main; the branch is current."
+    command: >-
+      git fetch origin main --quiet && git cat-file -e origin/main:docs/plans/approved/sandbox-reviewer-revise-route.yaml
+      && git cat-file -e origin/main:docs/plans/PLAN-sandbox-reviewer-revise-route.yaml && git merge-base --is-ancestor
+      origin/main HEAD && echo PRECONDITION_OK
+    expected: Prints PRECONDITION_OK.
+    fix_if: A missing file means the plan PR has not merged; stop. A failed ancestry test means a stale branch; merge origin/main first.
+    hermetic: false
+    graduation: not-applicable
+  - step: 2
+    phase: pre-deploy
+    action: DECISIONS.md and environment-taxonomy.yaml are exactly main plus the approved sidecar.
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug sandbox-reviewer-revise-route --base origin/main
+    expected: Exit 0, printing APPROVED-TEXT OK. Red before the blocks are placed.
+    fix_if: >-
+      A word mismatch means a placed block drifted: restore its after text exactly, never edit the sidecar. A moved
+      anchor (another plan landed first) is a plan-defect report.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      A base-relative, one-time binding of this build's diff to its sidecar; validate_merge_step enforces the same
+      binding on the build PR's fast tier.
+  - step: 3
+    phase: pre-deploy
+    action: review.sh's opt-in REVISE route and its unchanged default, STARVED and PROCEED paths.
+    command: bin/venv-python -m pytest tests/test_subagent_plan_review_route.py tests/test_subagent_review_wiring.py tests/test_subagent_review_overflow_and_reason.py tests/test_subagent_plan_review_values_stripped.py -q
+    expected: All pass. Red before (the new file is absent; with it, test_revise_routes_with_opt_in fails on rc 1).
+    expected_literals: [" passed"]
+    fix_if: Fix review.sh; never edit tests/test_subagent_review_wiring.py, the overflow-and-reason or values-stripped tests, or relax a default-mode assertion.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: subagent-review-revise-routes-opt-in
+  - step: 4
+    phase: pre-deploy
+    action: The workflow topology pins the push-only route, the PROCEED conjunct and Reconcile's fail-closed REVISE.
+    command: >-
+      bin/venv-python -m pytest tests/checks/ci_guards/test_validate_dispatch_gated_apply_topology.py::TestRevisePathInvariants -q
+      && bin/venv-python -m pytest tests/checks/ci_guards/test_validate_dispatch_gated_apply_topology.py
+      tests/test_convergence_infra_error_acceptance.py -q
+    expected: All pass. Red before (the TestRevisePathInvariants class is absent; with it, the count node fails on 8).
+    expected_literals: [" passed"]
+    fix_if: Fix the workflow or the check; never relax an existing invariant (i)-(viii) or edit the infra-error test.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: sandbox-revise-route-topology
+  - step: 5
+    phase: pre-deploy
+    action: The wake message names the REVISE route; the guard-routed message and the record consumers are unchanged.
+    command: >-
+      bin/venv-python -m pytest tests/test_apply_wake.py::test_apply_sandbox_revise_route_message -q && bin/venv-python -m
+      pytest tests/test_apply_wake.py tests/test_convergence_classify.py tests/convergence_health -q
+    expected: All pass. Red before (the node is absent; with it, the REVISE wake node gets the default message).
+    expected_literals: [" passed"]
+    fix_if: Fix apply_wake.py; the guard-routed branch is not edited.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: apply-wake-revise-route
+  - step: 6
+    phase: pre-deploy
+    action: The new Decision and its notes are recorded.
+    command: bin/venv-python -m pytest tests/checks/decisions/test_revise_route_decision_records.py -q
+    expected: All pass. Red before (no such Decision).
+    expected_literals: [" passed"]
+    fix_if: Place the sidecar's blocks; never reword them.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: revise-route-decision-records
+  - step: 7
+    phase: pre-deploy
+    action: Fast tier on the branch.
+    command: bin/venv-python -m scripts.validate --pre
+    expected: Exit 0.
+    fix_if: Fix the named failure on the branch; never skip, disable or quarantine a test.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      A whole fast-tier run over diff-relative state; a graduate step may not invoke scripts.validate (recursion), and
+      steps 3-6 carry the durable regressions.
+  - step: 8
+    phase: pre-deploy
+    action: Full tier before handoff (handoff_policy), started in the background from the top-level session.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: The verify-head read reports a completed full run for HEAD with exit 0.
+    fix_if: A red full tier blocks handoff; fix and rerun from the start. A timeout is blocked, never a warning.
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: post-deploy
+    action: >-
+      The first terraform-apply-sandbox push run whose head descends from the build's squash commit and whose Terraform
+      apply step ran (not a guard or REVISE route) still auto-applies on PROCEED: its subagent review and Terraform
+      apply steps both concluded success and the run succeeded. Routed runs before it are listed, not judged. The push
+      trigger is path-filtered to terraform/personal/**, so such a run may not exist at merge time.
+    command: >-
+      MERGE_SHA=<build squash commit> bin/venv-python -c "import json, os, subprocess as sp; m = os.environ['MERGE_SHA'];
+      gh = lambda *a: json.loads(sp.run(['gh', *a], capture_output=True, text=True, check=True).stdout); runs =
+      sorted((r for r in gh('run', 'list', '--workflow', 'terraform-apply-sandbox.yml', '--event', 'push', '--limit',
+      '200', '--json', 'databaseId,conclusion,headSha,createdAt') if sp.run(['git', 'merge-base', '--is-ancestor', m,
+      r['headSha']]).returncode == 0), key=lambda r: r['createdAt']); runs = [(r, {s['name']: s['conclusion'] for j in
+      gh('run', 'view', str(r['databaseId']), '--json', 'jobs')['jobs'] if j['name'] == 'apply-sandbox' for s in
+      j['steps']}) for r in runs]; rev = lambda st: [v for k, v in st.items() if 'review' in k.lower()]; app = lambda
+      st: [v for k, v in st.items() if k.lower().startswith('terraform apply')]; [print('ROUTED', r['databaseId']) for
+      r, st in runs if app(st) == ['skipped']]; hit = next(((r, st) for r, st in runs if rev(st) == ['success'] and
+      app(st) not in (['skipped'], [])), None); print('AWAITING' if hit is None else hit); hit and
+      hit[0]['conclusion'] == 'success' and app(hit[1]) == ['success'] and print('PUSH-APPLY OK')"
+    expected: >-
+      Prints PUSH-APPLY OK, or AWAITING while no qualifying push run exists (git fetch origin main first so the
+      ancestry test sees the runs' heads). AWAITING leaves the step open: it is reported UNPROVEN at handoff and
+      rechecked after the next terraform/personal push, never counted as a pass. The session may read the same runs and
+      jobs through mcp__github__actions_list instead of gh; the selection rule is the same.
+    fix_if: >-
+      A hit whose apply step failed is ci-rca's red; diagnose it before closing rec-5205. A ROUTED run whose
+      apply-sandbox job carries no REVISE warning annotation, no guard route, no STARVED marker and no CONVERGENCE_RED
+      refusal means the proceed conjunct or the outcome output is wrong. A REVISE-routed run is evidence for the route (record it), not a failure.
+    hermetic: false
+    graduation: not-applicable
+  - step: 10
+    phase: post-deploy
+    action: rec-5205 closed through the squash commit's Resolves trailer, with its acceptance repointed first.
+    command: >-
+      bin/venv-python -c "from src.common import ducklake_reader_client as c; rows, missing =
+      c.fetch_recs_by_ids(c.make_reader(), ['rec-5205']); s={r['id']: (r['status'], r['acceptance']) for r in rows};
+      print(s, missing); assert not missing and s['rec-5205'][0] == 'closed' and 'test_revise_routes_with_opt_in' in
+      s['rec-5205'][1]; print('REC-CLOSED OK')"
+    expected: Prints REC-CLOSED OK.
+    fix_if: An open rec means the closure job did not run or rejected the acceptance; read its CI run and close through ops_data_portal only with its acceptance passing.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: .github/actions/subagent-plan-review/review.sh
+    behavior: an opted-in REVISE exits 0 with outcome revise and the reason in the summary; every other REVISE_ROUTES value keeps the fail-closed exit 1; STARVED and PROCEED unchanged
+    verification_step: 3
+    test_selector: tests/test_subagent_plan_review_route.py
+    red_green_expectation: red before (file absent; with it, the opt-in node fails on rc 1), green after
+  - source: .github/actions/subagent-plan-review/action.yml
+    behavior: the revise-routes input defaults to false and reaches review.sh as REVISE_ROUTES
+    verification_step: 3
+    test_selector: tests/test_subagent_plan_review_route.py::test_action_maps_revise_routes_env
+    red_green_expectation: red before (no input and no env mapping), green after
+  - source: .github/workflows/terraform-apply-sandbox.yml
+    behavior: push-only revise-routes, the PROCEED conjunct on apply, the routed disjunct on the output, record write and wake, and a guard-only dispatch hand-off
+    verification_step: 4
+    test_selector: tests/checks/ci_guards/test_validate_dispatch_gated_apply_topology.py
+    red_green_expectation: red before (invariants (ix)-(xi) fail on the committed workflow), green after
+  - source: scripts/ci/apply_wake.py
+    behavior: a REVISE-routed apply-sandbox run gets the REVISE wake message; the guard-routed message is unchanged
+    verification_step: 5
+    test_selector: tests/test_apply_wake.py::test_apply_sandbox_revise_route_message
+    red_green_expectation: red before (routed revise falls through to the RED did-NOT-converge message), green after
+  - source: scripts/checks/ci_guards/validate_dispatch_gated_apply_topology.py
+    behavior: invariants (ix)-(xiii) over the parsed workflows and the action, each failing alone on a mutated copy, with examined(13)
+    verification_step: 4
+    test_selector: tests/checks/ci_guards/test_validate_dispatch_gated_apply_topology.py
+    red_green_expectation: red before (count 8; no (ix)-(xiii) labels), green after
+  - source: scripts/checks/ci_guards/_manifest.py
+    behavior: an edit to the subagent-plan-review action.yml reaches the topology check in --pre
+    verification_step: 4
+    test_selector: tests/checks/ci_guards/test_validate_dispatch_gated_apply_topology.py::TestRevisePathInvariants::test_pre_globs_cover_every_file_read
+    red_green_expectation: red before (the action.yml glob is absent), green after
+  - source: tests/fixtures/review_sh_harness.py
+    behavior: the shim harness used by the new review.sh tests
+    verification_step: 3
+    test_selector: tests/test_subagent_plan_review_route.py
+    red_green_expectation: red before (absent), green after
+  - source: docs/decisions-index.json
+    behavior: the generated index lists the new Decision
+    verification_step: 7
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: a generated companion; validate_decisions_index_freshness fails an index that does not match DECISIONS.md
+  - source: docs/DECISIONS.md
+    behavior: the new Decision amending 154 and 183 and the dated notes on both
+    verification_step: 6
+    test_selector: tests/checks/decisions/test_revise_route_decision_records.py
+    red_green_expectation: red before (no such Decision), green after
+  - source: docs/contracts/environment-taxonomy.yaml
+    behavior: the apply model and sandbox_gated_apply name the push REVISE route
+    verification_step: 6
+    test_selector: tests/checks/decisions/test_revise_route_decision_records.py
+    red_green_expectation: red before (no such text), green after
+weakening_dispositions:
+  - candidate: "[assertion-changed] tests/checks/ci_guards/test_validate_dispatch_gated_apply_topology.py::TestPassPath::test_examined_count_is_eight_topology_invariants"
+    disposition: planned-change
+    cite: "acceptance_criteria[3]"
+constraints:
+  - Place the sidecar's blocks byte for byte, filling only {{DATE}} and {{N}}; never edit the sidecar (Decision 246). Any other edit to the bound text fails approved_text verify.
+  - "Fail closed: only REVISE_ROUTES exactly \"true\" routes; the shared action defaults to false; Reconcile and the dispatch never pass it (rec-5213 owns them, after rec-4230, since their hand-offs upload plan.bin)."
+  - "One existing assertion changes, the topology count 8 to 13 (weakening_dispositions, planned-change); every other existing test, assertion and check stays byte-identical (tests/test_subagent_review_wiring.py, invariants (i)-(viii) and their nodes, test_convergence_infra_error_acceptance.py, tests/ci_rca/taxonomy/test_convergence.py); new coverage is additive (Decision 235). If validate_weakening_candidates lists anything else, stop with a plan-defect report."
+  - "write-convergence-record is not edited: a REVISE route writes the same pending_gated marker as a guard route (its r3 body ceiling stays untouched); the route cause and the routed log line are rec-5220's."
+  - "No new inline run step in any workflow or action (Decision 162); the routed signal is an expression, not an aggregator step."
+  - "The REVISE reason never reaches a job output, an env interpolated into a run body, or the wake comment: it stays in the step summary and log, as today (LLM text is untrusted)."
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - "Decision-scout verdict + CITE list (round 4, 2026-11-16, main 16efea25, after Decision 264 landed): Verdict: FLAGS_FOUND. Decisions triaged: 213 of 213. Roadmap items intersected: 6; CONFLICT: 0; RELATED: 6. Serves: NS.9 4/5. CITE: 55, 77, 92, 126, 154, 158, 162, 167, 181, 183, 190, 226, 235, 246 (unchanged). Flags: no CONTRADICT; NS.9 NOTE (approval rate on the shared Environment; rejection not a veto) -> rec-5220 separates REVISE-route from guard-route approvals, rejected-reapplied stays a reversal condition."
+  - "Decision-scout verdict + CITE list (round 3, 2026-11-16, main 137d6533): Verdict: FLAGS_FOUND. Decisions triaged: 211 of 211. Roadmap items intersected: 6; CONFLICT: 0; RELATED: 6. Serves: NS.9 4/5. CITE: 77, 92, 126, 154, 158, 162, 167, 181, 183, 226, 235, 246. Flags: no CONTRADICT; NS.9 NOTE (approval habituation) -> rubber-stamp reversal condition, tallied as below; 55 SPIRIT NOTE (no queryable trace of a REVISE route; write-convergence-record's routed log line says Guard routed) -> follow-on rec-5220 (followon_recs; the Decision text already states the residual). 55 and 190 stay cited (triaged RELATED); 181 added."
+  - "Decision-scout verdict + CITE list (round 2, 2026-11-16, main f5ce806c): Verdict: FLAGS_FOUND. Decisions triaged: 211 of 211. Roadmap items intersected: 7; CONFLICT: 0; RELATED: 7. Serves: NS.9 4/5. CITE: 55, 77, 92, 126, 154, 158, 162, 167, 183, 190, 226, 235, 246. Flags: no CONTRADICT; 55 SPIRIT NOTE and NS.9 NOTE (nothing durably counts REVISE-routed episodes) -> tally source named below. Round 1's 183 WARN, 235 NOTE and 158 NOTE became CITEs (new Decision amends 183 pt 3; clause 5; push-only leaves Reconcile's route set untouched)."
+  - "REVISE-route tally (for the Decision's rubber-stamp reversal condition): the tf-gated-apply Environment's deployment history on GitHub (each approval or rejection, with its run), filtered to runs whose apply-sandbox job carries the '[SUBAGENT-REVIEW] REVISE routed to tf-gated-apply' warning annotation (check-run annotations), plus the PR wake comments; read when the condition is reviewed. No new store."
+  - "Decision-scout verdict + CITE list (round 1, 2026-11-16, main 4b6dab65): Verdict: FLAGS_FOUND. Decisions triaged: 211 of 211. Roadmap items intersected: 5; CONFLICT: 0; RELATED: 5. Serves: NS.9 4/5. CITE: 55, 77, 92, 126, 154, 158, 162, 167, 190, 226. Flags: 183 WARN (reach grows beyond 'exactly one cell') -> a new numbered Decision amends 154 pt 4 and 183 pt 3, adjudicated by the operator (fork 2A); 235 NOTE -> Decision clause 5 names it in-class, no assertion loosened; 55 SPIRIT WARN -> route_reason marker, ::warning:: and stale_gated_approval keep REVISEs visible; 158 NOTE -> asymmetry stated, rec-5213 filed; NS.9 NOTE -> reversal condition rubber-stamp. Report: /mnt/project-files/reviewer-revise-route/SCOUT-r1.md."
+  - "Evidence (rec-5205): push run 43871111764 REVISEd the TfstateGithubRead Sid removal from #2051 (aa22e8c2); dispatch 43874628757 at 4b6dab65 got PROCEED with no terraform/personal or digest change in between (git log aa22e8c2..4b6dab65). The red record was healed by that dispatch."
+  - "Settled hazard (advisor): no apply step required a PROCEED token; fail-closed rested only on REVISE's exit 1, and gated-apply needs apply-sandbox success, so the exit-0 must be opt-in and the apply step must gain the proceed conjunct. Advisor: /mnt/project-files/reviewer-revise-route/ADVICE.md (blind Fable)."
+  - "Sign-off (operator, 2026-11-16 13:46Z, this thread): fork 1A (REVISE routes to the Environment; no approved-change list fed to the reviewer), fork 2A (new numbered Decision), settled-with-notice items accepted. Push-only narrowing (rec-4230: a routed dispatch uploads plan.bin as a public artifact) put to the operator on a decision card the same day; he chose Push only at 15:02Z."
+  - "rec-5205's acceptance names tests/test_subagent_plan_review_approval.py::test_approved_iam_reduction_proceeds, which presumes the rejected design; the build repoints it with update_rec to tests/test_subagent_plan_review_route.py::test_revise_routes_with_opt_in before merging (VP 10 checks it)."
+  - "An unapproved or rejected Environment run leaves pending_gated set; convergence_classify's stale_gated_approval escalation (scripts/ci/convergence_classify.py) is the existing signal, unchanged. A rejection is not a veto: the next push's saved plan still carries the change and a PROCEED applies it; the operator vetoes by reverting in a PR (Decision clause 3, reversal rejected-reapplied). A REVISE-routed run files no ci-rca rec (the job succeeds), the residual clause 6 names."
+  - "A REVISE route, like a guard route, holds the shared terraform-apply-sandbox concurrency group until the operator approves, rejects or lets it expire; later pushes queue (GitHub keeps only the newest pending). The latch becomes a click, not a free-running pipeline; the rubber-stamp reversal condition watches the approval pressure this adds."
+  - "Live REVISE route: UNPROVEN until a real push REVISE occurs (it cannot be forced without a real infrastructure change); hermetic tests 3-5 prove the shape, VP 9 proves PROCEED still auto-applies once a terraform/personal push lands after the merge."
+  - "Critique round 1 (REVISE): route_reason dropped (a same-line edit would sit at write-convergence-record's 97-line r3 ceiling, Decision 162); the topology invariants fold into validate_dispatch_gated_apply_topology; rejection semantics, VP 9 ancestry and the wake-comment wording fixed. Round 2 (REVISE): the REVISE disjunct gains steps.review.outcome == 'success' so a fail-closed REVISE still latches red; the action's env mapping gets its own test; N6 (a rejection concludes the run red and wakes ci-rca) and the success-wake wording went to rec-5220; N8 (no serves) and N10 (count node name) accepted. Round 3 (REVISE): B8 the _manifest.py waiver was false (pre-glob closure follows imports only), now a pre_globs node; VP 9 skips routed runs; VP 3 adds the default-REVISE suites; N4 (VP 4 runs the new class twice, kept for red-before), N5 and N7 accepted. Round 4 PROCEED with nits: header-comment, STARVED/refusal and REVISE-reason-source nits applied; N1 accepted (the approved Problem text glosses Decision 126 pt 5 as the STARVED carve-out, which T2.39 delivered under it). Round 5 (confirming) PROCEED: stub REVISE token and prefix, the wake red-before text, VP 7 waive and the action description metadata applied; base drift (Decision 263) informational."
+  - "Related-work check (Decision 226): red_overlap 2026-11-16 14:2xZ on main f5ce806c: BLOCKED, overlap on rec-5194 (telemetry-arrival red, 26.6h, shared only through ci_guards test modules in the affected set); rec-5205 repairs_this_red; rec-5212 disjoint. Deferral: this plan does not repair rec-5194 and edits no telemetry path; Feedback Loop owns that red (its fix PLAN-arrival-excused-session-rec-5194 merged as #2061), and the operator ruled on 2026-11-16 that agents proceed past it. The build re-runs red_overlap at dispatch."
+  - "Overlap: rec-5100 (open, Low) also plans to route into tf-gated-apply from the persona dispatch gate; whichever builds second rebases the routed expression. T4.26 c2/c5 rewrite subagent-plan-review into run_persona: revise-routes must carry over (scout ROADMAP note)."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:b0e526a267cf01d29070ba5935bce34fd2b12b13d37927ecef56887dc49e0b86'}  # pragma: allowlist secret
+  - {gate: wording-check, round: 1, verdict: PASS, digest: 8dd14d69754a03018b7e221999feb4150f78173b2396d1a3c33a800fa4e87e2f, base: f5ce806c4941724483d4c05c46f496db3fdcb264, selection: complete}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:7e74897c631dc0ad37ad29180e450ccf2c32e6df116867516dd2e57d4619f3b1'}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 5, nits: 7}
+  - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:b4edc99f57ff670620be1cc682e324a48cd67296a876a1562715dca9c16d71c0'}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 10}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 8}
+  - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 5}
+  - {gate: plan-critique, round: 5, verdict: PROCEED, blocking: 0, nits: 5}
+  - {gate: decision-scout, round: 4, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:1a0531ad6cebe61d5f58073d9afa06aee829b8df72926220a17fde59f0fac263'}  # pragma: allowlist secret
+  - {gate: wording-check, round: 2, verdict: PASS, digest: 1f2ad27b9d38a053a736b1706b67bb8d0a2312d5d9971f5adebb6322127ccd25, base: 137d6533cc2970808a57a8bb1c4df4583f75e494, selection: complete}  # pragma: allowlist secret
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Only the plan-cited decision sections (55, 77, 92 pt 5, 126 pt 5, 154, 158, 162, 167, 181 cl.2, 183, 190 pt 7, 226, 235 cl.1)
+  - All files in scope located and readable; docs/plans/approved/sandbox-reviewer-revise-route.yaml read
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "STEP 0: run VP step 1. Post: PRECONDITION_OK."
+  - "STEP 1: place the sidecar's blocks in docs/DECISIONS.md and docs/contracts/environment-taxonomy.yaml byte for byte ({{DATE}} = build date UTC, {{N}} = the next free Decision number); regenerate the decisions index; write tests/checks/decisions/test_revise_route_decision_records.py. Run VP steps 2 and 6."
+  - "STEP 2: action.yml input and review.sh opt-in branch; tests/fixtures/review_sh_harness.py and tests/test_subagent_plan_review_route.py. Run VP step 3."
+  - "STEP 3: scripts/ci/apply_wake.py REVISE-route message and the new tests/test_apply_wake.py node. Run VP step 5."
+  - "STEP 4: terraform-apply-sandbox.yml edits (1)-(4); invariants (ix)-(xiii) in validate_dispatch_gated_apply_topology, the _manifest.py pre_globs line, and the test file's count change and new nodes. Run VP step 4."
+  - "STEP 5: update_rec rec-5205 --acceptance 'bin/venv-python -m pytest tests/test_subagent_plan_review_route.py::test_revise_routes_with_opt_in -q'. Then validate --pre (VP 7) and the full tier (VP 8). Loop until pass; on an unrecoverable failure stop and RCA (Decision 55)."
+  - "STEP 6: merge with the squash commit body carrying 'Resolves: rec-5205' as its own paragraph; run VP steps 9 and 10."
+  - "Report: what was implemented, the VP results, and that rec-5213 stays open (blocked on rec-4230)."
+rollback: >-
+  Revert the build PR: a push REVISE latches red again and the shared action loses its input. A pending_gated marker
+  written meanwhile by a REVISE route is the guard route's marker and clears on the next gated or green write.
