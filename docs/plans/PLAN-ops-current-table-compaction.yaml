@@ -24,14 +24,18 @@ scope:
       compact_current_tables(con, discovered, *, semantics, registry, policy, catalog, emit, budget_s) -> {per_table,
       skipped, refused, deferred, failures, elapsed_ms}. Resolves verb rewrite_current_deletes via scope.resolve_scope
       and reads read_partition_layout once; a catalog-level error there (a scope error, a layout read error or an
-      unclassified table) is one recorded failure, never a raise, so the merge still runs; the layout is read only when a
+      unclassified table) is one recorded failure, never a raise, so the merge still runs (an unclassified table
+      persists until it is classified, suspending compaction catalog-wide meanwhile: accepted, caught by the pre-merge
+      dry-run stop and the 200-file ceiling); the layout is read only when a
       current-side table is scoped (the telemetry catalog reads nothing). Order: smoke_harness tables
       first (the in-pass canary), then the rest by delete-file count, largest first. A scoped history-side table is a recorded skip. A table with
       an active scheme and legacy_scheme_files > 0 is a collected refusal. Per table: re-prove its latest
       rewrite_current_deletes commit (token "rewrite_current_deletes:<table>:<uuid>", the Decision 204 verb's
-      set_commit_message precedent) at its immediate predecessor snapshot vs the commit, a predecessor past retention
-      being a recorded skip (the re-proof also counts against the budget); then, unless elapsed time passes COMPACTION_TIME_BUDGET_S (450, half the 900 s function
-      timeout; checked before every OCC retry too, deferring rather than retrying once past it), one transaction under
+      set_commit_message precedent) at its immediate predecessor snapshot (snapshot id commit - 1, which must exist)
+      vs the commit; an expired predecessor is a recorded skip and the table's rewrite still proceeds; a re-proof is
+      not started once past the budget (the table is deferred); then, unless elapsed time passes COMPACTION_TIME_BUDGET_S (450, half the 900 s function
+      timeout, pinned by a test against terraform/personal/ducklake_maintenance.tf; checked before every OCC retry
+      too, deferring rather than retrying once past it), one transaction under
       that token runs maint.rewrite at CURRENT_REWRITE_DELETE_THRESHOLD (0.0) under the writer's bounded OCC policy; the proof is decided by token lookup, not by files_processed; post-commit row count +
       full-row digest at the commit's immediate predecessor vs the commit (never the in-transaction pre snapshot: a
       non-conflicting insert can commit between them). files_processed > 0 with no snapshot for the token, or any
@@ -42,8 +46,9 @@ scope:
       prints one value-free line per pass, when compaction finishes and before the merge loop, and also on the
       CurrentCompactionProofError path just before the raise: the literal prefix CURRENT_COMPACTION then one JSON object with keys
       per_table (each {table, files_before, delete_files_before, files_processed, files_after, attempts, duration_ms,
-      pre_snapshot_id, commit_snapshot_id, proof}, proof one of equal | none | reproved), skipped, refused, deferred,
-      failures and elapsed_ms; no row value. files_processed 0 with no snapshot for the token is clean (proof none).
+      pre_snapshot_id, commit_snapshot_id, proof}, proof one of equal | none | reproved, or mismatch | unresolved only on
+      the CurrentCompactionProofError line), skipped, refused, deferred, failures and elapsed_ms; no row value.
+      files_processed 0 with no snapshot for the token is clean (proof none).
     new_imports:
       - src.common.ducklake_maintenance
       - src.common.ducklake_maintenance_scope
@@ -108,7 +113,9 @@ scope:
       split, breaker mapping, the `compaction` body key, metrics) classified non-destructive with the reason (it
       supersedes files the way merge does, every row unchanged and old files reachable until gc_ops, unlike
       rewrite_partition_layout's DELETE plus INSERT); the control_health ceiling
-      sentence; the audit_invariants line naming maintenance_policy's production consumers; one amendment_log row.
+      sentence; the audit_invariants line naming maintenance_policy's production consumers; a note that
+      MergeOpsFilesBeforeTotal and per_table files_before are now counted after compaction, not at pass start (a step
+      change at the deploy); one amendment_log row.
       Relief first (NEAR_CAP).
   - file: docs/DECISIONS.md
     action: Modify
@@ -204,9 +211,10 @@ acceptance_criteria:
     control_health fails a current table whose live file count exceeds CURRENT_LIVE_FILE_CEILING, reports every one
     and emits OpsCurrentLiveFilesMax.
   - The new module ships in the maintenance bundle and is excluded from data-pipeline and every other bundle.
-  - The new Decision, the two notes and the two pointers match the approved-text sidecar.
+  - The new Decision, the two notes and the three pointers (191, 188, 88) match the approved-text sidecar.
   - >-
-    After the deploy, no pass logs a compaction failure or refusal, and the first pass that rewrote each of
+    After the deploy, no pass logs a compaction failure, refusal or proof failure and MaintenanceBreakerTrip stays 0,
+    and the first pass that rewrote each of
     ops_recommendations_current and ops_decisions_current logs files rewritten and proof equal; MergeOpsFilesAfterTotal falls below 400 (946 at
     2026-11-15T06:30Z), a first count_by_status on a fresh connection spends under 5,000 ms outside connect, and the
     next control_health is clean.
@@ -238,7 +246,9 @@ verification_plan:
       tests/common/test_ducklake_current_compaction.py::test_compaction_line_keys_and_value_free
       tests/common/test_ducklake_current_compaction.py::test_engine_evidence_bounds_files_and_preserves_rows
       tests/common/test_ducklake_current_compaction.py::test_noop_rewrite_without_snapshot_is_not_a_failure
-    expected: Nineteen passed.
+      tests/common/test_ducklake_current_compaction.py::test_budget_stops_occ_retries
+      tests/common/test_ducklake_current_compaction.py::test_budget_is_half_the_function_timeout
+    expected: Twenty-one passed.
     fix_if: A failure names the branch; fix the module, never the assertion.
     hermetic: true
     graduation: graduate
@@ -332,7 +342,9 @@ verification_plan:
     command: >-
       bin/venv-python -m scripts.roadmap.approved_text verify --slug ops-current-table-compaction --expect
       "$APPROVED_DIGEST"
-    expected: The line APPROVED-TEXT OK followed by the digest; $APPROVED_DIGEST is the digest the operator approved.
+    expected: >-
+      The line APPROVED-TEXT OK followed by the digest; $APPROVED_DIGEST is the digest= value approved_text record
+      prints for the approved sidecar (not its approved= value).
     fix_if: Place the sidecar's words verbatim; a wording change needs a new approval, never an edit to match.
     hermetic: true
     expected_literals:
@@ -394,10 +406,11 @@ verification_plan:
       ps=[json.loads(m[m.index('{'):]) for m in ms];assert ps,'no CURRENT_COMPACTION line yet';
       [print(d['elapsed_ms'],'ms of 900000;',[(r['table'],r['files_processed'],r['proof'],r['duration_ms']) for r in d['per_table']],d['deferred']) for d in ps];
       assert all(not d['failures'] and not d['refused'] for d in ps),[(d['failures'],d['refused']) for d in ps];
+      assert all(r['proof'] in ('equal','none','reproved') for d in ps for r in d['per_table']),'proof failure logged';
       assert all(any(r['table']==x and r['files_processed']>0 and r['proof']=='equal' for d in ps for r in d['per_table']) for x in ['ops_recommendations_current','ops_decisions_current']);
       print('COMPACTION_LIVE_OK')"
     expected: >-
-      Every pass since the deploy free of failures and refusals, each target table rewritten and proved equal in some
+      Every pass since the deploy free of failures, refusals and proof failures, each target table rewritten and proved equal in some
       pass, each pass's elapsed time printed against the 900 s timeout, then COMPACTION_LIVE_OK.
     fix_if: >-
       A deferred table means the first pass hit the time budget: let the next scheduled pass finish it and re-read. A
@@ -463,14 +476,20 @@ verification_plan:
     graduation: not-applicable
   - step: 16
     phase: post-deploy
-    action: The next control_health run after the first pass holds the ceiling.
+    action: >-
+      The next control_health run after the first pass holds the ceiling, and no breaker tripped since the deploy (the
+      undimensioned ops series of MaintenanceBreakerTrip).
     command: >-
       aws cloudwatch get-metric-statistics --profile agent_platform --region eu-west-2 --namespace DuckLakeMaintenance
       --metric-name ControlTableInvariantViolation --start-time "$PASS_ISO" --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
       --period 300 --statistics Maximum --query 'max(Datapoints[].Maximum)' --output text | bin/venv-python -c
       "import sys;r=sys.stdin.read().strip();assert r not in ('','None'),'no control_health run yet';
-      assert float(r)==0,r;print('CEILING_HOLDS')"
-    expected: 0, then CEILING_HOLDS.
+      assert float(r)==0,r;print('CEILING_HOLDS')" && aws cloudwatch get-metric-statistics --profile agent_platform
+      --region eu-west-2 --namespace DuckLakeMaintenance --metric-name MaintenanceBreakerTrip --start-time "$DEPLOY_ISO"
+      --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --period 300 --statistics Maximum --query 'max(Datapoints[].Maximum)'
+      --output text | bin/venv-python -c "import sys;r=sys.stdin.read().strip();
+      assert r in ('','None') or float(r)==0,'breaker tripped: '+r;print('NO_BREAKER_TRIP')"
+    expected: 0, then CEILING_HOLDS and NO_BREAKER_TRIP (no breaker datapoint, or a maximum of 0).
     fix_if: A violation names its table in the control_health 500 log body; read it before changing anything.
     hermetic: false
     graduation: not-applicable
@@ -598,6 +617,7 @@ gate_rounds:
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 5, nits: 9}
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 2, nits: 7}
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 2, nits: 8}
+  - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 11}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -642,6 +662,9 @@ execution_steps:
     is BLOCKED, no push); structured postflight evidence (scripts.session.postflight --evidence); the real outcome --
     push, PR, CI green by event-driven wake (never polled), squash-merge on code review PROCEED and green CI under the
     sidecar's standing authorisation with Resolves: rec-5179 in the squash body, reporting PR number, run ids and SHA.
+  - >-
+    If SIT stands before this build (Decision 252 cl.6: PROD becomes promote-only), the merge deploys to SIT and PROD
+    receives it by promotion; steps 11-16 then read the first PROD pass after promotion.
   - >-
     Post-deploy sequence: step 11; ask the operator for the first pass, AWS_MAX_ATTEMPTS=1 aws lambda invoke
     --function-name agent-platform-ducklake-maintenance --region eu-west-2 --cli-read-timeout 960
