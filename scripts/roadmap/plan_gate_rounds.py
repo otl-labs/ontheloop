@@ -14,6 +14,7 @@ _GATE_VERDICTS: dict[str, frozenset[str]] = {
     "decision-scout": frozenset({"NO_FLAGS", "FLAGS_FOUND", "BLOCK"}),
     "plan-critique": frozenset({"PROCEED", "REVISE"}),
     "wording-check": frozenset({"PASS", "FAIL"}),
+    "kind-blind": frozenset({"mechanism", "direction"}),
 }
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _GIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
@@ -27,12 +28,13 @@ class GateRound(BaseModel):
     Decision 205; T4.29 c2 keeps per-finding rows with rec-4434). A wording-check row also records the run's
     digest, base and selection status (scripts.roadmap.plan_wording_check). A decision-scout row may record
     scout_input_fingerprint (scripts.roadmap.plan_fingerprint): a run fact, never a reason to skip a scout; every
-    reader recomputes it.
+    reader recomputes it. A kind-blind row is the verdict a fresh subagent gave, shown only
+    plan_obligations --blind-drafts output (planning SKILL.md 8b); it carries no run facts and no counts.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    gate: Literal["decision-scout", "plan-critique", "wording-check"]
+    gate: Literal["decision-scout", "plan-critique", "wording-check", "kind-blind"]
     round: int = Field(ge=1)
     verdict: str
     blocking: int = Field(default=0, ge=0)
@@ -70,6 +72,8 @@ class GateRound(BaseModel):
         if self.pending_evaluators is not None and (self.gate != "wording-check" or self.verdict != "PASS"):
             raise ValueError("pending_evaluators is allowed only on a wording-check PASS row")
         facts = (self.digest, self.base, self.selection)
+        if self.gate == "kind-blind" and (self.blocking or self.nits or self.escalated):
+            raise ValueError("a kind-blind row carries no blocking or nits count and is never escalated")
         if self.gate != "wording-check":
             if any(fact is not None for fact in facts):
                 raise ValueError("digest, base and selection are wording-check fields only")

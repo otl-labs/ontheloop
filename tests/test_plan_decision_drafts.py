@@ -231,3 +231,26 @@ class TestDraftsReportInfo:
         _sidecar(tmp_path, [{"id": "b", "file": "docs/DECISIONS.md", "before": "", "after": after}])
         lines = pdd.report_for_plan(_plan(tmp_path, "x"), tmp_path)
         assert len(_infos(lines)) == 1
+
+
+def test_drafted_entries_and_blind_text(tmp_path: Path) -> None:
+    mech = _draft(title="Mech (amends Decision 12)", kind=False).replace(
+        "significance:", "kind:\n  value: mechanism\n  justification: only the means,\n    over two lines.\nsignificance:"
+    )
+    both = _draft(title="Dir", extra="amends: [5]\nsupersedes: [6]\n") + "\n" + mech
+    _sidecar(tmp_path, [{"id": "d", "file": "docs/DECISIONS.md", "before": "", "after": both}])
+    path = _plan(tmp_path, "x")
+    entries = pdd.drafted_entries(path, tmp_path)
+    assert [e["kind"] for e in entries] == ["direction", "mechanism"]
+    assert entries[0]["amends"] == [5, 6] and entries[1]["amends"] == [12]
+    blind = pdd.blind_text(entries[1]["block"])
+    assert "kind:" not in blind and "mechanism" not in blind and "over two lines" not in blind
+    assert "significance:" in blind and "**Status:** Decided" in blind and "amends" not in blind.split("```")[2]
+    assert pdd.blind_text("no fence here") == "no fence here"
+    assert pdd.drafted_entries(tmp_path / "missing.yaml", tmp_path) == []
+
+
+def test_drafted_entries_of_a_non_mapping_plan(tmp_path: Path) -> None:
+    path = tmp_path / "PLAN-list.yaml"
+    path.write_text("- a\n- b\n", encoding="utf-8")
+    assert pdd.drafted_entries(path, tmp_path) == []

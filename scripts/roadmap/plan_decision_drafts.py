@@ -4,11 +4,13 @@ Finds drafted "## Decision <placeholder|n>: <title>" blocks in a plan's string v
 sidecar (docs/plans/approved/<slug>.yaml, blocks on docs/DECISIONS.md) and in a draft file, parses each through the
 shared parser's placeholder grammar (scripts.decisions_md) and applies the same rules the conformance gate applies
 (scripts.checks.decisions.envelope_rules), so a missing kind is caught before the wording is approved. Advisory:
-every entry point is total (a finding, never a raise) and nothing here feeds a gate verdict.
+every entry point is total (a finding, never a raise). The report is advisory; validate_approval_routing's leg B
+reads drafted_entries.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
@@ -220,6 +222,41 @@ def findings_for_draft(path: str | Path, root: Path | None = None) -> list[Findi
 def findings_for_plan(path: str | Path, root: Path | None = None) -> list[Finding]:
     """Findings for the drafted Decisions in a plan's text and its approved-text sidecar; total, never raises."""
     return _scan_plan(path, root or ROOT)[1]
+
+
+_KIND_MAPPING = re.compile(r"^kind:[^\n]*\n(?:[ \t]+[^\n]*\n|[ \t]*\n)*", re.MULTILINE)
+
+
+def blind_text(block: str) -> str:
+    """The block with the envelope's kind mapping (key, value and justification lines) removed, nothing else changed."""
+    fence_end = block.find("\n```\n", block.find("```yaml") + 1) if "```yaml" in block else -1
+    if fence_end < 0:
+        return block
+    head, tail = block[: fence_end + 1], block[fence_end + 1 :]
+    return _KIND_MAPPING.sub("", head) + tail
+
+
+def drafted_entries(plan_path: str | Path, root: Path | None = None) -> list[dict]:
+    """One dict per drafted Decision in the plan's sidecar blocks on DECISIONS.md: title, kind, amends, block."""
+    root = root or ROOT
+    try:
+        plan = yaml.safe_load(Path(plan_path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return []
+    if not isinstance(plan, dict):
+        return []
+    entries: list[dict] = []
+    for text in _sidecar_contents(plan, root)[0]:
+        found = list(_blocks(text))
+        title = found[0][1] if found else ""
+        env = extract_entry_envelope(text, placeholder=True) or {}
+        kind = env.get("kind")
+        amends = _int_list(env.get("amends")) or extract_amends_edges(title)
+        amends = sorted({*amends, *_int_list(env.get("supersedes")), *_extract_title_borne_supersedes(title)})
+        entries.append(
+            {"title": title, "kind": kind.get("value") if isinstance(kind, dict) else None, "amends": amends, "block": text}
+        )
+    return entries
 
 
 def _report(drafted: int, findings: list[Finding], infos: list[str]) -> list[str]:

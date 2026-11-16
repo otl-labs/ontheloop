@@ -6,11 +6,15 @@ TestReasonRequired.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.checks import _marker_guard
+import pytest
+import yaml
+
+from scripts.checks import _common, _marker_guard, _marker_guard_state_options
 from scripts.checks._marker_guard import RegistrySpec, check_diff, check_present_markers, check_state_diff
 
 
@@ -245,3 +249,59 @@ class TestTransitionLabel:
         with patch("scripts.checks._common.ROOT", tmp_path):
             out = check_state_diff(spec, base_reader=lambda _rel: _BASE_STRONG)
         assert out and "unauthorized weakening with no fresh" in out[0]
+
+
+def _kind_map(root: Path, rung: str = "sampled", floor: object = 300) -> Path:
+    path = root / "docs" / "contracts" / "approval-routing.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lane = {"rung": rung, **({} if floor is None else {"kind_floor": floor})}
+    path.write_text(yaml.safe_dump({"lane": lane}), encoding="utf-8")
+    return path
+
+
+def _entry(number: int, kind: str | None) -> str:
+    tail = f"kind:\n  value: {kind}\n  justification: j.\n" if kind else ""
+    return f"## Decision {number}: T\n\n```yaml\nnumber: {number}\n{tail}```\n\nNames docs/x.py here.\n"
+
+
+def test_kind_failure_reads_the_floor(tmp_path: Path, capsys: object) -> None:
+    kind_failure = _marker_guard_state_options.kind_failure
+    assert kind_failure(301, _entry(301, "mechanism"), tmp_path) is False
+    path = _kind_map(tmp_path)
+    assert kind_failure(301, _entry(301, "mechanism"), tmp_path) is True
+    assert "kind rule: Decision 301 is above kind_floor 300" in capsys.readouterr().out
+    assert kind_failure(301, _entry(301, "direction"), tmp_path) is False
+    assert kind_failure(301, _entry(301, None), tmp_path) is False
+    assert kind_failure(300, _entry(300, "mechanism"), tmp_path) is False
+    _kind_map(tmp_path, floor=None)
+    os.utime(path, ns=(1, 2))
+    assert kind_failure(250, _entry(250, "mechanism"), tmp_path) is True
+    assert kind_failure(250, _entry(250, "direction"), tmp_path) is False
+    path.write_text("lane: [unterminated\n", encoding="utf-8")
+    os.utime(path, ns=(1, 3))
+    assert kind_failure(250, _entry(250, "mechanism"), tmp_path) is True
+    assert kind_failure(250, _entry(250, "direction"), tmp_path) is False
+    path.write_text("- a list\n", encoding="utf-8")
+    os.utime(path, ns=(1, 4))
+    assert kind_failure(250, _entry(250, "mechanism"), tmp_path) is True
+    _kind_map(tmp_path, rung="read_all")
+    os.utime(path, ns=(1, 5))
+    assert kind_failure(301, _entry(301, "mechanism"), tmp_path) is False
+    _kind_map(tmp_path, floor=True)
+    os.utime(path, ns=(1, 6))
+    assert kind_failure(301, _entry(301, "mechanism"), tmp_path) is True
+    _kind_map(tmp_path, floor=300)
+    os.utime(path, ns=(1, 7))
+    assert kind_failure(301, _entry(301, "mechanism"), tmp_path) is True
+
+
+def test_kind_rule_through_authorization_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_common, "ROOT", tmp_path)
+    _kind_map(tmp_path)
+    fails = _marker_guard.authorization_failure
+    assert fails("dec-301", "docs/x.py", {301: _entry(301, "mechanism")}) is True
+    assert fails("dec-301", "docs/x.py", {301: _entry(301, "direction")}) is False
+    assert fails("dec-250", "docs/x.py", {250: _entry(250, "mechanism")}) is False
+    stub = "## Decision 250: S\n\n**Superseded by: Decision 301**\n"
+    assert fails("dec-250", "docs/x.py", {250: stub, 301: _entry(301, "mechanism")}) is True
+    assert fails("dec-250", "docs/x.py", {250: stub, 301: _entry(301, "direction")}) is False
