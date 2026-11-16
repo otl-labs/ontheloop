@@ -1,5 +1,8 @@
 """The in-session warning and alarm for a tree whose turn capture keeps deferring (rec-4941, rules DW-1..DW-3).
 
+Rule DW-1 has three reasons: deferred_no_pin and halted (trigger 2) and stopped (rec-5204, trigger 3: the last three Stop
+passes all ended stopped, warning with the latest stop token).
+
 Stdlib-only at import so the UserPromptSubmit shim can load it before any switch or credential work; every other import is
 lazy inside the function that needs it. Alarm, never a gate (Decision 210 cl.2): nothing here changes a pass outcome, and
 every public function swallows its own failure. Fixed tokens only (Decision 101): no content, ref or session id is printed
