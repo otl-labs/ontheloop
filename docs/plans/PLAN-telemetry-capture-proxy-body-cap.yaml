@@ -41,7 +41,7 @@ scope:
       (1) A no_rows pass whose load status is cursor_lost persists no envelope, so a first pass cannot record
       DEFAULT_CATALOG for rows it never sent; the next pass reloads cursor_lost, records from the start and adopts the
       describe's catalog without a catalog_reset. cursor_tail_mismatch and valid loads keep today's behaviour. (2) A
-      stopped pass records its fixed stop token in the diagnostics line as stop_reason (the _Stop reason or the
+      stopped pass records its fixed stop token in the diagnostics line as stop_token (the _Stop reason or the
       CaptureUnavailable reason), for the in-session warning.
     new_imports: []
   - file: scripts/telemetry_capture/capture_warning.py
@@ -49,7 +49,7 @@ scope:
     purpose: >-
       Rule DW-1 gains a third reason, stopped: the last STOPPED_TRIGGER_PASSES (3) Stop or StopFailure passes all ended
       stopped. prompt_warning prints, once per episode with the existing REARM_EVERY rearm, a fixed-token warning naming
-      the streak and the latest stop_reason token (for example status_502) and the status command. Deferred and halted
+      the streak and the latest stop_token token (for example status_502) and the status command. Deferred and halted
       reasons, their texts and their trigger of 2 are unchanged. Alarm, never a gate, as rules DW-1..DW-3 already are.
     new_imports: []
   - file: docs/contracts/ports.yaml
@@ -65,7 +65,8 @@ scope:
     action: Modify
     purpose: >-
       New node test_signed_request_carries_the_body_sha256: with the real botocore SigV4Auth over fixed frozen
-      credentials, make_client's sign(body) returns X-Amz-Content-Sha256 equal to hashlib.sha256(body).hexdigest() and
+      credentials (import botocore.auth and botocore.awsrequest before patching and stub only boto3 and botocore.session,
+      since _fake_botocore replaces the botocore module), make_client's sign(body) returns X-Amz-Content-Sha256 equal to hashlib.sha256(body).hexdigest() and
       the Authorization header's SignedHeaders lists x-amz-content-sha256. Existing nodes that assert the exact header
       dict gain the header key (planned change, acceptance_criteria[0]).
     new_imports: []
@@ -85,7 +86,9 @@ scope:
   - file: tests/telemetry_capture/test_session_capture_stop_visible.py
     action: Create
     purpose: >-
-      rec-5204's acceptance file. Nodes (the first named test_three_stopped_passes_warn_once_with_the_stop_token): the runner writes stop_reason status_502 when the append answers 502; three
+      rec-5204's acceptance file. Nodes (the first named test_three_stopped_passes_warn_once_with_the_stop_token): test_a_stopped_pass_records_its_stop_token asserts
+      the diagnostics line's stop_token for a _Stop reason (status_502 when the append answers 502) and for a
+      CaptureUnavailable reason (credential_transport); three
       trailing stopped Stop passes produce one UserPromptSubmit warning naming status_502 and the streak, a second call
       prints nothing, REARM_EVERY more passes rearm it; two stopped passes, or a sent pass after them, print nothing and
       clear the marker; the text carries no URL, host, session id or account-like digits.
@@ -176,7 +179,7 @@ verification_plan:
       Recovery of the operator's three kept sessions outside projects (relayed by the coordinator): the PR #2059
       planning session, the implementation session for the same plan, and an ongoing /audit session. Each pulls main,
       ends one turn, then runs the probe on its own transcript.
-    command: git pull origin main && bin/venv-python -m scripts.telemetry_capture probe --tree "$TRANSCRIPT"
+    command: git pull origin main && bin/venv-python -m scripts.telemetry_capture probe --tree "<this session's transcript path>" --require telemetry_sessions,telemetry_observations,telemetry_transcripts
     expected: >-
       in each of the three sessions the latest diagnostics line is outcome sent, and the probe shows rows above 0 for
       telemetry_sessions, telemetry_observations and telemetry_transcripts for that session.
@@ -196,7 +199,7 @@ verification_plan:
       AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids,
       make_reader; rows, _ = fetch_recs_by_ids(make_reader(), ['rec-5204', 'rec-5212']); print([(r['id'], r['status'])
       for r in rows])"
-    expected: both closed; record the closure job run id for rec-5204 and the update_rec read-back for rec-5212, closed with --status closed --closure-artifact shard:telemetry-capture-signs-body-sha256 --closure-fix-sha <the build's squash sha>, the commit that adds that shard (Decision 186 cl.4).
+    expected: both closed; record the closure job run id for rec-5204 and the update_rec read-back for rec-5212, closed with --status closed --closure-artifact shard:telemetry-capture-signs-body-sha256 --closure-fix-sha <the build's squash sha>, the commit that adds that shard (Decision 186 cl.4). The rec-5204 closure job's run is also the first live proof that a header-signed Function URL write succeeds (CI signs the lambda service).
     fix_if: never close with a direct status write after a refusal (Decision 186); fix the cause and re-run the route
     hermetic: false
 test_obligations:
@@ -211,10 +214,15 @@ test_obligations:
     test_selector: tests/ops_data_portal/test_writer_transport.py::TestDuckLakeTransportHelpers::test_ducklake_write_sends_the_body_sha256
     red_green_expectation: red before, green after
   - source: scripts/telemetry_capture/runner.py
-    behavior: a first no-rows pass records no unconfirmed catalog; a stopped pass records its stop token
+    behavior: a first no-rows pass records no unconfirmed catalog
     verification_step: 3
     test_selector: tests/telemetry_capture/test_runner_catalog.py::test_a_first_no_rows_pass_records_no_catalog
     red_green_expectation: red before, green after
+  - source: scripts/telemetry_capture/runner.py
+    behavior: a stopped pass records its fixed stop token, for both a _Stop reason and a CaptureUnavailable reason
+    verification_step: 4
+    test_selector: tests/telemetry_capture/test_session_capture_stop_visible.py::test_a_stopped_pass_records_its_stop_token
+    red_green_expectation: red before (no stop_token key), green after
   - source: scripts/telemetry_capture/capture_warning.py
     behavior: three stopped Stop passes warn once in the session with the stop token
     verification_step: 4
@@ -244,7 +252,7 @@ context:
   - "rec-5194 (excuse build in its own thread) is not bundled; its excused row and shard retire when dcc6a9f5 leaves judge_days (about 2026-11-18T09:56Z)."
   - "rec-5176 (fleet-wide capture-silence alarm) stays open: this plan adds only the in-session warning."
   - "Graduated shards kept unchanged (test_runner_catalog.py gains one node, existing nodes untouched): capture-catalog-reset-resends-tree, capture-describe-pairs-catalog-and-data-path."
-  - "Overlaps (whichever builds second rebases): PLAN-agent-proxy-signed-access (transport.py, writer_transport.py and their tests), PLAN-ratify-telemetry-writer-contract (transport.py), PLAN-telemetry-claude-p-capture-adapter (runner.py). No open PR touches the scope files (checked 2026-11-16)."
+  - "Overlaps (whichever builds second rebases): PLAN-agent-proxy-signed-access (transport.py, writer_transport.py and their tests; its transport changes are already on main, so the rebase risk is low), PLAN-ratify-telemetry-writer-contract (transport.py), PLAN-telemetry-claude-p-capture-adapter (runner.py). No open PR touches the scope files (checked 2026-11-16)."
   - "fork: rec-5204 acceptance | chosen: re-keyed at plan write (operator-confirmed 14:27Z) to the ::node test_three_stopped_passes_warn_once_with_the_stop_token in the same file, because the closure lint refuses a file-only pytest (Decision 201) | class: asked | precedent: Decision 201; Decision 235 | precedent_kind: decision | reversible: yes | persisted: rec-5204 acceptance (warehouse)"
   - "fork: stopped-warning trigger | chosen: 3 trailing stopped Stop passes (deferred and halted keep 2), so one transient deadline or transport stop does not warn | class: consistency-only | precedent: Decision 84 | precedent_kind: decision | reversible: yes | persisted: scripts/telemetry_capture/capture_warning.py"
   - 'red_overlap (2026-11-16 14:33Z, main 137d6533): {"verdict": "blocked", reds: rec-5205 rule overlap (shared: tests/checks/ci_guards/test_validate_composite_action_shell_bodies.py, tests/checks/contracts/test_validate_composite_action_shape_rosters.py, tests/test_ci_rca_lifecycle_correct_rec_context.py, tests/verify_ci_workflow/test_apply_and_terraform.py), rec-5212 repairs_this_red}. Deferral rationale for rec-5205: the shared paths are import-graph test residue reached through writer_transport.py, none is edited here; CI Reform owns rec-5205 (coordinator log 2026-11-16 13:19Z) and its repair touches the sandbox-apply reviewer, not these files; the build reaches handoff only on a green full tier (Decision 163). Re-measure at build start.'
@@ -252,6 +260,7 @@ gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:d4d46f9cd2c3f8d5c15fc8290e602250f4c88a98e9db19ad485c90bc6a83099d"}  # pragma: allowlist secret
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:b36078e6d34c0af0ec1acae16159e3e183fdd52835723e26f31bd34da985d222"}  # pragma: allowlist secret
   - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:410b9f49a213f03e2024d408d81d57efad48ef6a5e56aef23cd6220a8964df78"}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 1, nits: 5}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -260,7 +269,7 @@ pre_implementation_checklist:
   - Acceptance criteria understood and verifiable
 execution_steps:
   - "transport.py and writer_transport.py: sign the body hash; VP 1, 2."
-  - "runner.py: the cursor_lost no_rows rule and stop_reason; VP 3."
+  - "runner.py: the cursor_lost no_rows rule and stop_token; VP 3."
   - "capture_warning.py: the stopped reason; the new test file; VP 4, 5."
   - "Graduated shards for VP 1, 3 and 4."
   - "ports.yaml: the PC-01 sentence and amendment_log row, within the line budget."
