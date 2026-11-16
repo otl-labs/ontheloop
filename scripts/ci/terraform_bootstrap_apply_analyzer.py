@@ -31,8 +31,9 @@ def _load(name: str) -> Any:
     return module
 
 
+cls = _load("terraform_bootstrap_apply_classify")
 sel = _load("terraform_bootstrap_apply_analyzer_select")
-cls = sel.cls
+sel.bind(cls)
 Unreadable = cls.Unreadable
 SWEEP_TRIGGERS = ("config/iam-invariants.json",)
 SWEEP_PREFIXES = ("scripts/ci/terraform_bootstrap_apply_analyzer",)

@@ -1,36 +1,31 @@
 #!/usr/bin/env python3
 """Selection and classing for the bootstrap preview's IAM Access Analyzer checks (PLAN-bootstrap-iam-analyzer-checks).
 
-Stdlib only. Turns one `terraform show -json` plan into units, one per checked document, each with the classes it
-belongs to (config/iam-invariants.json). The selection predicate is the classifier's checked_document, never
-reimplemented here. Names and digests only; a document is carried in memory and never printed.
+Stdlib only; it runs no subprocess and makes no network call, and reaches the classifier only through bind(), the
+module object the analyzer passes in. Turns one `terraform show -json` plan into units, one per checked document, each
+with the classes it belongs to (config/iam-invariants.json). The selection predicate is the classifier's
+checked_document, never reimplemented here. Names and digests only; a document is carried in memory, never printed.
 """
 
 from __future__ import annotations
 
 import fnmatch
-import importlib.util
 import json
-import sys
 from pathlib import Path
 from typing import Any
 
-
-def _load(name: str) -> Any:
-    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(f"{name}.py"))
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-cls = _load("terraform_bootstrap_apply_classify")
-core = cls._core
-Unreadable = cls.Unreadable
+cls: Any = None
+core: Any = None
+Unreadable: Any = None
 SWEPT_TYPES = ("aws_iam_policy", "aws_iam_role_policy", "aws_iam_user_policy", "aws_iam_role")
 ATTACH_TYPES = ("aws_iam_role_policy_attachment", "aws_iam_user_policy_attachment")
 INLINE_OR_MANAGED = ("aws_iam_policy", "aws_iam_role_policy", "aws_iam_user_policy")
+
+
+def bind(classify: Any) -> None:
+    """Adopt the analyzer's one load of the classifier, so there is one Plan and one Unreadable class."""
+    global cls, core, Unreadable
+    cls, core, Unreadable = classify, classify._core, classify.Unreadable
 
 
 def load_invariants(path: str) -> dict[str, Any]:

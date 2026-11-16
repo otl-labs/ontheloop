@@ -6,8 +6,10 @@ every selection, class and check path. No real ARN or account id appears here, a
 
 from __future__ import annotations
 
+import ast
 import json
 import re
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -23,6 +25,7 @@ from tests.fixtures.bootstrap_analyzer import (
     REGION,
     ZERO,
     FakeAws,
+    PagedCompare,
     allow,
     attach_rc,
     cfg_refs,
@@ -172,42 +175,18 @@ def test_an_unreadable_or_truncated_compare_sweeps_and_a_dispatch_never_does(
 
 
 def test_the_compare_fetch_pages_and_a_run_of_full_pages_up_to_300_is_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
-    asked: list[str] = []
+    def serve(*sizes: int) -> PagedCompare:
+        monkeypatch.setattr(an.urllib.request, "urlopen", fake := PagedCompare(list(sizes)))
+        return fake
 
-    def serve(sizes: list[int]) -> Any:
-        class Resp:
-            def __init__(self, body: bytes) -> None:
-                self.body = body
-
-            def __enter__(self) -> Resp:
-                return self
-
-            def __exit__(self, *_a: Any) -> None:
-                return None
-
-            def read(self) -> bytes:
-                return self.body
-
-        def urlopen(req: Any, **_k: Any) -> Resp:
-            asked.append(req.full_url)
-            page = int(req.full_url.rsplit("page=", 1)[1])
-            n = sizes[page - 1] if page <= len(sizes) else 0
-            return Resp(json.dumps({"files": [{"filename": f"p{page}f{i}"} for i in range(n)]}).encode())
-
-        monkeypatch.setattr(an.urllib.request, "urlopen", urlopen)
-
-    serve([2])
-    assert an.fetch_changed("o/r", "t", "b", "h") == ["p1f0", "p1f1"] and len(asked) == 1
-    asked.clear()
-    serve([100, 100, 50])
-    assert len(an.fetch_changed("o/r", "t", "b", "h")) == 250 and len(asked) == 3
-    assert all("per_page=100" in u for u in asked)
-    serve([100, 100, 100])
-    with pytest.raises(an.Unreadable, match="truncated"):
-        an.fetch_changed("o/r", "t", "b", "h")
-    serve([300])
-    with pytest.raises(an.Unreadable):
-        an.fetch_changed("o/r", "t", "b", "h")
+    serve(2)
+    assert an.fetch_changed("o/r", "t", "b", "h") == ["p1f0", "p1f1"]
+    fake = serve(100, 100, 50)
+    assert len(an.fetch_changed("o/r", "t", "b", "h")) == 250 and len(fake.urls) == 3 and "per_page=100" in fake.urls[0]
+    for sizes in ((100, 100, 100), (300,)):
+        serve(*sizes)
+        with pytest.raises(an.Unreadable, match="truncated"):
+            an.fetch_changed("o/r", "t", "b", "h")
     monkeypatch.setattr(an.urllib.request, "urlopen", lambda *_a, **_k: (_ for _ in ()).throw(OSError("net")))
     with pytest.raises(an.Unreadable):
         an.fetch_changed("o/r", "t", "b", "h")
@@ -577,3 +556,18 @@ def test_a_missing_cli_a_timeout_an_unset_region_and_an_internal_error_exit_two_
     monkeypatch.delenv("AWS_REGION", raising=False)
     with pytest.raises(an.Unreadable, match="region"):
         an.Cli()
+
+
+def test_the_analyzer_and_select_import_only_the_stdlib_never_touch_sys_path_and_select_runs_nothing() -> None:
+    for name, banned in (
+        ("analyzer", set()),
+        ("analyzer_select", {"subprocess", "urllib", "socket", "http", "importlib", "sys"}),
+    ):
+        tree = ast.parse((ROOT / "scripts" / "ci" / f"terraform_bootstrap_apply_{name}.py").read_text(encoding="utf-8"))
+        roots = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+        roots |= {n.module.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
+        assert roots <= set(sys.stdlib_module_names) and not roots & banned, name
+        assert not [
+            n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr == "path" and ast.unparse(n) == "sys.path"
+        ]
+    assert an.sel.cls is an.cls and an.sel.Unreadable is an.Unreadable

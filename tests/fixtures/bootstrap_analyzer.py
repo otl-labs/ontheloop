@@ -170,3 +170,26 @@ class FakeAws:
     def _check_no_public_access(self, docs: dict[str, Any], _access: list[Any]) -> dict[str, Any]:
         open_ = any(s.get("Principal") in ("*", {"AWS": "*"}) for s in _statements(docs["--policy-document"]))
         return {"result": "FAIL" if open_ else "PASS"}
+
+
+class PagedCompare:
+    """A urlopen stand-in for the GitHub compare API: page N holds sizes[N-1] files (none past the list)."""
+
+    def __init__(self, sizes: list[int]) -> None:
+        self.sizes, self.urls = sizes, []
+
+    def __call__(self, req: Any, **_kw: Any) -> PagedCompare:
+        self.urls.append(req.full_url)
+        page = int(req.full_url.rsplit("page=", 1)[1])
+        n = self.sizes[page - 1] if page <= len(self.sizes) else 0
+        self.body = json.dumps({"files": [{"filename": f"p{page}f{i}"} for i in range(n)]}).encode()
+        return self
+
+    def __enter__(self) -> PagedCompare:
+        return self
+
+    def __exit__(self, *_a: Any) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self.body
