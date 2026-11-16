@@ -49,6 +49,7 @@ _DATEABLE_KINDS = frozenset(
 )
 _TWO_COLUMN_KINDS = frozenset({"not_before", "at_most"})
 PRODUCER_SIDE_KINDS = frozenset({"acceptance_lint", "array_element_reference", "glossary_lint"})
+WRITER_REFERENCE_KINDS = frozenset({"array_element_reference"})
 _TABLE_KEYS = frozenset({"exactly_one_of", "payload"})
 _CONTENT_KEYS = frozenset({"inline", "uri", "sha", "size", "threshold", "cap", "integrity"})
 EXEMPTABLE_LEGS = frozenset({"inline_within_threshold", "uri_above_threshold", "within_cap", "integrity"})
@@ -473,5 +474,6 @@ __all__ = [
     "RowRuleError",
     "RowRules",
     "RuleProjectionError",
+    "WRITER_REFERENCE_KINDS",
     "check_row",
 ]

@@ -19,7 +19,7 @@ from typing import Any
 from scripts.contract_rules import DeclaredRule, declared_rules
 from scripts.data_quality_execute import run_checks
 from scripts.data_quality_models import Check, dq_request
-from src.common.ducklake_write_rules import WRITER_REFERENCE_KINDS
+from src.row_rules.rules import WRITER_REFERENCE_KINDS
 
 TABLES = ("ops_recommendations", "ops_decisions")
 EXIT_OK, EXIT_VIOLATIONS, EXIT_UNCLEAN = 0, 1, 2

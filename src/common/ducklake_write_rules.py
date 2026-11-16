@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any, Mapping
 
 from src.common.ducklake_scd2_schema import CATALOG_ALIAS, ScdTableSpec, SchemaGateError
-from src.row_rules.rules import RowRuleError, RowRules, RuleProjectionError, check_row
+from src.row_rules.rules import WRITER_REFERENCE_KINDS, RowRuleError, RowRules, RuleProjectionError, check_row
 
 
 class RowRuleViolationError(SchemaGateError):
@@ -25,9 +25,6 @@ class RowRuleViolationError(SchemaGateError):
         self.column = column
         self.exclude_before = exclude_before
         super().__init__(f"{table}.{column}: row rule {rule} violated")
-
-
-WRITER_REFERENCE_KINDS = frozenset({"array_element_reference"})
 
 
 def reference_columns(fields: Mapping[str, Mapping[str, Any]]) -> frozenset[str]:
