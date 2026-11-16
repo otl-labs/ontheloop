@@ -10,6 +10,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+CONFIG_REL = "docs/contracts/project-configuration.yaml"
+PERSONAS = ("code_reviewer", "decision_scout", "plan_critic")
 REAL_ROOT = Path(__file__).resolve().parents[2]
 GITHUB_URL = "https://github.com/otl-labs/ontheloop"
 _ENV = {
@@ -43,6 +45,19 @@ def write(repo: Path, rel: str, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def config_text(values: dict[str, str] | None = None, *, rows: bool = True) -> str:
+    """A minimal project-configuration.yaml: the three gates rows (default in_session), the only keys the gate reads."""
+    values = values or {}
+    lines = ["settings:"]
+    for persona in PERSONAS if rows else ():
+        value = values.get(persona, "in_session")
+        lines.append(f"  - id: gates.{persona}.verdict_source")
+        lines.append(f"    defaults: {{local: {value}, cloud: {value}}}")
+    if not rows:
+        lines.append("  - id: other.setting")
+    return "\n".join(lines) + "\n"
+
+
 def commit(repo: Path, rel: str, text: str, message: str = "change") -> str:
     write(repo, rel, text)
     git(repo, "add", "-A")
@@ -63,6 +78,7 @@ class Fixture:
         git(self.work, "remote", "add", "origin", self.origin_url)
         commit(self.work, "a.txt", "a\n", "seed")
         commit(self.work, "b.txt", "b\n", "seed b")
+        commit(self.work, CONFIG_REL, config_text(), "seed config")
         git(self.work, "push", "-u", "origin", "main")
         self.set_github_identity(self.work)
         self.set_required(["pr-validate", "terraform-validate"])
@@ -118,6 +134,21 @@ class Fixture:
         git(self.work, "push", "origin", "main")
         return sha
 
+    def set_verdict_source(self, persona: str, value: str) -> str:
+        """Advance main with one gates row changed (the others keep their value on main)."""
+        self.sources = {**getattr(self, "sources", {}), persona: value}
+        return self.advance_main(CONFIG_REL, config_text(self.sources))
+
+    def branch_pr_switch(self, number: int, persona: str, value: str, name: str = "pr") -> str:
+        """Open a PR (branched off the current main) changing only one gates row."""
+        sources = {**getattr(self, "sources", {}), persona: value}
+        return self.branch_pr(number, CONFIG_REL, config_text(sources), name=name)
+
+    def clear_gate_rows(self) -> str:
+        """Advance main with the three rows removed (the pre-adoption base)."""
+        self.sources = {}
+        return self.advance_main(CONFIG_REL, config_text(rows=False))
+
     def update_pr(self, number: int, name: str = "pr") -> str:
         """Merge main into the PR branch and republish refs/pull/<number>/head."""
         git(self.work, "checkout", "-q", name)
@@ -154,6 +185,9 @@ def install_project(project: Path) -> None:
         dest = project / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(REAL_ROOT / rel, dest)
+    ci = project / "scripts" / "ci"
+    ci.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(REAL_ROOT / "scripts/ci/push_scope.py", ci / "push_scope.py")
     for pkg in ("scripts", "scripts/session"):
         (project / pkg / "__init__.py").touch()
     venv_bin = project / ".venv" / "bin"

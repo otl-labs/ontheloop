@@ -57,7 +57,7 @@ def test_contract_points_at_the_profile() -> None:
     assert "[contract], [harness] or [repo:<path>]" in _CONTRACT_TEXT.split("Generic rulings land in batches")[1]
     assert "[contract], [harness] or [repo:<path>], not landed" in _CONTRACT_TEXT
     assert "Harness facts: <shared_store>/coordinator/" in str(_CONTRACT["templates"]["standing_instructions"])
-    last = _CONTRACT["amendment_log"][-1]
+    last = next(e for e in _CONTRACT["amendment_log"] if "PLAN-coordinator-harness-profile" in e["summary"])
     assert "PLAN-coordinator-harness-profile" in last["summary"]
     assert last["semantic_break"] is False
     assert fnmatch.fnmatchcase(_PROFILE_REL, coordinator_copy.PROFILE_GLOB)
