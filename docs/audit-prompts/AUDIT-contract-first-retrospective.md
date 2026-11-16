@@ -476,8 +476,8 @@ control is `missed`. EX1-EX13 is a CLOSED list: do not add properties. Verdict, 
 
 **Q8 Reversal-condition reviews.** Three intervention Decisions carry monitored reversal
 conditions whose review dates fall between 2026-11-17 and 2026-12-01 (G14). For each of the eight
-conditions listed in G14, decide from evidence whether it has fired, and recommend a disposition.
-Fill `condition_reviews` (Section 14). This question's entry carries no verdict of its own; its
+conditions listed in G14, decide from evidence whether it has fired, and recommend a disposition
+(G14 pins how to test the two prose conditions). Fill `condition_reviews` (Section 14). This question's entry carries no verdict of its own; its
 `prose` points at the block.
 
 **Q9 Improvement path.** Given your answers to Q1-Q8: which changes, in what order, are worth
@@ -586,8 +586,10 @@ anchor, stated without a verdict. Verify before relying. Figures are as of commi
 (2026-11-16). `docs/DECISIONS.md` and `docs/ROADMAP-PLATFORM.yaml` change daily, so this map
 anchors them by Decision number and clause, or by roadmap item id, never by line: locate a Decision
 with `grep -n '^## Decision 167:' docs/DECISIONS.md` and a roadmap item with
-`grep -n 'id: T2.56$' docs/ROADMAP-PLATFORM.yaml`. Line numbers given for other files may have
-moved; re-resolve by searching for the quoted text.
+`grep -n 'id: T2.56$' docs/ROADMAP-PLATFORM.yaml`. Each line anchor into another file names the
+symbol, key or text it points at; if the line has moved, find it by searching for that name. A
+moved line is drift, not a stale anchor: record a `meta.stale_anchors` row only when the named
+symbol, key or text is not in the file at all.
 
 Three scripts re-derive the numeric rows. Run each from the repository root as
 `bin/venv-python - <<'EOF'` ... `EOF`. They only read.
@@ -668,11 +670,13 @@ cap = 6144
 print("entries_ge_167", len(rows), "median_first_size", statistics.median(r[2] for r in rows))
 print("first_size_over_cap", [(r[0], r[2], r[1]) for r in rows if r[2] > cap])
 print("first_size_within_5pct_under_cap", sum(1 for r in rows if cap * 0.95 <= r[2] <= cap))
+print("first_appearance_bytes_total", sum(r[2] for r in rows))
 print("larger_now", sum(1 for r in rows if r[3] > r[2]), "bytes_added_after_landing", sum(r[3] - r[2] for r in rows if r[3] > r[2]))
 print("smaller_now", [(r[0], r[3] - r[2]) for r in rows if r[3] < r[2]])
 print("now_over_cap", sum(1 for r in rows if r[3] > cap), "all_live_over_1.2x_cap", sum(1 for b in now.values() if b > cap * 1.2))
 same = collections.Counter(r[4] for r in rows)
 print("commits_adding_2plus_entries", [(h, sorted(r[0] for r in rows if r[4] == h)) for h, k in same.items() if k > 1])
+print("first_appearance", [(r[0], r[1], r[2]) for r in rows])
 for lo, hi in [("2026-06-16", "2026-08-07"), ("2026-08-08", "2026-09-12"), ("2026-09-13", "2099-01-01")]:
     added = sh("git", "log", "--first-parent", "--diff-filter=A", "--name-only", "--format=", f"--since={lo}T00:00:00Z",
                f"--until={hi}T23:59:59Z", REF, "--", "docs/plans/PLAN-*.yaml").split()
@@ -680,7 +684,7 @@ for lo, hi in [("2026-06-16", "2026-08-07"), ("2026-08-08", "2026-09-12"), ("202
 ```
 
 Script C (census of the working tree, which is the audited commit after Section 5 step 1; feeds
-G10, G11, G13, G14, G22):
+G10, G11, G13, G14, G22, G23):
 
 ```python
 import collections, json, pathlib, re, subprocess, yaml
@@ -725,19 +729,35 @@ text = open("docs/DECISIONS.md", encoding="utf-8").read()
 fence = "`" * 3
 stanzas = re.findall("^" + fence + r"yaml reversal-conditions\n(.*?)^" + fence, text, re.M | re.S)
 print("stanzas", len(stanzas), "condition_kinds", dict(collections.Counter(k for s in stanzas for k in re.findall(r"^\s+kind:\s*(\S+)", s, re.M))))
-# gate rounds recorded in plan files
-gates, with_rounds, plans = collections.Counter(), 0, 0
+# gate rounds recorded in plan files; the subset whose text contains a Decision header
+gates, sub, with_rounds, sub_plans, plans = collections.Counter(), collections.Counter(), 0, 0, 0
 for p in sorted(pathlib.Path("docs/plans").glob("PLAN-*.yaml")):
     plans += 1
+    body = p.read_text(encoding="utf-8")
     try:
-        gr = (yaml.safe_load(p.read_text(encoding="utf-8")) or {}).get("gate_rounds")
+        gr = (yaml.safe_load(body) or {}).get("gate_rounds")
     except Exception:
         continue
     if isinstance(gr, list) and gr:
         with_rounds += 1
-        gates.update((str(r.get("gate")), str(r.get("verdict"))) for r in gr if isinstance(r, dict))
+        pairs = [(str(r.get("gate")), str(r.get("verdict"))) for r in gr if isinstance(r, dict)]
+        gates.update(pairs)
+        if "## Decision " in body:
+            sub_plans += 1
+            sub.update(pairs)
 print("plan_files", plans, "with_gate_rounds", with_rounds, "rows", sum(gates.values()))
 print("gate_rounds", sorted(gates.items(), key=lambda kv: -kv[1]))
+print("with_decision_header", sub_plans, sorted(sub.items(), key=lambda kv: -kv[1]))
+# contract-changing commits that also changed the decision file, by period
+for label, lo, hi in [("P0", "2026-06-16", "2026-08-07"), ("P1", "2026-08-08", "2026-09-12"), ("P2", "2026-09-13", "2099-01-01")]:
+    out = sh("git", "log", "--first-parent", "--name-only", "--format=@%h", f"--since={lo}T00:00:00Z", f"--until={hi}T23:59:59Z", REF)
+    total = both = 0
+    for block in out.split("@")[1:]:
+        files = block.splitlines()[1:]
+        if any(f.startswith("docs/contracts/") for f in files):
+            total += 1
+            both += any(f == "docs/DECISIONS.md" for f in files)
+    print("contract_commits", label, total, "also_changing_decisions", both)
 ```
 
 IF a script errors: record the error in `meta.contract_notes`, use the row's quoted figures as
@@ -780,7 +800,8 @@ The 2026-06-15 live file held one duplicated header and one entry that was also 
 which is why `distinct_numbers` is the count to difference, not header counts.
 
 **G3 Entry size at first appearance and now** (Script B; entries numbered 167 or higher).
-- 93 such entries exist. Median size at first appearance: 5,798 bytes.
+- 93 such entries exist. Median size at first appearance: 5,798 bytes; together they were 511,737
+  bytes at first appearance.
 - 45 of the 93 first appeared between 5,837 and 6,144 bytes (within 5 percent under the cap).
 - One first appeared over the cap: Decision 169 at 10,499 bytes on 2026-08-11. The cap became a
   hard failure on 2026-08-13 (commit `eaff8043`, "arm the per-entry decision cap").
@@ -819,9 +840,11 @@ files are deliberately absent from the prose byte-budget registry. At 2026-08-07
 (its Decision section, clauses 1-5). Decision 178 clause 3 (2026-08-27) retired that guard, says
 the append-only "dialect REMAINS policy", and calls re-landing the guard a "sanctioned follow-up";
 the blockquote at the top of Decision 177 says the same. At `197c800c` no
-file named `validate_live_entry_immutability.py` exists under `scripts/checks/`; the name appears
-in `config/agent/verification_registry/entries/deprecated/live-entry-guard-discriminates.yaml` and
-in comments. Decision 177's Problem states a census "found confirmed drift in 55 of 126" live
+file named `validate_live_entry_immutability.py` exists under `scripts/checks/`; outside the
+decision files, plans and audits the name appears in
+`config/agent/verification_registry/entries/deprecated/live-entry-guard-discriminates.yaml`, in a
+contract value at `docs/contracts/decision-entry.yaml:588`, and in two docstrings
+(`scripts/checks/decisions/validate_decisions_size.py:97` and its test module). Decision 177's Problem states a census "found confirmed drift in 55 of 126" live
 entries under the earlier convention-only rule.
 
 **G7 Outflow.** Archive headers: 27 at 2026-08-07, 27 at `197c800c` (G2). Four live entries are
@@ -925,7 +948,7 @@ judge). Of the 212 live entries: cited by at least one file under `scripts/check
 45, `docs/contracts/` 88, agent surfaces 25. Fourteen live entries are cited in none of
 `scripts/`, `src/`, `docs/contracts/`, agent surfaces, `config/`, `.github/` or `terraform/`:
 24, 25, 27, 41, 106, 109, 112, 121, 140, 141, 220, 241, 258, 262. Repository-wide,
-`git grep -oIE 'Decision [0-9]+' -- . | wc -l` printed 45,289 at `197c800c` (the earlier audit
+`git grep -oIE 'Decision [0-9]+' 197c800c -- . | wc -l` prints 45,231 (the earlier audit
 recorded 19,414 on 2026-08-07, before many plan files existed). Roadmap item T2.54 "Bidirectional
 clause-to-check traceability" is `not_started` with both criteria open.
 
@@ -949,6 +972,18 @@ preflight report key `decision_conditions.surfaced` listed one entry on 2026-11-
 Decision 167's prose conditions (c) and (d) are not reviewed: (c) is recorded as fired by the note
 dated 2026-09-20 under that paragraph, and (d) concerned migration step 3 never landing, which
 landed on 2026-08-13 (G3).
+
+How to test the two prose conditions. (a): take the first 10 entries that first appeared on or
+after 2026-08-13 (Script B's `first_appearance` list, by number). `fired` when for more than 2 of
+them the entry, its envelope justification, or the message of the commit that added it says that
+decision content (ruling, rationale or reversal conditions) was cut or moved out to fit the cap;
+`not-fired` when that is so for at most 2. (b): look at the two-entry commits Script B lists.
+`fired` when in at least one of them the two entries share a subject (one amends the other, or
+both rule on the same mechanism) and their combined size at first appearance exceeds 6,144 bytes;
+`not-fired` when none does.
+
+Decision 179's `index-read-context-cost` is worded as a problem arising "before T2.56 c1 or T1.5 c1
+lands"; T2.56 c1 is `met` (G1).
 
 **G15 Adjacent records** (Script A unless stated).
 
@@ -992,8 +1027,10 @@ landed on 2026-08-13 (G3).
   5 sessions; behind `52029fb9` -- 142 calls, 289, 425,304, 27,155,059, 3 sessions; behind
   `c893ba5b` and `8eff624a` (one tree, two plans) -- 214 calls, 434, 543,120, 32,585,104, 3
   sessions. All three trees carried `workflow: claude_code` in the verb's rows.
-- Workflow values across the 173 trees started 2026-11-08 to 2026-11-16 (read 2026-11-16):
-  `claude_code` 127, `implement` 21, `plan` 13, `ci_rca` 11, `audit` 1.
+- Workflow values by session tree, for trees started 2026-11-10 to 2026-11-16 (read 2026-11-16;
+  126 trees): `claude_code` 83, `implement` 20, `plan` 13, `ci_rca` 9, `audit` 1. Re-derive for any
+  window of at most 7 days (one telemetry read):
+  `bin/venv-python -c "import collections,sys; from scripts.aws_profile import resolve_aws_profile; from scripts.telemetry_capture.read_route import TelemetryReader; r=TelemetryReader(profile=resolve_aws_profile('agent_platform')); rows=r.named('model_usage_rollup', day_from=sys.argv[1], day_to=sys.argv[2]); print(dict(collections.Counter({x['root_session_id']: x.get('workflow') for x in rows}.values())))" 2026-11-10 2026-11-16`
 - Dated sample, first model call of a session (`startup --by-agent`, 2026-11-09): root sessions on
   `agent/` branches (n=3) 65,183 to 78,113 input tokens; `general-purpose` sub-agents (n=8) 44,363
   to 49,642. A first call includes the harness's own system prompt and tool definitions as well as
@@ -1039,7 +1076,7 @@ and 160, July 2026); they are listed because the intervention relies on them.
 | L3 | Per-entry byte cap, hard-fail for new entries | entry-size | Decision 167 cl.3; `validate_decisions_size.py:66` | Script B first-appearance sizes after 2026-08-13 |
 | L4 | WARN-tier accretion signal (two legs) | entry-size | `validate_decisions_size.py:93`, `:128`; `decision-entry.yaml:582-599` | G3 growth after landing; whether anything acted on the WARN |
 | L5 | Planning-skill Decision Significance Gate (three property tests) | routing | `.claude/skills/planning/SKILL.md:214-236` | envelope justifications naming a rejected contract home (E1); E2 |
-| L6 | Plan-critique category-consistency verdict | routing | `.claude/skills/plan-critique/SKILL.md:87-90` | plan-critique rounds in G22 for plans that draft a Decision |
+| L6 | Plan-critique category-consistency verdict | routing | `.claude/skills/plan-critique/SKILL.md:87-90` | plan-critique rounds in G22 for plan files with a Decision header; step 12p's own verdicts are not recorded separately |
 | L7 | Class D contracts with a resolving evaluator | contract-enforcement | Decision 168; `_population.py:315` | G10, G11; E3 |
 | L8 | Subject uniqueness and topic-equals-subject | contract-integrity | `contract-population.yaml:265-276` | `honesty_clauses` in the same file; rec-3354 |
 | L9 | Population ratchet pins | contract-integrity | `contract-population.yaml:313-331` | pin values against Script C's status counts |
@@ -1081,9 +1118,18 @@ change-record and 6 percent other, single-rater, stated as plus or minus 10 poin
 **G22 Gate rounds recorded in plan files** (Script C). Of 754 `docs/plans/PLAN-*.yaml` files, 105
 carry a `gate_rounds` list (a field newer plans have); the lists hold 1,075 rows. By gate and
 verdict: plan-critique REVISE 378, plan-critique PROCEED 303, wording-check PASS 224,
-decision-scout FLAGS_FOUND 136, wording-check FAIL 25, decision-scout NO_FLAGS 9. A row records the
-gate, the round number, the verdict and counts of blocking findings and nits; it does not record
-what the findings were.
+decision-scout FLAGS_FOUND 136, wording-check FAIL 25, decision-scout NO_FLAGS 9. Sixteen of the
+105 contain the text `## Decision ` (they draft or quote a Decision header); their rows:
+plan-critique REVISE 54, wording-check PASS 50, plan-critique PROCEED 42, decision-scout
+FLAGS_FOUND 34, wording-check FAIL 5, decision-scout NO_FLAGS 1. What a row records differs by
+gate: plan-critique rows carry counts of blocking findings and nits; decision-scout rows carry
+only gate, round and verdict (some also a `scout_input_fingerprint`); wording-check rows carry
+`base`, `digest` and `selection`. No row records what a finding was, or which critique step
+raised it.
+
+**G23 Contract changes and the decision file** (Script C). First-parent commits on main that
+changed any file under `docs/contracts/`, and how many of those also changed `docs/DECISIONS.md`:
+P0 81 and 27; P1 59 and 27; P2 237 and 90 (to `197c800c`).
 
 ## 11. EMPIRICAL PASS
 
@@ -1111,40 +1157,55 @@ the audited commit.** For each:
    > separators. Tie-break: a sentence doing two jobs classifies by its dominant clause; a
    > specification stated only to describe a rejected alternative is rationale.
 
-   Two additions for entries written after the baseline, neither of which changes the rule for
+   Three additions for entries written after the baseline, none of which changes the rule for
    body text. The envelope (which did not exist at the baseline) is class (4). The structural
    elements class (4) lists are class (4) whatever they say, including dated annotations:
    blockquote lines beginning `> **` and trailing `[Amendment ...]` brackets (these are what C2
-   counts); "first match wins" orders classes (1) to (3) for the remaining body text. Record shares
-   to the nearest 5 points.
+   counts); "first match wins" orders classes (1) to (3) for the remaining body text. A fenced
+   `yaml reversal-conditions` stanza is class (3): the rule names reversal conditions there. Record
+   the four shares to the nearest 5 points, and `spec_share` (Q1) from those recorded shares.
 2. Bar test. Apply the three questions of `significance.routing_rule`
    (`docs/contracts/decision-entry.yaml:430-437`) to the entry's own clauses and classify:
    `clears-bar` | `bar-met-by-amends-edge-only` (it clears only because it amends an earlier
    entry) | `routable-elsewhere` (a routing row other than `numbered_decision` owns most of it;
    name the row) | `unclear`.
-3. Deletion counterfactual: if this entry were deleted and citations of its number removed, would
-   any check, contract, agent instruction or human approval step behave differently? Name the
-   artifact and where, or write "none found".
+3. Binding test. Take the entry's main clause (its first numbered clause, or its Decision
+   paragraph when it has no numbered clauses). Is there a check, a contract rule, an agent
+   instruction or a human approval step that would fail, block or tell an agent to act if the
+   repository violated that clause? `bound`: yes; name the artifact and where (`file:line`).
+   `cited-only`: artifacts cite the entry's number, and none would react to a violation.
+   `none-found`: neither.
 
-Finish all 12 before computing the means; then set them beside G20.
+Finish all 12 before computing the means; each mean is the plain mean of the 12 recorded values,
+every entry weighted equally. Then set them beside G20.
 
-**E2 Contract changes made without a Decision -- at most 10 commits.** List the P2 commits on main
-that changed a contract and did not touch `docs/DECISIONS.md`, newest first:
+**E2 Contract changes with and without a Decision -- at most 10 commits.** List the P2 `feat(`
+commits on main that changed a contract, newest first, each marked by whether it also changed
+`docs/DECISIONS.md`:
 
 ```bash
-for c in $(git log --first-parent --since=2026-09-13T00:00:00Z --format=%h origin/main -- 'docs/contracts/*.yaml'); do git show --name-only --format= "$c" | grep -q '^docs/DECISIONS.md$' || git log -1 --format='%h %cs %s' "$c"; done
+for c in $(git log --first-parent --since=2026-09-13T00:00:00Z --format=%h origin/main -- 'docs/contracts/*.yaml'); do if git show --name-only --format= "$c" | grep -q '^docs/DECISIONS.md$'; then m=with-decision; else m=no-decision; fi; git log -1 --format="$m %h %cs %s" "$c"; done | grep ' feat('
 ```
 
-At `197c800c` this prints 147 commits, 130 of them with a subject beginning `feat(`. From the
-`feat(` ones take the 5 newest and the 5 oldest. For each, read what it added to the contract or
-contracts (`git show <sha> -- docs/contracts/`) and classify the main addition: `mechanism-rule`
-(a rule, threshold, procedure or enforcement binding), `field-semantics` (the meaning or
-constraints of a field or key), `operational-fact` (what is currently true, a status or a pointer),
-or `housekeeping` (wording, renames, pin or count updates with no governing content). List any
-second kind of addition in `also`. Counterfactual: judged against how comparable content was
-recorded in entries numbered 140-166, would this content have been written as a new numbered
-Decision before the intervention -- `yes | no | unclear`? Quote the added line that best shows what
-kind of content it is.
+At `197c800c` this prints 214 commits: 130 `no-decision` and 84 `with-decision`. Group (a): the 3
+newest and the 3 oldest `no-decision` commits. Group (b): the 2 newest and the 2 oldest
+`with-decision` commits. For each sample read what the commit added to the contract or contracts
+(`git show <sha> -- docs/contracts/`) and classify the main addition: `mechanism-rule` (a rule,
+threshold, procedure or enforcement binding), `field-semantics` (the meaning or constraints of a
+field or key), `operational-fact` (what is currently true, a status or a pointer), or
+`housekeeping` (wording, renames, pin or count updates with no governing content). List any second
+kind of addition in `also`. Quote the added line that best shows what kind of content it is.
+
+Group (a) counterfactual. Read at most 6 of Decisions 157-166 (the entries the baseline
+partitioned) as the comparison set, once, for all six samples. `would_have_minted_before` is `yes`
+when a comparison entry recorded the same kind of content as a numbered Decision (name the entry
+and clause in `evidence`), `no` when no comparison entry holds content of that kind, `unclear`
+when the likeness is arguable. Write `overlap: n/a`.
+
+Group (b) overlap. Read the Decision entry the same commit added or changed. `overlap` is `none`
+when the entry gives the reason and points at the contract, `partial` when it restates some of
+the contract's specification, `restated` when the same specification is in both. Write
+`would_have_minted_before: n/a`.
 
 **E3 Evaluator samples -- at most 12 Class D contracts.** Sort the 12 `agent_surface` contracts by
 basename and take every second one starting with the first (6). Sort the `check` contracts by
@@ -1163,13 +1224,18 @@ read or apply the contract at a defined trigger, or mention it? Classify: `asser
 **E4 Amended chains -- at most 6 entries.** Take the 6 live entries that are the target of the
 most `amends` edges in `docs/decisions-index.json` (ties by lower number; list them with
 `bin/venv-python -c "import json,collections as c; d=json.load(open('docs/decisions-index.json'))['decisions']; live={r['number'] for r in d if r.get('live')}; k=c.Counter(t for r in d for t in (r.get('amends') or []) if t in live); print(sorted(k.items(), key=lambda x: (-x[1], x[0]))[:6])"`).
-For each: how many entries must be read to state the rule as it now stands; does the amended entry
-itself carry an annotation naming each amender (count named against edges); could a reader of that
-entry alone act on a clause a later entry changed -- `yes | no`, with the clause.
+For each: how many entries must be read to state the rule as it now stands, counting the entry
+itself plus each entry with a direct `amends` edge to it (do not follow amenders of amenders);
+does the amended entry itself carry an annotation naming each amender (count named against
+edges); could a reader of that entry alone act on a clause a later entry changed -- `yes | no`,
+with the clause.
 
-**E5 Observed planning footprint -- at most 8 plan merges and at most 6 telemetry CLI calls (the
-Section 5 step 6 probe counts as one).** Skip if `meta.degraded_telemetry`. Run `models --by-root`
-(G17) for the 7 UTC days ending on the audit day and for the 7 days before that (2 calls). From the
+**E5 Observed planning footprint -- at most 8 plan merges and at most 8 telemetry reads.** A
+telemetry read is any call that reaches the telemetry reader: the CLI, the G17 one-liner, or a
+`ducklake-reads` MCP tool. The Section 5 step 6 probe is the first of the 8. Skip the rest if
+`meta.degraded_telemetry`. Run `models --by-root` (G17) for the 7 UTC days ending on the audit day
+and for the 7 days before that (2 reads), and the G17 workflow one-liner for the 7 days ending on
+the audit day (1 read; evidence for C19). From the
 plan merge commits in those 14 days (G17 command), take the 8 most recent whose subject contains
 `approved plan` and whose trailer key matches a `harness_session_key` in the output; a tree that
 produced several sampled plans counts once and is noted. For each matched tree, summing its rows
@@ -1177,9 +1243,8 @@ across models, record first-time tokens (Trap 15), cache-read tokens, model call
 Report median, minimum and maximum of first-time tokens. A tree may include work other than the
 plan: say so; these are upper bounds for one plan. IF fewer than 3 trees match: report those that
 did (none: `observed: []` and `null` summary fields), note it in `meta.contract_notes`, and do not
-widen the window. Then compaction: with at most 2 further calls of your choice from the CLI, or the
-`ducklake-reads` MCP tools if your session has them, try to read a count of `compact` events for
-the same trees. IF you find no route: set `meta.compaction_unreadable = true`, write
+widen the window. Then compaction: with at most 2 further reads of your choice, try to read a
+count of `compact` events for the same trees. IF you find no route: set `meta.compaction_unreadable = true`, write
 `metrics.compaction.readable: false`, and adjudicate C18 on that evidence. Do not write telemetry
 tenant ids, project ids or session ULIDs in either deliverable; identify a sample by its merge
 commit short sha.
@@ -1191,10 +1256,10 @@ commit short sha.
 - Phase 2: run Scripts A, B and C; fill `metrics` (DD-A); record mismatches with Section 10.
 - Phase 3: trace the planning read path (DD-E) and the contract trajectory (DD-F).
 - Phase 4: empirical pass E1-E5.
-- Phase 5: fill `intervention_ledger`, `growth_ledger` and `condition_reviews`; adjudicate
-  candidates C1-C20.
-- Phase 6: rate the rubric (Section 8).
-- Phase 7: dedup every prospective finding (Section 13); assign severity (Section 15).
+- Phase 5: fill `intervention_ledger`, `growth_ledger` and `condition_reviews`.
+- Phase 6: dedup every prospective finding (Section 13); assign severity (Section 15); then
+  adjudicate candidates C1-C20 (Section 2).
+- Phase 7: rate the rubric (Section 8).
 - Phase 8: answer Q1-Q8.
 - Phase 9: only now, Q9 (`improvement_sequence`), then Q10.
 - Phase 10, LAST: summary, per-surface maturity, the report, the pre-push gate (Section 16).
@@ -1213,11 +1278,14 @@ search). To read recs in full:
 IF a dedup command fails mid-run: retry once; if it still fails, set `meta.degraded_dedup = true`
 and apply Section 5 step 4's rule to every finding not yet deduped.
 
-Record `dedup_search_terms` and `dedup_hit_count` on the finding. A hit is a returned item whose
-text you judge to OWN the defect (its acceptance or criterion would fix it); `recs_related` always
-returns its nearest matches, so record the raw returned total in `roadmap_crossref.note` and count
-only owning hits in `dedup_hit_count`. A hit means a sufficiency assessment (`planned-insufficient`
-or `planned-unbuilt`) or a `covered` outcome (Section 2) -- never a fresh discovery. A `novel`
+Record `dedup_search_terms` and `dedup_hit_count` on the finding. An owner is a returned item (an
+open recommendation, a roadmap criterion or a Decision clause) whose subject is this defect,
+whether or not its remedy would close it; for a Decision clause the remedy is the rule it states.
+`recs_related` always returns its nearest matches, so record the raw returned total in
+`roadmap_crossref.note` and count only owners in `dedup_hit_count`. An owner means
+`planned-insufficient` (its remedy would not close the defect), `planned-unbuilt` (it would, and
+is not in progress) or a `covered` outcome (it would, and is in progress; Section 2) -- never a
+fresh discovery. A `novel`
 finding requires a recorded negative search (`dedup_hit_count: 0`); a `novel` finding without one
 is `confidence: HYPOTHESIS`. A defect that came from no candidate and that an owner already has
 built or in progress (Section 2's pinned meaning) is not filed at all.
@@ -1234,8 +1302,9 @@ never whether they should exist):
 - No standing mechanism for refactoring live, non-superseded entries (the operator's decline
   recorded on rec-3246, 2026-08-24, which applies Decision 163).
 - The routing-consistency lint as specified in the earlier audit's amendment was rejected on
-  construct-validity grounds (Decision 167, update of 2026-08-17). Do not re-propose that lint. A
-  different mechanism is allowed if evidence meets Decision 167's stanza condition.
+  construct-validity grounds (Decision 167, update of 2026-08-17). Do not re-propose it unless Q8
+  finds Decision 167's stanza condition `mis-routed-past-both-gates` `fired`; that stanza's
+  `on_trigger` then reopens the question. A different mechanism may be proposed on its merits.
 - New enforcement is forward-only; entries and contracts that predate a rule are grandfathered
   (Decisions 167 and 168; `decision-entry.yaml` scope notes).
 - `deferred_post_mvp` roadmap statuses (Decision 93): a deferral is not a defect. Recommending that
@@ -1280,9 +1349,10 @@ audit:
     periods:                      # exactly 3 rows: P0, P1, P2
       - {period: P0|P1|P2, from: "", to: "", days: 0, new_entries: 0, entries_per_day: 0.0,
          corpus_bytes_added: 0, bytes_per_day: 0, plan_files_added: 0, new_entries_per_plan_file: 0.0}
-    cap: {entries_examined: 0, first_size_median: 0, within_5pct_under_cap: 0,
-          over_cap_at_first_appearance: 0, larger_now: 0, bytes_added_after_landing: 0,
-          now_over_cap: 0, commits_adding_2plus_entries: 0}
+    cap: {entries_examined: 0, first_size_median: 0, first_appearance_bytes_total: 0,
+          within_5pct_under_cap: 0, over_cap_at_first_appearance: 0, larger_now: 0,
+          bytes_added_after_landing: 0, now_over_cap: 0, commits_adding_2plus_entries: 0}
+    contracts_near_budget: []     # 5 rows (DD-F): {file, effective_lines, budget, amendment_log_share_pct}
     planning_context_footprint:
       band_assignment: []         # 16 rows: {file, band: always_read|gate_subagent|on_demand, basis: "file:line"}
       static:                     # exactly 3 rows: 2026-08-07, 2026-09-12, the audited commit
@@ -1301,7 +1371,7 @@ audit:
        root_agent_direction: reduced|held|grown, gate_subagent_direction: reduced|held|grown,
        basis: [], prose: ""}
     - {q: Q3, verdict: enforced-by-default|mixed|mostly-asserted|cannot-determine, basis: [], prose: ""}
-    - {q: Q4, verdict: intact|intact-with-erosion|materially-eroded, basis: [], prose: ""}
+    - {q: Q4, verdict: all-holding|core-holding|core-gap, basis: [], prose: ""}
     - {q: Q5, verdict: sustainable|sustainable-with-named-gaps|unsustainable-on-current-trajectory|cannot-determine,
        any_limit_binds_within_30_days: yes|no,
        projections: [{horizon_days: 90, live_entries: 0, token_estimate: 0}],   # 3 rows: 90, 180, 365
@@ -1311,7 +1381,7 @@ audit:
        external_checklist: [{property: EX1, rating: met|partial|missed, evidence: "",
                              baseline: met|partial|missed, delta: up|same|down}]}   # 13 rows, EX1..EX13
     - {q: Q8, basis: [], prose: ""}                 # no verdict; points at condition_reviews
-    - {q: Q9, verdict: path-identified|path-partial|no-change-warranted, basis: [], prose: ""}
+    - {q: Q9, verdict: path-identified|no-change-warranted, basis: [], prose: ""}
     - {q: Q10, answers: [{question: "", answer: "", basis: []}]}
   candidate_adjudication:         # exactly 20 rows, C1..C20
     - {candidate: C1, outcome: finding|not-a-defect|false|covered|undetermined, findings: [], note: ""}
@@ -1329,14 +1399,15 @@ audit:
   content_partition:
     entries:                      # at most 12 rows (E1)
       - {decision: 0, bytes: 0, specification_pct: 0, rationale_pct: 0, change_record_pct: 0, other_pct: 0,
-         bar_test: clears-bar|bar-met-by-amends-edge-only|routable-elsewhere|unclear, routable_row: "",
-         deletion_counterfactual: ""}
-    means: {specification_pct: 0, rationale_pct: 0, change_record_pct: 0, other_pct: 0}
-    baseline_means: {specification_pct: 43, rationale_pct: 33, change_record_pct: 19, other_pct: 6}
+         spec_share: 0, bar_test: clears-bar|bar-met-by-amends-edge-only|routable-elsewhere|unclear,
+         routable_row: "", binding: bound|cited-only|none-found, binding_artifact: ""}
+    means: {specification_pct: 0, rationale_pct: 0, change_record_pct: 0, other_pct: 0, mean_spec_share: 0}
+    baseline_means: {specification_pct: 43, rationale_pct: 33, change_record_pct: 19, other_pct: 6,
+                     mean_spec_share: 65}
   samples:                        # E2, E3, E4 rows
-    - {id: E2-01, sample_set: E2, subject: "<commit short sha>",
+    - {id: E2-01, sample_set: E2, group: a|b, subject: "<commit short sha>",
        classification: mechanism-rule|field-semantics|operational-fact|housekeeping, also: [],
-       would_have_minted_before: yes|no|unclear, evidence: ""}
+       would_have_minted_before: yes|no|unclear|n/a, overlap: none|partial|restated|n/a, evidence: ""}
     - {id: E3-01, sample_set: E3, subject: "<contract basename>", evaluator: "", statement_tested: "",
        classification: asserts-this-statement|asserts-other-content|reads-structure-only|instructs-agent-at-trigger|mention-only,
        evidence: "file:line"}
@@ -1352,7 +1423,7 @@ audit:
        abort_criterion: "", expected_effect: "", blocked_behind: [], confidence: CONFIRMED|HYPOTHESIS}
   per_surface_assessment:         # exactly 6 rows
     - {surface: "", maturity: frontier|strong|solid|nascent, strengths: "", top_gaps: []}
-  rubric_ratings:                 # 42 rows: 6 surfaces x VD1..VD7
+  rubric_ratings:                 # 42 rows: 6 surfaces x VD1..VD7; cells outside Section 8's second table are n/a
     - {surface: "", dimension: VD1, rating: strong|adequate|weak|absent|n/a, evidence: "file:line|item-id", note: ""}
   findings:
     - {id: CFR-01, surface: "<surface>|shared", question: Q1, dimension: VD1,
@@ -1376,13 +1447,13 @@ audit:
 
 Field rules:
 
-- `condition_reviews.verdict`: `foreclosed` means a later Decision removed the trigger (the
-  stanza's own note says so). `recommended_disposition`: `re-arm` (stanza conditions only) keeps the
-  condition and proposes a new review date in `rationale`; `keep-as-is` leaves a condition
-  unchanged (use for a prose condition that has not fired); `re-decide` sends it to a planning
-  session, as the stanza's `on_trigger` says (use when `fired`); `retire-condition` removes a
-  condition that can no longer fire (use when `foreclosed`). For `cannot-determine`, choose `re-arm`
-  or `keep-as-is` and name in `rationale` the evidence a reviewer would need.
+- `condition_reviews.verdict`: `foreclosed` means the condition can no longer fire as written: a
+  later Decision removed its trigger, or an event it is conditioned on has passed; cite what
+  foreclosed it. `recommended_disposition` follows the verdict: `fired` -> `re-decide` (send it to
+  a planning session, as the stanza's `on_trigger` says); `foreclosed` -> `retire-condition`;
+  `not-fired` or `cannot-determine` -> `re-arm` for a stanza condition (keep it and propose a new
+  review date in `rationale`) or `keep-as-is` for a prose condition. For `cannot-determine`, name
+  in `rationale` the evidence a reviewer would need.
 - `improvement_sequence`: a step with `opportunity: false` has at least one finding id in `closes`;
   a step with `opportunity: true` has `closes: []`. `moves` names what it moves, for example
   "Q2 grown -> held" or "EX7 missed -> partial". `practice` is an EX id or a named practice;
@@ -1392,16 +1463,31 @@ Field rules:
   `side_effect`; `eroded` = in force on paper, and evidence shows it no longer constrains what it
   was built to constrain; `retired-with-replacement` / `retired-without-replacement` = removed by a
   recorded act, with or without another control taking over its purpose; `never-exercised` = built,
-  and no instance of it firing or being used was found where G19's hint points.
+  and no instance of it firing or being used was found where G19's hint points. Where the place
+  G19 points to cannot show a component firing (L6), do not use `never-exercised`: choose the state
+  the other evidence supports and set `confidence: HYPOTHESIS`.
 - `growth_ledger`: units are entries for `decision_entries` (Script A `distinct_numbers`); bytes for
-  `decision_index`, `contracts`, `ambient_instruction_layer` and `roadmap`; files for `plans` and
-  for `checks_and_tests` (Script A `check_py + tests_py`); a count for `open_recommendations` (the
-  preflight report). A flow is the change between a period's two Script A boundaries divided by the
+  `decision_index`, `contracts` and `ambient_instruction_layer`; lines of
+  `docs/ROADMAP-PLATFORM.yaml` for `roadmap` (Script A `roadmap_lines`, the unit its hard limit
+  uses); files for `plans` and for `checks_and_tests` (Script A `check_py + tests_py`); a count
+  for `open_recommendations` (the preflight report). `consumer_cost_model`: `ambient` = loaded
+  into every session; `per-plan` = read once in every planning run; `retrieved-by-id` = read only
+  when something cites it; `on-demand` = read when a task touches it; `not-read-by-agents` = no
+  workflow sends an agent to it. A flow is the change between a period's two Script A boundaries divided by the
   period's days (Section 9 DD-A). Write `null` for `flow_p0_per_day` on `decision_index`,
   `contracts` and `checks_and_tests` (Trap 17), and for every flow of `open_recommendations` (no
   history in git). `hard_limit` names the limit from G21 or "none". Q5's
   `any_limit_binds_within_30_days` is `yes` when any row's `binds_within_30_days` is `yes`, else
   `no`.
+- `findings`: `surface` is one of the six surfaces, or `shared` when the defect spans more than
+  one (name them in `gap`). `question` is the one of Q1-Q10 the finding bears on most, and
+  `dimension` the one of VD1-VD7. `change_type`: `add` a new mechanism; `rescope` move, split or
+  re-time an existing item; `enforce` give an existing rule an evaluator; `unify` merge duplicate
+  statements; `persist` record something not recorded; `clarify` wording only; `retune_gate`
+  change a threshold or tier; `retire` remove a mechanism. `effort`: `XS` a wording or one-line
+  change; `S` one small plan; `M` one plan touching several files and a check; `L` more than one
+  plan. `sequencing.blocked_behind` holds finding ids or roadmap item ids;
+  `improvement_sequence.blocked_behind` holds step numbers.
 - `top_improvements` holds at most 5 finding ids. `highest_leverage_change` is a finding id, or
   `null` when there are no findings.
 
@@ -1510,7 +1596,7 @@ this prompt forecloses it.
   You do NOT edit Decisions, contracts, the roadmap, skills, commands, checks, code or workflows;
   do NOT file or update a recommendation; do NOT re-arm, edit or annotate any reversal-condition
   stanza (Q8 recommends; the human acts); do NOT deploy or change any cloud resource.
-- Live systems: only the read commands Sections 5, 11 and 13 allow, within their limits. No write
+- Live systems: only the read commands Sections 5, 10, 11 and 13 allow, within their limits. No write
   verb, ever.
 - Never write an AWS account id, ARN, credential, ExternalId, or telemetry tenant id, project id or
   session ULID in either deliverable or in the PR (public repository). Commit shas, file paths,
