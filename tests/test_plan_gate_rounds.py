@@ -151,3 +151,16 @@ def test_other_gates_refuse_scout_input_fingerprint(data: dict) -> None:
 def test_a_bad_scout_input_fingerprint_is_refused(fingerprint: str) -> None:
     with pytest.raises(ValidationError, match="scout_input_fingerprint"):
         GateRound.model_validate(_row("decision-scout", 1, "NO_FLAGS", scout_input_fingerprint=fingerprint))
+
+
+def test_kind_blind_rows() -> None:
+    for verdict in ("mechanism", "direction"):
+        assert GateRound.model_validate(_row("kind-blind", 1, verdict)).verdict == verdict
+    with pytest.raises(ValidationError, match="verdict must be one of"):
+        GateRound.model_validate(_row("kind-blind", 1, "PASS"))
+    with pytest.raises(ValidationError, match="wording-check fields only"):
+        GateRound.model_validate(_row("kind-blind", 1, "mechanism", digest=_DIGEST))
+    with pytest.raises(ValidationError, match="no blocking or nits"):
+        GateRound.model_validate(_row("kind-blind", 1, "mechanism", blocking=1))
+    with pytest.raises(ValidationError, match="never escalated"):
+        GateRound.model_validate(_row("kind-blind", 1, "mechanism", escalated=True))

@@ -1,6 +1,7 @@
 """Private option helpers for scripts/checks/_marker_guard.py (Decision 165, Decision 187 cl.7).
 
-Every opt-in branch of the shared marker mechanism lives here, so scripts/checks/_marker_guard.py gains only
+Every opt-in branch of the shared marker mechanism, and the unconditional kind rule (approval-routing.yaml
+lane.kind_floor, PLAN-wording-approval-routing), live here, so scripts/checks/_marker_guard.py gains only
 unconditional calls and stays measured at 100% by its own mirror. Measured through
 tests/checks/test__marker_guard_state_options.py. Grammar and semantics: docs/contracts/marker-grammar.yaml
 (state_diff_mechanics (5)-(8)). This module never imports _marker_guard at module level (no cycle).
@@ -10,15 +11,20 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING
 
-from scripts.decisions_md import iter_decision_sections
+import yaml
+
+from scripts.decisions_md import extract_entry_envelope, iter_decision_sections
 
 if TYPE_CHECKING:
     from scripts.checks._marker_guard import MarkerEntry, RegistrySpec, StateEntry
 
 _DECISIONS_REL = "docs/DECISIONS.md"
 _ARCHIVE_REL = "docs/DECISIONS_ARCHIVE.md"
+_MAP_REL = "docs/contracts/approval-routing.yaml"
+_FLOORS: dict[str, tuple[int, str, int | None]] = {}
 
 
 def mentions(body: str, candidates: list[str], bounded: bool) -> bool:
@@ -107,3 +113,50 @@ def transition_failure(
         f"{key}: {spec.token} marker cites {marker}, but no text added to it in this change names this entry "
         "(a mention the base already carried is spent; an in-place rewrite never authorizes)."
     )
+
+
+def _floor(root: Path) -> tuple[str, int | None]:
+    """(state, kind_floor) of the working-tree map: absent | inert | unreadable | sampled, memoized per mtime_ns."""
+    path = Path(root) / _MAP_REL
+    try:
+        stamp = path.stat().st_mtime_ns
+    except OSError:
+        return "absent", None
+    cached = _FLOORS.get(str(root))
+    if cached and cached[0] == stamp:
+        return cached[1], cached[2]
+    try:
+        lane = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("lane")
+    except (OSError, yaml.YAMLError, AttributeError):
+        state, floor = "unreadable", None
+    else:
+        floor = lane.get("kind_floor") if isinstance(lane, dict) else None
+        floor = floor if isinstance(floor, int) and not isinstance(floor, bool) else None
+        state = "inert" if not isinstance(lane, dict) or lane.get("rung") != "sampled" else "sampled"
+    _FLOORS[str(root)] = (stamp, state, floor)
+    return state, floor
+
+
+def kind_failure(number: int, body: str, root: Path) -> bool:
+    """True when the cited entry may not authorize a marker under the map's lane.kind_floor.
+
+    Reads root/docs/contracts/approval-routing.yaml from the working tree (callers pass _common.ROOT, so fixture-rooted
+    callers read the real repository's map). Inert when the map is absent or not on sampled. An unreadable map, or a
+    sampled map without an int kind_floor, refuses mechanism entries only. An entry with no kind reads as direction.
+    """
+    state, floor = _floor(root)
+    if state in ("absent", "inert"):
+        return False
+    envelope = extract_entry_envelope(body) or {}
+    kind = envelope.get("kind")
+    value = kind.get("value") if isinstance(kind, dict) else None
+    if state == "unreadable" or floor is None:
+        refused = value == "mechanism"
+    else:
+        refused = number > floor and value not in (None, "direction")
+    if refused:
+        print(
+            f"  kind rule: Decision {number} is above kind_floor {floor} and is not direction (approval-routing.yaml); "
+            "cite a direction entry"
+        )
+    return refused

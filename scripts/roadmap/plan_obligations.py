@@ -50,6 +50,7 @@ _CONTRACT_PATH = ROOT / "docs" / "contracts" / "plan-obligations.yaml"
 # floor plus the net-new-in-diff gate below, every one of them would red on first touch.
 MIN_SCHEMA_VERSION = 4
 _IMPLEMENTATION = "IMPLEMENTATION"
+_KIND_TEST_KEYS = ("test", "direction_when", "mechanism_when", "tie_break")
 
 
 def load_obligation_map(contract_path: Path | None = None) -> tuple[list[dict[str, Any]], str | None]:
@@ -437,6 +438,17 @@ def build_report(path: Path) -> str:
     return "\n".join(lines)
 
 
+def _blind_drafts(plan: str) -> str:
+    """The kind test, then each drafted Decision without its kind mapping, separated by '---' (nothing else)."""
+    try:
+        contract = yaml.safe_load((ROOT / "docs/contracts/decision-kind.yaml").read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        contract = {}
+    head = [f"{key}: {' '.join(str(contract.get(key, '')).split())}" for key in _KIND_TEST_KEYS]
+    drafts = [plan_decision_drafts.blind_text(e["block"]).strip() for e in plan_decision_drafts.drafted_entries(plan, ROOT)]
+    return "\n---\n".join(["\n".join(head), *drafts])
+
+
 def main(argv: list[str] | None = None) -> int:
     """Advisory CLI. ALWAYS exits 0, including on unmet obligations -- the registered check
     (validate_plan_scope_closure) is the gate this report only informs."""
@@ -444,8 +456,11 @@ def main(argv: list[str] | None = None) -> int:
     which = parser.add_mutually_exclusive_group(required=True)
     which.add_argument("--plan", help="Path to a docs/plans/PLAN-{slug}.yaml file")
     which.add_argument("--decision-draft", help="Path to a drafted Decision file: print its decision_drafts section only")
+    which.add_argument("--blind-drafts", help="Path to a plan: print the kind test and each drafted Decision without its kind")
     args = parser.parse_args(argv)
-    if args.decision_draft:
+    if args.blind_drafts:
+        print(_blind_drafts(args.blind_drafts))
+    elif args.decision_draft:
         print("\n".join(plan_decision_drafts.report_for_draft(args.decision_draft)))
     else:
         print(build_report(Path(args.plan)))

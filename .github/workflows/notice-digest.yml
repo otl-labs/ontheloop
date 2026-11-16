@@ -1,0 +1,56 @@
+name: notice-digest
+
+# The operator's notice read (Decision 246; PLAN-wording-approval-routing): one issue comment per merged commit with
+# notice-class changes, posted from main with the job token only (contents read, issues write). No AWS role, no secret,
+# no manual dispatch trigger, and no concurrency group: each run digests only its own push's range, and a shared group would
+# cancel a pending run and lose its rows. Inert (no step after the map probe runs) while the map is absent at both
+# BEFORE and AFTER. Never a required check; a failure starts a ci-rca run (config/ci_rca_taxonomy.yaml).
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Find the routing map
+        id: map
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          present=false
+          for rev in "$BEFORE" "$AFTER"; do
+            [[ "$rev" =~ ^0+$ ]] && continue
+            git cat-file -e "$rev:docs/contracts/approval-routing.yaml" 2>/dev/null && present=true
+          done
+          echo "present=$present" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python 3.12
+        if: steps.map.outputs.present == 'true'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install digest dependencies
+        if: steps.map.outputs.present == 'true'
+        run: python -m pip install pyyaml -c requirements.txt
+
+      - name: Post the notice rows
+        if: steps.map.outputs.present == 'true'
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: python -m scripts.ci.notice_digest --before "$BEFORE" --after "$AFTER"

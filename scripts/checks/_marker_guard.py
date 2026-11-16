@@ -33,6 +33,7 @@ from scripts.checks._marker_guard_state_options import (
     base_corpus,
     bodies_from_text,
     effective_marker,
+    kind_failure,
     mentions,
     transition_failure,
 )
@@ -331,13 +332,13 @@ def authorization_failure(
     if body is None:
         return True
     if _mentions_any(body, candidates, bounded):
-        return False
+        return kind_failure(_normalize_dec_id(dec_id), body, _common.ROOT)
 
     superseded_by = extract_superseded_by(body)
     if superseded_by:
         target_body = bodies.get(_normalize_dec_id(superseded_by))
         if target_body is not None and _mentions_any(target_body, candidates, bounded):
-            return False
+            return kind_failure(_normalize_dec_id(superseded_by), target_body, _common.ROOT)
 
     return True
 

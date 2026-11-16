@@ -568,3 +568,28 @@ def test_registry_shard_naming_a_scoped_test_is_reported(tmp_path: Path) -> None
     path = _write(tmp_path, fx.make_plan(("tests/test_a.py", "Modify", "p")))
     with patch.object(plan_obligations, "ROOT", tmp_path):
         assert rel in plan_obligations.evaluate_plan(path)[0]
+
+
+def test_blind_drafts_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(plan_obligations, "ROOT", tmp_path)
+    (tmp_path / "docs/contracts").mkdir(parents=True)
+    kind = {"test": "t1", "direction_when": "d1", "mechanism_when": "m1", "tie_break": "b1", "values": ["x"]}
+    (tmp_path / "docs/contracts/decision-kind.yaml").write_text(yaml.safe_dump(kind), encoding="utf-8")
+    sig = "significance:\n  value: numbered_decision\n  justification: r.\n"
+    env = "number: {{N}}\nkind:\n  value: mechanism\n  justification: j.\n" + sig
+    one = f"## Decision {{{{N}}}}: One\n\n```yaml\n{env}```\n\n**Intent:** First intent.\n"
+    block = {"id": "d", "file": "docs/DECISIONS.md", "before": "", "after": one + "\n" + one.replace("One", "Two")}
+    (tmp_path / "docs/plans/approved").mkdir(parents=True)
+    (tmp_path / "docs/plans/approved/demo.yaml").write_text(
+        yaml.safe_dump({"schema_version": 1, "slug": "demo", "blocks": [block]}), encoding="utf-8"
+    )
+    plan = tmp_path / "PLAN-demo.yaml"
+    plan.write_text(yaml.safe_dump({"slug": "demo"}), encoding="utf-8")
+    assert plan_obligations.main(["--blind-drafts", str(plan)]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("test: t1\ndirection_when: d1\nmechanism_when: m1\ntie_break: b1\n---\n## Decision")
+    assert out.count("\n---\n") == 2 and "kind:" not in out and "First intent." in out and "Two" in out
+    with pytest.raises(SystemExit):
+        plan_obligations.main(["--blind-drafts", str(plan), "--plan", str(plan)])
+    monkeypatch.setattr(plan_obligations, "ROOT", tmp_path / "none")
+    assert plan_obligations.main(["--blind-drafts", str(plan)]) == 0

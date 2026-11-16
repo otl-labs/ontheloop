@@ -52,6 +52,12 @@ class TestRoadmapManifest:
             "scripts/platform_roadmap_liveness.py",
         } <= set(entry.pre_globs or ())
 
+    def test_approval_routing_entry_is_pre_without_globs_and_in_the_full_tier(self) -> None:
+        entry = next(e for e in _manifest.ENTRIES if e.name == "validate_approval_routing")
+        assert entry.pre is True
+        assert not entry.pre_globs
+        assert entry.full_segment == "full_after_lint"
+
 
 class TestGatedEntryInputClosures:
     """A gated check's pre_globs must cover EVERY path its implementation reads, not just its
