@@ -39,18 +39,22 @@ scope:
   - file: tests/checks/iam_tf/test_bootstrap_ci_roles.py
     action: Modify
     purpose: >-
-      rec-5231. A new test pins DenyProviderAndAccountWrite's action set exactly (the 19 actions, the last
-      iam:SetSecurityTokenServicePreferences) and requires every sts: action anywhere in bootstrap_apply_guard_json to be
-      one of DenyCredentialMinting's; a mutation case swapping the token back to sts: is red.
+      rec-5231. A new test requires DenyProviderAndAccountWrite to contain today's 18 iam: provider and account
+      actions plus iam:SetSecurityTokenServicePreferences (a required subset, so a later addition does not break it) and
+      every sts: action anywhere in bootstrap_apply_guard_json to be one of DenyCredentialMinting's; a mutation case
+      swapping the token back to sts: is red on both.
   - file: tests/checks/iam_tf/test_platform_dev_data_lake_read_fence.py
     action: Modify
     purpose: >-
       rec-5232. _check_list_deny requires a StringNotLike s3:prefix condition (and no StringLike) whose values equal
       _EXPECTED_LIST_CONDITION_PREFIXES, the Allow's set; the condition parser takes the operator as a parameter; the
-      fixture's list deny moves to the new shape; a new assertion that none of convergence/personal/*,
-      tfplan/personal/* or tfstate/personal/* matches any StringNotLike value (fnmatch), so the state prefixes stay
-      denied whatever the constant holds; new red cases: the old StringLike-over-state-prefixes deny, a StringNotLike set
-      that differs from the Allow's, and one that admits a state prefix. Declared re-authoring of a graduated row's node file, approved with
+      fixture's list deny moves to the new shape. A new assertion resolves the StringNotLike values against the
+      file's own locals (it parses ducklake_prod_data_prefix and ducklake_smoke_data_prefix and pins them to "ducklake"
+      and "ducklake-neon-smoke"), then requires that no concrete state prefix (convergence/personal/, tfplan/personal/,
+      tfstate/personal/x and the short tf) matches any resolved value under fnmatch, so the state prefixes stay denied
+      even if a local is changed. New red cases: the old StringLike-over-state-prefixes deny, a StringNotLike set that
+      differs from the Allow's, and a local mutated to tfstate/personal (both the pin and the fnmatch assertion fail).
+      Measured 2026-11-16: fnmatch against the unresolved ${local...}/* text is always False, hence the resolution. Declared re-authoring of a graduated row's node file, approved with
       this plan (operator, 2026-11-16): the new deny is a strict superset of the old one.
 bundled_recommendations: [rec-5231, rec-5232]
 followon_recs: []
@@ -74,7 +78,7 @@ infrastructure_dependencies:
 acceptance_criteria:
   - >-
     bootstrap-apply-guard's DenyProviderAndAccountWrite denies iam:SetSecurityTokenServicePreferences and holds no sts:
-    action; its action set is pinned exactly, and every sts: action in the guard is a credential-minting one
+    action; its required actions are pinned as a subset, and every sts: action in the guard is a credential-minting one
     (test_bootstrap_ci_roles.py, VP 1); live, bootstrap-apply simulates explicitDeny for
     iam:SetSecurityTokenServicePreferences (VP 6).
   - >-
@@ -133,7 +137,8 @@ verification_plan:
     phase: pre-deploy
     action: >-
       ENVIRONMENT CHECK (deploy-paths.yaml admin_out_of_band.pre_merge_live_plan), operator-run in AWS CloudShell in
-      the PROD account as user/platform-breakglass, posted once the PR is CI green.
+      the PROD account as user/platform-breakglass, posted once the PR is CI green; the CloudShell variant of
+      PLAN-bootstrap-iam-analyzer-checks VP 6 (Decision 256 cl.3).
     command: >-
       ( printf 'caller-arn check: '; aws sts get-caller-identity --query Arn --output text 2> /dev/null | grep -q
       ':user/platform-breakglass$' && echo ADMIN_CHAIN_OK || echo ADMIN_CHAIN_ABSENT )
@@ -175,7 +180,11 @@ verification_plan:
       "$W/plan.txt"; terraform -chdir="$B" show -json "$W/head.bin" > "$W/plan.json" 2>> "$L"; jq -r '.resource_changes[]
       | select(.change.actions != ["no-op"]) | "\(.change.actions | join(",")) \(.address)"' "$W/plan.json" | LC_ALL=C
       sort; jq -c '.resource_changes[] | select(.change.actions == ["update"]) | {a: .address, b: .change.before.policy,
-      p: .change.after.policy}' "$W/plan.json" > "$W/docs.jsonl"; while IFS= read -r J; do N=$(jq -r .a <<< "$J"); for
+      p: .change.after.policy}' "$W/plan.json" > "$W/docs.jsonl"; for PN in $(aws iam list-role-policies --role-name
+      PlatformDev --query PolicyNames --output text 2>> "$L"); do [ "$PN" = DailyOps ] && continue; C=$(aws iam
+      get-role-policy --role-name PlatformDev --policy-name "$PN" --query PolicyDocument --output json 2>> "$L" | grep -cE
+      'ListBucketVersions|"s3:\*"|"s3:List\*"|"\*"'); echo "EXTRA $PN s3list_lines=$C"; done; echo "ATTACHED $(aws iam
+      list-attached-role-policies --role-name PlatformDev --query 'length(AttachedPolicies)' --output text 2>> "$L")"; while IFS= read -r J; do N=$(jq -r .a <<< "$J"); for
       K in b p; do D=$(jq -r ".$K" <<< "$J"); T=$(aws accessanalyzer validate-policy --policy-type IDENTITY_POLICY
       --policy-document "$D" --query "findings[?findingType=='ERROR'||findingType=='SECURITY_WARNING'].[findingType,issueCode]"
       --output text 2>> "$L" < /dev/null) || T=CALL_ERROR; [ -n "$T" ] && sed "s/^/VALIDATE $K $N /" <<< "$T" || echo
@@ -187,7 +196,9 @@ verification_plan:
       VALIDATE b aws_iam_policy.agent_session_guard SECURITY_WARNING S3_PREFIX_IN_NEGATIVE_CONTEXT; a VALIDATE b line for
       platform_dev_runtime (its code is recorded; S3_PREFIX_IN_NEGATIVE_CONTEXT is inferred, not yet read); VALIDATE p
       aws_iam_policy.bootstrap_apply_guard CLEAN; VALIDATE p aws_iam_policy.agent_session_guard CLEAN; no VALIDATE p
-      platform_dev_runtime line carrying S3_PREFIX_IN_NEGATIVE_CONTEXT, ERROR or CALL_ERROR; the sha.
+      platform_dev_runtime line carrying S3_PREFIX_IN_NEGATIVE_CONTEXT, ERROR or CALL_ERROR; EXTRA lines only for inline
+      policies other than DailyOps (names only; terraform/CLAUDE.md records an uncodified AgentPlatformRuntime), each
+      with s3list_lines 0; ATTACHED 0; the sha.
     fix_if: >-
       SCREEN_REFUSED: nothing was initialised; if main moved under terraform/ the build rebases and re-posts, else the
       head carries files beyond scope and the build stops. A setup line: the operator reads $HOME/bgf-tf.err in
@@ -196,7 +207,9 @@ verification_plan:
       re-run VP 1-5. A VALIDATE p finding on agent_session_guard or platform_dev_runtime that the StringNotLike shape
       itself draws: stop, do not merge, and take the fork back to the operator with the issue code; the build never
       picks another shape. A remaining DailyOps SECURITY_WARNING with another code: record it, file a rec, and merge (class
-      other shows it, never refuses it).
+      other shows it, never refuses it). An EXTRA line with s3list_lines above 0, or ATTACHED above 0: a live grant may
+      list versions outside the two prefixes, which the new deny would remove; stop, do not merge, and take it to the
+      operator.
     hermetic: false
     graduation: not-applicable
   - step: 6
@@ -285,7 +298,7 @@ verification_plan:
     graduation: not-applicable
 test_obligations:
   - source: terraform/bootstrap/bootstrap_ci_apply.tf
-    behavior: "DenyProviderAndAccountWrite's action set is exactly the 19 actions with iam:SetSecurityTokenServicePreferences, and the guard's only sts: actions are credential-minting ones."
+    behavior: "DenyProviderAndAccountWrite contains the 18 existing actions and iam:SetSecurityTokenServicePreferences, and the guard's only sts: actions are credential-minting ones."
     verification_step: 1
     test_selector: tests/checks/iam_tf/test_bootstrap_ci_roles.py
     red_green_expectation: red before (the HCL still names sts:SetSecurityTokenServicePreferences), green after
@@ -300,12 +313,12 @@ test_obligations:
     test_selector: tests/checks/iam_tf/test_agent_session_user.py::test_agent_session_carries_platform_dev_denies
     red_green_expectation: red if only DailyOps changes, green when both change
   - source: tests/checks/iam_tf/test_bootstrap_ci_roles.py
-    behavior: "The pinned set and the sts: rule reject a swap back to sts:."
+    behavior: "The required subset and the sts: rule each reject a swap back to sts:."
     verification_step: 1
     test_selector: tests/checks/iam_tf/test_bootstrap_ci_roles.py::test_bootstrap_ci_predicates_are_red_on_each_mutation
     red_green_expectation: the new sts_prefs mutation case is red against the predicate, green on the real tree
   - source: tests/checks/iam_tf/test_platform_dev_data_lake_read_fence.py
-    behavior: The old StringLike deny and a StringNotLike set unequal to the Allow's are both rejected.
+    behavior: The old StringLike deny, a StringNotLike set unequal to the Allow's, and a DuckLake prefix local changed to a state prefix are all rejected.
     verification_step: 1
     test_selector: tests/checks/iam_tf/test_platform_dev_data_lake_read_fence.py
     red_green_expectation: new red cases fail the checker; the good fixture and the real tree pass
@@ -319,7 +332,7 @@ context:
   - "SIT (Decision 252 cl.7, RELATED): these files carry no SIT-only gating; SIT's bootstrap root is not yet applied (rec-5027), so the fix reaches SIT with its first apply."
   - "Findings: operator's CloudShell validate-policy read, 2026-11-16 (bootstrap-apply-guard ERROR INVALID_ACTION Statement 4; agent-platform-session-guard SECURITY_WARNING S3_PREFIX_IN_NEGATIVE_CONTEXT Statement 7); filed as rec-5231 and rec-5232 by the PLAN-bootstrap-iam-analyzer-checks build. Statement 4 is DenyProviderAndAccountWrite, statement 7 DenyStateAndConvergenceVersionList (0-based, read from the HCL)."
   - "Fork (IAM, operator's call 2026-11-16): StringNotLike on both documents chosen over an unconditional session-only deny (breaks the mirror, leaves DailyOps' warning) and dropping the Sid (loosens the mirror). Advice: /mnt/project-files/guard-policy-fixes/ADVICE.md (blind Fable consult)."
-  - "Equivalence: PlatformDev's only ListBucketVersions Allow is DataLakeVersionListRead (StringLike over the same two values), so the new deny removes nothing PlatformDev can do today; the session user's boundary grants no s3: action, so for it the deny is depth only. A negated operator on an absent key evaluates true (IAM condition-operator reference, recalled, proven by VP 6's dev_none and session_none)."
+  - "Equivalence (HCL, inferred for the live role until VP 5's EXTRA read): PlatformDev's only codified ListBucketVersions Allow is DataLakeVersionListRead (StringLike over the same two values), so the new deny removes nothing PlatformDev can do today; the session user's boundary grants no s3: action, so for it the deny is depth only. A negated operator on an absent key evaluates true (IAM condition-operator reference, recalled, proven by VP 6's dev_none and session_none)."
   - "Graduated rows: platformdev-state-convergence-denies-intact keeps passing (Sid names and the three state prefixes in DenyStateAndConvergenceVersionRead are unchanged); platform-dev-data-lake-read-fence's node file is re-authored here; its guard_target still names terraform/personal (rec-4047's residual)."
   - "Ordering: PLAN-bootstrap-iam-analyzer-checks PR 2 merges only after VP 6 passes; the build tells that build thread when it does. Main gained #2079 (github_ci_apply_reads.tf, a CI-applied bootstrap change) after this plan was drafted: the build confirms its tf-bootstrap-apply run completed before merging, since VP 6 applies only an exact three-update plan."
   - "Approvals at build start: none for the build session. It runs no secret read, admin credential or terraform command; VP 4-6 are the operator's own CloudShell blocks, and the rec reads in VP 7 use the routine agent_platform profile."
@@ -328,6 +341,7 @@ context:
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:563103130e6c94361753148b70e62fb6d7203a1a13d5a06916e56193891fe669'}  # pragma: allowlist secret
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 8}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 4}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
