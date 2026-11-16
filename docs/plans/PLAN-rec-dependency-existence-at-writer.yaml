@@ -73,17 +73,22 @@ scope:
   - file: src/row_rules/rules.py
     action: Modify
     purpose: >-
-      WRITER_REFERENCE_KINDS = frozenset({"array_element_reference"}) (exported); array_element_reference joins the
-      column keys; RowRules gains references: frozenset[str] (columns whose elements must name an existing merge key of
-      the same table), filled from a projected array_element_reference: true and refusing any other value, and refusing
-      a column that carries both the leg and its exemption. The engine stays pure: check_row never evaluates
-      references (no I/O); PRODUCER_SIDE_KINDS is unchanged, so an exempted leg (class cross_row) still projects as a
-      producer exemption. Shared with the telemetry writer, whose RowRules gain an empty references set (inert).
+      Only "array_element_reference" joins _COLUMN_KEYS, so a projected leg is a known key; RowRules gains no field
+      and rules.py gains no branch and no import (amendment 2: its mirror test tests/row_rules/test_rules.py is at 498
+      of 500 SLOC and is not edited, and test_package_is_a_stdlib_leaf with the .importlinter contract
+      src-row-rules-is-a-leaf refuses any first-party import inside src/row_rules, so the reference branches live in
+      the adapter below). check_row never evaluates the leg (no I/O); PRODUCER_SIDE_KINDS is unchanged, so an
+      exempted leg (class cross_row) still projects as a producer exemption. The telemetry writer is unaffected.
     new_imports: []
   - file: src/common/ducklake_write_rules.py
     action: Modify
     purpose: >-
-      check_references(con, spec, rules, record, prior) -> None: for each column in rules.references with a non-empty
+      WRITER_REFERENCE_KINDS = frozenset({"array_element_reference"}) and reference_columns(fields) -> frozenset[str]
+      (fields is a table's projected field map, spec.fields): the columns whose elements must name an existing merge
+      key of the same table, built from a projected array_element_reference: true; any other value, or a column that
+      carries both the leg and its write_time_exemptions entry, raises src.row_rules.rules.RuleProjectionError (so the
+      conformance arm's except still catches it). check_references(con, spec, rules, record, prior) -> None: for each
+      column in reference_columns(spec.fields) with a non-empty
       value that is an insert (prior None) or differs from prior[column], one SELECT of spec.merge_key from the
       current table WHERE merge_key IN (one ? per distinct element), on the caller's open transaction; any element not
       returned raises RowRuleViolationError(spec.table, "array_element_reference", column) carrying no value.
@@ -109,9 +114,10 @@ scope:
   - file: scripts/checks/contracts/validate_write_time_enforcement_conformance.py
     action: Modify
     purpose: >-
-      A references arm: the declared non-exempt array_element_reference columns equal RowRules.references for every
-      contract table, and an event table declaring one without an exemption fails closed.
-    new_imports: []
+      A references arm: the declared non-exempt array_element_reference columns equal
+      src.common.ducklake_write_rules.reference_columns of the table's projected fields for every contract table, and an
+      event table declaring one without an exemption fails closed.
+    new_imports: [src.common.ducklake_write_rules]
   - file: scripts/contract_rule_census.py
     action: Modify
     purpose: >-
@@ -124,7 +130,8 @@ scope:
     action: Modify
     purpose: >-
       The derived pre-check keeps refusing early with the absent ids named: the existing _ElementReference handler now
-      runs from RowRules.references (insert, or a changed value) as well as from a producer exemption, so behaviour and
+      runs from src.common.ducklake_write_rules.reference_columns(spec.fields) (insert, or a changed value) as well as
+      from a producer exemption, so behaviour and
       its reader round-trip are unchanged; the module docstring names the writer as the enforcement point. The
       references path resolves its handler through _producer_handlers and fails closed when it is missing, so
       test_producer_side_rules_follow_the_contract_exemptions stays green (its docstring is re-pointed).
@@ -149,7 +156,8 @@ scope:
     purpose: >-
       test_select_widens_only_with_dated_rules expects dependencies in the widened select; the gate-case test expects
       the new case and checks it through check_references with a double that returns no row (planned changes);
-      check_references unit nodes.
+      check_references unit nodes; reference_columns nodes (built from array_element_reference true; any other value
+      refused; leg plus exemption refused), so the mirror test keeps ducklake_write_rules.py at 100%.
   - file: tests/common/test_ducklake_write_rules_integration.py
     action: Modify
     purpose: >-
@@ -160,11 +168,6 @@ scope:
       nothing. Planned changes to existing nodes: test_a_rule_clean_file_scd2_lands seeds rec-7 before naming
       it; test_the_census_sql_and_the_engine_agree_row_for_row skips writer-lookup legs through the census module's own
       predicate, never a restated kind.
-  - file: tests/row_rules/test_rules_references.py
-    action: Create
-    purpose: >-
-      references built from array_element_reference true; any other value refused; leg plus exemption refused. A new
-      file because tests/row_rules/test_rules.py is at 498 of 500 SLOC; that file is not edited.
   - file: tests/test_field_semantics_rule_projection.py
     action: Modify
     purpose: The real projection carries array_element_reference true on dependencies and no exemption (planned change).
@@ -193,8 +196,9 @@ scope:
   - file: tests/test_ops_data_portal_validators.py
     action: Modify
     purpose: >-
-      The portal pre-check still rejects an absent rec when the leg comes from RowRules.references. Planned change:
-      _without_leg drops the projected leg from RowRules.references, not a write_time_exemptions entry that no longer
+      The portal pre-check still rejects an absent rec when the leg comes from reference_columns. Planned change:
+      _without_leg drops the projected leg from the table's projected fields, not a write_time_exemptions entry that no
+      longer
       exists.
   - file: tests/checks/contracts/test_write_time_enforcement_decision.py
     action: Modify
@@ -248,9 +252,9 @@ verification_plan:
     action: Engine projection, generator and grammar accept the writer-enforced leg.
     command: >-
       bin/venv-python -m pytest -q
-      tests/row_rules/test_rules_references.py::test_references_built_from_projected_leg
-      tests/row_rules/test_rules_references.py::test_reference_leg_value_must_be_true
-      tests/row_rules/test_rules_references.py::test_reference_leg_with_its_exemption_is_refused
+      tests/common/test_ducklake_write_rules.py::test_reference_columns_built_from_projected_leg
+      tests/common/test_ducklake_write_rules.py::test_reference_leg_value_must_be_true
+      tests/common/test_ducklake_write_rules.py::test_reference_leg_with_its_exemption_is_refused
       tests/test_field_semantics_rule_projection.py::test_dependencies_projects_writer_reference
       tests/test_contract_rules.py::test_dependencies_reference_leg_is_not_exempt
       tests/checks/contracts/test__rule_grammar.py::test_scd2_reference_leg_needs_no_exemption
@@ -271,7 +275,7 @@ verification_plan:
       tests/checks/contracts/test_validate_write_time_enforcement_conformance.py::test_the_registered_check_passes_on_the_real_tree
       tests/test_contract_rule_census.py::test_writer_lookup_leg_reported_not_compiled
     expected: Four passed.
-    fix_if: The conformance arm must compare the declared columns with RowRules.references exactly.
+    fix_if: The conformance arm must compare the declared columns with reference_columns exactly.
     hermetic: true
     graduation: graduate
     graduation_check_id: ops-dependency-reference-conformance
@@ -437,9 +441,11 @@ test_obligations:
     test_selector: tests/common/test_ducklake_writes_references.py::test_file_scd2_rejects_dangling_dependency_inside_transaction
     red_green_expectation: red before (no lookup; the dangling insert commits), green after
   - source: src/row_rules/rules.py
-    behavior: RowRules.references from the projected leg; bad values and leg-plus-exemption refused.
+    behavior: >-
+      A projected array_element_reference is a known column key; reference_columns (ducklake_write_rules.py) builds
+      the set and refuses bad values and leg-plus-exemption.
     verification_step: 2
-    test_selector: tests/row_rules/test_rules_references.py::test_references_built_from_projected_leg
+    test_selector: tests/common/test_ducklake_write_rules.py::test_reference_columns_built_from_projected_leg
     red_green_expectation: red before (unknown rule key), green after
   - source: scripts/field_semantics_rule_projection.py
     behavior: A non-exempt array_element_reference projects as true.
@@ -462,7 +468,7 @@ test_obligations:
     test_selector: tests/checks/contracts/test__rule_grammar.py::test_scd2_reference_leg_needs_no_exemption
     red_green_expectation: red before (producer-side rule needs an exemption), green after
   - source: scripts/checks/contracts/validate_write_time_enforcement_conformance.py
-    behavior: Declared reference columns equal RowRules.references; unexempted event leg fails closed.
+    behavior: Declared reference columns equal reference_columns; unexempted event leg fails closed.
     verification_step: 3
     test_selector: tests/checks/contracts/test_validate_write_time_enforcement_conformance.py::test_references_mismatch_fails
     red_green_expectation: red before (no references arm), green after
@@ -472,7 +478,7 @@ test_obligations:
     test_selector: tests/test_contract_rule_census.py::test_writer_lookup_leg_reported_not_compiled
     red_green_expectation: red before (raises no census check kind), green after
   - source: scripts/ops_portal/write_validators.py
-    behavior: The derived pre-check runs from RowRules.references.
+    behavior: The derived pre-check runs from reference_columns.
     verification_step: 4
     test_selector: tests/test_ops_data_portal_validators.py::test_reference_precheck_runs_from_writer_leg
     red_green_expectation: red before (no producer exemption, so no pre-check runs), green after
@@ -549,6 +555,15 @@ context:
     fingerprint is unchanged (it hashes DECISIONS.md blocks only), so scout r7 stands. Critique r6 (confirming) PROCEED;
     its one nit (a long line) applied.
   - >-
+    Amendment 2 (build-reported, 2026-11-16): the full tier's per-file coverage gate measures src/row_rules/rules.py
+    by tests/row_rules/test_rules.py alone (498 of 500 SLOC, not edited), so reference branches in rules.py read under
+    100%; a sibling module is barred too (test_package_is_a_stdlib_leaf and .importlinter src-row-rules-is-a-leaf
+    refuse any first-party import inside src/row_rules). Fix, the builder's proposal: rules.py only learns the key
+    name; reference_columns and its refusals live in the adapter src/common/ducklake_write_rules.py, measured by its
+    in-scope mirror test; RowRules.references is dropped and the writer, the portal pre-check and the conformance arm
+    read reference_columns. scripts.ops_portal already imports that module; the conformance check gains the import
+    (no import contract forbids scripts -> src.common). The sidecar and its approved words are unchanged.
+  - >-
     Operator: 2026-11-16 adopted the blind consult's advice (/mnt/project-files/rec-write-path-audit/advisor-brief/ADVICE.md),
     including the Decision 210 cl.2(a) amendment; chose plan A plus a guardrail hook (plan F) over moving the glossary
     lint or the portal server-side; said "write the plan" 18:04 UTC. Split A-E settled on a blind Fable consult
@@ -611,7 +626,8 @@ pre_implementation_checklist:
     (scope parts 1-3, outside the sidecar; coordinator.yaml standing_authorisation covers sidecar-bound text only)
 execution_steps:
   - >-
-    src/row_rules/rules.py references and its tests; scripts/field_semantics_rule_projection.py; step 2's engine and
+    src/row_rules/rules.py's one column key and reference_columns in src/common/ducklake_write_rules.py with its
+    nodes; scripts/field_semantics_rule_projection.py; step 2's engine and
     projection nodes red then green.
   - >-
     docs/contracts/data-modeling-standard.yaml: place the sidecar blocks verbatim; docs/contracts/ops_recommendations.yaml:
@@ -640,7 +656,7 @@ execution_steps:
     scripts.ops_data_portal so its context names it a backstop for rows written before Decision {{N}} and for Decision
     70 deletions (status stays open), then step 12; file one follow-up rec through scripts.ops_data_portal file_rec
     (get_rec_write_guidance first): extend the per-action adapter proof (test_write_time_enforcement_conformance.py
-    _enforced) to RowRules.references, and make the grammar or conformance arm refuse a non-exempt
+    _enforced) to reference_columns, and make the grammar or conformance arm refuse a non-exempt
     array_element_reference on any table other than ops_recommendations until the portal handler is table-aware; schedule a wake 7 days after the deploy for step 11 (never
     poll) and record its figures on the PR.
   - Execute Verification Plan -- run each step; loop until pass; on unrecoverable V3 failure stop and RCA (Decision 55)
