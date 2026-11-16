@@ -32,7 +32,8 @@ scope:
   - file: scripts/ops_portal/writer_transport.py
     action: Modify
     purpose: >-
-      The ops writer's signed POST adds the same header to its headers before signing, so a rec or decision write over
+      The ops writer's signed POST adds the same header, the SHA-256 of body.encode("utf-8") (body is a str), to
+      its headers before signing, so a rec or decision write over
       1 MiB is not refused by the proxy. No other behaviour changes.
     new_imports: []
   - file: scripts/telemetry_capture/runner.py
@@ -42,7 +43,8 @@ scope:
       DEFAULT_CATALOG for rows it never sent; the next pass reloads cursor_lost, records from the start and adopts the
       describe's catalog without a catalog_reset. cursor_tail_mismatch and valid loads keep today's behaviour. (2) A
       stopped pass records its fixed stop token in the diagnostics line as stop_token (the _Stop reason or the
-      CaptureUnavailable reason), for the in-session warning.
+      CaptureUnavailable reason), for the in-session warning; a halted line carries no stop_token, so the stopped and
+      halted streaks stay disjoint.
     new_imports: []
   - file: scripts/telemetry_capture/capture_warning.py
     action: Modify
@@ -68,8 +70,8 @@ scope:
     action: Modify
     purpose: >-
       New node test_signed_request_carries_the_body_sha256: with the real botocore SigV4Auth over fixed frozen
-      credentials (import botocore.auth and botocore.awsrequest before patching and stub only boto3 and botocore.session,
-      since _fake_botocore replaces the botocore module), make_client's sign(body) returns X-Amz-Content-Sha256 equal to hashlib.sha256(body).hexdigest() and
+      credentials (pre-import the real botocore.auth and botocore.awsrequest, then monkeypatch boto3.Session and
+      botocore.session.get_session with setattr rather than replacing the botocore module as _fake_botocore does), make_client's sign(body) returns X-Amz-Content-Sha256 equal to hashlib.sha256(body).hexdigest() and
       the Authorization header's SignedHeaders lists x-amz-content-sha256. Existing nodes that assert the exact header
       dict gain the header key (planned change, acceptance_criteria[0]).
     new_imports: []
@@ -106,7 +108,7 @@ acceptance_criteria:
   - "A signed describe with a 2,000,000-byte body sent through make_client on the build branch answers 200 over the execute_api route (it answers 502 on main today)."
   - "A first pass with no rows records no catalog, so the next pass sends without a catalog_reset."
   - "Three consecutive stopped Stop passes give one in-session warning naming the stop token."
-  - "The operator's three kept sessions (the PR #2059 planning session, its implementation session and an ongoing /audit session) reach the warehouse by re-capture before the merge and keep capturing after it, arrival no longer lists sha 380916fc6726, and rec-5212 and rec-5204 are closed."
+  - "The operator's three kept sessions (the PR #2059 planning session, its implementation session and an ongoing /audit session) reach the warehouse by re-capture before the merge and keep capturing after it (a session reclaimed before VP 8 drops out of this criterion, VP 9 decides for #2059, and the report names it), arrival no longer lists sha 380916fc6726, and rec-5212 and rec-5204 are closed."
 verification_plan:
   - step: 1
     phase: pre-deploy
@@ -187,7 +189,8 @@ verification_plan:
       build branch (its own branch and working tree are untouched), then the probe. The build worker writes the
       relay text with the branch name filled in.
     command: >-
-      git fetch origin <build branch> && git worktree add --detach /tmp/capture-fix FETCH_HEAD && cd /tmp/capture-fix
+      git worktree remove --force /tmp/capture-fix 2>/dev/null; git fetch origin <build branch> && git worktree add
+      --detach /tmp/capture-fix FETCH_HEAD && cd /tmp/capture-fix
       && <repo>/bin/venv-python -m scripts.telemetry_capture pass --tree "<this session's transcript path>" &&
       <repo>/bin/venv-python -m scripts.telemetry_capture probe --tree "<this session's transcript path>" --require
       telemetry_sessions,telemetry_observations,telemetry_transcripts
@@ -203,7 +206,7 @@ verification_plan:
     graduation: not-applicable
   - step: 9
     phase: pre-deploy
-    action: Arrival no longer misses the PR #2059 squash, before the merge, so rec-5212's acceptance holds at the PR head.
+    action: Arrival no longer misses the PR #2059 squash, before the merge (the operator's merge gate for rec-5212).
     command: AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_verify arrival
     expected: no ARRIVAL_MISSING line names 380916fc6726; record the ARRIVAL line in the PR body.
     fix_if: still missing after step 8 shows sent, so read the session's root row in telemetry_root_sessions before suspecting the oracle; the merge waits until this passes
@@ -213,18 +216,19 @@ verification_plan:
     phase: post-deploy
     action: >-
       The three sessions move onto the fixed code so their own hooks keep capturing (a catalog_reset confirm resends
-      the whole tree 30 minutes after step 8, which the old code would refuse). Each rebases onto main and ends one
-      turn, then runs the probe.
+      the whole tree 30 minutes after step 8, which the old code would refuse). The two #2059 sessions, whose branch
+      is merged, detach onto main; the /audit session rebases its branch onto main. Each ends one turn, then runs the
+      probe. The command shown is the #2059 form; the /audit form replaces the switch with git rebase origin/main.
     command: >-
-      git fetch origin main && git rebase origin/main && bin/venv-python -m scripts.telemetry_capture probe --tree
+      git fetch origin main && git switch --detach origin/main && bin/venv-python -m scripts.telemetry_capture probe --tree
       "<this session's transcript path>" --require telemetry_sessions,telemetry_observations,telemetry_transcripts
     expected: >-
-      the rebase succeeds (squash-merged commits drop as empty) and the latest hook pass in diagnostics is outcome
-      sent; record it per session.
+      the switch or rebase succeeds and the latest hook pass in diagnostics is outcome sent; record it per session.
     fix_if: >-
-      a dirty tree is stashed first (git stash, then git stash pop after the rebase); on a conflict, git rebase
-      --abort and keep capture alive by re-running step 8's pass from a detached worktree of origin/main after each
-      long turn until the session can rebase; a 502 from a hook pass means the rebase did not land
+      a dirty tree is stashed first (git stash, then git stash pop after); on a rebase conflict, git rebase --abort,
+      run step 8's pass once from a detached worktree of origin/main, and report to the coordinator so the operator
+      decides how that session lands its work (at most one such manual pass per session); a 502 from a hook pass
+      means the switch or rebase did not land
     hermetic: false
   - step: 11
     phase: post-deploy
@@ -235,12 +239,12 @@ verification_plan:
       for r in rows])"
     expected: >-
       both closed; record the closure job run id. rec-5212's close names closure_artifact
-      shard:telemetry-capture-signs-body-sha256 added in the squash (Decision 186 cl.4). The closure job's run is also
-      the first live proof that a header-signed Function URL write succeeds (CI signs the lambda service).
+      shard:telemetry-capture-signs-body-sha256 added in the squash (Decision 186 cl.4). The closure job's run and the first post-merge ci-pass
+      capture on main are also the first live proof that a header-signed Function URL call succeeds (CI signs the lambda
+      service); record both run ids.
     fix_if: >-
-      if the closure job refuses rec-5212 because its arrival acceptance cannot be read there, close it from a session
-      through bin/venv-python -m scripts.session.merge_step recover --slug telemetry-capture-proxy-body-cap --sha
-      <squash sha> (the Decision 201 verdict gate runs live); if CI's header-signed Function URL calls are refused, revert
+      a ClosureArtifactRequired refusal means the shard is not in the squash, so land it and re-run the closure route
+      (merge_step recover --slug telemetry-capture-proxy-body-cap --sha <squash sha>); if CI's header-signed Function URL calls are refused, revert
       per rollback and report it to the coordinator for ci-rca; never close with a direct status write after a refusal
       (Decision 186)
     hermetic: false
@@ -281,10 +285,11 @@ constraints:
   - "The in-session warning is an alarm, never a gate, like the existing deferral and halt warnings; a stop fails loudly in the session (Decision 84 I-4)."
   - "No backfill: step 8 is ordinary capture of a transcript that still exists; reclaimed sessions are not recovered."
   - "No existing assertion is loosened (Decision 235); exact-header-dict assertions gain the new key as a planned change citing acceptance_criteria[0]."
+  - "The rec-5204 and rec-5212 acceptance re-keys are operator-confirmed (14:27Z and the 15:54Z card; Decisions 181, 235); the build PR body states them as planned changes, and any further change to either goes to the operator first."
   - "No rescue agents or workaround loops (Decision 55)."
 context:
   - "Decision-scout verdict FLAGS_FOUND (rounds 1-3; round 2 added: the PC-01 sentence names only the two clients, and rec-5212's close names fixed_by_sha; round 3 added a Decision 226 cl.3 NOTE on the rec-5205 overlap deferral, kept as the sanctioned exit-1 path with re-measure at build start and a green full tier before handoff). CITE: 256 (cl.2 the execute_api path that fails), 226 (cl.1 Track B, cl.3 a red never blocks the plan bundling its repair, cl.5 preventive_action), 201 (closure acceptance verdict), 186 (rec-5212 closure_artifact), 212 (cl.3 the PC-01 coupling row). CONTRADICT: NOTE 256 reversal condition proxy-stops-signing, evaluated and not fired: the refusal is a request-shape rule a standard SigV4 header satisfies (200 at 2 MB and 5 MB with it), so clause 1's signing model stands; the condition is kind manual, so the operator confirms this reading at plan approval. SPIRIT: none. RELATED: 255, 250, 210, 101, 55, 235, 228, 199, 207, 230, 236, 213, 84, 100, 128, 126. Decisions triaged: 211 of 211. Roadmap items intersected: 4; CONFLICT: 0; RELATED: 4. Serves: NS.6 3/5 -- telemetry that keeps arriving is the input improvement is proven against; a restoration, not an advance."
-  - "rec-5212 (ci_rca, escape_mode no_premerge_gate_by_design): its preventive_action is this plan's in-session stop warning (VP 4), with rec-5176 the fleet-wide alarm; its close names closure_artifact shard:telemetry-capture-signs-body-sha256 with the build's squash sha as fix sha (Decision 186 cl.4). Its acceptance (arrival without the sha) holds at the PR head once VP 8-9 pass before the merge, so the squash's Resolves trailer closes it with rec-5204; validate_merge_step requires the trailer union to equal bundled_recommendations."
+  - "rec-5212 (ci_rca, escape_mode no_premerge_gate_by_design): its preventive_action is this plan's in-session stop warning (VP 4), with rec-5176 the fleet-wide alarm; closure_artifact shard:telemetry-capture-signs-body-sha256 stamped in its context_v2_json at plan write (update_rec read back 2026-11-16 ~15:15Z; status open); the shard lands in the build's squash, which the trailer close stamps as fix sha (Decision 186 cl.4). Its acceptance was re-keyed at plan write (operator card 2026-11-16 15:54Z; update_rec read back 15:55Z) from the live arrival probe, which the closure sandbox runs with no network and so measures nothing, to VP 1's node bin/venv-python -m pytest \"tests/telemetry_capture/test_transport.py::test_signed_request_carries_the_body_sha256\" -q. The live arrival check stays as VP 9, a pre-merge gate: the build merges only after it shows sha 380916fc6726 arrived. The squash's Resolves trailer closes rec-5212 with rec-5204; validate_merge_step requires the trailer union to equal bundled_recommendations."
   - "Root cause proven 2026-11-16 ~14:20Z from a cloud session with describe-only probes over the execute_api writer route: 200 up to 1,046,875 body bytes, 502 from 1,062,500; the 502 body is the proxy's own refusal (body exceeds 1048576 bytes with no X-Amz-Content-Sha256 header). With the header, 200 at 2,000,000 and 5,000,000 bytes."
   - "Writer log /aws/lambda/agent-platform-ducklake-telemetry-writer 2026-11-16 12:00Z onward: 240 describe vs 154 append_telemetry from agent-platform-session, no append from a session over 900 KB, no non-200; the 13:58Z window shows describes with no following append. The writer never sees the refused request."
   - "Operator's #2059 session diagnostics (pasted in thread, 2026-11-16 14:02Z): 2 no_rows passes then 86 stopped status_502 with catalog_reset since 10:35Z, requests [], cursor at root line 173, state.json catalog ducklake_smoke; 8,628 rows offered on the latest pass."
@@ -299,12 +304,14 @@ context:
   - "fork: stopped-warning trigger | chosen: 3 trailing stopped Stop passes (deferred and halted keep 2), so one transient deadline or transport stop does not warn | class: consistency-only | precedent: Decision 84 | precedent_kind: decision | reversible: yes | persisted: scripts/telemetry_capture/capture_warning.py"
   - 'red_overlap (2026-11-16 14:33Z, main 137d6533): {"verdict": "blocked", reds: rec-5205 rule overlap (shared: tests/checks/ci_guards/test_validate_composite_action_shell_bodies.py, tests/checks/contracts/test_validate_composite_action_shape_rosters.py, tests/test_ci_rca_lifecycle_correct_rec_context.py, tests/verify_ci_workflow/test_apply_and_terraform.py), rec-5212 repairs_this_red}. Deferral rationale for rec-5205: the shared paths are import-graph test residue reached through writer_transport.py, none is edited here; CI Reform owns rec-5205 (coordinator log 2026-11-16 13:19Z) and its repair touches the sandbox-apply reviewer, not these files; the build reaches handoff only on a green full tier (Decision 163). Re-measure at build start.'
   - "fork: when the kept sessions are recovered | chosen: before the merge, by a manual pass from a worktree of the build branch (VP 8), so rec-5212's acceptance holds at the PR head and one Resolves trailer closes both bundled recs | class: consistency-only | precedent: Decision 201 | precedent_kind: decision | reversible: yes | persisted: docs/plans/PLAN-telemetry-capture-proxy-body-cap.yaml"
+  - "fork: rec-5212 acceptance | chosen: re-keyed to VP 1's pytest node with the live arrival check kept as the VP 9 pre-merge gate (operator card 2026-11-16 15:54Z) | class: asked | precedent: Decision 201; Decision 235 | precedent_kind: decision | reversible: yes | persisted: rec-5212 acceptance (warehouse)"
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:d4d46f9cd2c3f8d5c15fc8290e602250f4c88a98e9db19ad485c90bc6a83099d"}  # pragma: allowlist secret
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:b36078e6d34c0af0ec1acae16159e3e183fdd52835723e26f31bd34da985d222"}  # pragma: allowlist secret
   - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:410b9f49a213f03e2024d408d81d57efad48ef6a5e56aef23cd6220a8964df78"}  # pragma: allowlist secret
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 1, nits: 5}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 3, nits: 5}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 2, nits: 7}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
