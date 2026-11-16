@@ -55,8 +55,8 @@ def test_observations_declares_the_status_rows() -> None:
         "192 characters is dropped and counted",
         "echoed or printed whole STATUS line",
         "rec-4605",
-        "hook_fault",
-        "unmapped_block",
+        "reported_skip",
+        "reported_failure",
     ):
         assert token in semantics, token
     entries = logged(name["amendment_log"])
