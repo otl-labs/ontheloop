@@ -382,7 +382,7 @@ locals {
         # by this statement; a direct call is. The key policy's kms:ViaService still bounds the forwarded one.
         Sid       = "DenyAllButReads"
         Effect    = "Deny"
-        NotAction = concat(local.bootstrap_plan_read_actions, ["sts:GetCallerIdentity"])
+        NotAction = concat(local.bootstrap_plan_read_actions, local.bootstrap_preview_analyzer_actions, ["sts:GetCallerIdentity"])
         Resource  = ["*"]
         Condition = {
           BoolIfExists = {

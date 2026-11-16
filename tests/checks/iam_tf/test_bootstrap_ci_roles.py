@@ -215,8 +215,9 @@ def preview_problems(text: str) -> list[str]:
     if not all(re.match(r"^(\w+:(Get|List|Describe)|apigateway:GET|states:Validate)", a) for a in reads):
         problems.append("a plan-read action is not a read family")
     guard = _local(text, "bootstrap_preview_guard_json")
-    if 'concat(local.bootstrap_plan_read_actions, ["sts:GetCallerIdentity"])' not in guard:
-        problems.append("DenyAllButReads NotAction must be the reads list plus sts:GetCallerIdentity")
+    want = 'concat(local.bootstrap_plan_read_actions, local.bootstrap_preview_analyzer_actions, ["sts:GetCallerIdentity"])'
+    if want not in guard:
+        problems.append("DenyAllButReads NotAction must be the reads, the four analyzer actions and sts:GetCallerIdentity")
     if re.search(r'BoolIfExists\s*=\s*\{\s*"aws:ViaAWSService"\s*=\s*"false"\s*\}', guard) is None:
         problems.append("DenyAllButReads must carry BoolIfExists aws:ViaAWSService false")
     if set(_local_list(text, "bootstrap_plan_read_actions")) != reads:
