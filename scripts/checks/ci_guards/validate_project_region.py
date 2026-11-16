@@ -13,8 +13,8 @@ Rules:
       aws-eu-west-2 is never matched (the region alternation must not be immediately preceded by
       a hyphen or word character).
   R3  no such id appears in the raw text (comments included) of any terraform/**/*.tf or *.hcl
-      file, except the default of variable "aws_region" in terraform/bootstrap/variables.tf and
-      terraform/personal/providers.tf, each of which must equal config/aws-region; no
+      file, except the default of variable "aws_region" in terraform/bootstrap/variables.tf,
+      terraform/organization/variables.tf and terraform/personal/providers.tf, each of which must equal config/aws-region; no
       backend "s3" block or backend*.hcl file sets a region (literal or expression).
   R4  every configure-aws-credentials step's aws-region is either `${{ env.AWS_REGION }}` with an
       earlier ./.github/actions/aws-region step in the same job whose most recent preceding
@@ -53,6 +53,7 @@ _CHECKOUT_PREFIX = "actions/checkout@"
 
 _PINNED_VAR_FILES = {
     "terraform/bootstrap/variables.tf",
+    "terraform/organization/variables.tf",
     "terraform/personal/providers.tf",
 }
 

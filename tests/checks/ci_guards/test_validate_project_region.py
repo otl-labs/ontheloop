@@ -155,6 +155,19 @@ def test_r3_default_differs_from_file(tmp_path: Path) -> None:
     assert any("R3" in f and "differs from" in f for f in failed)
 
 
+def test_r3_organization_variables_are_pinned(tmp_path: Path) -> None:
+    _base_tree(tmp_path)
+    _write(tmp_path, "terraform/organization/variables.tf", _GOOD_BOOTSTRAP_VARIABLES)
+    assert _run(tmp_path) == []
+    _write(
+        tmp_path,
+        "terraform/organization/variables.tf",
+        'variable "aws_region" {\n  default = "us-east-1"\n}\n',
+    )
+    failed = _run(tmp_path)
+    assert any("R3" in f and "differs from" in f and "terraform/organization" in f for f in failed)
+
+
 def test_r3_hcl_comment_holding_region_id(tmp_path: Path) -> None:
     _base_tree(tmp_path)
     _write(tmp_path, "terraform/personal/notes.tf", "# historical region: eu-west-2\n")
