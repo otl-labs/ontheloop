@@ -5,8 +5,12 @@ Run with python3 -I by path from .github/workflows/terraform-bootstrap-apply.yml
 Stdlib only; the classifier is terraform_bootstrap_apply_classify.py, the screen terraform_bootstrap_apply_screen.py.
 
   screen    the whole root, before any credential: prints SCREEN_OK or SCREEN_REFUSED <rule> <file>, exit 1 on a refusal
-  preview   the read-only plan: a Markdown table, and reviewed, has_changes and verdict to GITHUB_OUTPUT. A plan holding a
-            protected change ends CLOUDSHELL_REQUIRED: a push run exits 0 with a ::warning::, any other run exits 1
+  preview   the read-only plan and the analyzer's results (--analyzer-json, required): a Markdown table, and reviewed,
+            has_changes and verdict to GITHUB_OUTPUT. A plan holding a protected change ends CLOUDSHELL_REQUIRED: a push
+            run exits 0 with a ::warning::, any other run exits 1. An analyzer REFUSED verdict exits 1 on every event
+            (ANALYZER_REFUSED, or CLOUDSHELL_REQUIRED when a protected row is also present). A reviewed digest is
+            sha256 hex and may hold a twelve-digit decimal run (not an account id): a later digit-run scanner of the
+            apply log excludes it
   check     the apply-time plan against the reviewed set: exit 0 only when every change is CI-writable and matches a
             reviewed row; prints SIMULATE_OWED when an applied row changes the apply role's grant surface
   prove     exit 0 only when the plan has no change
@@ -42,20 +46,35 @@ DEPENDENT_WORKFLOWS = ("terraform-apply-sandbox.yml", "reconcile.yml")
 PENDING_STATUSES = ("queued", "waiting", "in_progress")
 IGNORED_EVENTS = frozenset({"pull_request", "pull_request_target"})
 _CLOUDSHELL_OUTPUT = "has_changes=false\nverdict=CLOUDSHELL_REQUIRED\n"  # pragma: allowlist secret
-_CHECK_KEYS = ("address", "actions", "allows", "resources", "flags", "sids")
+_CHECK_KEYS = ("address", "actions", "allows", "resources", "flags", "sids", "digest")
 
 
 def _cell(text: str) -> str:
     return re.sub(r"[\x00-\x1f|]", " ", text).replace("::", ": :")
 
 
-def table(rows: list[dict[str, Any]], title: str) -> str:
+def _analyzer_cell(result: dict[str, Any] | None) -> str:
+    if not result:
+        return ""
+    checks = [c for c in result.get("checks") or [] if isinstance(c, dict)]
+    failed = [f"FAIL {c.get('check')} {c.get('loc') or ''}".strip() for c in checks if c.get("verdict") == "FAIL"]
+    if failed:
+        return "; ".join(failed)
+    verdicts = {str(c.get("verdict")) for c in checks}
+    return next((v for v in ("WIDENS", "UNCHECKED", "NEW", "PASS") if v in verdicts), "")
+
+
+def table(rows: list[dict[str, Any]], title: str, results: dict[str, dict[str, Any]] | None = None) -> str:
+    results = results or {}
     privileged = sum(1 for r in rows if r["flags"])
     lines = [f"### {title}", "", f"{len(rows)} changes; {privileged} privilege-affecting"]
     if not rows:
         return "\n".join(lines + ["", "No changes."]) + "\n"
-    lines += ["", "| Resource | Action | Changed attributes | Flags | Allow actions gained | Resources | Protected |"]
-    lines.append("|---|---|---|---|---|---|---|")
+    lines += [
+        "",
+        "| Resource | Action | Changed attributes | Flags | Allow actions gained | Resources | Analyzer | Protected |",
+    ]
+    lines.append("|---|---|---|---|---|---|---|---|")
     for r in rows:
         name = r["address"] + (f" (x{r['count']})" if r["count"] > 1 else "")
         cells = [
@@ -65,10 +84,34 @@ def table(rows: list[dict[str, Any]], title: str) -> str:
             ",".join(r["flags"]) + (f" [{','.join(r['sids'])}]" if r["sids"] else ""),
             ", ".join(r["allows"]),
             ", ".join(r["resources"]),
+            _analyzer_cell(results.get(r["address"])),
             "PROTECTED " + ",".join(r["protected"]) if r["protected"] else "",
         ]
         lines.append("| " + " | ".join(_cell(c) for c in cells) + " |")
     return "\n".join(lines) + "\n"
+
+
+def analyzer_results(analyzer: Any, rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """The analyzer's results by address; every row with a digest needs one for the same digest, else unreadable."""
+    items = analyzer.get("results") if isinstance(analyzer, dict) else None
+    if not isinstance(items, list) or analyzer.get("verdict") not in ("PASS", "REFUSED"):
+        raise Unreadable("analyzer results missing or malformed")
+    by = {str(r.get("address")): r for r in items if isinstance(r, dict)}
+    for r in rows:
+        if r["digest"] and by.get(r["address"], {}).get("digest") != r["digest"]:
+            raise Unreadable(f"analyzer result missing or stale for {r['address']}")
+    return by
+
+
+def sweep_section(analyzer: dict[str, Any], rows: list[dict[str, Any]]) -> str:
+    if analyzer.get("mode") != "full":
+        return ""
+    changed = {r["address"] for r in rows}
+    out = ["", f"Full sweep: mode=full documents={len(analyzer['results'])}"]
+    for r in analyzer["results"]:
+        if r.get("address") not in changed and any(c.get("verdict") == "FAIL" for c in r.get("checks") or []):
+            out.append(f"- FAIL {_cell(str(r.get('address')))} {_analyzer_cell(r)}")
+    return "\n".join(out) + "\n"
 
 
 def verdict_of(rows: list[dict[str, Any]]) -> str:
@@ -81,15 +124,23 @@ def reviewed_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{k: r[k] for k in (*_CHECK_KEYS, "changed")} for r in rows]
 
 
-def preview(plan: Any, event_name: str = "") -> tuple[int, str, str]:
+def preview(plan: Any, analyzer: Any, event_name: str = "") -> tuple[int, str, str]:
     """(exit code, stdout, GITHUB_OUTPUT text)."""
     rows = _cls.build_rows(_cls.Plan(plan))
+    results = analyzer_results(analyzer, rows)
     verdict = verdict_of(rows)
-    out = table(rows, "terraform/bootstrap CI apply preview (read-only plan; the reviewed set)")
+    out = table(rows, "terraform/bootstrap CI apply preview (read-only plan; the reviewed set)", results)
+    out += sweep_section(analyzer, rows)
+    protected_count = sum(1 for r in rows if r["protected"])
+    if analyzer["verdict"] == "REFUSED":
+        verdict = "CLOUDSHELL_REQUIRED" if protected_count else "ANALYZER_REFUSED"
+        out += f"BOOTSTRAP_APPLY_PREVIEW verdict={verdict} rows={len(rows)}\n"
+        out += "::error::ANALYZER_REFUSED an IAM document fails an Access Analyzer check; see the Analyzer column\n"
+        return 1, out, f"has_changes=false\nverdict={verdict}\n"
     out += f"BOOTSTRAP_APPLY_PREVIEW verdict={verdict} rows={len(rows)}\n"
     if verdict == "CLOUDSHELL_REQUIRED":
-        count = sum(1 for r in rows if r["protected"])
-        out += f"::warning::CLOUDSHELL_REQUIRED {count} protected rows; the operator applies this plan from CloudShell\n"
+        out += f"::warning::CLOUDSHELL_REQUIRED {protected_count} protected rows; "
+        out += "the operator applies this plan from CloudShell\n"
         return (0 if event_name == "push" else 1), out, _CLOUDSHELL_OUTPUT
     has_changes = verdict == "REVIEWABLE"
     reviewed = json.dumps(reviewed_rows(rows), sort_keys=True, separators=(",", ":"))
@@ -166,6 +217,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--root", default=_screen.ROOT)
     p = sub.add_parser("preview")
     p.add_argument("--plan-json", required=True)
+    p.add_argument("--analyzer-json", required=True)
     p.add_argument("--github-output", required=True)
     p.add_argument("--event-name", default="")
     c = sub.add_parser("check")
@@ -193,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1 if runs else 0
         plan = _read_json(args.plan_json)
         if args.cmd == "preview":
-            rc, out, gh_out = preview(plan, args.event_name)
+            rc, out, gh_out = preview(plan, _read_json(args.analyzer_json), args.event_name)
             sys.stdout.write(out)
             with open(args.github_output, "a", encoding="utf-8") as fh:
                 fh.write(gh_out)

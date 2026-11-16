@@ -27,6 +27,7 @@ ALLOWED: dict[str, str] = {
     "scripts/preflight/aws_infra.py": EXIT_CODE_ONLY,
     "scripts/sync/ops.py": EXIT_CODE_ONLY,
     "scripts/ci/iam_simulate.py": ACCOUNT_ID_ONLY,
+    "scripts/ci/terraform_bootstrap_apply_analyzer.py": ACCOUNT_ID_ONLY,
     "scripts/ci/security_detector_probe.py": ACCOUNT_ID_ONLY,
 }
 

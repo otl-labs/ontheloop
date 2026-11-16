@@ -1,5 +1,5 @@
 """Red/green tests for validate_bootstrap_apply (PLAN-bootstrap-ci-gated-apply, Decision 257): one real-tree node and
-one red node per predicate (a) to (h) on synthetic input."""
+one red node per predicate (a) to (j) on synthetic input."""
 
 from __future__ import annotations
 
@@ -97,6 +97,37 @@ def test_h_a_screen_step_after_the_credentials_step_is_refused(wf: dict[str, Any
     assert len(v.check_screen_first(wf)) == 2
 
 
+def test_i_a_missing_late_or_unbound_analyzer_step_is_refused(wf: dict[str, Any]) -> None:
+    job = wf["jobs"]["preview"]
+    assert v.check_analyzer_step(wf) == []
+    step = job["steps"].pop(_step(job, "terraform_bootstrap_apply_analyzer.py"))
+    assert any(x.startswith("i:") for x in v.check_analyzer_step(wf))
+    job["steps"].insert(_step(job, "terraform_bootstrap_apply_gate.py preview") + 1, step)
+    assert any(x.startswith("i:") for x in v.check_analyzer_step(wf))
+    job["steps"].remove(step)
+    job["steps"].insert(_step(job, "terraform_bootstrap_apply_gate.py preview"), step)
+    preview = job["steps"][_step(job, "terraform_bootstrap_apply_gate.py preview")]
+    preview["run"] = preview["run"].replace("--analyzer-json", "--dropped")
+    assert any(x.startswith("i:") for x in v.check_analyzer_step(wf))
+    assert any(x.startswith("i:") for x in v.check_analyzer_step(None))
+
+
+def test_j_an_access_analyzer_call_in_the_apply_job_or_script_is_refused(wf: dict[str, Any]) -> None:
+    assert v.check_apply_no_analyzer(wf, "") == []
+    wf["jobs"]["apply"]["steps"].append({"run": "aws accessanalyzer validate-policy"})
+    assert v.check_apply_no_analyzer(wf, "") == ["j: the apply job and its shell script must never call Access Analyzer"]
+    wf["jobs"]["apply"]["steps"].pop()
+    assert len(v.check_apply_no_analyzer(wf, "aws access-analyzer check-no-new-access")) == 1
+
+
+def test_g_the_invariants_file_and_analyzer_scripts_are_code_owned(tree: Tree) -> None:
+    kept = "\n".join(ln for ln in tree[3].splitlines() if "iam-invariants" not in ln)
+    assert v.check_codeowners(kept) == ["g: config/iam-invariants.json is not code-owned"]
+    assert (
+        "scripts/ci/terraform_bootstrap_apply_analyzer_select.py" in v.OWNED and "config/iam-invariants.json" in v.PUSH_PATHS
+    )
+
+
 def test_missing_workflow_is_reported_and_other_predicates_tolerate_it() -> None:
     assert v.check_triggers(None) == ["a: terraform-bootstrap-apply.yml is missing"]
     assert v.check_jobs(None) == []
@@ -115,7 +146,7 @@ def test_f_a_role_trust_not_using_the_shared_refs_local_is_refused(tree: Tree) -
 def test_registered_check_passes_on_the_real_tree(capsys: pytest.CaptureFixture[str]) -> None:
     failed: list[str] = []
     v.validate_bootstrap_apply(failed)
-    assert failed == [] and "PASS: predicates (a)-(h)" in capsys.readouterr().out
+    assert failed == [] and "PASS: predicates (a)-(j)" in capsys.readouterr().out
 
 
 def test_registered_check_reports_violations(monkeypatch: pytest.MonkeyPatch, tree: Tree) -> None:
