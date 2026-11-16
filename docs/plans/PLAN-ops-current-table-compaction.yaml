@@ -39,7 +39,8 @@ scope:
       by the budget is recorded under deferred. Every other per-table error is an isolated failure. Emits
       CurrentCompactionFilesRewritten, CurrentCompactionFailures, CurrentCompactionRefused and
       CurrentCompactionDurationMs (ops series undimensioned; non-ops catalogs through the CATALOG_METRICS filter) and
-      prints one value-free line per pass: the literal prefix CURRENT_COMPACTION then one JSON object with keys
+      prints one value-free line per pass, when compaction finishes and before the merge loop, and also on the
+      CurrentCompactionProofError path just before the raise: the literal prefix CURRENT_COMPACTION then one JSON object with keys
       per_table (each {table, files_before, delete_files_before, files_processed, files_after, attempts, duration_ms,
       pre_snapshot_id, commit_snapshot_id, proof}, proof one of equal | none | reproved), skipped, refused, deferred,
       failures and elapsed_ms; no row value. files_processed 0 with no snapshot for the token is clean (proof none).
@@ -95,7 +96,9 @@ scope:
       CURRENT_LIVE_FILE_CEILING (200; the busiest merge-to-merge window of 2026-11-08..15 carried 104 ops writes): every
       registry current-side table present in the catalog reports live and delete-bearing file counts; a live count
       above the ceiling is an invariant violation (existing ControlTableInvariantViolation alarm); OpsCurrentLiveFilesMax
-      emitted every run when any current table is present.
+      emitted every run when any current table is present. Basis caveat: the 104 counts writes, not files; a multi-row
+      write can land up to 8 files (one per bucket) and control_health at :15 sees 5h45m of writes since the :30 merge,
+      so rec-5200 also measures files created per window on the two target tables.
     new_imports:
       - src.common.ducklake_maintenance_scope
   - file: docs/contracts/ducklake_maintenance.yaml
@@ -110,18 +113,19 @@ scope:
   - file: docs/DECISIONS.md
     action: Modify
     purpose: >-
-      Bound verbatim by docs/plans/approved/ops-current-table-compaction.yaml: one new numbered Decision (amends 188,
-      191, 192; number and date filled at implementation, max-plus-one after rebasing) with a reversal-conditions
+      Bound verbatim by docs/plans/approved/ops-current-table-compaction.yaml: one new numbered Decision (amends 88,
+      188, 191, 192; number and date filled at implementation, max-plus-one after rebasing) with a reversal-conditions
       stanza; an Update note on Decision 204 (re-lay is a partition-layout rewrite; the history tables are the true
       append-only record, and every current table can always be rebuilt from them, procedure rec-5202); a dated note
-      on Decision 192 (the VERB_UNIVERSE literal); pointer lines on 191 (after its Warehouse ID) and 188 (after its
-      Decision 193 pointer).
+      on Decision 192 (the VERB_UNIVERSE literal); pointer lines on 191 (after its Warehouse ID), 188 (after its
+      Decision 193 pointer) and 88 (after its Decision 192 pointer).
   - file: tests/common/test_ducklake_current_compaction.py
     action: Create
     purpose: >-
       Unit tests with connection doubles (mirror file; full branch coverage of the new module), plus
       test_engine_evidence_bounds_files_and_preserves_rows, which reads the committed evidence fixture, asserts its
-      duckdb version equals config/lambda/ducklake/version.yaml (a Decision 99 bump re-runs step 6) and is rec-5179's
+      duckdb version equals config/lambda/ducklake/version.yaml (its failure message names step 6's command, so a
+      Decision 99 bump re-runs it) and is rec-5179's
       acceptance (hermetic, so CI measures it); test_compaction_line_keys_and_value_free pins the line schema. If the
       file nears 500 SLOC, split it into a mirror package, never a budget registration.
   - file: tests/common/test_ducklake_current_compaction_engine.py
@@ -398,8 +402,9 @@ verification_plan:
     fix_if: >-
       A deferred table means the first pass hit the time budget: let the next scheduled pass finish it and re-read. A
       pass with no CURRENT_COMPACTION line but a Task timed out REPORT line in the log group means the pass outran 900
-      s: read the last per-table durations, file a rec, and let the idempotent re-proof finish it. A proof failure has
-      already paged (MaintenanceBreakerTrip): STOP and file a Critical rec naming both snapshot ids;
+      s: read the last per-table durations, file a rec, and let the idempotent re-proof finish it. A refusal means
+      legacy-scheme files: re-plan with rec-5202. A transient per-table failure: wait for the next pass and re-read. A
+      proof failure has already paged (MaintenanceBreakerTrip): STOP and file a Critical rec naming both snapshot ids;
       restoration is a rebuild of current from history (Decision 81 cl.8; rec-5202), separately planned.
     hermetic: false
     graduation: not-applicable
@@ -430,7 +435,7 @@ verification_plan:
     expected: A fresh connection, status 200 and under 5,000 ms outside connect (96,363 ms on 2026-11-14), then FIRST_READ_FAST.
     fix_if: >-
       A reused connection: wait longer and repeat. Over 5 s on compacted tables points at another cost (threads,
-      rec-5182; the batch predicate, rec-5181): record the number in the PR body, never loosen the bound.
+      rec-5182; the batch predicate, rec-5181): record the number on rec-5200, never loosen the bound.
     hermetic: false
     graduation: not-applicable
   - step: 15
@@ -449,7 +454,7 @@ verification_plan:
       print(r);assert r['after']['slow']<=2 and r['after']['p95']<r['before']['p95'],r;print('LATENCY_OUTCOME_OK')"
     expected: >-
       At most 2 calls over 29 s in the 24 h after (about 51 a day before: 359 in 7 days) and a lower p95, then
-      LATENCY_OUTCOME_OK; both windows' figures go in the PR body and on rec-5200.
+      LATENCY_OUTCOME_OK; both windows' figures go on rec-5200.
     fix_if: >-
       More slow calls on compacted tables means another cost dominates (rec-5181 batch predicate, rec-5182 threads,
       rec-5180 deadline): file a new rec citing rec-5179 (closed at merge) with both windows' figures, never loosen the
@@ -591,6 +596,7 @@ gate_rounds:
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 10, nits: 18}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 5, nits: 9}
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 2, nits: 7}
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 2, nits: 8}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -601,8 +607,9 @@ pre_implementation_checklist:
 execution_steps:
   - >-
     Operator readouts before the merge (context): catalog_stats and the reconcile_partitions dry run; record both on
-    rec-5200 with update_rec and read it back with recs_by_ids. A current table with legacy_scheme_files > 0 stops the
-    build: it would be refused, so re-plan with rec-5202 first.
+    rec-5200 with update_rec and read it back with recs_by_ids. Two stop conditions: a current table with
+    legacy_scheme_files > 0 (it would be refused; re-plan with rec-5202 first), and a dry run that raises (an
+    unclassified table would make every pass a catalog-level compaction failure; classify it first).
   - src/common/ducklake_maintenance.py rewrite(); step 5 red then green.
   - >-
     VERB_UNIVERSE, the four cells and the header comment, regenerate field_semantics.yaml, the scope / matrix / gc_ops
@@ -619,9 +626,10 @@ execution_steps:
     docs/contracts/ducklake_maintenance.yaml: relief first (NEAR_CAP; condense the merge_ops response prose without
     dropping a stated rule), then the compaction, ceiling, consumer-list and amendment_log text; if it cannot fit, stop
     and amend the plan, never raise the cap. handler.py relief if the call site would cross 500 SLOC: move
-    action_merge_ops's body to src/lambdas/ducklake_maintenance/merge_actions.py by plan amendment (gc_ops precedent).
+    action_merge_ops's body to src/lambdas/ducklake_maintenance/merge_actions.py by plan amendment (gc_ops precedent),
+    adding its explicit include to the maintenance manifest and to step 7's bundle assertion.
   - >-
-    docs/DECISIONS.md: place the sidecar's five blocks verbatim, filling {{N}} with MAX(decision number in DECISIONS.md
+    docs/DECISIONS.md: place the sidecar's six blocks verbatim, filling {{N}} with MAX(decision number in DECISIONS.md
     and DECISIONS_ARCHIVE.md) + 1 after rebasing and {{DATE}} with the build date; regenerate docs/decisions-index.json;
     step 8 with the approved digest.
   - >-
@@ -643,8 +651,10 @@ execution_steps:
   - Execute Verification Plan -- run each step; loop until pass; on unrecoverable V3 failure stop and RCA (Decision 55)
   - 'Report: what was implemented, verification results'
 rollback: >-
-  Revert the PR; the governed deploy ships the previous code and merge_ops stops rewriting. Compaction is
-  content-preserving, so nothing needs restoring; superseded files stay time-travel reachable for the current-table
-  retention window (7 days) until gc_ops. To stop the rewrite without a revert, set the scd2 and smoke_harness cells
+  Revert the code and config only, keeping the docs/DECISIONS.md blocks (Decision 149: headers are never removed, and
+  the DCG-03 orphan guard, scripts/ops_portal/decisions.py:146, would fail every backfill), and record the reversal as
+  a dated amendment on the new Decision; the governed deploy then ships the previous code and merge_ops stops
+  rewriting. Compaction is content-preserving, so nothing needs restoring; superseded files stay time-travel reachable
+  for gc_ops's catalog-wide snapshot retention (30 days). To stop the rewrite without a revert, set the scd2 and smoke_harness cells
   to apply=false (the Decision's proof-mismatch reversal); the 200-file ceiling stays armed, so control_health then
   raises a breaker 500 every 6 h once a current table passes 200 files -- expected until compaction resumes.
