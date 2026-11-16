@@ -8,6 +8,10 @@ NoEventReaderOnSmoke before any call. Ops reads always use the shared reader. No
 failure raises at the first use, inside the caller's own handler. Errors name a source, never a value, a URL or an AWS
 error text (Decision 101). The content route (Decision 239) is a further function_url client for the telemetry content reader:
 a content verb on the event route, or an event verb on the content route, raises WrongRoute before any call.
+
+Two transports (PLAN-agent-proxy-signed-access, OTL_OPS_VERBS_TRANSPORT): function_url (unset, today's chain) and execute_api,
+under which the event reader resolves plan A's API route parameter and the content reader, which has no API route yet
+(rec-4696 owns it), raises before any call.
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ from scripts.aws_profile import resolve_aws_profile
 from scripts.telemetry_capture.state import DEFAULT_CATALOG, KNOWN_CATALOGS
 from src.common.ducklake_content_read_verbs import CONTENT_READS
 from src.common.ducklake_event_read_verbs import EVENT_READS
-from src.common.ducklake_reader_client import DuckLakeReader, make_reader
+from src.common.ducklake_reader_client import DuckLakeReader, api_route_url, api_transport, make_reader
 
 CATALOG_ENV = "DUCKLAKE_TELEMETRY_CATALOG"
 CATALOG_PARAMETER = "/agent-platform/ducklake/telemetry_catalog"
@@ -85,6 +89,8 @@ class TelemetryReader(DuckLakeReader):
     """The telemetry reader's Function URL behind the shared reader client (its _invoke, retries and deadline error)."""
 
     def _reader_url(self) -> str:
+        if not os.environ.get(READER_URL_ENV) and api_transport():
+            return api_route_url("telemetry/reader", self._profile, self._region)
         url = (
             os.environ.get(READER_URL_ENV)
             or _parameter(READER_URL_PARAMETER, self._profile, self._region)
@@ -107,6 +113,8 @@ class ContentReader(DuckLakeReader):
     """The telemetry content reader's Function URL behind the shared reader client; serves the content verbs only."""
 
     def _reader_url(self) -> str:
+        if api_transport():
+            raise RuntimeError("the telemetry content reader has no API route")
         url = (
             os.environ.get(CONTENT_READER_URL_ENV)
             or _parameter(CONTENT_READER_URL_PARAMETER, self._profile, self._region)

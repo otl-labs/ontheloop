@@ -237,6 +237,15 @@ locals {
         }
       },
       {
+        # Decision 255 cl.2: no bounded identity creates, changes, redeploys or deletes any API Gateway resource,
+        # the account's CloudWatch role setting included. The ceiling holds no apigateway action today; this keeps a
+        # later widening from reaching the DuckLake API. GET stays outside.
+        Sid      = "DenyApiGatewayWrite"
+        Effect   = "Deny"
+        Action   = ["apigateway:DELETE", "apigateway:P*"]
+        Resource = "*"
+      },
+      {
         # Decision 230 cl.5: the production telemetry catalog's data prefix and its blob root are reachable only by
         # the roles that serve or maintain that catalog. PlatformDev and the CI roles carry this boundary, so their
         # bucket-wide S3 grants are fenced here without an identity-side edit. The roles may not exist yet, which
@@ -250,8 +259,8 @@ locals {
           "s3:DeleteObject"
         ]
         Resource = [
-          "arn:aws:s3:::agent-platform-data-lake/ducklake-telemetry/*",
-          "arn:aws:s3:::agent-platform-data-lake/telemetry-blobs/ducklake_telemetry/*"
+          "${local.data_lake_bucket_arn}/ducklake-telemetry/*",
+          "${local.data_lake_bucket_arn}/telemetry-blobs/ducklake_telemetry/*"
         ]
         Condition = {
           ArnNotLike = {
@@ -268,7 +277,7 @@ locals {
         Sid      = "DenyTelemetryBlobPut"
         Effect   = "Deny"
         Action   = ["s3:PutObject"]
-        Resource = ["arn:aws:s3:::agent-platform-data-lake/telemetry-blobs/*"]
+        Resource = ["${local.data_lake_bucket_arn}/telemetry-blobs/*"]
         Condition = {
           ArnNotLike = {
             "aws:PrincipalArn" = [
@@ -284,7 +293,7 @@ locals {
         Sid      = "DenyTelemetryBlobDelete"
         Effect   = "Deny"
         Action   = ["s3:DeleteObject"]
-        Resource = ["arn:aws:s3:::agent-platform-data-lake/telemetry-blobs/*"]
+        Resource = ["${local.data_lake_bucket_arn}/telemetry-blobs/*"]
         Condition = {
           ArnNotLike = {
             "aws:PrincipalArn" = ["arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-maintenance"]
@@ -297,8 +306,8 @@ locals {
         Effect = "Deny"
         Action = ["s3:DeleteObjectVersion"]
         Resource = [
-          "arn:aws:s3:::agent-platform-data-lake/telemetry-blobs/*",
-          "arn:aws:s3:::agent-platform-data-lake/ducklake-telemetry/*"
+          "${local.data_lake_bucket_arn}/telemetry-blobs/*",
+          "${local.data_lake_bucket_arn}/ducklake-telemetry/*"
         ]
       },
       {
@@ -317,9 +326,9 @@ locals {
           "s3:DeleteObjectVersion"
         ]
         Resource = [
-          "arn:aws:s3:::agent-platform-data-lake/tfstate/*",
-          "arn:aws:s3:::agent-platform-data-lake/tfplan/*",
-          "arn:aws:s3:::agent-platform-data-lake/ci-rca-evidence/review-transcripts/*"
+          "${local.data_lake_bucket_arn}/tfstate/*",
+          "${local.data_lake_bucket_arn}/tfplan/*",
+          "${local.data_lake_bucket_arn}/ci-rca-evidence/review-transcripts/*"
         ]
         Condition = {
           ArnLike = {
@@ -329,6 +338,18 @@ locals {
             ]
           }
         }
+      },
+      {
+        # PLAN-bootstrap-ci-gated-apply: bootstrap-apply may change a bounded role's grants after a names-only
+        # review, and this ceiling allows UpdateAssumeRolePolicy, DeleteRole, DetachRolePolicy, DeleteRolePolicy
+        # and PassRole on "*", so without this Deny such a grant could reach the protected roles. Compact on
+        # purpose (headroom): the six families cover every write a role takes (Attach, Create, Delete, Detach,
+        # Put, PassRole, Tag, Untag, Update); IAM's reads (Get*, List*, Simulate*, Generate*) match none. The
+        # account segment is * because a wider Deny is safe and saves bytes.
+        Sid      = "DenyBoundedWriteOnProtectedRoles"
+        Effect   = "Deny"
+        Action   = ["iam:A*", "iam:C*", "iam:D*", "iam:P*", "iam:T*", "iam:U*"]
+        Resource = ["arn:aws:iam::*:role/Platform*", "arn:aws:iam::*:role/bootstrap-*", "arn:aws:iam::*:role/github-settings-*", "arn:aws:iam::*:role/platform-security-*", "arn:aws:iam::*:role/ducklake-api-*"]
       }
     ]
   })

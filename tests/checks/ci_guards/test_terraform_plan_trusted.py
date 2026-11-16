@@ -68,7 +68,7 @@ def _trusted_violations(wf: dict[str, Any]) -> list[str]:
     cond = str(job.get("if", ""))
     if "head.repo.full_name == github.repository" not in cond or "base.ref == 'main'" not in cond:
         out.append("gate: same-repo and base main")
-    if job.get("environment") != "tf-trusted-plan":
+    if job.get("environment") != {"name": "tf-trusted-plan", "deployment": False}:
         out.append("environment: tf-trusted-plan")
     steps = _steps(wf)
     checkouts = [s for s in steps if str(s.get("uses", "")).startswith("actions/checkout@")]
@@ -276,6 +276,11 @@ MUTATIONS: list[tuple[str, Callable[[dict[str, Any]], None], str]] = [
     ("extra trigger", _extra_trigger, "trigger:"),
     ("gate without base", _set_job("if", "github.event.pull_request.head.repo.full_name == github.repository"), "gate:"),
     ("no environment", lambda wf: wf["jobs"]["plan"].pop("environment"), "environment:"),
+    (
+        "deployment true",
+        lambda wf: wf["jobs"]["plan"]["environment"].__setitem__("deployment", True),
+        "environment:",
+    ),
     ("checkout ref", _checkout_ref, "checkout:"),
     ("assume before screen", _swap("screen", "assume"), "order:"),
     ("continue-on-error", lambda wf: _by_id(wf, "assume").__setitem__("continue-on-error", True), "assume:"),

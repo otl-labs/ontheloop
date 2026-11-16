@@ -1,0 +1,165 @@
+schema_version: 1
+slug: scheduled-workflow-dispatch
+tldr: 'Records how terraform-drift, convergence-health and main-canary get started on time: an AWS clock calls one small Lambda
+  that starts each workflow through a dedicated GitHub App, with GitHub''s cron kept as the fallback. A new Decision accepts
+  that the App''s Actions access is held by agent-editable code (an exception to Decision 143 clause 1) and names the checks
+  that watch it; three settings rows, one port coupling row and one credential inventory row record the rest.'
+blocks:
+- id: decision-entry
+  file: docs/DECISIONS.md
+  before: |
+    The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
+  after: |
+    The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
+
+    ## Decision {{N}}: An AWS clock dispatches the three hourly loops through a dedicated GitHub App held inside the agent merge loop -- an accepted residual against Decision 143 clause 1 (Decided)
+
+    ```yaml
+    number: {{N}}
+    status: Decided
+    decided_date: "{{DATE}}"
+    kind:
+      value: direction
+      justification: >-
+        Clause 5 exempts a new identity from Decision 143 clause 1's human gate on widening scope, which moves a gate;
+        clauses 1-4 and 6 are the means.
+    amends: []
+    significance:
+      value: numbered_decision
+      justification: >-
+        A standing exception to Decision 143 clause 1 for a new repository-wide GitHub credential, held by detective
+        controls with reversal triggers. No clause of Decision 143 changes for any other identity.
+    ```
+
+    **Status:** Decided
+    **Date:** {{DATE}}
+    **Warehouse ID:** dec-{{N}} (per Decision 84 backfill)
+
+    **Problem:** GitHub's best-effort cron drops about 80% of the hourly ticks of terraform-drift.yml, convergence-health.yml and main-canary.yml. Starting them from AWS needs a credential that can start a workflow, and GitHub's smallest such grant, Actions write, is repository-wide: it can also cancel, re-run and delete runs, approve fork pull-request runs, disable workflows and rewrite the OIDC subject template every AWS trust keys on. Decision 143 clause 1 wants an identity's scope enforced outside the agent merge loop; here every narrowing control is agent-editable code.
+
+    **Decision:**
+    1. Clock. One EventBridge rule per row of config/lambda/scheduled_workflow_dispatcher/schedules.yaml invokes the Lambda agent-platform-workflow-dispatcher, which starts that workflow on main through workflow_dispatch unless a run started within the row's skip window. Each workflow keeps its on.schedule as the fallback and stays a deterministic job (Decision 205 cl.1 and cl.3).
+    2. Credential. An organisation-owned GitHub App with Actions write and Metadata read only, no webhook, installed on this repository only. Its private key lives only in the SSM SecureString /secret/agent-platform-workflow-dispatcher-app-key, put by the operator (Decision 237); besides PlatformAdmin, only the Lambda's role reads it, by literal ARN. Each run mints a token with those two permissions and revokes it after dispatch.
+    3. Allowlist and refusal. The Lambda starts only the register's workflows. Every other workflow that declares workflow_dispatch refuses, on each job that can start work, a workflow_dispatch run whose github.actor is the App's bot (a workflow_run child keeps its upstream's actor and runs), and a test fails a new dispatchable workflow that neither refuses nor is registered.
+    4. SIT. SIT builds the same stack switched off: rules disabled, no App key, and the function returns before any secret read. In SIT the alarms have their actions off. The untried mint-and-dispatch path is a residual of the production promotion item (Decision 252 cl.6).
+    5. Accepted residual against Decision 143 cl.1. The register, handler, guards and deploy channel all sit inside the agent merge loop, and GitHub has no narrower permission. Accepted as a standing exception held by detective controls: each convergence-health tick checks that the OIDC subject template is GitHub's default, that the bot dispatched or re-ran no workflow outside the register and that no workflow is disabled, filing a workflow_dispatch_integrity rec on a breach; and the first production run proves the token cannot approve a pending deployment (Decision 248 cl.8). With no Contents, Deployments, Environments or Administration permission it cannot change code or a setting or approve a deployment; approving a fork run and deleting runs stay possible and are accepted. Its PC-10 row raises docs/contracts/ports.yaml's size budget by one line (Decision 166).
+    6. Liveness. loop_liveness_stale counts the bot's dispatches of the register's workflows as cadence. Four alarms watch the AWS side: Lambda errors, and one dead-man per rule (Decision 250 cl.3). After 14 days with no missed tick rec-5126 tightens the floor, and only then does rec-5113 add rows.
+
+    **Rationale:** The workflows already accept workflow_dispatch, so only the clock moves. Rules, not Scheduler: CI can already create rules; Scheduler needs new apply grants and a bootstrap apply. A dedicated App, not a personal token, so bot runs are told apart and nothing expires silently. SSM, not Secrets Manager, because Actions write cannot approve a deployment (Decision 248). Rejected: a full lock now (key, role and every change behind an admin apply), which still leaves auto-applied IAM able to grant the key; and no dispatcher in SIT, so production would run code SIT never ran.
+
+    **Coverage (Decision 181 cl.2):** cl.1, cl.2 and cl.4 -- tests/checks/iam_tf/test_scheduled_workflow_dispatch.py, validate_secret_parameter_grants and the handler tests; cl.3 -- tests/verify_ci_workflow/test_dispatch_bot_guard.py; cl.5 -- scripts/convergence_health/dispatch_integrity.py's tests and the first-run probe; cl.6 -- the sensor's tests and the stack test. Residuals: a bot re-run of a run older than the read window and a deleted run are unseen, and the reads detect, they do not prevent.
+
+    ```yaml reversal-conditions
+    decision: {{N}}
+    review_by: 2027-05-31
+    on_trigger: "re-decide via /plan"
+    conditions:
+      - id: lock-available
+        kind: manual
+        description: "rec-4696 delivers Decision 239 cl.5's change lock, or rec-5029's SCP takes the key read outside the agent merge loop: re-decide clause 5."
+      - id: narrower-permission
+        kind: manual
+        description: "GitHub offers workflow_dispatch without the rest of Actions write: narrow the App and re-decide clause 5."
+      - id: integrity-breach
+        kind: manual
+        description: "A workflow_dispatch_integrity rec records a breach: the operator deletes the App key, and clauses 2 and 5 are re-decided before a new one."
+      - id: probe-approves
+        kind: manual
+        description: "The App's token approves a pending deployment: re-decide clauses 2 and 5 with Decision 248."
+    ```
+
+    **Related:** Decisions 143, 166, 205, 237, 239, 248, 250, 252; rec-4233, rec-5113, rec-5126, rec-5029, rec-4696.
+
+    ---
+- id: pc-amendment-log
+  file: docs/contracts/project-configuration.yaml
+  before: |
+    amendment_log:
+  after: |
+    amendment_log:
+      - {date: "{{DATE}}", semantic_break: false, change_class: field_add, summary: "PLAN-scheduled-workflow-dispatch (rec-4233, Decision {{N}}): settings gains ports.scheduling.eventbridge.dispatch_app.private_key (resolved, the SSM /secret/ parameter the dispatcher Lambda reads), .client_id and .bot_login (the App's two public identifiers, open in the dispatcher's register until ontheloop/platform.yaml exists)."}
+- id: pc-dispatch-app-rows
+  file: docs/contracts/project-configuration.yaml
+  before: |2
+        this_repository: {current_home: docs/contracts/actions-capacity.yaml, note: "cap.concurrent_jobs, read by the Actions capacity gauge on convergence-health.yml; an adopter on another GitHub plan sets that plan's cap", status: open, owning_item: "T4.24:c16"}
+        enforcement: advisory
+  after: |2
+        this_repository: {current_home: docs/contracts/actions-capacity.yaml, note: "cap.concurrent_jobs, read by the Actions capacity gauge on convergence-health.yml; an adopter on another GitHub plan sets that plan's cap", status: open, owning_item: "T4.24:c16"}
+        enforcement: advisory
+      - id: ports.scheduling.eventbridge.dispatch_app.private_key
+        kind: secret
+        basis: "rec-4233; Decision {{N}} clause 2 (the scheduled workflow dispatcher's GitHub App); Decision 237 (the value is put out of band)"
+        applies_when: {port: scheduling, adapter: eventbridge}
+        homes: {cloud: secrets_port}
+        variable: WORKFLOW_DISPATCH_APP_PRIVATE_KEY
+        exports: []
+        readers: [rec-4233]
+        set_by: user
+        defaults: {local: null, cloud: null}
+        this_repository: {current_home: null, note: "the SSM SecureString parameter /secret/agent-platform-workflow-dispatcher-app-key in the production account, read at run time by the dispatcher Lambda's role by literal ARN; SIT holds none", status: resolved, owning_item: dec-{{N}}}
+        enforcement: validate_secret_parameter_grants
+      - id: ports.scheduling.eventbridge.dispatch_app.client_id
+        kind: project
+        basis: "rec-4233; Decision {{N}} clause 2: the App's client id, an OAuth client identifier that is not a credential and signs nothing"
+        applies_when: {port: scheduling, adapter: eventbridge}
+        homes: {cloud: platform_file}
+        variable: null
+        exports: []
+        readers: [rec-4233]
+        set_by: user
+        defaults: {local: null, cloud: null}
+        this_repository: {current_home: config/lambda/scheduled_workflow_dispatcher/schedules.yaml, note: "app.client_id in the dispatcher's register, bundled into its zip", status: open, owning_item: "T4.24:c16"}
+        enforcement: advisory
+      - id: ports.scheduling.eventbridge.dispatch_app.bot_login
+        kind: project
+        basis: "rec-4233; Decision {{N}} clauses 3 and 6: the App's bot login, shown on every run it starts in this public repository"
+        applies_when: {port: scheduling, adapter: eventbridge}
+        homes: {cloud: platform_file}
+        variable: null
+        exports: []
+        readers: [rec-4233]
+        set_by: user
+        defaults: {local: null, cloud: null}
+        this_repository: {current_home: config/lambda/scheduled_workflow_dispatcher/schedules.yaml, note: "app.bot_login in the dispatcher's register; every refusal guard names the same literal, and the guard test holds them equal", status: open, owning_item: "T4.24:c16"}
+        enforcement: advisory
+- id: ports-amendment-log
+  file: docs/contracts/ports.yaml
+  before: |
+    amendment_log:
+  after: |
+    amendment_log:
+      - {date: "{{DATE}}", semantic_break: false, change_class: field_add, summary: "PLAN-scheduled-workflow-dispatch (rec-4233, Decision {{N}}): coupling_findings gains PC-10, accepted: the scheduling port's eventbridge adapter starts verdict_plane's GitHub Actions workflows through the workflow_dispatch API."}
+- id: ports-pc-10
+  file: docs/contracts/ports.yaml
+  before: |2
+        status: accepted
+        owning_item: dec-234
+
+    structural_assumptions:
+  after: |2
+        status: accepted
+        owning_item: dec-234
+      - {id: PC-10, ports: [scheduling, verdict_plane], location: dec-{{N}}, status: accepted, owning_item: dec-{{N}}, description: "The scheduling port's eventbridge adapter starts work through GitHub's workflow_dispatch API with a GitHub App token, so the scheduled workflow dispatcher (rec-4233) presumes verdict_plane's github_actions adapter runs the workflows its register (config/lambda/scheduled_workflow_dispatcher/schedules.yaml) names; a local_cron adapter or another verdict plane needs its own dispatch path. Accepted while those loops are GitHub Actions workflows; rec-5113 makes the register the scheduling port's declarative input."}
+
+    structural_assumptions:
+- id: inventory-amendment-log
+  file: docs/contracts/account-credential-inventory.yaml
+  before: |
+    amendment_log:
+  after: |
+    amendment_log:
+      - {date: "{{DATE}}", semantic_break: false, change_class: field_add, summary: "PLAN-scheduled-workflow-dispatch (rec-4233, Decision {{N}}): rows gain GH-15, the workflow dispatcher App installation, company-owned from creation, with one evidence_ledger entry."}
+- id: inventory-gh-15
+  file: docs/contracts/account-credential-inventory.yaml
+  before: |2
+      - {id: GH-14, provider: GitHub, item: agent-platform-github-pat, kind: OAuth token (Secrets Manager entry), location: AWS Secrets Manager, owner_today: none, target: Deleted, stage: github_transfer, rec: [rec-4539], status: retired}
+  after: |2
+      - {id: GH-14, provider: GitHub, item: agent-platform-github-pat, kind: OAuth token (Secrets Manager entry), location: AWS Secrets Manager, owner_today: none, target: Deleted, stage: github_transfer, rec: [rec-4539], status: retired}
+      - {id: GH-15, provider: GitHub, item: workflow dispatcher App installation, kind: GitHub App installation, location: "SSM SecureString /secret/agent-platform-workflow-dispatcher-app-key; client id in config/lambda/scheduled_workflow_dispatcher/schedules.yaml", owner_today: company, target: "Organisation-owned from creation, installed on this repository only", stage: none, rec: [rec-4233], status: company, ref: "docs/contracts/project-configuration.yaml#settings.ports.scheduling.eventbridge.dispatch_app.private_key"}
+- id: inventory-gh-15-ledger
+  file: docs/contracts/account-credential-inventory.yaml
+  before: |2
+      - {date: "2026-11-03", row: BILL-02, status: moved, evidence: "PLAN-neon-org-company-assignment C4: the operator set company billing details and card on the organisation on 2026-10-30, before Decision 242's AWS move (an early operator step, recorded here); the billing page shows the company and Launch, and the API reads 7-day history; proven on the first company invoice (rec-4865)"}
+  after: |2
+      - {date: "2026-11-03", row: BILL-02, status: moved, evidence: "PLAN-neon-org-company-assignment C4: the operator set company billing details and card on the organisation on 2026-10-30, before Decision 242's AWS move (an early operator step, recorded here); the billing page shows the company and Launch, and the API reads 7-day history; proven on the first company invoice (rec-4865)"}
+      - {date: "{{DATE}}", row: GH-15, status: company, evidence: "PLAN-scheduled-workflow-dispatch (rec-4233) VP 9: the operator created the App under the organisation and installed it on this repository only; the installation's permission read-back lists Actions write and Metadata read and nothing else"}

@@ -28,7 +28,7 @@
 # ---------------------------------------------------------------------------
 
 resource "aws_s3_bucket" "data_lake" {
-  bucket = "agent-platform-data-lake"
+  bucket = local.data_lake_bucket_name
 
   tags = {
     Name    = "Platform Data Lake"

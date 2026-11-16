@@ -10,6 +10,10 @@ cut (a spawn record is a toolUseResult carrying the agent's id, in the root befo
 are the last record per message.id; synthetic (model "<synthetic>") and API-error records are excluded. A model's key is the
 record's requestedModel, else message.model: the key of the ledger's modelUsage map.
 
+A non-auxiliary model with transcript records is a bound when the ledger is at or above the transcript (Claude Code side
+requests that write no transcript record credit the ledger [inferred]); a sub-agent stream on disk that started before a cut
+and that no spawn record before it links is the alarm ledger_stream_unlinked, so the bound cannot hide a stream never walked.
+
 The cumulative reading of a later cost-state record is the declared expectation, measured only on single-record sessions; each
 finding carries the record's index so a mismatch on a later record is visible as such. A post-cut record never counts.
 """
@@ -17,6 +21,7 @@ finding carries the record's index so a mismatch on a later record is visible as
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Iterator
 
 from src.turn_capture.transcript import ROOT, TranscriptTree, read_lines
@@ -45,6 +50,11 @@ DECLARED = {
     "ledger_bounded_auxiliary": "an auxiliary-prefix model that also has transcript records, compared as ledger >= transcript",
     "ledger_bounded_compaction": "a compaction before the cut: its call has no assistant record [inferred], so a bound",
     "ledger_bounded_background": "a background sub-agent with no completion notice before the cut may straddle it, so a bound",
+    "ledger_bounded_side_query": (
+        "a model with transcript records: Claude Code side requests that write no transcript record (resume cache warm, "
+        "sub-agent and away summaries, WebSearch's inner request) credit the ledger [inferred, Claude Code 2.1.322 bundle], "
+        "so a bound"
+    ),
     "ledger_unavailable": "a cost-state record with no modelUsage map, counted and never compared",
 }
 ALARMS = (
@@ -52,6 +62,7 @@ ALARMS = (
     "ledger_output_residual_unexplained",
     "ledger_output_excess",
     "ledger_model_unexplained",
+    "ledger_stream_unlinked",
 )
 
 
@@ -241,7 +252,11 @@ def _classify(model: str, ledger: dict[str, int] | None, seen: dict[str, int] | 
             return "ledger_input_class_mismatch", 0
         return (bound, 0) if ledger["output"] >= seen["output"] else ("ledger_output_excess", 0)
     if any(ledger[name] != seen[name] for name in CLASSES if name != "output"):
-        return "ledger_input_class_mismatch", 0
+        if all(ledger[name] >= seen[name] for name in CLASSES):
+            return "ledger_bounded_side_query", 0
+        if any(ledger[name] < seen[name] for name in CLASSES if name != "output"):
+            return "ledger_input_class_mismatch", 0
+        return "ledger_output_excess", 0
     shortfall = ledger["output"] - seen["output"]
     if shortfall == 0:
         return "ledger_exact", 0
@@ -251,8 +266,40 @@ def _classify(model: str, ledger: dict[str, int] | None, seen: dict[str, int] | 
     return ("ledger_output_residual_nonfinal" if nonfinal else "ledger_output_residual_unexplained"), shortfall
 
 
-def reconcile_ledger(tree: TranscriptTree) -> list[Finding]:
-    """One Finding per model of every cost-state record in the root stream (a record without modelUsage: one unavailable)."""
+def _instant(record: dict[str, Any]) -> datetime | None:
+    value = record.get("timestamp")
+    if not isinstance(value, str):
+        return None
+    try:
+        stamp = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return stamp.replace(tzinfo=timezone.utc) if stamp.tzinfo is None else stamp.astimezone(timezone.utc)
+
+
+def _unlinked(tree: TranscriptTree, raw: TranscriptTree, root: list[dict[str, Any]], cut: int) -> list[str]:
+    """Sub-agent streams on disk that started at or before the cut and that no spawn record before it links."""
+    before = root[:cut]
+    linked = {agent for agent, _, _, _ in _included(tree, before)}
+    stamps = [stamp for stamp in map(_instant, before) if stamp is not None]
+    latest = max(stamps) if stamps else None
+    found = []
+    for agent in sorted(set(raw.agent_ids()) | set(tree.agent_ids())):
+        if agent in linked:
+            continue
+        records = read_stream(raw, agent) or read_stream(tree, agent)
+        starts = [stamp for stamp in map(_instant, records) if stamp is not None]
+        if latest is None or not starts or min(starts) <= latest:
+            found.append(agent)
+    return found
+
+
+def reconcile_ledger(tree: TranscriptTree, *, raw: TranscriptTree | None = None) -> list[Finding]:
+    """One Finding per model of every cost-state record in the root stream (a record without modelUsage: one unavailable).
+
+    *raw* is the tree the unlinked-stream check lists streams from (default: *tree* itself); a cursor view lists only the
+    streams the producer consumed, so the production verify passes the on-disk tree beside it.
+    """
     root = read_stream(tree, ROOT)
     findings: list[Finding] = []
     cut_index = 0
@@ -279,5 +326,9 @@ def reconcile_ledger(tree: TranscriptTree) -> list[Finding]:
                         transcript=prefix.totals.get(model, {}),
                     )
                 )
+            findings += [
+                Finding(None, "ledger_stream_unlinked", cut_index, line)
+                for _ in _unlinked(tree, raw if raw is not None else tree, root, line)
+            ]
         cut_index += 1
     return findings

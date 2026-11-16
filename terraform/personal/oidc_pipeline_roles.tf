@@ -139,7 +139,7 @@ data "aws_iam_policy_document" "github_ci_planner" {
     effect  = "Allow"
     actions = ["s3:PutObject", "s3:DeleteObject"]
     resources = [
-      "${aws_s3_bucket.data_lake.arn}/tfstate/personal/sandbox/terraform.tfstate.tflock"
+      "${aws_s3_bucket.data_lake.arn}/tfstate/personal/${var.environment}/terraform.tfstate.tflock"
     ]
   }
 

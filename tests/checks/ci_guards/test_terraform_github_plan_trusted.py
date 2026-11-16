@@ -62,7 +62,7 @@ def _job_violations(wf: dict[str, Any]) -> list[str]:
     gates = ("head.repo.full_name == github.repository", "base.ref == 'main'", "github.actor != 'dependabot[bot]'")
     if list(wf["jobs"]) != ["plan"] or not all(g in cond for g in gates):
         out.append("job: one job named plan gated on same-repo, base main and Dependabot")
-    if job.get("environment") != "tf-trusted-plan" or wf.get("permissions") != {}:
+    if job.get("environment") != {"name": "tf-trusted-plan", "deployment": False} or wf.get("permissions") != {}:
         out.append("job: environment tf-trusted-plan and top-level permissions {}")
     if wf.get("defaults") != {"run": {"shell": "bash"}} or any("shell" in s for s in _steps(wf)):
         out.append("shell: workflow-level defaults.run.shell is bash and no step sets shell")
@@ -190,7 +190,8 @@ def _mutations() -> dict[str, Callable[[str], str]]:
             "      - 'terraform/github/**'\n", "      - 'terraform/github/**'\n      - '.github/workflows/x.yml'\n", 1
         ),
         "gate": lambda t: t.replace(" && github.event.pull_request.base.ref == 'main'", "", 1),
-        "environment": lambda t: t.replace("    environment: tf-trusted-plan\n", "", 1),
+        "environment": lambda t: t.replace("    environment: {name: tf-trusted-plan, deployment: false}\n", "", 1),
+        "deployment_true": lambda t: t.replace("deployment: false}", "deployment: true}", 1),
         "permissions": lambda t: t.replace("permissions: {}\n", "permissions:\n  contents: read\n", 1),
         "defaults": lambda t: t.replace("defaults:\n  run:\n    shell: bash\n\n", "", 1),
         "step_shell": lambda t: t.replace(

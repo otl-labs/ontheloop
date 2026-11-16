@@ -127,7 +127,8 @@ class TestSecretsToSsmCutover:
             source = _text(rel)
             assert "get_parameter" in source and "WithDecryption=True" in source, rel
         assert "/secret/neon-api-key" in _text("src/common/neon_api.py")
-        assert "/secret/agent-platform-anthropic-api-key" in _text("scripts/smoke_test_inference_credentials.py")
+        assert "/secret/agent-platform-anthropic-api-key" in _text("docs/contracts/project-configuration.yaml")
+        assert "ports.run_persona.litellm.api_key." in _text("scripts/smoke_test_inference_credentials.py")
 
     def test_shell_consumers_fetch_with_ssm_get_parameter(self) -> None:
         neon = _text("scripts/ci/neon_api_key.sh")

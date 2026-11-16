@@ -21,13 +21,14 @@ from scripts.roadmap.vp_literals import (
     find_unsatisfiable_literals,
 )
 
-_SUPPORTED_VERSIONS: frozenset[int] = frozenset({1, 2, 3, 4, 5})
+_SUPPORTED_VERSIONS: frozenset[int] = frozenset({1, 2, 3, 4, 5, 6})
 _V2_PHASE_ENUM: frozenset[str] = frozenset({"pre-deploy", "post-deploy"})
 _MIN_WAIVER_CHARS = 20
 _REC_ID_RE = re.compile(r"rec-\d+")
 _DECISION_TOKEN_RE = re.compile(r"dec:[1-9][0-9]*(#[^\s#:]+)?")
 _EDGE_FIELDS = frozenset({"amends", "introduces", "principal"})
 _EDGE_FIELDS_MIN_VERSION = 5
+_CITES_MIN_VERSION = 6
 
 # _partition_command lives in scripts.roadmap.vp_literals (Decision 104 sole-home for the
 # shell-command tokenizer within this package) -- imported back here rather than duplicated.
@@ -257,6 +258,7 @@ class PlanDocument(BaseModel):
     implementation_declared: bool = False
     weakening_dispositions: list[WeakeningDisposition] = Field(default_factory=list)
     amends: list[str] = Field(default_factory=list)
+    cites: list[str] = Field(default_factory=list)
     introduces: list[str] = Field(default_factory=list)
     principal: str | None = None
     gate_rounds: list[GateRound] = Field(default_factory=list)
@@ -314,6 +316,14 @@ class PlanDocument(BaseModel):
                 raise ValueError(f"amends entry {entry!r} is not a valid 'dec:<number>[#<clause-id>]' token")
         return v
 
+    @field_validator("cites")
+    @classmethod
+    def _cites_tokens(cls, v: list[str]) -> list[str]:
+        for entry in v:
+            if not _DECISION_TOKEN_RE.fullmatch(entry):
+                raise ValueError(f"cites entry {entry!r} is not a valid 'dec:<number>[#<clause-id>]' token")
+        return v
+
     @field_validator("introduces")
     @classmethod
     def _introduces_tokens(cls, v: list[str]) -> list[str]:
@@ -342,6 +352,10 @@ class PlanDocument(BaseModel):
                 f"{', '.join(present)} require schema_version {_EDGE_FIELDS_MIN_VERSION} or above "
                 f"(got schema_version {self.schema_version})"
             )
+        if "cites" in self.model_fields_set and self.schema_version < _CITES_MIN_VERSION:
+            raise ValueError(
+                f"cites requires schema_version {_CITES_MIN_VERSION} or above (got schema_version {self.schema_version})"
+            )
 
     def _validate_gate_rounds(self) -> None:
         if self.gate_rounds and self.schema_version < _EDGE_FIELDS_MIN_VERSION:
@@ -352,13 +366,13 @@ class PlanDocument(BaseModel):
                 raise ValueError(f"gate_rounds for {gate} must number 1..N in order with no gap, got {rounds}")
 
     def _validate_handoff_policy(self) -> None:
-        if self.schema_version in {3, 4, 5}:
+        if self.schema_version in {3, 4, 5, 6}:
             if self.plan_type == "IMPLEMENTATION" and self.handoff_policy is None:
                 raise ValueError(f"schema_version {self.schema_version} IMPLEMENTATION plans require handoff_policy")
             if self.plan_type != "IMPLEMENTATION" and self.handoff_policy is not None:
                 raise ValueError(f"handoff_policy is only valid on schema_version {self.schema_version} IMPLEMENTATION plans")
         elif self.handoff_policy is not None:
-            raise ValueError("handoff_policy is only valid with schema_version 3, 4 or 5")
+            raise ValueError("handoff_policy is only valid with schema_version 3, 4, 5 or 6")
 
     def _validate_expected_literals(self) -> None:
         """schema_version 5's assertion carrier (docs/contracts/vp-red-before.yaml#carrier_rule):

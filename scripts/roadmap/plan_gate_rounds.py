@@ -17,6 +17,7 @@ _GATE_VERDICTS: dict[str, frozenset[str]] = {
 }
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _GIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
+_FINGERPRINT_RE = re.compile(r"v[1-9][0-9]*:[0-9a-f]{64}")
 
 
 class GateRound(BaseModel):
@@ -24,7 +25,9 @@ class GateRound(BaseModel):
 
     Counts only: never a status or approval input, and never a per-finding record (Decision 87 as amended by
     Decision 205; T4.29 c2 keeps per-finding rows with rec-4434). A wording-check row also records the run's
-    digest, base and selection status (scripts.roadmap.plan_wording_check).
+    digest, base and selection status (scripts.roadmap.plan_wording_check). A decision-scout row may record
+    scout_input_fingerprint (scripts.roadmap.plan_fingerprint): a run fact, never a reason to skip a scout; every
+    reader recomputes it.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -41,6 +44,7 @@ class GateRound(BaseModel):
     base: str | None = None
     selection: Literal["complete", "degraded"] | None = None
     pending_evaluators: int | None = Field(default=None, ge=1)
+    scout_input_fingerprint: str | None = None
 
     @model_validator(mode="after")
     def _verdict_matches_gate(self) -> GateRound:
@@ -51,7 +55,16 @@ class GateRound(BaseModel):
         if self.escalation_choice is not None and not self.escalated:
             raise ValueError("escalation_choice records the human's answer to an escalation; set escalated: true")
         self._check_run_facts()
+        self._check_scout_fingerprint()
         return self
+
+    def _check_scout_fingerprint(self) -> None:
+        if self.scout_input_fingerprint is None:
+            return
+        if self.gate != "decision-scout":
+            raise ValueError("scout_input_fingerprint is allowed only on a decision-scout row")
+        if not _FINGERPRINT_RE.fullmatch(self.scout_input_fingerprint):
+            raise ValueError("scout_input_fingerprint is 'v<N>:' followed by 64 lowercase hex characters")
 
     def _check_run_facts(self) -> None:
         if self.pending_evaluators is not None and (self.gate != "wording-check" or self.verdict != "PASS"):

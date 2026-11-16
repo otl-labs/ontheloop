@@ -43,7 +43,7 @@ class TestWorkflowAndTaxonomy:
         assert "github.event.pull_request.head.repo.full_name == github.repository" in cond
         assert "github.event.pull_request.base.ref == 'main'" in cond
         assert "github.actor != 'dependabot[bot]'" in cond
-        assert wf["jobs"]["plan"]["environment"] == "tf-trusted-plan"
+        assert wf["jobs"]["plan"]["environment"] == {"name": "tf-trusted-plan", "deployment": False}
         assert wf["permissions"] == {}
         assert wf["jobs"]["plan"]["permissions"] == {"id-token": "write", "contents": "read", "pull-requests": "write"}
 

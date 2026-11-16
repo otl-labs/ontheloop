@@ -95,7 +95,7 @@ locals {
           "s3:GetBucketCORS",
           "s3:GetBucketWebsite",
         ]
-        Resource = ["arn:aws:s3:::agent-platform-ducklake-catalog-dr"]
+        Resource = [local.ducklake_dr_bucket_arn]
       },
       {
         Sid    = "CatalogDrObjectRead"
@@ -107,8 +107,8 @@ locals {
           "s3:ListBucket",
         ]
         Resource = [
-          "arn:aws:s3:::agent-platform-ducklake-catalog-dr",
-          "arn:aws:s3:::agent-platform-ducklake-catalog-dr/*",
+          local.ducklake_dr_bucket_arn,
+          "${local.ducklake_dr_bucket_arn}/*",
         ]
       },
       {
@@ -153,7 +153,7 @@ locals {
           "s3:PutBucketPublicAccessBlock",
           "s3:GetBucketPublicAccessBlock",
         ]
-        Resource = ["arn:aws:s3:::agent-platform-bootstrap-tfstate"]
+        Resource = [local.bootstrap_state_bucket_arn]
       },
       {
         Sid    = "BootstrapStateObjectIO"
@@ -163,7 +163,7 @@ locals {
           "s3:PutObject",
           "s3:DeleteObject",
         ]
-        Resource = ["arn:aws:s3:::agent-platform-bootstrap-tfstate/*"]
+        Resource = ["${local.bootstrap_state_bucket_arn}/*"]
       },
     ]
   })
@@ -221,7 +221,7 @@ resource "aws_iam_role_policy" "platform_admin_datalake" {
 }
 
 # Bootstrap state backend (T2.23): PlatformAdmin provisions and uses terraform/bootstrap's own S3
-# state backend. The bucket (agent-platform-bootstrap-tfstate) is created out-of-band and is NOT a
+# state backend. The bootstrap state bucket is created out-of-band and is NOT a
 # Terraform resource in any root -- codifying it would be circular.
 import {
   id = "PlatformAdmin:BootstrapStateProvisioning"
@@ -248,8 +248,8 @@ resource "aws_iam_role_policy" "platform_admin_bootstrap_state" {
       # policy -- personal-policies-carry-byte-preconditions does not scan this file).
       condition = alltrue([
         for arn, actions in {
-          "arn:aws:s3:::agent-platform-bootstrap-tfstate"   = ["s3:ListBucket"]
-          "arn:aws:s3:::agent-platform-bootstrap-tfstate/*" = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+          (local.bootstrap_state_bucket_arn)      = ["s3:ListBucket"]
+          "${local.bootstrap_state_bucket_arn}/*" = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
           } : anytrue([
             for s in jsondecode(local.platform_admin_bootstrap_state_policy_json).Statement :
             s.Effect == "Allow" && !can(s.Condition)

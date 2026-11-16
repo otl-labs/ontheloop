@@ -177,3 +177,66 @@ resource "github_repository_environment_deployment_policy" "tf_github_apply_main
   environment    = github_repository_environment.tf_github_apply.environment
   branch_pattern = "main"
 }
+
+# GitHub Environment: persona-verdict (PLAN-persona-verdict-credential, T4.32 c1).
+#
+# The verdict persona jobs' Environment. No reviewer gates it, because the jobs run unattended on every pull
+# request. Its safety is the main-only deployment policy below (matched against GITHUB_REF, refs/heads/main under
+# workflow_run), the persona-verdict role's job_workflow_ref binding in terraform/personal, and
+# tests/checks/iam_tf/test_persona_verdict_role.py; never put it in a reviewer-gated list. No Environment secret
+# or variable, ever. Created by the first approved terraform-github-apply.yml dispatch naming both addresses in
+# gate_change (Decision 248), with no UI step and no import block. Destroying it fails open for the same reason
+# as tf_gated_apply.
+resource "github_repository_environment" "persona_verdict" {
+  repository        = github_repository.this.name
+  environment       = "persona-verdict"
+  can_admins_bypass = false
+
+  deployment_branch_policy {
+    protected_branches     = false
+    custom_branch_policies = true
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "github_repository_environment_deployment_policy" "persona_verdict_main" {
+  repository     = github_repository.this.name
+  environment    = github_repository_environment.persona_verdict.environment
+  branch_pattern = "main"
+}
+
+# GitHub Environment: tf-bootstrap-apply (PLAN-bootstrap-ci-gated-apply).
+#
+# The gate for terraform-bootstrap-apply.yml's apply job: the bootstrap-apply role's OIDC trust names this
+# Environment as its only subject. Required reviewers from var.gated_apply_reviewer_user_ids, no admin bypass, and
+# the explicit main-only policy (rec-4651). Created by an approved terraform-github-apply.yml dispatch that names
+# both addresses. Destroying it fails open: GitHub would auto-create an unprotected Environment of the same name,
+# so the approvals preflight refuses a run against it.
+resource "github_repository_environment" "tf_bootstrap_apply" {
+  repository          = github_repository.this.name
+  environment         = "tf-bootstrap-apply"
+  prevent_self_review = false
+  can_admins_bypass   = false
+
+  reviewers {
+    users = var.gated_apply_reviewer_user_ids
+  }
+
+  deployment_branch_policy {
+    protected_branches     = false
+    custom_branch_policies = true
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "github_repository_environment_deployment_policy" "tf_bootstrap_apply_main" {
+  repository     = github_repository.this.name
+  environment    = github_repository_environment.tf_bootstrap_apply.environment
+  branch_pattern = "main"
+}

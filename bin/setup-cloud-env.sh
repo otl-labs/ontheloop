@@ -7,71 +7,50 @@
 # credential block below (the env-var field is "visible to anyone using this
 # environment" -- never put credentials there).
 #
-# AWS credentials (rec-4510, Decision 113 Update): the agent_static key never sits in a container. Each
-# environment (DEV, ADMIN) has two parts:
+# AWS credentials (rec-4510, Decision 113 Update, Decision 256): the agent-platform-session key never sits in a
+# container, and no environment holds a role. One template serves every agent environment, and it has two parts:
 #
-# (1) An AWS (SigV4) network secret in the environment settings holding the agent_static access key, with the
-#     allowed host sts.eu-west-2.amazonaws.com ONLY. The agent proxy signs STS calls to that host as the IAM user;
-#     the container never sees the key. Network secrets apply to NEW sessions only.
+# (1) An AWS (SigV4) network secret in the environment settings holding the agent-platform-session access key
+#     (terraform/bootstrap/agent_session_user.tf), with exactly these allowed hosts: sts.eu-west-2.amazonaws.com,
+#     ssm.eu-west-2.amazonaws.com, logs.eu-west-2.amazonaws.com, monitoring.eu-west-2.amazonaws.com,
+#     iam.amazonaws.com and the DuckLake REST API's execute-api host (print it from the SSM parameter
+#     /agent-platform/ducklake/api_url/ops/reader). The agent proxy signs requests to those hosts as the IAM user;
+#     the container never sees the key. Network secrets apply to NEW sessions only. The key and host procedure is
+#     docs/contracts/deploy-paths.yaml admin_out_of_band.agent_session_identity.
 #
 # (2) A private "Setup script" field block that writes ~/.aws/config only (placeholder credentials come from
 #     bin/aws-proxy-placeholder-credentials, installed to ~/.local/bin by step 2b below) and removes any stale
-#     ~/.aws/credentials. botocore does not expand $HOME or ~ in credential_process, so the block writes that
-#     section with printf and an expanded path. Fill the <PLACEHOLDER> values (account id, ExternalIds) from your
-#     local ~/.aws/config.
+#     ~/.aws/credentials. botocore does not expand $HOME or ~ in credential_process, so the block writes the
+#     sections with printf and an expanded path. The env-var field (non-secret) sets
+#     OTL_OPS_VERBS_TRANSPORT=execute_api and nothing else: no AWS_PROFILE.
 #
-# DEV environment (PlatformDev) -- paste into the "Setup script" field:
+# DEV environment -- paste into the "Setup script" field:
 #
 #     set -euo pipefail
 #     mkdir -p "$HOME/.aws" "$HOME/.local/bin" && chmod 700 "$HOME/.aws"
 #     rm -f "$HOME/.aws/credentials"
 #
-#     printf '[profile agent_static]\nregion = eu-west-2\noutput = json\ncredential_process = %s\n\n' \
-#         "$HOME/.local/bin/aws-proxy-placeholder-credentials" > "$HOME/.aws/config"
-#     cat >> "$HOME/.aws/config" <<'EOF'
-#     [profile agent_platform]
-#     role_arn = arn:aws:iam::<ACCOUNT_ID>:role/PlatformDev
-#     source_profile = agent_static
-#     external_id = <PLACEHOLDER>
-#     duration_seconds = 36000
-#     region = eu-west-2
-#     sts_regional_endpoints = regional
-#     output = json
-#     EOF
+#     for p in agent_platform agent_static; do
+#         printf '[profile %s]\nregion = eu-west-2\nsts_regional_endpoints = regional\noutput = json\ncredential_process = %s\n\n' \
+#             "$p" "$HOME/.local/bin/aws-proxy-placeholder-credentials"
+#     done > "$HOME/.aws/config"
 #     chmod 600 "$HOME/.aws/config"
 #
 #     cd /home/user/ontheloop && bash bin/setup-cloud-env.sh
 #
-# boto3 then resolves the agent_platform profile: the placeholder key is only the source credential, the proxy
-# re-signs the AssumeRole call, and the STS session auto-refreshes with no re-paste. Leave the env-var field EMPTY
-# for the dev environment.
+# boto3 then resolves the agent_platform profile: the placeholder key is only a placeholder, the proxy signs each
+# call as the user, and there is no role step to refresh. agent_static is kept so scripts naming it still resolve.
 #
-# ADMIN environment (PlatformAdmin, used rarely for infra) -- same block, plus a second role profile appended to
-# the heredoc (ADMIN keeps BOTH profiles):
-#
-#     [profile agent_platform_admin]
-#     role_arn = arn:aws:iam::<ACCOUNT_ID>:role/PlatformAdmin
-#     source_profile = agent_static
-#     external_id = <PLACEHOLDER>
-#     duration_seconds = 1800
-#     region = eu-west-2
-#     sts_regional_endpoints = regional
-#     output = json
-#
-# PlatformAdmin's max_session_duration is 3600 (terraform/bootstrap/platform_roles.tf), so its profile must not ask
-# for more: 36000 here makes every PlatformAdmin AssumeRole fail. PlatformDev allows 36000.
-#
-# and set this in the (non-secret) env-var field:
-#     AWS_PROFILE=agent_platform_admin
-#
-# The ADMIN block's last line passes the flag inline instead of relying on the env-var field:
+# ADMIN environment: there is no admin identity here (Decision 256 cl.3). An admin environment is this same
+# session user with terraform installed; every admin step is the operator's, run in AWS CloudShell. Its last line
+# passes the flag inline instead of relying on the env-var field:
 #     cd /home/user/ontheloop && INSTALL_TERRAFORM=1 bash bin/setup-cloud-env.sh
 # The setup script runs once per environment snapshot, before environment variables are set, and
 # the agent proxy never signs its requests, so INSTALL_TERRAFORM=1 is passed inline and the script
 # makes no AWS call: the provider mirror is synced by the every-session ADMIN hook (see the split below).
 #
-# Identity checks: an unpinned `aws sts get-caller-identity` returns the IAM user under the proxy. Use
-# `bin/venv-python -m scripts.aws_identity caller-arn --profile <p>` (reads the identity from a second region).
+# Identity checks: an unpinned `aws sts get-caller-identity` and the helper both report the IAM user. Use
+# `bin/venv-python -m scripts.aws_identity caller-arn --profile <p>` (reads the identity from the profile's own session).
 #
 # IMPORTANT: the "Setup script" field must include the `cd` prefix above, because
 # the field runs bash from a working directory that is NOT the repo root.
@@ -79,7 +58,7 @@
 #
 # Responsibility split (post T0.2 refactor):
 #   setup-cloud-env.sh -- snapshot-cached installs plus Codex bootstrap parity for Claude's SessionStart checks.
-#   .claude/hooks/session_start_aws.sh -- reports the assumed-role identity via scripts.aws_identity (every session).
+#   .claude/hooks/session_start_aws.sh -- reports the proxy-signed user via scripts.aws_identity (every session).
 #   .claude/hooks/session_start_sync_deps.sh -- self-heals requirements.txt/requirements-dev.txt (and terraform binary) drift on stale snapshots (every session).
 #   .claude/hooks/session_start_terraform_assets.sh -- syncs the Terraform provider mirror in ADMIN sessions (every session; bin/sync-terraform-assets.sh).
 #   .claude/hooks/session_start_precommit.sh -- re-wires the pre-commit .git hook (every session; .git/hooks does not survive a fresh clone).

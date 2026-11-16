@@ -91,6 +91,32 @@ class TestGatedEntryInputClosures:
         globs = self._globs("validate_ci_rca_trigger")
         assert not any(fnmatch("README.md", glob) for glob in globs)
 
+    def test_github_settings_apply_entry_closes_over_its_render_inputs(self) -> None:
+        """The guard reads Terraform through _account_names.render, so an edit to the renderer or to any file it
+        parses must dispatch the guard in --pre (validate_pre_glob_closure follows import edges only)."""
+        entry = next(e for e in _manifest.ENTRIES if e.name == "validate_github_settings_apply")
+        assert entry.pre is True
+        assert {
+            "scripts/checks/iam_tf/_account_names.py",
+            "terraform/bootstrap/account_names.tf",
+            "terraform/bootstrap/variables.tf",
+            "terraform/personal/account_names.tf",
+            "terraform/personal/variables.tf",
+        } <= self._globs("validate_github_settings_apply")
+
+    def test_bootstrap_apply_entry_is_selected_by_any_workflow_or_composite_action_change(self) -> None:
+        """Predicate (c) reads every workflow and composite action, so an unrelated one must select the fence."""
+        entry = next(e for e in _manifest.ENTRIES if e.name == "validate_bootstrap_apply")
+        assert entry.pre is True and entry.module == "scripts.checks.ci_guards.validate_bootstrap_apply"
+        globs = self._globs("validate_bootstrap_apply")
+        for changed in (
+            ".github/workflows/ci.yml",
+            ".github/actions/aws-region/action.yml",
+            "scripts/ci/terraform_bootstrap_apply.sh",
+        ):
+            assert any(fnmatch(changed, glob) for glob in globs), changed
+        assert not any(fnmatch("README.md", glob) for glob in globs)
+
     def test_dependabot_config_entry_closes_over_its_inputs(self) -> None:
         """A config-only or checker-only PR must still dispatch the guard in --pre: every path
         validate_dependabot_config.py reads (the dependabot config, the denylist delegate it

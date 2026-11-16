@@ -1,309 +1,141 @@
 """Unit tests for scripts/smoke_test_inference_credentials.py.
 
-Covers both providers (deepseek, anthropic), the success path, AccessDeniedException,
-ResourceNotFoundException, and the empty-response failure path to satisfy 100% coverage.
-All boto3 and litellm calls are mocked; no live network calls are made.
+The contracts supply each role's parameter name and key variable; boto3 and the transport's cold start are patched,
+so no network call is made and no key is real.
 """
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+import os
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from botocore.exceptions import ClientError
 
-from scripts.smoke_test_inference_credentials import _parse_args, main, run
+from scripts import smoke_test_inference_credentials as smoke
+from scripts.llm import tier_selection
+from scripts.llm.litellm_cold_start import ColdStartResult
+from scripts.llm.litellm_wire import CallRecord
+
+ROLES = ("primary", "warm_fetched_escape_hatch")
+VALUE = "smoke-test-sentinel-9876"
+ROOT = Path(__file__).resolve().parents[1]
 
 
-def _make_sm_response(secret_string: str) -> dict:
-    return {"Parameter": {"Value": secret_string}}
+def _row(role: str) -> dict:
+    _, config = tier_selection.load()
+    return next(r for r in config["settings"] if r["id"] == f"ports.run_persona.litellm.api_key.{role}")
 
 
-def _make_litellm_result(content: str) -> SimpleNamespace:
-    message = SimpleNamespace(content=content)
-    choice = SimpleNamespace(message=message)
-    return SimpleNamespace(choices=[choice])
+def _record(role: str) -> CallRecord:
+    return CallRecord("p", role, "prov", "req/model", "served-x", "shape", "enabled", "high", 1, 1, 0, 0, None, 1, 5)
+
+
+def _result(role: str, outcome: str, with_record: bool = True) -> ColdStartResult:
+    return ColdStartResult(role, "assertion", outcome, _record(role) if with_record else None, "some detail")
+
+
+def _client(value: str = VALUE) -> MagicMock:
+    client = MagicMock()
+    client.get_parameter.return_value = {"Parameter": {"Value": value}}
+    return client
+
+
+def _client_error(code: str) -> ClientError:
+    return ClientError({"Error": {"Code": code, "Message": "m"}}, "GetParameter")
+
+
+def _run(role: str, client: MagicMock, cold: MagicMock | None = None, region: str | None = None) -> int:
+    with (
+        patch.object(smoke.boto3, "Session") as session,
+        patch.object(smoke, "resolve_aws_profile", return_value=None),
+        patch.object(smoke.litellm_transport, "cold_start_check", cold or MagicMock(return_value=_result(role, "asserted"))),
+    ):
+        session.return_value.client.return_value = client
+        return smoke.run(role, region=region)
 
 
 class TestParseArgs:
-    def test_provider_deepseek(self) -> None:
-        with patch("sys.argv", ["smoke_test_inference_credentials", "--provider", "deepseek"]):
-            args = _parse_args()
-        assert args.provider == "deepseek"
-        assert args.model is None
-        assert args.envelope_id is None
-        assert args.region == "eu-west-2"
+    def test_role_required_and_parsed(self) -> None:
+        with pytest.raises(SystemExit):
+            smoke._parse_args([])
+        args = smoke._parse_args(["--role", "primary"])
+        assert args.role == "primary" and args.region is None
 
-    def test_provider_anthropic_with_overrides(self) -> None:
-        argv = [
-            "smoke_test_inference_credentials",
-            "--provider",
-            "anthropic",
-            "--model",
-            "anthropic/claude-opus-4",
-            "--parameter-name",
-            "my-secret",
-            "--region",
-            "us-east-1",
-        ]
-        with patch("sys.argv", argv):
-            args = _parse_args()
-        assert args.provider == "anthropic"
-        assert args.model == "anthropic/claude-opus-4"
-        assert args.envelope_id == "my-secret"
-        assert args.region == "us-east-1"
+    def test_removed_flags_are_gone(self) -> None:
+        for flag in ("--provider", "--model", "--parameter-name"):
+            with pytest.raises(SystemExit):
+                smoke._parse_args(["--role", "primary", flag, "x"])
+
+
+class TestRun:
+    @pytest.mark.parametrize("role", ROLES)
+    def test_pass_uses_the_contract_row(self, role: str, capsys: pytest.CaptureFixture[str], monkeypatch) -> None:
+        row = _row(role)
+        monkeypatch.delenv(row["variable"], raising=False)
+        client, cold = _client(), MagicMock(return_value=_result(role, "asserted"))
+        assert _run(role, client, cold) == 0
+        client.get_parameter.assert_called_once_with(Name=row["this_repository"]["current_home"], WithDecryption=True)
+        cold.assert_called_once_with(role)
+        assert os.environ[row["variable"]] == VALUE
+        out = capsys.readouterr()
+        assert f"PASS [{role}] requested=req/model served=served-x assertion=asserted" in out.out
+        assert VALUE not in out.out + out.err
+        monkeypatch.delenv(row["variable"])
+
+    def test_region_defaults_to_the_file_and_can_be_given(self) -> None:
+        client = _client()
+        with (
+            patch.object(smoke.boto3, "Session") as session,
+            patch.object(smoke, "resolve_aws_profile", return_value=None),
+            patch.object(smoke.litellm_transport, "cold_start_check", return_value=_result("primary", "asserted")),
+        ):
+            session.return_value.client.return_value = client
+            smoke.run("primary")
+            smoke.run("primary", region="elsewhere-1")
+        regions = [c.kwargs["region_name"] for c in session.return_value.client.call_args_list]
+        assert regions == [(ROOT / "config" / "aws-region").read_text().strip(), "elsewhere-1"]
+        assert smoke._default_region() == regions[0]
+
+    @pytest.mark.parametrize("outcome", ["spent", "not_asserted", "not_applicable"])
+    def test_not_asserted_outcomes_fail(self, outcome: str, capsys: pytest.CaptureFixture[str]) -> None:
+        cold = MagicMock(return_value=_result("primary", outcome, with_record=False))
+        assert _run("primary", _client(), cold) == 1
+        assert f"FAIL [primary] assertion={outcome}" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(("code", "hint"), [("AccessDeniedException", "IAM grant"), ("ParameterNotFound", "not found")])
+    def test_ssm_errors(self, code: str, hint: str, capsys: pytest.CaptureFixture[str]) -> None:
+        client = MagicMock()
+        client.get_parameter.side_effect = _client_error(code)
+        assert _run("primary", client) == 1
+        assert hint in capsys.readouterr().err
+
+    def test_other_ssm_error_has_no_hint(self, capsys: pytest.CaptureFixture[str]) -> None:
+        client = MagicMock()
+        client.get_parameter.side_effect = _client_error("Throttling")
+        assert _run("primary", client) == 1
+        assert "SSM error (Throttling)" in capsys.readouterr().err
+
+    def test_empty_value(self, capsys: pytest.CaptureFixture[str]) -> None:
+        assert _run("primary", _client("")) == 1
+        assert "empty value" in capsys.readouterr().err
+
+    def test_transport_exception(self, capsys: pytest.CaptureFixture[str], monkeypatch) -> None:
+        cold = MagicMock(side_effect=RuntimeError("boom"))
+        assert _run("primary", _client(), cold) == 1
+        assert "boom" in capsys.readouterr().err
+        monkeypatch.delenv(_row("primary")["variable"], raising=False)
+
+    def test_missing_row(self) -> None:
+        with patch.object(smoke.tier_selection, "load", return_value=({}, {"settings": []})):
+            with pytest.raises(tier_selection.TierSelectionError):
+                smoke.run("primary")
 
 
 class TestMain:
-    def test_main_calls_run_and_exits(self) -> None:
-        sm_client = MagicMock()
-        sm_client.get_parameter.return_value = _make_sm_response("sk-test")
-        with (
-            patch("sys.argv", ["smoke_test_inference_credentials", "--provider", "deepseek"]),
-            patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
-            patch("scripts.smoke_test_inference_credentials.litellm.completion") as mock_completion,
-            patch("scripts.smoke_test_inference_credentials.resolve_aws_profile", return_value=None),
-            pytest.raises(SystemExit) as exc_info,
-        ):
-            mock_session.return_value.client.return_value = sm_client
-            mock_completion.return_value = _make_litellm_result("OK")
-            main()
-        assert exc_info.value.code == 0
-
-
-class TestRunDeepseekSuccess:
-    def test_success_returns_zero(self, capsys: pytest.CaptureFixture[str]) -> None:
-        sm_client = MagicMock()
-        sm_client.get_parameter.return_value = _make_sm_response("sk-deepseek-test")
-        with (
-            patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
-            patch("scripts.smoke_test_inference_credentials.litellm.completion") as mock_completion,
-            patch("scripts.smoke_test_inference_credentials.resolve_aws_profile", return_value="agent_platform"),
-        ):
-            mock_session.return_value.client.return_value = sm_client
-            mock_completion.return_value = _make_litellm_result("OK")
-
-            result = run("deepseek")
-
-        assert result == 0
-        captured = capsys.readouterr()
-        assert "PASS [deepseek]" in captured.out
-        mock_completion.assert_called_once()
-        call_kwargs = mock_completion.call_args
-        assert call_kwargs.kwargs["model"] == "deepseek/deepseek-chat"
-        assert call_kwargs.kwargs["api_key"] == "sk-deepseek-test"  # pragma: allowlist secret
-
-    def test_model_override(self, capsys: pytest.CaptureFixture[str]) -> None:
-        sm_client = MagicMock()
-        sm_client.get_parameter.return_value = _make_sm_response("sk-deepseek-test")
-        with (
-            patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
-            patch("scripts.smoke_test_inference_credentials.litellm.completion") as mock_completion,
-            patch("scripts.smoke_test_inference_credentials.resolve_aws_profile", return_value=None),
-        ):
-            mock_session.return_value.client.return_value = sm_client
-            mock_completion.return_value = _make_litellm_result("OK")
-
-            result = run("deepseek", model="deepseek/deepseek-reasoner")
-
-        assert result == 0
-        assert mock_completion.call_args.kwargs["model"] == "deepseek/deepseek-reasoner"
-
-    def test_parameter_name_override(self) -> None:
-        sm_client = MagicMock()
-        sm_client.get_parameter.return_value = _make_sm_response("sk-deepseek-test")
-        with (
-            patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
-            patch("scripts.smoke_test_inference_credentials.litellm.completion") as mock_completion,
-            patch("scripts.smoke_test_inference_credentials.resolve_aws_profile", return_value=None),
-        ):
-            mock_session.return_value.client.return_value = sm_client
-            mock_completion.return_value = _make_litellm_result("OK")
-
-            result = run("deepseek", envelope_id="my-custom-secret")
-
-        assert result == 0
-        sm_client.get_parameter.assert_called_once_with(
-            Name="my-custom-secret", WithDecryption=True
-        )  # pragma: allowlist secret
-
-
-class TestRunAnthropicSuccess:
-    def test_success_returns_zero(self, capsys: pytest.CaptureFixture[str]) -> None:
-        sm_client = MagicMock()
-        sm_client.get_parameter.return_value = _make_sm_response("sk-ant-test")
-        with (
-            patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
-            patch("scripts.smoke_test_inference_credentials.litellm.completion") as mock_completion,
-            patch("scripts.smoke_test_inference_credentials.resolve_aws_profile", return_value="agent_platform"),
-        ):
-            mock_session.return_value.client.return_value = sm_client
-            mock_completion.return_value = _make_litellm_result("OK")
-
-            result = run("anthropic")
-
-        assert result == 0
-        captured = capsys.readouterr()
-        assert "PASS [anthropic]" in captured.out
-        call_kwargs = mock_completion.call_args.kwargs
-        assert call_kwargs["model"] == "anthropic/claude-haiku-4-5"
-        assert call_kwargs["api_key"] == "sk-ant-test"  # pragma: allowlist secret
-
-
-class TestRunAccessDenied:
-    def test_access_denied_returns_one(self, capsys: pytest.CaptureFixture[str]) -> None:
-        from botocore.exceptions import ClientError
-
-        sm_client = MagicMock()
-        sm_client.get_parameter.side_effect = ClientError(
-            {"Error": {"Code": "AccessDeniedException", "Message": "Access denied"}},
-            "GetParameter",
-        )
-        with (
-            patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
-            patch("scripts.smoke_test_inference_credentials.resolve_aws_profile", return_value="agent_platform"),
-        ):
-            mock_session.return_value.client.return_value = sm_client
-            result = run("deepseek")
-
-        assert result == 1
-        captured = capsys.readouterr()
-        assert "FAIL [deepseek]" in captured.err
-        assert "InferenceCredentialsParameterRead" in captured.err
-
-    def test_resource_not_found_returns_one(self, capsys: pytest.CaptureFixture[str]) -> None:
-        from botocore.exceptions import ClientError
-
-        sm_client = MagicMock()
-        sm_client.get_parameter.side_effect = ClientError(
-            {"Error": {"Code": "ParameterNotFound", "Message": "Not found"}},
-            "GetParameter",
-        )
-        with (
-            patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
-            patch("scripts.smoke_test_inference_credentials.resolve_aws_profile", return_value=None),
-        ):
-            mock_session.return_value.client.return_value = sm_client
-            result = run("anthropic")
-
-        assert result == 1
-        captured = capsys.readouterr()
-        assert "ParameterNotFound" in captured.err or "not found" in captured.err.lower()
-
-
-class TestRunEmptySecretValue:
-    def test_empty_secret_returns_one(self, capsys: pytest.CaptureFixture[str]) -> None:
-        sm_client = MagicMock()
-        sm_client.get_parameter.return_value = _make_sm_response("")
-        with (
-            patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
-            patch("scripts.smoke_test_inference_credentials.resolve_aws_profile", return_value=None),
-        ):
-            mock_session.return_value.client.return_value = sm_client
-            result = run("deepseek")
-
-        assert result == 1
-        captured = capsys.readouterr()
-        assert "empty" in captured.err.lower()
-
-    def test_missing_secret_string_key_returns_one(self, capsys: pytest.CaptureFixture[str]) -> None:
-        sm_client = MagicMock()
-        sm_client.get_parameter.return_value = {}
-        with (
-            patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
-            patch("scripts.smoke_test_inference_credentials.resolve_aws_profile", return_value=None),
-        ):
-            mock_session.return_value.client.return_value = sm_client
-            result = run("anthropic")
-
-        assert result == 1
-        captured = capsys.readouterr()
-        assert "empty" in captured.err.lower()
-
-
-class TestRunLiteLLMFailures:
-    def test_litellm_auth_error_returns_one(self, capsys: pytest.CaptureFixture[str]) -> None:
-        sm_client = MagicMock()
-        sm_client.get_parameter.return_value = _make_sm_response("bad-key")
-        with (
-            patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
-            patch("scripts.smoke_test_inference_credentials.litellm.completion") as mock_completion,
-            patch("scripts.smoke_test_inference_credentials.resolve_aws_profile", return_value=None),
-        ):
-            mock_session.return_value.client.return_value = sm_client
-            mock_completion.side_effect = Exception("AuthenticationError: invalid api_key")
-
-            result = run("deepseek")
-
-        assert result == 1
-        captured = capsys.readouterr()
-        assert "FAIL [deepseek]" in captured.err
-        assert "Authentication" in captured.err
-
-    def test_litellm_generic_error_returns_one(self, capsys: pytest.CaptureFixture[str]) -> None:
-        sm_client = MagicMock()
-        sm_client.get_parameter.return_value = _make_sm_response("some-key")
-        with (
-            patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
-            patch("scripts.smoke_test_inference_credentials.litellm.completion") as mock_completion,
-            patch("scripts.smoke_test_inference_credentials.resolve_aws_profile", return_value=None),
-        ):
-            mock_session.return_value.client.return_value = sm_client
-            mock_completion.side_effect = Exception("Connection timeout")
-
-            result = run("anthropic")
-
-        assert result == 1
-        captured = capsys.readouterr()
-        assert "FAIL [anthropic]" in captured.err
-
-    def test_empty_completion_content_returns_one(self, capsys: pytest.CaptureFixture[str]) -> None:
-        sm_client = MagicMock()
-        sm_client.get_parameter.return_value = _make_sm_response("sk-test")
-        with (
-            patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
-            patch("scripts.smoke_test_inference_credentials.litellm.completion") as mock_completion,
-            patch("scripts.smoke_test_inference_credentials.resolve_aws_profile", return_value=None),
-        ):
-            mock_session.return_value.client.return_value = sm_client
-            mock_completion.return_value = _make_litellm_result("")
-
-            result = run("deepseek")
-
-        assert result == 1
-        captured = capsys.readouterr()
-        assert "empty" in captured.err.lower()
-
-    def test_whitespace_only_content_returns_one(self, capsys: pytest.CaptureFixture[str]) -> None:
-        sm_client = MagicMock()
-        sm_client.get_parameter.return_value = _make_sm_response("sk-test")
-        with (
-            patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
-            patch("scripts.smoke_test_inference_credentials.litellm.completion") as mock_completion,
-            patch("scripts.smoke_test_inference_credentials.resolve_aws_profile", return_value=None),
-        ):
-            mock_session.return_value.client.return_value = sm_client
-            mock_completion.return_value = _make_litellm_result("   ")
-
-            result = run("anthropic")
-
-        assert result == 1
-        captured = capsys.readouterr()
-        assert "empty" in captured.err.lower()
-
-    def test_none_choices_returns_one(self, capsys: pytest.CaptureFixture[str]) -> None:
-        sm_client = MagicMock()
-        sm_client.get_parameter.return_value = _make_sm_response("sk-test")
-        with (
-            patch("scripts.smoke_test_inference_credentials.boto3.Session") as mock_session,
-            patch("scripts.smoke_test_inference_credentials.litellm.completion") as mock_completion,
-            patch("scripts.smoke_test_inference_credentials.resolve_aws_profile", return_value=None),
-        ):
-            mock_session.return_value.client.return_value = sm_client
-            mock_completion.return_value = SimpleNamespace(choices=[])
-
-            result = run("deepseek")
-
-        assert result == 1
-        captured = capsys.readouterr()
-        assert "empty" in captured.err.lower()
+    def test_main_exits_with_run_code(self) -> None:
+        with patch.object(smoke, "run", return_value=3) as fake, pytest.raises(SystemExit) as exc:
+            smoke.main(["--role", "warm_fetched_escape_hatch", "--region", "r-1"])
+        assert exc.value.code == 3
+        fake.assert_called_once_with("warm_fetched_escape_hatch", region="r-1")

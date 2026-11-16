@@ -56,3 +56,13 @@ variable "neon_org_id" {
   type        = string
   nullable    = false
 }
+
+variable "environment" {
+  description = "Deploy-target selector for per-account names: sandbox is today's account (becoming PROD), sit is the SIT account."
+  type        = string
+  default     = "sandbox"
+  validation {
+    condition     = can(regex("^(sandbox|sit)$", var.environment))
+    error_message = "environment must be sandbox or sit."
+  }
+}

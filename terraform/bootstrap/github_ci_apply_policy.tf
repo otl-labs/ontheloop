@@ -18,7 +18,7 @@ locals {
           "s3:PutObject",
           "s3:DeleteObject"
         ]
-        Resource = ["arn:aws:s3:::agent-platform-data-lake/tfstate/personal/*"]
+        Resource = ["${local.data_lake_bucket_arn}/tfstate/personal/*"]
       },
       {
         # Data-plane object IO the module's resources require during apply.
@@ -29,7 +29,7 @@ locals {
           "s3:PutObject",
           "s3:DeleteObject"
         ]
-        Resource = ["arn:aws:s3:::agent-platform-data-lake/*"]
+        Resource = ["${local.data_lake_bucket_arn}/*"]
       },
       {
         # CD.35 / T2.20 convergence record (the server-side anti-masking anchor). Among the CI roles
@@ -46,7 +46,7 @@ locals {
           "s3:GetObject",
           "s3:PutObject"
         ]
-        Resource = ["arn:aws:s3:::agent-platform-data-lake/convergence/personal/*"]
+        Resource = ["${local.data_lake_bucket_arn}/convergence/personal/*"]
       },
       {
         # P0-5 (gap sweep): terraform/personal manages the two buckets' CONFIGURATION through six
@@ -80,8 +80,8 @@ locals {
           "s3:PutBucketTagging"
         ]
         Resource = [
-          "arn:aws:s3:::agent-platform-data-lake",
-          "arn:aws:s3:::agent-platform-ducklake-catalog-dr",
+          local.data_lake_bucket_arn,
+          local.ducklake_dr_bucket_arn,
         ]
       },
       {

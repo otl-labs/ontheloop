@@ -3,10 +3,11 @@
 # WHY isolated: terraform/personal auto-applies from GitHub Actions via github_ci_apply. If that
 # role's own IAM lived in personal, the pipeline could grant itself new privileges through the
 # pipeline it gates (self-grant cycle). Moving the apply role + its permissions boundary to this
-# admin-applied root breaks the cycle: github_ci_apply can no longer write its own policy.
+# root applied by that gated workflow or the operator breaks the cycle: github_ci_apply can no longer write its own policy.
 #
-# NEVER auto-apply: this root must only be applied manually under agent_platform_admin (PlatformAdmin,
-# iam:*). Never add terraform/bootstrap/** to any apply-workflow path.
+# Apply paths: terraform-bootstrap-apply.yml (added by PLAN-bootstrap-ci-gated-apply's second PR) applies this root from
+# main after one operator approval, only for changes outside the protected set; the operator's CloudShell applies
+# the rest under agent_platform_admin (PlatformAdmin, iam:*). It is never on an auto-apply path.
 # See terraform/bootstrap/CLAUDE.md for the provisioning and ongoing apply runbook.
 
 terraform {

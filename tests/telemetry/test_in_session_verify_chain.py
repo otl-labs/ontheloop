@@ -277,6 +277,20 @@ def test_planted_store_defects_are_reported_by_class(tmp_path: Path) -> None:
     older.con.close()
 
 
+def test_an_unconsumed_interrupted_stream_files_ledger_stream_unlinked(tmp_path: Path) -> None:
+    tree = "verification:resume_with_cost_state"
+    files, _ = chain.tree_files(tree)
+    ghost = json.dumps(
+        {"type": "user", "uuid": "g1", "timestamp": "2026-01-01T00:00:02.500Z", "agentId": "ghost", "isSidechain": True}
+    )
+    session = Session(tree, tmp_path / "ghost", {**files, f"{SID}/subagents/agent-ghost.jsonl": ghost + "\n"})
+    assert session.capture(None, final=True) is not None
+    outcome = session.verify(alarms=True)
+    assert outcome.completed and "ledger_stream_unlinked" in outcome.alarms
+    assert outcome.counts.get("ledger_stream_unlinked", 0) == 1
+    session.con.close()
+
+
 def test_ledger_classes_on_the_resume_trap_and_a_planted_input_mismatch(tmp_path: Path) -> None:
     tree = "verification:resume_with_cost_state"
     session = _final_session(tmp_path / "trap", tree)
@@ -298,7 +312,7 @@ def test_ledger_classes_on_the_resume_trap_and_a_planted_input_mismatch(tmp_path
     lines = files[f"{SID}.jsonl"].split("\n")
     index = next(i for i, line in enumerate(lines) if '"cost-state"' in line)
     record = json.loads(lines[index])
-    record["modelUsage"][chain.verification.MAIN_REQUESTED]["inputTokens"] += 1
+    record["modelUsage"][chain.verification.MAIN_REQUESTED]["inputTokens"] -= 1
     lines[index] = json.dumps(record, sort_keys=True)
     planted = Session(tree, tmp_path / "planted", {**files, f"{SID}.jsonl": "\n".join(lines)})
     assert planted.capture(None, final=True) is not None

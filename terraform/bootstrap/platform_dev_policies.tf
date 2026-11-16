@@ -8,8 +8,7 @@
 # telemetry writer as literal ARN templates (the only forms test_url_only_invoke_guard recognises
 # without a name-only local -- never a full-ARN local referenced as bare local.x).
 locals {
-  data_lake_bucket_arn = "arn:aws:s3:::agent-platform-data-lake"
-  counters_table_arn   = "arn:aws:dynamodb:${var.aws_region}:${var.account_id}:table/agent-platform-counters"
+  counters_table_arn = "arn:aws:dynamodb:${var.aws_region}:${var.account_id}:table/agent-platform-counters"
 
   ducklake_prod_data_prefix  = "ducklake"
   ducklake_smoke_data_prefix = "ducklake-neon-smoke"

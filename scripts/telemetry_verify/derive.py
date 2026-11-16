@@ -22,8 +22,9 @@ with cost_source local whatever it reports) and friction_vectors.yaml expectatio
 that no contract or committed vector pins were aligned to the verbs' observable behaviour once this module
 passed the committed cases (declared here, not derived): a roll-up answers one row for every session holding a sessions or
 observations row (zeros, an empty label_counts); a token total is NULL when no model_call carries that count;
-usage_missing_count counts model_calls missing tokens_input or tokens_output; only a severity-error hook is a blocking hook
-that absorbs its blocked tool_call; a sub-agent session with no agent-run row reads running or abandoned by idle time.
+usage_missing_count counts model_calls missing tokens_input or tokens_output; only a severity-error child process_event is a
+blocking event that absorbs its error or blocked tool_call (absorbed_count counts those closes); a close with no name joins no
+repeat run; a sub-agent session with no agent-run row reads running or abandoned by idle time.
 
 RESIDUAL. Agreement with the verbs proves the SQL implements the same reading of the contract text as this module, not that
 the formula is right; the hand-authored derived_golden files and the contract text carry the formula itself.
@@ -292,44 +293,68 @@ def session_process_event_rollup(tables: Tables, session_id: str) -> list[dict[s
 
 
 def _matching_rule(observation_type: str, signature: str | None, disposition: str | None) -> tuple[Any, ...] | None:
-    exact = generic = None
+    exact = prefixed = generic = None
     for rule in FRICTION_RULES["rules"]:
-        _, rule_type, rule_signature, rule_disposition, _, _ = rule
+        _, rule_type, rule_signature, rule_prefix, rule_disposition, _, _ = rule
         if rule_type != observation_type or rule_disposition != disposition:
             continue
-        if rule_signature is None:
+        if rule_signature is not None:
+            if rule_signature == signature:
+                exact = exact or rule
+        elif rule_prefix is not None:
+            if signature is not None and signature.startswith(rule_prefix):
+                prefixed = prefixed or rule
+        else:
             generic = generic or rule
-        elif rule_signature == signature:
-            exact = exact or rule
-    return exact or generic
+    return exact or prefixed or generic
+
+
+def _absorbing_parents(rows: list[Row]) -> set[Any]:
+    return {
+        r.get("parent_observation_id")
+        for r in rows
+        if r.get("observation_type") == "process_event" and r.get("severity") == _BLOCKING_SEVERITY
+    }
+
+
+def _absorbed_closes(rows: list[Row]) -> list[Row]:
+    parents = _absorbing_parents(rows)
+    return [
+        r
+        for r in rows
+        if r.get("observation_type") == "tool_call"
+        and r["event_kind"] == "close"
+        and r.get("outcome") in ("error", "blocked")
+        and r["observation_id"] in parents
+    ]
 
 
 def friction_facts(observations: Iterable[Row]) -> list[tuple[str, str, str]]:
     """(ref, label, class) of every friction fact of one session's deduped observations."""
     rows = list(observations)
     facts: list[tuple[str, str, str]] = []
-    blocking_hooks: set[Any] = set()
     for row in rows:
         if row.get("observation_type") != "process_event" or row.get("severity") not in _FACT_SEVERITIES:
             continue
         rule = _matching_rule("process_event", row.get("name"), row["severity"])
         if rule is not None:
-            facts.append((row["observation_id"], rule[4], rule[5]))
-            if row["severity"] == _BLOCKING_SEVERITY:
-                blocking_hooks.add(row.get("parent_observation_id"))
+            facts.append((row["observation_id"], rule[5], rule[6]))
+    blocking_hooks = _absorbing_parents(rows)
     closes = sorted(
         (r for r in rows if r.get("observation_type") == "tool_call" and r["event_kind"] == "close"),
         key=lambda r: (r["event_timestamp"], _ordinal(r)),
     )
     for row in closes:
         outcome = row.get("outcome")
-        if outcome not in ("error", "blocked") or (outcome == "blocked" and row["observation_id"] in blocking_hooks):
+        if outcome not in ("error", "blocked") or row["observation_id"] in blocking_hooks:
             continue
         rule = _matching_rule("tool_call", None, outcome)
         if rule is not None:
-            facts.append((row["observation_id"], rule[4], rule[5]))
+            facts.append((row["observation_id"], rule[5], rule[6]))
     runs: dict[tuple[Any, Any], list[list[Row]]] = {}
     for row in closes:
+        if row.get("name") is None:
+            continue
         stream = runs.setdefault((row.get("parent_observation_id"), row.get("name")), [[]])
         if row.get("outcome") == "error":
             stream[-1].append(row)
@@ -346,7 +371,8 @@ def session_friction_rollup(tables: Tables, session_id: str) -> list[dict[str, A
     scope = Scope(tables, "session_friction_rollup", [session_id])
     if not scope.known(session_id):
         return []
-    facts = friction_facts(scope.rows(OBSERVATIONS, session_id))
+    rows = scope.rows(OBSERVATIONS, session_id)
+    facts = friction_facts(rows)
     counts: dict[str, int] = {}
     for _, label, _ in facts:
         counts[label] = counts.get(label, 0) + 1
@@ -358,6 +384,7 @@ def session_friction_rollup(tables: Tables, session_id: str) -> list[dict[str, A
                 "exception_total": sum(1 for f in facts if f[2] == "exception"),
                 "label_counts": [{"label": label, "n": n} for label, n in sorted(counts.items())],
                 "unmapped_count": counts.get("unmapped_block", 0),
+                "absorbed_count": len(_absorbed_closes(list(rows))),
                 "classifier_version": FRICTION_RULES["classifier_version"],
             }
         )

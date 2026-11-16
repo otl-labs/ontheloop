@@ -5,7 +5,8 @@ its own role and connects to the catalog as its own scoped login. It is env-pinn
 and never reads data_path or meta_schema from the event. It serves `describe`, `attach_check` (gate
 instrumentation) and the telemetry verbs of telemetry_actions (docs/contracts/ducklake_telemetry_writer.yaml).
 
-Caller identity comes from the Function URL authorizer context; neither the account id nor the user ARN, nor
+Caller identity comes from the signed context of the path that delivered the call: the Function URL authorizer
+context, or the IAM identity of the REST API (AWS_PROXY) in front of it; neither the account id nor the user ARN, nor
 any hash of them, is logged or returned (Decision 101). There is no direct-invoke fallback.
 """
 
@@ -73,17 +74,28 @@ def _is_smoke(data_path: str) -> bool:
     return data_path.rstrip("/") == rt.SMOKE_DATA_PATH.rstrip("/")
 
 
-def _require_caller(event: dict[str, Any]) -> None:
+def _caller_fields(event: dict[str, Any]) -> dict[str, Any] | None:
+    """The signed caller fields of the delivering path (Function URL payload 2.0 or REST AWS_PROXY); else None."""
     ctx = event.get("requestContext") if isinstance(event, dict) else None
-    auth = ctx.get("authorizer") if isinstance(ctx, dict) else None
+    ctx = ctx if isinstance(ctx, dict) else {}
+    auth = ctx.get("authorizer")
     iam = auth.get("iam") if isinstance(auth, dict) else None
-    if not isinstance(iam, dict) or not iam.get("accountId") or not iam.get("userArn"):
+    ident = ctx.get("identity")
+    rest = isinstance(event, dict) and "httpMethod" in event and bool(ctx.get("apiId"))
+    function_url = iam if isinstance(iam, dict) and not (isinstance(event, dict) and "httpMethod" in event) else None
+    rest_fields = ident if isinstance(ident, dict) and rest and iam is None else None
+    return None if isinstance(iam, dict) and isinstance(ident, dict) else (function_url or rest_fields)
+
+
+def _require_caller(event: dict[str, Any]) -> None:
+    fields = _caller_fields(event)
+    if not fields or not fields.get("accountId") or not fields.get("userArn"):
         raise _ClientError(403, "missing_caller_identity", "caller identity is required")
 
 
 def _principal(event: dict[str, Any]) -> CallerPrincipal:
     """The signed caller as the registration port sees it; no AWS event shape crosses into src/common (Decision 184 cl.2)."""
-    iam = event["requestContext"]["authorizer"]["iam"]
+    iam = _caller_fields(event) or {}
     segments = str(iam["userArn"]).split(":", 5)[-1].split("/")
     return CallerPrincipal(kind="aws_account", ref=str(iam["accountId"]), role_name=segments[1] if len(segments) > 1 else "")
 

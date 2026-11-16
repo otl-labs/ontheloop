@@ -127,3 +127,27 @@ def test_pending_evaluators_is_refused_outside_a_wording_check_pass(data: dict) 
 def test_pending_evaluators_is_at_least_one() -> None:
     with pytest.raises(ValidationError):
         GateRound.model_validate(_wording("PASS", pending_evaluators=0))
+
+
+@pytest.mark.parametrize("fingerprint", ["v1:" + "a" * 64, "v2:" + "0" * 64, "v10:" + "f" * 64])
+def test_a_decision_scout_row_accepts_a_scout_input_fingerprint(fingerprint: str) -> None:
+    row = GateRound.model_validate(_row("decision-scout", 1, "FLAGS_FOUND", scout_input_fingerprint=fingerprint))
+    assert row.scout_input_fingerprint == fingerprint
+
+
+def test_scout_input_fingerprint_defaults_to_none() -> None:
+    assert GateRound.model_validate(_row("decision-scout", 1, "NO_FLAGS")).scout_input_fingerprint is None
+
+
+@pytest.mark.parametrize(
+    "data", [_row(scout_input_fingerprint="v1:" + "a" * 64), _wording(scout_input_fingerprint="v1:" + "a" * 64)]
+)
+def test_other_gates_refuse_scout_input_fingerprint(data: dict) -> None:
+    with pytest.raises(ValidationError, match="only on a decision-scout row"):
+        GateRound.model_validate(data)
+
+
+@pytest.mark.parametrize("fingerprint", ["a" * 64, "v0:" + "a" * 64, "v1:" + "A" * 64, "v1:" + "a" * 63, "v:" + "a" * 64, ""])
+def test_a_bad_scout_input_fingerprint_is_refused(fingerprint: str) -> None:
+    with pytest.raises(ValidationError, match="scout_input_fingerprint"):
+        GateRound.model_validate(_row("decision-scout", 1, "NO_FLAGS", scout_input_fingerprint=fingerprint))

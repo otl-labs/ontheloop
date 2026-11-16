@@ -153,4 +153,20 @@ ENTRIES: tuple[Entry, ...] = (
         ),
         full_segment="full_after_lint",
     ),
+    Entry(
+        name="validate_account_portable_names",
+        module="scripts.checks.iam_tf.validate_account_portable_names",
+        attr="validate_account_portable_names",
+        pre=True,
+        pre_globs=(
+            "terraform/bootstrap/**",
+            "terraform/personal/**",
+            "config/terraform/backend-personal-sit.hcl",
+            "scripts/checks/iam_tf/validate_account_portable_names.py",
+            "scripts/checks/iam_tf/_account_names.py",
+            "scripts/checks/_common.py",
+            "scripts/checks/registry.py",
+        ),
+        full_segment="full_after_lint",
+    ),
 )

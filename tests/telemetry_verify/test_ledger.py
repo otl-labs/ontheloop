@@ -52,7 +52,7 @@ def test_cut_bounded_reconciliation_classifies_every_model() -> None:
     assert found[trees.AUX_MODEL].transcript == {} and found[trees.AUX_MODEL].ledger["input"] == 100
 
     assert _one_call(_LED) == {"claude-test-1": "ledger_exact"}
-    assert _one_call(dict(_LED, inputTokens=11)) == {"claude-test-1": "ledger_input_class_mismatch"}
+    assert _one_call(dict(_LED, inputTokens=11)) == {"claude-test-1": "ledger_bounded_side_query"}
     assert _one_call(dict(_LED, cacheCreationInputTokens=0)) == {"claude-test-1": "ledger_input_class_mismatch"}
     assert _one_call(dict(_LED, outputTokens=25)) == {"claude-test-1": "ledger_output_residual_unexplained"}
     assert _one_call(dict(_LED, outputTokens=19)) == {"claude-test-1": "ledger_output_excess"}
@@ -65,6 +65,95 @@ def test_cut_bounded_reconciliation_classifies_every_model() -> None:
     }
     declared = {f.cls for f in ledger.reconcile_ledger(mem_tree(files))}
     assert declared <= set(ledger.DECLARED) and not (declared & set(ledger.ALARMS))
+
+
+def _above(**over: int) -> dict[str, int]:
+    return {**_LED, **{k: _LED[k] + v for k, v in over.items()}}
+
+
+def _spawn(tool_id: str, agent: str, t: float) -> tuple[dict[str, Any], dict[str, Any]]:
+    use = assistant(f"a-{agent}", t, f"m-{agent}", [tool_use_block(tool_id, "Agent", {"description": "d", "prompt": "p"})])
+    return use, tool_result(f"r-{agent}", t + 0.5, tool_id, "done", pid="p1", tur={"agentId": agent})
+
+
+def test_a_superset_ledger_on_a_transcript_model_is_the_side_query_bound() -> None:
+    twice = _above(inputTokens=5, cacheReadInputTokens=7, cacheCreationInputTokens=9)
+    doubled = {k: 2 * v for k, v in _LED.items()}
+    root = [
+        prompt("u1", 1, "p1", "go"),
+        assistant("a1", 2, "m1", [text_block("hi")]),
+        _cost_state(**{"claude-test-1": twice}),
+        assistant("a2", 3, "m2", [text_block("again")]),
+        _cost_state(**{"claude-test-1": dict(doubled, inputTokens=25, cacheReadInputTokens=70, cacheCreationInputTokens=90)}),
+    ]
+    files = make_files(root)
+    assert _classes(files, 0) == {"claude-test-1": "ledger_bounded_side_query"}
+    assert _classes(files, 1) == {"claude-test-1": "ledger_bounded_side_query"}
+    found = [f for f in ledger.reconcile_ledger(mem_tree(files)) if f.cut_index == 0]
+    assert found[0].cls in ledger.DECLARED and not found[0].alarm
+    assert found[0].ledger["input"] == 15 and found[0].transcript["input"] == 10
+
+    use, result = _spawn("tuS", "sub1", 2.1)
+    kid = [
+        child(prompt("s1", 2.2, "p1", "t"), "sub1"),
+        child(assistant("s2", 2.3, "ms", [text_block("w")], model="claude-sub-1"), "sub1"),
+    ]
+    sub_root = [prompt("u1", 1, "p1", "go"), use, result]
+    sub_files = make_files([*sub_root, _cost_state(**{"claude-test-1": _LED, "claude-sub-1": _LED})], {"sub1": kid})
+    assert _classes(sub_files) == {"claude-test-1": "ledger_exact", "claude-sub-1": "ledger_exact"}
+    above = make_files(
+        [*sub_root, _cost_state(**{"claude-test-1": _LED, "claude-sub-1": _above(cacheReadInputTokens=3)})], {"sub1": kid}
+    )
+    assert _classes(above) == {"claude-test-1": "ledger_exact", "claude-sub-1": "ledger_bounded_side_query"}
+
+
+def test_a_ledger_below_the_transcript_still_alarms() -> None:
+    mismatch = {"claude-test-1": "ledger_input_class_mismatch"}
+    assert _one_call(_above(cacheReadInputTokens=1, cacheCreationInputTokens=1, inputTokens=-1)) == mismatch
+    assert _one_call(_above(inputTokens=1, cacheReadInputTokens=-1, cacheCreationInputTokens=1)) == mismatch
+    assert _one_call(_above(inputTokens=1, cacheReadInputTokens=1, cacheCreationInputTokens=-1)) == mismatch
+    assert _one_call(_above(inputTokens=1, cacheReadInputTokens=1, outputTokens=-1)) == {
+        "claude-test-1": "ledger_output_excess"
+    }
+    assert _one_call(_above(outputTokens=5)) == {"claude-test-1": "ledger_output_residual_unexplained"}
+    assert _one_call(_above(outputTokens=-1)) == {"claude-test-1": "ledger_output_excess"}
+    assert _one_call(None) == {"claude-test-1": "ledger_model_unexplained"}
+
+
+def _unlinked(files: dict[str, str], raw: dict[str, str] | None = None) -> list[int]:
+    view = mem_tree(files)
+    found = ledger.reconcile_ledger(view, raw=None if raw is None else mem_tree(raw))
+    return [f.cut_index for f in found if f.cls == "ledger_stream_unlinked"]
+
+
+def test_an_unlinked_stream_before_the_cut_alarms() -> None:
+    use = assistant("a1", 2, "m1", [tool_use_block("tuI", "Agent", {"description": "d", "prompt": "p"})])
+    cut = _cost_state(**{"claude-test-1": _LED})
+    root = [prompt("u1", 1, "p1", "go"), use, cut, cut]
+    ghost = [child(prompt("g1", 1.5, "p1", "t"), "ghost")]
+    files = make_files(root, {"ghost": ghost})
+    assert _unlinked(files) == [0, 1], "an interrupted sync spawn: no result record links the stream, once per cut"
+    alarm = [f for f in ledger.reconcile_ledger(mem_tree(files)) if f.cls == "ledger_stream_unlinked"][0]
+    assert alarm.alarm and alarm.model is None and alarm.cls in ledger.ALARMS
+
+    nested = {"a1": [child(prompt("n1", 1.5, "p1", "t"), "a1")], "b1": [child(prompt("n2", 1.6, "p1", "t"), "b1")]}
+    assert _unlinked(make_files(root, nested)) == [0, 0, 1, 1], "root to A to B, both interrupted: two streams"
+
+    late = make_files(root, {"ghost": [child(prompt("g1", 50, "p1", "t"), "ghost")]})
+    assert _unlinked(late) == [], "a stream that starts after the cut is not counted"
+
+    use2, result = _spawn("tuL", "linked", 2.1)
+    linked = make_files(
+        [prompt("u1", 1, "p1", "go"), use2, result, cut], {"linked": [child(prompt("l1", 2.2, "p1", "t"), "linked")]}
+    )
+    assert _unlinked(linked) == [], "a linked stream never is"
+
+    assert _unlinked(make_files(root), raw=files) == [0, 1], "the raw tree is read when the view lacks the stream"
+
+    unstamped = [{k: v for k, v in r.items() if k != "timestamp"} for r in ghost]
+    assert _unlinked(make_files(root, {"ghost": unstamped})) == [0, 1], "no timestamped record: before the cut"
+    late_unstamped = make_files([cut], {"ghost": [child(prompt("g1", 50, "p1", "t"), "ghost")]})
+    assert _unlinked(late_unstamped) == [0], "no timestamped root record before the cut: before the cut"
 
 
 def _auxiliary(led: dict[str, int]) -> dict[str, str]:

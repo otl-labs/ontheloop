@@ -17,8 +17,8 @@ locals {
   github_settings_workflow_refs = [
     "otl-labs/ontheloop/.github/workflows/terraform-github-apply.yml@refs/heads/main",
   ]
-  github_settings_state_arn  = "arn:aws:s3:::agent-platform-data-lake/tfstate/github/terraform.tfstate"
-  github_settings_mirror_arn = "arn:aws:s3:::agent-platform-data-lake/tf-provider-mirror/registry.terraform.io/integrations/github/*"
+  github_settings_state_arn  = "${local.data_lake_bucket_arn}/tfstate/github/terraform.tfstate"
+  github_settings_mirror_arn = "${local.data_lake_bucket_arn}/tf-provider-mirror/registry.terraform.io/integrations/github/*"
 
   github_settings_apply_policy_json = jsonencode({
     Version = "2012-10-17"

@@ -34,7 +34,8 @@ def _ok(_cmd: list[str], **_kwargs: object) -> MagicMock:
 class TestTerraformGateLockReadonly:
     def test_terraform_gate_leaves_lock_unmodified(self) -> None:
         """init for terraform/personal and terraform/github carries -lockfile=readonly;
-        terraform/bootstrap's does not (its lock is gitignored, never tracked)."""
+        the test patches tracked_lock_files to the personal and github locks, so terraform/bootstrap
+        (untracked here) gets no -lockfile=readonly."""
         calls: list[list[str]] = []
 
         def mock_run(cmd: list[str], **kwargs: object) -> MagicMock:
@@ -199,11 +200,12 @@ class TestTrackedLockDiscovery:
         with patch("scripts.checks._terraform.subprocess.run", side_effect=FileNotFoundError):
             assert tracked_lock_files(Path("/nonexistent")) is None
 
-    def test_real_repo_tracks_exactly_personal_and_github(self) -> None:
+    def test_real_repo_tracks_exactly_bootstrap_personal_and_github(self) -> None:
         """UNPATCHED -- catches a discovery defect the patched gate cases above cannot, and stops
         TestRepoLocksCoherent (validate_terraform_lock_coherence's own test) from passing
         vacuously as examined(0) if the tracking state ever changes."""
         assert tracked_lock_files(_common.ROOT) == [
+            "terraform/bootstrap/.terraform.lock.hcl",
             "terraform/github/.terraform.lock.hcl",
             "terraform/personal/.terraform.lock.hcl",
         ]

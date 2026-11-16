@@ -41,7 +41,7 @@ def _job(workflows: dict[str, dict[str, Any]], job: str) -> dict[str, Any]:
 
 
 def test_real_tree_is_green(real_workflows, real_terraform, real_codeowners) -> None:
-    assert v.run_all(real_workflows, real_terraform, real_codeowners, v._repo_reader()) == [[]] * 11
+    assert v.run_all(real_workflows, real_terraform, real_codeowners, v._repo_reader()) == [[]] * 12
 
 
 def test_real_tree_governs_the_single_plan_job(real_workflows) -> None:
@@ -89,6 +89,31 @@ def test_missing_trusted_file(wfs) -> None:
 def test_id_token_job_without_the_environment(wfs) -> None:
     del _job(wfs, "plan")["environment"]
     assert any("without environment" in x for x in v.check_minting_jobs(wfs))
+
+
+_FLIPPED = {
+    "terraform-plan-trusted.yml": "plan",
+    "terraform-github-plan.yml": "plan",
+    "terraform-github-apply.yml": "preview",
+}
+
+
+@pytest.mark.parametrize("workflow,job", sorted(_FLIPPED.items()))
+@pytest.mark.parametrize(
+    "bad",
+    [v.ENV, {"name": v.ENV, "deployment": True}, {"name": v.ENV, "deployment": "false"}, {"name": v.ENV}],
+    ids=["bare-string", "deployment-true", "quoted-false", "key-absent"],
+)
+def test_trusted_environment_job_requires_deployment_false(wfs, workflow, job, bad) -> None:
+    assert v.check_deployment_false(wfs) == []
+    wfs[workflow]["jobs"][job]["environment"] = bad
+    assert any(x.startswith(f"l: {workflow}:{job}") for x in v.check_deployment_false(wfs))
+
+
+def test_trusted_environment_green_mapping_form(wfs) -> None:
+    for workflow, job in _FLIPPED.items():
+        assert wfs[workflow]["jobs"][job]["environment"] == {"name": v.ENV, "deployment": False}
+    assert v.check_deployment_false(wfs) == []
 
 
 def test_a_no_env_probe_job_now_fails(wfs) -> None:
@@ -273,7 +298,7 @@ def test_pass_line_ignores_unrelated_earlier_failures(capsys) -> None:
     failed = ["other-check: unrelated"]
     v.validate_trusted_plan_environment(failed)
     assert failed == ["other-check: unrelated"]
-    assert "PASS: predicates (a)-(k)" in capsys.readouterr().out
+    assert "PASS: predicates (a)-(l)" in capsys.readouterr().out
 
 
 def test_no_pass_line_when_this_check_fails(monkeypatch, capsys) -> None:
@@ -447,7 +472,17 @@ def _preview(workflows: dict[str, dict[str, Any]]) -> dict[str, Any]:
 
 def test_trusted_workflows_are_unchanged_and_the_apply_workflow_may_declare_env() -> None:
     assert frozenset({"terraform-plan-trusted.yml", "terraform-github-plan.yml"}) == v.TRUSTED_WORKFLOWS
-    assert v.ENV_WORKFLOWS == v.TRUSTED_WORKFLOWS | {_APPLY_WF}
+    assert v.ENV_WORKFLOWS == v.TRUSTED_WORKFLOWS | {_APPLY_WF, "terraform-bootstrap-apply.yml"}
+
+
+def test_bootstrap_apply_preview_is_governed(real_workflows) -> None:
+    name = "terraform-bootstrap-apply.yml"
+    assert {jid for jid, _ in v._governed(name, real_workflows[name])} == {"preview"}
+    assert not any(name in x for x in v.check_environment_references(real_workflows))
+    assert v.check_deployment_false(real_workflows) == []
+    mutated = copy.deepcopy(real_workflows)
+    mutated[name]["jobs"]["preview"]["environment"] = {"name": "tf-trusted-plan"}
+    assert any(name in x for x in v.check_deployment_false(mutated))
 
 
 def test_the_apply_workflows_preview_job_is_governed(real_workflows) -> None:
