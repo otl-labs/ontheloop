@@ -59,7 +59,11 @@ class TestWorkflow:
 
     def test_render_job_is_main_only_and_read_only(self) -> None:
         job = _wf()["jobs"]["render"]
-        assert job["if"] == "github.ref == 'refs/heads/main'"
+        bot = yaml.safe_load((ROOT / "config/lambda/scheduled_workflow_dispatcher/schedules.yaml").read_text())["app"][
+            "bot_login"
+        ]
+        guard = f"(github.event_name != 'workflow_dispatch' || github.actor != '{bot}')"
+        assert job["if"] == f"{guard} && (github.ref == 'refs/heads/main')"
         assert job["permissions"] == {"contents": "read", "actions": "read"}
         assert "environment" not in job
 

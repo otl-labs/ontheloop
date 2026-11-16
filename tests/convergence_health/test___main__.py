@@ -6,6 +6,7 @@ CLI dispatch: python -m scripts.convergence_health
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import patch
 
 # boto3 is imported at MODULE scope even though the tests reference it only via
@@ -287,8 +288,16 @@ class TestMainBudgetIngest:
         assert "ducklake_writer unreachable" in out
 
 
+_TICK = "scripts.convergence_health.dispatch_integrity.tick"
+
+
 class TestMainSensorLiveness:
     """LSA-02: the scheduled-loop liveness sensor's CLI leg."""
+
+    @pytest.fixture(autouse=True)
+    def _integrity(self) -> Any:
+        with patch(_TICK, return_value={"integrity_blind": "none"}) as tick:
+            yield tick
 
     def test_happy_path_returns_zero(self) -> None:
         with patch(
@@ -318,6 +327,24 @@ class TestMainSensorLiveness:
         assert "sensor_liveness FAILED" in out
         assert "nothing buffered" in out
         assert "ducklake_writer unreachable" in out
+
+    def test_runs_dispatch_integrity_after_liveness(self, _integrity: Any) -> None:
+        with patch("scripts.convergence_health.__main__.detect_stale_loops", return_value={}):
+            assert main_sensor_liveness(profile="p") == 0
+        _integrity.assert_called_once_with(profile="p")
+
+    def test_integrity_raising_returns_one(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with (
+            patch("scripts.convergence_health.__main__.detect_stale_loops", return_value={}),
+            patch(_TICK, side_effect=RuntimeError("portal down")),
+        ):
+            assert main_sensor_liveness() == 1
+        assert "dispatch_integrity FAILED" in capsys.readouterr().out
+
+    def test_liveness_raising_still_runs_integrity(self, _integrity: Any) -> None:
+        with patch("scripts.convergence_health.__main__.detect_stale_loops", side_effect=RuntimeError("x")):
+            assert main_sensor_liveness() == 1
+        _integrity.assert_called_once()
 
 
 class TestMainLivenessProbe:
@@ -413,3 +440,23 @@ class TestDispatch:
         with patch("scripts.convergence_health.__main__.main_liveness_probe", return_value=0) as entry:
             assert _dispatch(["--liveness-probe", "ghas-probe.yml", "cadence"]) == 0
         entry.assert_called_once_with("ghas-probe.yml", leg="cadence")
+
+    @pytest.mark.parametrize(
+        ("argv", "check"),
+        [(["--dispatch-integrity-probe"], None), (["--dispatch-integrity-probe", "oidc_subject"], "oidc_subject")],
+    )
+    def test_dispatch_integrity_probe_routes_before_main(self, argv: list[str], check: Any) -> None:
+        with (
+            patch("scripts.convergence_health.dispatch_integrity.probe", return_value=0) as probe,
+            patch("scripts.convergence_health.__main__.main") as fallback,
+            patch("scripts.convergence_health.__main__.escalate") as esc,
+        ):
+            assert _dispatch(argv) == 0
+        probe.assert_called_once_with(check)
+        fallback.assert_not_called()
+        esc.assert_not_called()
+
+    @pytest.mark.parametrize("code", [0, 1])
+    def test_dispatch_integrity_probe_returns_probe_code(self, code: int) -> None:
+        with patch("scripts.convergence_health.dispatch_integrity.probe", return_value=code):
+            assert _dispatch(["--dispatch-integrity-probe", "off_register_run"]) == code

@@ -291,6 +291,7 @@ PROD_SOURCE_PATHSPECS: tuple[str, ...] = (
     "scripts/s3_log_store.py",
     "scripts/tool_runtime.py",
     "config/lambda/data-pipeline",
+    "config/lambda/scheduled_workflow_dispatcher",
 )
 
 _PROD_FUNCTION_NAMES: tuple[str, ...] = (

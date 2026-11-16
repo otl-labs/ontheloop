@@ -1,7 +1,7 @@
 """CLI entry point for the convergence-health sensor (called by convergence-health.yml).
 
 Preserves `python -m scripts.convergence_health [--ducklake-drift|--prod-drift|--budget-ingest
-[--dry-run]|--sensor-liveness|--liveness-probe [workflow]]`. Part of the
+[--dry-run]|--sensor-liveness|--liveness-probe [workflow]|--dispatch-integrity-probe [check]]`. Part of the
 scripts.convergence_health package -- see scripts/convergence_health/__init__.py for the full
 public surface.
 """
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from scripts.convergence_health import dispatch_integrity
 from scripts.convergence_health.approvals import (
     diagnose_stuck_approvals,
     find_reconcile_runs_since,
@@ -136,9 +137,17 @@ def main_sensor_liveness(profile: Optional[str] = None) -> int:
             "[convergence_health] sensor_liveness FAILED (nothing buffered -- Decision 84 I-4 has no "
             f"outbox; the next tick re-derives from the live workflow tree): {exc}"
         )
+        failed = True
+    else:
+        failed = False
+        print(f"[convergence_health] sensor_liveness result: {result}")
+    try:
+        integrity = dispatch_integrity.tick(profile=profile)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[convergence_health] dispatch_integrity FAILED (Decision 84 I-4, nothing buffered): {exc}")
         return 1
-    print(f"[convergence_health] sensor_liveness result: {result}")
-    return 0
+    print(f"[convergence_health] dispatch_integrity result: {integrity}")
+    return 1 if failed else 0
 
 
 def main_liveness_probe(workflow: Optional[str] = None, leg: str = "cadence") -> int:
@@ -171,6 +180,10 @@ def _dispatch(argv: list[str]) -> int:
         return main_budget_ingest(dry_run="--dry-run" in argv)
     if "--sensor-liveness" in argv:
         return main_sensor_liveness()
+    if "--dispatch-integrity-probe" in argv:
+        idx = argv.index("--dispatch-integrity-probe")
+        rest = [a for a in argv[idx + 1 :] if not a.startswith("--")]
+        return dispatch_integrity.probe(rest[0] if rest else None)
     if "--liveness-probe" in argv:
         idx = argv.index("--liveness-probe")
         # Bare positional tokens after the flag: an optional workflow name and an optional leg
