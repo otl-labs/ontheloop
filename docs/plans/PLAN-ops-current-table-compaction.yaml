@@ -40,13 +40,13 @@ scope:
       superseded; a re-proof is not started once past the budget (the table is deferred); then, unless elapsed time passes COMPACTION_TIME_BUDGET_S (450, half the 900 s function
       timeout, pinned by a test against terraform/personal/ducklake_maintenance.tf; checked before every OCC retry
       too, deferring rather than retrying once past it), one transaction under
-      that token runs maint.rewrite at CURRENT_REWRITE_DELETE_THRESHOLD (0.0) under the writer's bounded OCC policy; the proof is decided by token lookup, not by files_processed; post-commit row count +
+      that token runs maint.rewrite at CURRENT_REWRITE_DELETE_THRESHOLD (0.0) under the writer's bounded OCC policy; the proof is decided by token lookup, not by files_processed (files_processed 0 with no snapshot for the token is clean, proof none); post-commit row count +
       full-row digest at the commit's immediate predecessor vs the commit (never the in-transaction pre snapshot: a
       non-conflicting insert can commit between them). files_processed > 0 with no snapshot for the token, or any
       digest mismatch, raises CurrentCompactionProofError (a DuckLakeMaintenanceError) at once. A table left unstarted
       by the budget is recorded under deferred. Every other per-table error is an isolated failure. Emits
-      CurrentCompactionFilesRewritten, CurrentCompactionFailures, CurrentCompactionRefused and
-      CurrentCompactionDurationMs (ops series undimensioned; non-ops catalogs through the CATALOG_METRICS filter) and
+      CurrentCompactionFilesRewritten, CurrentCompactionFailures, CurrentCompactionRefused, CurrentCompactionDeferred
+      and CurrentCompactionDurationMs (ops series undimensioned; non-ops catalogs through the CATALOG_METRICS filter) and
       prints one value-free line per pass, when compaction finishes and before the merge loop, and also on the
       CurrentCompactionProofError path just before the raise: the literal prefix CURRENT_COMPACTION then one JSON object with keys
       meta_schema (the catalog's meta-schema name, a schema name and no row value), per_table (each {table, files_before, delete_files_before, files_processed, files_after, attempts, duration_ms,
@@ -56,7 +56,6 @@ scope:
       deferred, failures (each {table, null for a catalog-level failure, and error_class}; a failed table appears only
       in failures, never in per_table) and elapsed_ms; no row value. If the module nears 500 SLOC, split it into a
       facade package (Decision 128), never a budget registration.
-      files_processed 0 with no snapshot for the token is clean (proof none).
     new_imports:
       - src.common.ducklake_maintenance
       - src.common.ducklake_maintenance_scope
@@ -128,8 +127,9 @@ scope:
       split, breaker mapping, the `compaction` body key, metrics) classified non-destructive with the reason (it
       supersedes files the way merge does, every row unchanged and old files reachable until gc_ops, unlike
       rewrite_partition_layout's DELETE plus INSERT); the control_health ceiling
-      sentence; that an unclassified table, although persistent, takes the catalog-level failure path (recorded, every
-      table merges, the pass fails) until it is classified; the audit_invariants line naming maintenance_policy's
+      sentence; that a persistent catalog-level error (an unclassified table, or a missing rewrite_current_deletes cell)
+      takes the same catalog-level failure path as a transient one (recorded, every table merges, the pass fails) until
+      it is fixed; the audit_invariants line naming maintenance_policy's
       production consumers; a note that
       MergeOpsFilesBeforeTotal and per_table files_before are now counted after compaction, not at pass start (a step
       change at the deploy); a table whose rewrite committed no attempt counts as unstarted for the budget deferral;
@@ -160,7 +160,8 @@ scope:
     action: Create
     purpose: >-
       Integration-marked real-engine conformance on the pinned engine (precedent
-      tests/common/test_ducklake_gc_engine_conformance.py) that drives compact_current_tables itself on a local file
+      tests/common/test_ducklake_gc_engine_conformance.py, except that a missing extension calls pytest.fail, never
+      pytest.skip, as tests/fixtures/ducklake_pg_stage.py does) that drives compact_current_tables itself on a local file
       catalog: a bucket(8, rec_id) MERGE-maintained table with merged, delete-bearing files; the default threshold
       rewrites nothing and a compaction is invisible inside its own transaction (Decision 99 pins); compaction then
       merge leaves at most 8 files and no delete file, with the token lookup, predecessor resolution and AT VERSION
@@ -642,7 +643,7 @@ context:
     cl.6 makes that an alarm, but red_overlap.py lags until rec-5108; the build waits by choice unless the operator
     rules to proceed.
   - >-
-    Not bundled: rec-2216, rec-2218, rec-2220, rec-5181, rec-5182. T2.18 is a cross-reference only (c8's G4: about
+    Not bundled: rec-2216, rec-2218, rec-2220, rec-5181, rec-5182. T2.18 is a cross-reference only, advancing neither c2 nor c8 (c8's G4: about
     2,000 superseded files per 30 days against 20,000 per pass). rec-5179's stale_target is its to-be-created file.
     Ops MergeOpsPassFailed is unalarmed (rec-5185). The audit's per-table metric and weekly trend stand in as
     OpsCurrentLiveFilesMax plus the 6-hourly 200-file ceiling.
@@ -666,6 +667,7 @@ gate_rounds:
   - {gate: plan-critique, round: 8, verdict: PROCEED, blocking: 0, nits: 12}
   - {gate: plan-critique, round: 9, verdict: REVISE, blocking: 1, nits: 6}
   - {gate: plan-critique, round: 10, verdict: PROCEED, blocking: 0, nits: 8}
+  - {gate: plan-critique, round: 11, verdict: PROCEED, blocking: 0, nits: 7}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -705,6 +707,11 @@ execution_steps:
     docs/DECISIONS.md: place the sidecar's six blocks verbatim, filling {{N}} with MAX(decision number in DECISIONS.md
     and DECISIONS_ARCHIVE.md) + 1 after rebasing and {{DATE}} with the build date; regenerate docs/decisions-index.json;
     step 8 with the approved digest.
+  - >-
+    On every rebase, resolve config/lambda/ducklake/field_semantics.yaml by regenerating it from the static sidecar,
+    never by merging hunks (unbuilt PLAN-billing-shape-local, PLAN-persona-run-identity-contract,
+    PLAN-scheduled-workflow-dispatch and PLAN-telemetry-claude-p-capture-adapter also touch field_semantics; the
+    scheduled-workflow plan also the data-pipeline manifest).
   - >-
     CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; commit with
     Resolves: rec-5179; rebase on origin/main; steps 1-9; code review in a fresh context.
