@@ -153,7 +153,9 @@ def test_oracle_matches_every_friction_vector(vector: dict[str, Any]) -> None:
     assert row["rework_total"] == sum(1 for f in facts if f[2] == "rework")
     assert row["exception_total"] == sum(1 for f in facts if f[2] == "exception")
     assert sum(item["n"] for item in row["label_counts"]) == len(facts)
-    assert row["classifier_version"] == 1
+    assert row["classifier_version"] == derive.FRICTION_RULES["classifier_version"]
+    if "absorbed" in vector:
+        assert row["absorbed_count"] == vector["absorbed"], vector["id"]
     assert (row["rework_total"], row["exception_total"], row["label_counts"]) != (0, 0, []) or not facts
 
 

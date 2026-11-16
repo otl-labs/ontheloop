@@ -111,9 +111,19 @@ def test_compute_plane_contract_needs_no_skill_tether(tree: Path) -> None:
     assert _run(tree) == []
 
 
-def test_registry_is_not_read_when_no_row_carries_a_key(tree: Path) -> None:
-    from tests.persona_contracts.fixture_tree import INDEX_REL, REGISTRY_REL, edit_text
+def test_row_without_registry_key_is_refused(tree: Path) -> None:
+    from tests.persona_contracts.fixture_tree import INDEX_REL, edit_text
 
     edit_text(tree, INDEX_REL, "    registry_key: fixture-verdict\n", "")
+    assert any("is unreadable or off its schema" in f for f in _run(tree))
+
+
+def test_registry_is_not_read_when_the_index_has_no_rows(tree: Path) -> None:
+    from tests.persona_contracts.fixture_tree import INDEX_REL, REGISTRY_REL
+
+    index = tree / INDEX_REL
+    head, sep, _ = index.read_text(encoding="utf-8").rpartition("\npersonas:")
+    assert sep
+    index.write_text(head + "\npersonas: []\n", encoding="utf-8")
     (tree / REGISTRY_REL).unlink()
-    assert _run(tree) == []
+    assert not any("source_registry" in f or "registry_key" in f for f in _run(tree))

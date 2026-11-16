@@ -261,7 +261,7 @@ def test_cost_source_never_a_false_zero(case: dict[str, Any], expect: dict[str, 
 
 @pytest.mark.parametrize("vector", _FRICTION, ids=[v["id"] for v in _FRICTION])
 def test_friction_vectors(vector: dict[str, Any]) -> None:
-    """All 17 committed vectors: the (ref, label) facts and the verb's totals from the one shared rule text."""
+    """Every committed vector: the (ref, label) facts and the verb's totals from the one shared rule text."""
     session = derive_entity_key(
         "telemetry_sessions:session_id", _TENANT, _PROJECT, vector["id"], datetime.fromisoformat("2026-09-25T10:00:00+00:00")
     )
@@ -309,8 +309,10 @@ def test_friction_vectors(vector: dict[str, Any]) -> None:
     assert rollup[0]["rework_total"] == sum(1 for r in facts if r["class"] == "rework")
     assert rollup[0]["exception_total"] == sum(1 for r in facts if r["class"] == "exception")
     assert sum(item["n"] for item in rollup[0]["label_counts"]) == len(facts)
-    assert rollup[0]["classifier_version"] == 1
-    assert classes <= {"rework", "exception"}
+    assert rollup[0]["classifier_version"] == verbs.FRICTION_RULES["classifier_version"]
+    if "absorbed" in vector:
+        assert rollup[0]["absorbed_count"] == vector["absorbed"], vector["id"]
+    assert classes <= {"rework", "exception", "notice"}
 
 
 def test_health_count_reads_metadata_only() -> None:

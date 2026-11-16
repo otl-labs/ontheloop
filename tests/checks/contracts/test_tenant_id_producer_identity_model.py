@@ -21,7 +21,9 @@ def test_producer_identity_model_is_recorded() -> None:
         "house tenant",
         "github_ci_branch",
         "PlatformDev",
-        "URL-only",
+        "never a direct invoke",
+        "Decision 255",
+        "agent-platform-session",
         "rec-4480",
         "rec-4420",
     ):
@@ -29,4 +31,8 @@ def test_producer_identity_model_is_recorded() -> None:
     assert any(entry["date"] == "2026-10-19" and entry["semantic_break"] is False for entry in tenant["amendment_log"])
 
     writer = yaml.safe_load((_CONTRACTS / "ducklake_telemetry_writer.yaml").read_text(encoding="utf-8"))
-    assert writer["contract"]["governance"]["principal_classes"] == ["github_ci_branch", "PlatformDev"]
+    assert writer["contract"]["governance"]["principal_classes"] == [
+        "github_ci_branch",
+        "PlatformDev",
+        "agent-platform-session",
+    ]

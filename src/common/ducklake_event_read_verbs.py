@@ -19,20 +19,22 @@ MAX_TREE_ROWS = 2000
 
 # REPORT-w1-friction-classifier.md section 2 (friction-k1 (a), friction-k2 (a)): rules are data, one row per rule.
 FRICTION_RULES: Mapping[str, Any] = {
-    "classifier_version": 1,
+    "classifier_version": 2,
     "repeat_threshold": 3,
     "run_label": "repeated_tool_failure",
     "run_class": "rework",
     "rules": (
-        ("r01", "process_event", "hook:never_on_main", "error", "branch_policy_block", "exception"),
-        ("r02", "process_event", "hook:fresh_branch_base", "error", "stale_branch_base", "exception"),
-        ("r03", "process_event", "hook:edit_scope_guard", "error", "scope_creep", "exception"),
-        ("r04", "process_event", "gate:validate_scope_boundary", "error", "scope_creep", "exception"),
-        ("r90", "process_event", None, "error", "unmapped_block", "exception"),
-        ("r91", "process_event", None, "warning", "hook_fault", "exception"),
-        ("r92", "tool_call", None, "error", "tool_error", "exception"),
-        ("r93", "tool_call", None, "blocked", "tool_blocked", "exception"),
-        ("r94", "process_event", None, "critical", "unmapped_block", "exception"),
+        ("r01", "process_event", "hook:never_on_main", None, "error", "branch_policy_block", "exception"),
+        ("r02", "process_event", "hook:fresh_branch_base", None, "error", "stale_branch_base", "exception"),
+        ("r03", "process_event", "hook:edit_scope_guard", None, "error", "scope_creep", "exception"),
+        ("r04", "process_event", "gate:validate_scope_boundary", None, "error", "scope_creep", "exception"),
+        ("r10", "process_event", None, "status:", "warning", "reported_skip", "notice"),
+        ("r11", "process_event", None, "status:", "error", "reported_failure", "exception"),
+        ("r90", "process_event", None, None, "error", "unmapped_block", "exception"),
+        ("r91", "process_event", None, None, "warning", "hook_fault", "exception"),
+        ("r92", "tool_call", None, None, "error", "tool_error", "exception"),
+        ("r93", "tool_call", None, None, "blocked", "tool_blocked", "exception"),
+        ("r94", "process_event", None, None, "critical", "unmapped_block", "exception"),
     ),
 }
 
@@ -52,7 +54,9 @@ def render_data(data: Mapping[str, Any]) -> dict[str, str]:
     for key, value in data.items():
         if key == "rules":
             rows = ", ".join("(" + ", ".join(_quote(v) for v in rule) + ")" for rule in value)
-            out[key] = f"(VALUES {rows}) AS v(rule_id, observation_type, signature, disposition, label, class)"
+            out[key] = (
+                f"(VALUES {rows}) AS v(rule_id, observation_type, signature, signature_prefix, disposition, label, class)"
+            )
         elif isinstance(value, int):
             out[key] = str(value)
         elif isinstance(value, str) and _NAME.match(value):
@@ -101,7 +105,8 @@ EVENT_READS: dict[str, EventRead] = {
             binding="session",
             data=FRICTION_RULES,
             description=_derived_rows_note(
-                "One session's rework and exception totals, per-label counts and unmapped count (classifier_version stamped)."
+                "One session's rework and exception totals, per-label counts, unmapped count and absorbed_count "
+                "(error or blocked closes absorbed into their own error event; classifier_version stamped)."
             ),
         ),
         EventRead(

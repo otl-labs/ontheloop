@@ -2386,6 +2386,13 @@ child criteria; the self-review gap -- rec-4476.
 
 > **Amended by Decision 247 (2026-11-02):** Clause 1's interim reading is final: the legacy executor and STRATEGIC plans are retired for good, and the /overseer is no longer an interim coordinator: the coordinator alone starts a planning or implementation agent. Clause 4's CD.17 hold is discharged: CD.17 is superseded with no successor trigger.
 
+> **Update (2026-11-12, PLAN-persona-trigger-policy):** Coverage: "Actions dispatching no compute-plane
+> persona" is now enforced by launch signature by validate_persona_trigger_policy, which refuses a
+> workflow whose steps, or a local action or reusable workflow one hop away, name an ECS task launch, the
+> persona_compute_host port, or, as a launch argument, a persona whose index row is kind compute_plane. A
+> launch hidden inside a script a step runs, or behind a marketplace action, stays a residual. No clause
+> changes.
+
 ---
 
 ## Decision 228: A telemetry session's end is read from its turns -- idle at rest reads the last turn's outcome, idle mid-turn reads abandoned, and a producer close row is optional evidence (amends Decision 199 clause 1) (Decided)
@@ -7417,6 +7424,17 @@ after 3 rounds with all blocking items applied. Roadmap/queue refs (not DECISION
 **Reversal conditions:** Re-narrow if a fresh-guard-PASS auto-apply lands a change a human would have caught, or if evidence shows the guard's in-budget classification is weaker than the Environment gate it displaces on this path. **The mechanism is a TWO-SITE change, not a one-liner** -- recorded because a later reader will otherwise assume the narrowing was declined on taste and is cheap to undo. Adding a `fresh_reason != 'guard_routed'` conjunct to `apply_fresh`/`review_fresh` ALONE strands a fresh-guard-PASS episode with NO UPLOADER: `upload_fresh_plan_sha256` and the upload-artifact step are gated on `guard_fresh.outputs.routed == 'true'`, so no artifact is produced, `fresh_plan_pending` stays false, `gated-apply-reconcile` falls back to fetch-saved-plan, and the episode ends applying the STALE saved plan -- the exact failure this entry exists to remove, reached by a longer road. A reverser needs BOTH sites plus matching updates to the `recovery-workflow-topology` guard's assertions (ii) and (iv).
 
 **Related:** Decision 77 (speculative plan / no-TOCTOU; the artifact-vs-diff distinction in point 3), Decision 92 (the `tf-gated-apply` Environment as the authorization boundary -- whose reach point 4 narrows), Decision 126 / T2.37 (one dispatch, one approval: why a second Environment approval was rejected), Decision 154 (point 5(i) pre-ratifies route (iii)'s red latch; point 2's dispatch-ref side-checkout narrowing is why the re-plan runs against the RED_SHA checkout, not the dispatch ref), Decision 150 (the significance bar this entry clears). Provenance: decision-scout judged the newly-reachable cell a durable architectural commitment with reversal-relevant consequences, and separately found that the pre-existing STALE-route substitution had never been numbered. Roadmap/queue refs (not DECISIONS.md entries): T2.47/T2.48, rec-2847.
+
+> **Update (2026-11-12, PLAN-persona-trigger-policy):** A workflow_dispatch that Decision 205 cl.1 does not
+> admit (one not issued by a maintainer's own user identity) is stopped by the persona dispatch gate just
+> before each subagent review step, so on that dispatch a guard-PASS, saved or fresh, ends with no review
+> and no apply, and leaves the convergence record's status as it was. Point 2's three routes, and its
+> rule that no episode ends anywhere else, therefore hold for admitted dispatchers only: a non-admitted
+> dispatch whose fresh re-plan passes the guard ends at this refusal instead of route (i). Its no-op and
+> guard-ROUTE paths are unchanged. Decision 154 point 5's account: like a STARVED review, the refusal
+> moves no record to red or green, because no review or apply ran. The same gate stands before the
+> acknowledge-and-retry review, so Decision 183 point 1's guard-PASS cell also holds for admitted
+> dispatchers only.
 
 ## Decision 159: push-context diff-base class fix restores the post-merge diff-aware validation layer; a bounded, tamper-guarded coverage baseline unblocks the 100%-coverage gate going live (Decided)
 
