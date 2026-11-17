@@ -29,8 +29,7 @@ HTTP_LIB = (
 )
 LAMBDA_OPS = frozenset({"invoke", "invoke-async", "invoke-with-response-stream"})
 WRITER_FN = re.compile(r"(^|[:/=])agent-platform-ducklake-writer(:[^:\s]+)?$")
-_FAST_TOKENS = (*ROUTE_TOKENS[:1], "/ducklake/writer_url", "DUCKLAKE_WRITER_URL", "_ducklake_write")
-_FAST_TOKENS += ("_resolve_writer_url", "writer_transport", "ducklake-writer")
+_FAST_TOKENS = (*ROUTE_TOKENS, "_ducklake_write", "_resolve_writer_url", "writer_transport", "ducklake-writer")
 _RESERVED = frozenset({"do", "then", "else", "elif", "if", "while", "until", "!", "{"})
 _PORTAL = "scripts.ops_data_portal"
 

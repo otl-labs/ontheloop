@@ -87,3 +87,8 @@ def test_transport_names_still_exist() -> None:
 
     assert callable(writer_transport._ducklake_write)
     assert callable(writer_transport._resolve_writer_url)
+
+
+@pytest.mark.parametrize("words", [["do"], ["timeout", "5", "ls"], ["ls", "curl"]])
+def test_client_word_absent(words: list[str]) -> None:
+    assert match._client_word(words) is None
