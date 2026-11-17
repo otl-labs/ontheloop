@@ -23,11 +23,37 @@ def _run(tmp_path: Path, marker: str) -> str:
     ("marker", "expected"),
     [
         ("proceed", {"outcome": "success", "verdict": "PROCEED"}),
-        ("revise", {"outcome": "success", "verdict": "REVISE"}),
+        (
+            "revise",
+            {
+                "outcome": "success",
+                "verdict": "REVISE",
+                "findings": [{"id": "probe:revise-1", "title": "probe revise finding", "blocking": True}],
+            },
+        ),
+        (
+            "block",
+            {
+                "outcome": "success",
+                "verdict": "BLOCK",
+                "findings": [
+                    {"id": "probe:block-1", "title": "probe block finding one", "blocking": True},
+                    {"id": "probe:block-2", "title": "probe block finding two", "blocking": True},
+                ],
+            },
+        ),
+        (
+            "flags",
+            {
+                "outcome": "success",
+                "verdict": "FLAGS_FOUND",
+                "findings": [{"id": "probe:flag-1", "title": "probe flag finding", "blocking": False}],
+            },
+        ),
         ("fail", {"outcome": "failure", "failure": "input_unusable", "detail": "probe fail marker"}),
     ],
 )
-def test_marker_selects_output(tmp_path: Path, marker: str, expected: dict[str, str]) -> None:
+def test_marker_selects_output(tmp_path: Path, marker: str, expected: dict[str, object]) -> None:
     assert json.loads(_run(tmp_path, marker)) == expected
 
 

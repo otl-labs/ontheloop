@@ -37,6 +37,7 @@ UI_MANAGED = {"pypi": "rec-4549"}
 EXEMPT = frozenset({"deployment-approval-probe"})
 UPSTREAM = {
     "approved-text-approval.yml": ("render", "approve"),
+    "persona-verdict-override.yml": ("render", "approve"),
     "terraform-github-apply.yml": ("preview", "apply"),
     "terraform-bootstrap-apply.yml": ("preview", "apply"),
 }
