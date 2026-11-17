@@ -80,12 +80,16 @@ verification_plan:
     command: >-
       d=$(mktemp -d) && mkdir "$d/home" && sed '/base\["AWS_CONFIG_FILE"\] = os.devnull/d' tests/test_aws_profile.py > "$d/test_mutant_aws_profile.py" && HOME="$d/home" bin/venv-python -m pytest "$d/test_mutant_aws_profile.py::test_returns_none_when_oidc_env_credentials_present_with_host_config" -q -p no:cacheprovider -p no:randomly; rc=$?; rm -rf "$d"; echo "mutant_rc=$rc"; test $rc -eq 1
     expected: Prints the mutant's pytest exit code as 1 (one test failed on the mutant) and exits 0.
-    fix_if: Exit 0 on the mutant -- the regression test does not depend on the fix and guards nothing; re-anchor it on the planted HOME config.
+    fix_if: >-
+      mutant_rc=0 -- the regression test does not depend on the fix and guards nothing; re-anchor it on the planted HOME
+      config. mutant_rc of 2, 4 or 5 (collection or usage error, or no test ran) is unmeasurable, neither a pass nor a guard
+      failure: fix the command (it runs out of tree on purpose, so pyproject's addopts and -p no:randomly do not clash).
     hermetic: false
     graduation: waive
     graduation_waiver_reason: >-
       A one-off mutation witness of step 1's discriminating power; step 1 graduates the guard itself and a sed-based
-      mutant is brittle as a standing registry row.
+      mutant is brittle as a standing registry row. It is hermetic: false as a one-off out-of-tree witness whose
+      replay would re-run a mutant rather than the change.
   - step: 4
     phase: pre-deploy
     action: The file passes under an empty HOME and HOME=tests (CI-like and rec-5236's shape) and is lint- and format-clean.
@@ -93,8 +97,10 @@ verification_plan:
       d=$(mktemp -d) && HOME="$d" bin/venv-python -m pytest tests/test_aws_profile.py -q && HOME=tests bin/venv-python -m pytest tests/test_aws_profile.py -q && bin/venv-python -m ruff check tests/test_aws_profile.py && bin/venv-python -m ruff format --check tests/test_aws_profile.py; rc=$?; rm -rf "$d"; exit $rc
     expected: Both pytest runs pass every test, ruff reports no findings and format --check reports the file already formatted.
     fix_if: A pre-existing test fails -- most likely the HOME-default test lost its pop of AWS_CONFIG_FILE.
-    hermetic: false
+    hermetic: true
     graduation: not-applicable
+    expected_literals:
+      - 1 file already formatted
   - step: 5
     phase: pre-deploy
     action: The resolver and the shared conftest are untouched.
@@ -160,6 +166,7 @@ context:
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: NO_FLAGS, scout_input_fingerprint: "v1:3bf65a90ef5cb4e021f51f04118bfc7ef4cb781df4d7c156433d9adfd2cd40be"}  # pragma: allowlist secret
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 1, nits: 7}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 3}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -173,17 +180,20 @@ execution_steps:
     disposition writes the registry shard config/agent/verification_registry/entries/aws-profile-test-ignores-host-shared-config.yaml
     (sanction-row covered, no scope row).
   - >-
-    Readiness: commit, then git fetch origin main and git rebase origin/main (stop on conflict), then re-run
-    bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-aws-profile-test-host-config-hermetic.yaml and
-    record its verdict; re-run VP steps 1-7 if the rebase moved any file they read.
+    CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true in this plan
+    after the step 1 shard is written; commit; git fetch origin main && git rebase origin/main (stop on conflict);
+    re-run bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-aws-profile-test-host-config-hermetic.yaml
+    (deferral as in context); re-run VP 1-7 if the rebase moved a file they read; VP 8 on the committed, rebased,
+    clean tree (the full tier backgrounded with a 2 h limit from the top-level session, then
+    bin/venv-python -m scripts.checks.validation_result --verify-head; a timeout is BLOCKED and nothing is pushed);
+    bin/venv-python -m scripts.session.github_readiness; push; open the PR and cite its number; subscribe to its
+    activity; code review in a fresh context (a finding is fixed on the branch and the closure repeats for the new
+    HEAD); squash-merge on code review PROCEED and green CI with the body line "Resolves: rec-5196, rec-5199,
+    rec-5222, rec-5236"; then VP 9; then write /tmp/implementation-retrospective.json with the
+    scripts.session.postflight_evidence.CATEGORIES keys and run
+    bin/venv-python -m scripts.session.postflight --evidence /tmp/implementation-retrospective.json.
   - >-
-    Validator evidence (VP step 8, Decision 163): on the committed, rebased, clean tree, start the full tier
-    backgrounded with a 2 h limit from the top-level session, then run
-    bin/venv-python -m scripts.checks.validation_result --verify-head and record its verdict for HEAD.
-  - >-
-    Push and PR: push the branch, open the PR and cite its number, subscribe to its activity, and run a fresh-context
-    code review; fix any finding on the branch and repeat the readiness and validator steps for the new HEAD.
-  - >-
-    Merge: on review PROCEED and green CI, squash-merge with the body line "Resolves: rec-5196, rec-5199, rec-5222,
-    rec-5236", then run VP step 9.
-  - 'Report: what changed, the verification results, the full-tier verdict, the PR number and the merge SHA.'
+    Report the closure evidence as four SEPARATE facts (implement skill Commit Flows): GitHub readiness state
+    (scripts.session.github_readiness); parent validator evidence (VP 8 plus --verify-head for the pushed HEAD);
+    structured postflight evidence (scripts.session.postflight --evidence); the real outcome (push, PR number, CI green
+    by event-driven wake, read-back merge SHA, VP 9 rec closure).
