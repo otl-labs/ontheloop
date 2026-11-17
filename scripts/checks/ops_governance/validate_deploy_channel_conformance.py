@@ -12,7 +12,8 @@ extension; CFG-11 conversion repointed the taxonomy read from prose-paragraph re
 the typed field):
   - ducklake (terraform/personal/ducklake*.tf; build-lambda.yaml deploy_channels.ducklake_functions;
     environment-taxonomy.yaml's conformance.ducklake_class -- the ORIGINAL, unwidened check).
-  - prod (terraform/personal/prod_lambdas.tf; build-lambda.yaml deploy_channels.prod_functions;
+  - prod (terraform/personal/prod_lambdas.tf and scheduled_workflow_dispatch.tf;
+    build-lambda.yaml deploy_channels.prod_functions;
     environment-taxonomy.yaml's conformance.prod_class). The prod class
     additionally gets a completeness check (governed_channel + break_glass_only both populated)
     since its channel_class value ("decoupled_build_pipeline") does not use the ducklake class's
@@ -27,7 +28,7 @@ import re
 from scripts.checks import _common, registry
 
 _DUCKLAKE_TF_GLOB = "ducklake*.tf"
-_PROD_TF_GLOB = "prod_lambdas.tf"
+_PROD_TF_GLOBS = ("prod_lambdas.tf", "scheduled_workflow_dispatch.tf")
 _IGNORE_CHANGES_RE = re.compile(r"ignore_changes\s*=\s*\[[^\]]*source_code_hash[^\]]*\]")
 _FUNCTION_BLOCK_RE = re.compile(r'resource\s+"aws_lambda_function"\s+"(\w+)"\s*\{')
 
@@ -57,14 +58,14 @@ def _extract_function_blocks(text: str) -> dict[str, str]:
 
 def _actual_decoupled_state(
     failed: list[str],
-    glob_pattern: str = _DUCKLAKE_TF_GLOB,
+    glob_pattern: str | tuple[str, ...] = _DUCKLAKE_TF_GLOB,
     class_label: str = "ducklake",
 ) -> bool | None:
     """Scan terraform/personal/<glob_pattern> for aws_lambda_function resources.
 
     Generalised (T2.43) via glob_pattern + class_label so the same scan logic serves both the
     ducklake class (default args, unchanged behaviour) and the prod class
-    (glob_pattern=_PROD_TF_GLOB, class_label="prod").
+    (glob_pattern=_PROD_TF_GLOBS, class_label="prod").
 
     Returns True if every found function is decoupled (ignore_changes=[source_code_hash]),
     False if every found function is coupled (none carry it), or None (with a failure
@@ -74,7 +75,9 @@ def _actual_decoupled_state(
     personal_dir = _common.ROOT / "terraform" / "personal"
     decoupled_count = 0
     total_count = 0
-    for tf_path in sorted(personal_dir.glob(glob_pattern)):
+    patterns = (glob_pattern,) if isinstance(glob_pattern, str) else glob_pattern
+    tf_paths = sorted({path for pattern in patterns for path in personal_dir.glob(pattern)})
+    for tf_path in tf_paths:
         try:
             text = tf_path.read_text(encoding="utf-8")
         except OSError as exc:
@@ -88,7 +91,7 @@ def _actual_decoupled_state(
     if total_count == 0:
         failed.append(
             f"Deploy-channel conformance: no aws_lambda_function resources found under "
-            f"{personal_dir}/{glob_pattern} -- cannot determine actual {class_label} coupling state."
+            f"{personal_dir}/{','.join(patterns)} -- cannot determine actual {class_label} coupling state."
         )
         return None
     if 0 < decoupled_count < total_count:
@@ -239,7 +242,7 @@ def validate_deploy_channel_conformance(failed: list[str]) -> None:
             )
 
     # --- prod class (T2.43 extension) ---
-    actual_prod = _actual_decoupled_state(failed, glob_pattern=_PROD_TF_GLOB, class_label="prod")
+    actual_prod = _actual_decoupled_state(failed, glob_pattern=_PROD_TF_GLOBS, class_label="prod")
     prod_taxonomy_state = _taxonomy_state(failed, class_key="prod_class", label="prod")
     _prod_channels_complete(failed)
 
