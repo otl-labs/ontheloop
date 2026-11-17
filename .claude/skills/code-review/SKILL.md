@@ -5,7 +5,7 @@ name: code-review
 
 ## Intent
 
-Perform a full repository code review and return a structured findings report to the calling agent. The caller is responsible for filing findings using `scripts/ops_data_portal.py`. This agent does not edit any files.
+Review the branch's changes and return a structured findings report to the calling agent, which files the findings. Edit no files.
 
 ---
 
@@ -32,19 +32,19 @@ Note in your report: "X issues matched exemptions and were not flagged."
 
 # Scoped Branch Code Review
 
-Perform a focused code review of the current branch changes. Build the review scope from the branch diff, the plan, and one level of direct imports (see the Review Process below) -- do not read the entire repository.
+Review the current branch's changes within the scope the Review Process below builds; do not read the entire repository.
 
 ## Review Process
 
 1. **Read the anchoring docs** - the plan file (via `bin/venv-python -m scripts.roadmap.find_plan`), `docs/PROJECT_CONTEXT.md`, and only the docs directly referenced by the changed files. Do not bulk-read the roadmaps or other large docs unless a changed file references them.
-2. **Build the review file list** using a scoped approach - do not read the entire repository blindly:
+2. **Build the review file list**:
    a. Run `git diff --name-only origin/main` to get the list of changed files.
    b. Read the plan file (via `bin/venv-python -m scripts.roadmap.find_plan`) and parse its Scope table for planned files.
    c. For each Python file in the changed + planned sets, run `bin/venv-python -m scripts.extract_imports <file>` to collect `src.*` direct imports.
    d. The review scope is: **changed files + planned files + files that correspond to the direct imports collected in step (c)**. Resolve import module paths to file paths using the project file layout (e.g., `src.common.config` → `src/common/config.py`).
    e. Skip entire directories (e.g., `src/data/handlers/`) unless specific files in them appear in the scope above.
 
-   > **Review scope is limited to session-relevant files. Issues found in files outside this scope are out of scope for this review and should not be reported.**
+   > **Report no issues in a file outside this scope.**
 
 3. **Read project configuration** - pyproject.toml, requirements.txt, setup scripts, and CI/CD workflows.
 4. **Cross-reference** documentation claims against actual implementation.
@@ -57,7 +57,7 @@ Perform a focused code review of the current branch changes. Build the review sc
 
 ## Review Dimensions
 
-Evaluate the repository across each of the following dimensions. For every issue found, cite the specific file and line number.
+For every issue in each dimension below, cite the file and line.
 
 ### 1. Software Development Best Practices
 
@@ -233,6 +233,12 @@ FINDINGS:
 ...
 ```
 
-Do not write or edit any file. Return the findings block to the caller and stop.
+Last, output one line: `PERSONA_RESULT: ` and one JSON object, one findings item per finding above, in order:
 
-**The caller MUST use `bin/venv-python -m scripts.ops_data_portal` to file each finding.** This ensures writer-allocated ids and persistence via the closed DuckLake writer boundary (Decision 84).
+```
+PERSONA_RESULT: {"verdict": "[PROCEED|REVISE]", "subject_sha": "[git rev-parse HEAD]", "subject_dirty": [true|false: uncommitted changes], "findings": [{"id": "[file]:[line]:[dimension]", "severity": "[Critical|High|Medium|Low]", "origin": "[mechanical|judgement]", "anchor": "[file]:[line]"}]}
+```
+
+dimension uses the code_reviewer contract's enum; origin is mechanical when a deterministic check could catch it.
+
+Do not write or edit any file. Return the report to the caller and stop; the caller files each finding with `bin/venv-python -m scripts.ops_data_portal` (Decision 84).
