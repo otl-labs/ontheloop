@@ -45,12 +45,15 @@ scope:
       name persona-verdict. on: workflow_run, workflows [persona-verdict-trigger], types [completed]; top-level
       permissions {}; concurrency group persona-verdict-<workflow_run.head_repository.full_name>-<workflow_run.head_branch>
       with cancel-in-progress true; every uses: pinned to a 40-hex SHA with a trailing version comment. Three jobs.
-      Every python step is `python3 -I main/scripts/personas/run.py <verb>` with the working directory
-      $RUNNER_TEMP/work (never the snapshot). (1) prepare (timeout-minutes 10; permissions contents: read,
+      actions/checkout places main under $GITHUB_WORKSPACE only, so every checkout of main lands at
+      $GITHUB_WORKSPACE/main, and every python step is `python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py"
+      <verb>` (absolute path) with the working directory $RUNNER_TEMP/work and env PERSONA_SNAPSHOT set to
+      $RUNNER_TEMP/snapshot (outside the workspace; never the cwd). (1) prepare (timeout-minutes 10; permissions contents: read,
       pull-requests: read; no environment, no id-token): checks out main at github.sha (persist-credentials false) into
       main/, sets up Python 3.12 and runs `pip install pyyaml -c main/requirements.txt` (the approved-text-approval.yml
       pattern; no new dependency); then, in this order: resolve (GH_TOKEN in its step env), which logs one fixed line
-      `PERSONA-VERDICT head_sha=<sha> change_id=<id> allowlisted=<bool>`; route (GH_TOKEN); and, only when a route
+      `PERSONA-VERDICT head_sha=<sha> change_id=<id> allowlisted=<bool>`; route (GH_TOKEN), which logs
+      `PERSONA-VERDICT routes=<n> <ids>`; and, only when a route
       exists and the author is allowlisted, fetch (GH_TOKEN) then materialise, whose step env holds no token (no
       github.token, secrets.GITHUB_TOKEN or GH_TOKEN reference); uploads one artifact persona-verdict-prepared
       (resolution, routes, one input JSON per routed persona). (2) run (needs prepare; timeout-minutes 15; permissions
@@ -58,7 +61,8 @@ scope:
       sets up Python 3.12, runs `pip install jsonschema -c main/requirements.txt`, downloads the artifact and runs the
       execute verb (no token in its env), skipped when the resolution is not allowlisted; uploads
       persona-verdict-results. No bound persona other than the probe exists, so this job runs nothing else in this
-      plan. (3) post (needs [prepare, run]; if: always(); timeout-minutes 5; permissions checks: write, contents: read,
+      plan. (3) post (needs [prepare, run]; if: ${{ !cancelled() }}, so a run cancelled by a newer push on the same
+      branch posts nothing and the newer run posts; timeout-minutes 5; permissions checks: write, contents: read,
       actions: read): checks out main, sets up Python 3.12, runs `pip install pyyaml jsonschema -c
       main/requirements.txt` and the post verb, which posts one completed check run per route on the resolved head SHA
       from whatever artifacts exist (a missing or invalid one maps to failure). The workflow exits 0 on every verdict
@@ -90,11 +94,12 @@ scope:
   - file: scripts/personas/route.py
     action: Create
     purpose: >-
-      Routing on the diff, never on the branch name; changed paths and status from the compare API (base...head, the
-      merge base the merge gate's `git diff --name-only --no-renames merge_base head` also uses). A renamed entry
-      contributes both filename and previous_filename, so the path set equals the gate's. A compare list of 300 or more
-      files, or one the API marks incomplete, is unknown: both the plan-class and code-class sets are routed (fail
-      toward review). Two rules, unioned so no PR shape loses a verdict. (a) The merge gate's class, imported, never copied:
+      Routing on the diff, never on the branch name; changed paths and status from the compare API
+      <base.ref>...<head_sha> (the merge base of the PR's base branch as it is now, which is what the merge gate's
+      `git diff --name-only --no-renames merge_base head` uses at merge time, not the PR's possibly stale base.sha). A
+      renamed entry contributes both filename and previous_filename, so the path set equals the gate's. A compare list
+      of 300 or more files, or one the API marks incomplete, is unknown: both the plan-class and code-class sets are
+      routed (fail toward review). Two rules, unioned so no PR shape loses a verdict. (a) The merge gate's class, imported, never copied:
       scripts.session.merge_checks.pr_class(changed) (push_scope.confined_to_plans; T4.28 c1, ports.yaml PC-10) --
       every persona whose merge_checks.PERSONA_CLASSES class equals the PR's class, on every head, except those in
       merge_checks.READY_HEAD_PERSONAS, which run on ready heads only. Until PLAN-persona-verdict-rescout adds
@@ -102,16 +107,18 @@ scope:
       exists on the merge-time head the gate reads. (b) T4.2 c12's extras: a code-class PR that adds a
       docs/plans/PLAN-*.yaml, or modifies one in a field outside docs/contracts/implement-scope-boundary.yaml
       sanction_rows.implementing_plan_bookkeeping.permitted_field_edits (read from main; base and head plan text
-      compared with yaml.safe_load after a 512 KiB size cap; plan text over the cap, or containing a YAML anchor or
-      alias, is treated as unparseable), also gets the plan-class set with the same head rule, so the scout runs on every
+      compared with yaml.safe_load after a 512 KiB size cap; plan text over the cap, or whose yaml.parse event stream
+      holds an AliasEvent or an event carrying an anchor (never a text scan, so a scalar such as PLAN-*.yaml is not an
+      alias), is treated as unparseable), also gets the plan-class set with the same head rule, so the scout runs on every
       head (Decision 229 cl.4); a plan-class PR whose only plan edits are bookkeeping fields also gets the code-class
       set. An unparseable plan at head counts as a revision (fail toward review). Persona ids and classes come only
       from merge_checks, so route.py holds no persona-id string literal (executor-personas.yaml implementation_binding
       landing_dirs rule). The routes are then intersected with the bound set: executor-personas.yaml personas rows of
       kind verdict whose implementation.status is implemented (none today), read with yaml.safe_load (no pydantic,
       which the prepare job does not install). Separately, iff every changed path is under
-      tests/fixtures/persona_verdict/fixture_pr/, one probe route verdict_probe.<stem> is added per changed file there;
-      no other diff routes to the probe. Output: ordered route ids.
+      tests/fixtures/persona_verdict/fixture_pr/, one probe route verdict_probe.<stem> is added per changed file there
+      whose stem is one of the four committed markers (proceed, revise, fail, malformed, a closed set held in route.py;
+      any other file there is ignored, so a diff cannot mint arbitrary check names); no other diff routes to the probe. Output: ordered route ids.
   - file: scripts/personas/snapshot.py
     action: Create
     purpose: >-
@@ -125,7 +132,8 @@ scope:
     purpose: >-
       The execute verb (run job): for each route, validates the input JSON against that route's input schema with
       jsonschema (the probe's from tests/fixtures/persona_verdict/probe_schema.json; later add plans register theirs),
-      runs the probe as `python3 -I main/tests/fixtures/persona_verdict/probe.py <input>` in a subprocess with a
+      runs the probe as `python3 -I <main root>/tests/fixtures/persona_verdict/probe.py <input>` (main root derived
+      from execute.py's own path) in a subprocess with a
       240-second timeout and no token in its env, and writes results/<route>.json {route, exit_code, timed_out,
       stdout} as data, never parsed here. An invalid input writes {route, failure: input_unusable} without running.
       Output validation is post's job.
@@ -234,14 +242,20 @@ scope:
       persona-verdict/<route id>, allowlist refusal, missing artifacts, retry then shell fault.
   - file: tests/personas/test_run.py
     action: Create
-    purpose: "Mirror test: sys.path holds the main root first and no snapshot path; exit 3 when one would."
+    purpose: >-
+      Mirror test: sys.path holds the main root first and no snapshot path; exit 3 when one would; and, by ast, each
+      verb module's import closure under scripts/ reaches only stdlib, scripts.* and the packages its job installs
+      (resolve, route, fetch, materialise: yaml; execute: jsonschema; post: yaml, jsonschema), so no verb outgrows its
+      job's install line.
   - file: tests/ci/test_persona_verdict_isolation.py
     action: Create
     purpose: >-
       rec-5041 part 1 (its acceptance selector): a snapshot planting json.py, yaml.py, sitecustomize.py, conftest.py,
       scripts/__init__.py, scripts/personas/__init__.py and a .pth file, each writing a sentinel when imported or
-      processed. Runs the materialise verb with the exact argv and working directory parsed from persona-verdict.yml's
-      prepare job, under a hostile environment (PYTHONPATH set to the snapshot); asserts no sentinel and no loaded
+      processed. Lays out the runner's directories in tmp_path (workspace/main as a copy of the needed main files,
+      runner_temp/work, runner_temp/snapshot) and runs the materialise verb with the exact argv, working directory and
+      PERSONA_SNAPSHOT parsed from persona-verdict.yml's prepare job, with $GITHUB_WORKSPACE and $RUNNER_TEMP
+      substituted, under a hostile environment (PYTHONPATH set to the snapshot); asserts no sentinel and no loaded
       module __file__ under the snapshot. Negative control: the same argv with -I removed and the same PYTHONPATH fires
       a sentinel (sitecustomize.py and json.py shadow from PYTHONPATH), so the test can fail. A run by script path puts
       the script's own directory, not the cwd, at sys.path[0], so a cwd-only control would never fire and is not used.
@@ -253,8 +267,12 @@ scope:
       environment; a verdict workflow not on exactly workflow_run naming persona-verdict-trigger (until PLAN-persona-verdict-override adds c6's re-run event); any uses: in either
       not pinned to a 40-hex SHA;
       checks: write on any job but post; id-token: write or environment on any job (until
-      PLAN-persona-verdict-egress amends this rule); a prepare-job python invocation of the snapshot-reading verbs
-      without -I or with working directory under the snapshot; a prepare job whose fetch step comes after
+      PLAN-persona-verdict-egress amends this rule); any job whose permissions differ from its pinned set (trigger {},
+      prepare contents: read and pull-requests: read, run contents: read, post checks: write, contents: read and
+      actions: read); a python step that is not `python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" <verb>`,
+      lacks PERSONA_SNAPSHOT in its env, or has a working directory under the snapshot or the workspace; a job's pip
+      install line other than its pinned set (prepare pyyaml; run jsonschema; post pyyaml jsonschema), each with -c
+      main/requirements.txt; a post job condition other than !cancelled(); a prepare job whose fetch step comes after
       materialise, or whose fetch or materialise step lacks the allowlisted condition; a github.token,
       secrets.GITHUB_TOKEN or GH_TOKEN reference in the env of the materialise or execute step; a run job running
       anything but the execute verb. It reads the
@@ -554,14 +572,15 @@ context:
   - "workflow_run runs main HEAD's persona-verdict.yml, so the chain runs only after this plan's build merges; the fixture PRs (VP 8) are the end-to-end proof. ci-rca.yml:538-542 reads pull_requests[0]; resolve_pr.py must not copy that."
   - "T4.2 c9's executor App leg waits for T4.21's App (not_started); maintainers are admin or maintain by a live permission read."
   - "rec-5241 (High, filed 2026-11-16): the merge gate accepts any same-named persona check run; dormant while every gates.<persona>.verdict_source reads in_session; its fix binds before the first flip."
-  - "Unbuilt plans also scoping config/ci_rca_taxonomy.yaml and scripts/checks/ci_guards/_manifest.py (13; bin/venv-python -m scripts.roadmap.plan_obligations --plan docs/plans/PLAN-persona-verdict-chain.yaml lists them): whichever builds second rebases; the taxonomy compaction leaves about 8 lines of headroom."
+  - "Other unbuilt plans share scope files (bin/venv-python -m scripts.roadmap.plan_obligations --plan docs/plans/PLAN-persona-verdict-chain.yaml lists them): 12 on config/ci_rca_taxonomy.yaml and/or scripts/checks/ci_guards/_manifest.py; PLAN-telemetry-content-reader-lock and PLAN-wording-approval-routing on config/agent/executor/capabilities.yaml; PLAN-roadmap-start-edges on tests/roadmap/test_verdict_persona_criteria.py, where a rebase can move the hint-set-test anchor and force a new wording approval. Whichever builds second rebases; the taxonomy compaction leaves about 8 lines of headroom."
   - "rec-5251 (Low, filed 2026-11-17 from critique r2): scripts/session/merge_checks.py now drives routing as well as the merge gate but sits outside boundary_patterns; a pre-existing Decision 185 cl.3 gap, filed rather than widened here."
+  - "Critique r3 REVISE fixed: main checks out under $GITHUB_WORKSPACE and every python step uses that absolute path (isolation test and shape check follow the real layout); the sidecar's 'credential-free job' now reads 'token-free step' (wording-check r4); compare from base.ref; parse-event alias detection; closed probe stem set; pinned per-job permissions and installs; PERSONA_SNAPSHOT required; post skips cancelled runs; routes logged."
   - "Critique r2 REVISE fixed: one fixture head with four marker files (one full-tier attest, not four); an execute verb and module for the run job; snapshot fetch, materialise and run gated on allowlisted, tarball extracted with filter=data and links refused, no token in materialise or execute env; route.py counts previous_filename and routes both sets on a truncated list; PERSONA-VERDICT log line replaces job summaries; run job contents: read."
   - "Unbuilt plans scoping docs/ROADMAP-PLATFORM.yaml (operator-decision-journal-kind, planning-eligibility-start-edges, plans-only-main-fast-tier, roadmap-start-edges, sit-organization, telemetry-producer-admission-plan-review-capture, wording-approval-routing, work-graph-edge-model): whichever builds second rebases; the sidecar anchors are T4.32-local."
   - "CI Reform's #2071 (Decision 267): the roadmap edits ride this plan's own sidecar, so its leg P is satisfied; its rec-4233 PR 2 guards dispatchable workflows, and neither new workflow is dispatchable."
   - "rec-5041 (open; acceptance is exactly this plan's isolation test): part 1 only lands here, so the build narrows it (execution step) instead of bundling it, and its closure waits for PLAN-persona-verdict-egress (Decision 201 closes on acceptance)."
   - "No T4.32 or T4.2 criterion closes here (closes_criteria []): c1 stays open until a persona runs on the chain, and T4.2 c8, c9 and c12 discharge through T4.32 c1 (the PLAN-persona-verdict-credential precedent)."
-  - "Stale 'verdict-jobs' names outside the sidecar read as the PLAN-persona-verdict-* plans: Decision 263 cl.4 and Coverage, the T4.2 hint line naming PLAN-persona-verdict-jobs, and the test_persona_verdict_role.py::test_workflow_fence docstring. PLAN-persona-verdict-egress, which carries Decision 263 cl.4, re-words them (its own sidecar and a dated Update trailer)."
+  - "Stale 'verdict-jobs' names outside the sidecar read as the PLAN-persona-verdict-* plans: Decision 263 cl.4 and Coverage, the T4.2 hint line naming PLAN-persona-verdict-jobs, the test_persona_verdict_role.py::test_workflow_fence docstring, T4.32's decomposition_hints rationale ('Eight independently testable plans'), and c6's 'this item's verdict-chain plan sets the run's shape', which reads as this plan but means PLAN-persona-verdict-override. PLAN-persona-verdict-egress, which carries Decision 263 cl.4, re-words them (its own sidecar and a dated Update trailer)."
   - "Decision-scout r4 NO_FLAGS (Decisions triaged: 216 of 216; Roadmap items intersected: 7; CONFLICT: 0; RELATED: 5; Serves: NS.3 4/5) on the critique r1 fixes; dec:224 stays in cites (RELATED since r3). Decision-scout r3 FLAGS_FOUND; its only flag, a Decision 211 spirit note (record the chain's structural assumptions in ports.yaml), is rec-5249, owned by PLAN-persona-verdict-egress because ports.yaml is at its cap."
   - "Critique r1 REVISE fixed: routing table from merge_checks (no persona literal under scripts/personas/), scout on every head for mixed PRs, snapshot fetched before materialise, isolation control via PYTHONPATH, probe test, both workflows ci_rca excluded with a taxonomy compaction, wider boundary rows, rec-5041 narrowed, one fixture PR on the session branch, VP 9 on a real post-merge PR."
   - "Actions capacity: the trigger is one short job per PR event; prepare/run/post are seconds; public-repo minutes are free (W6 gauge counts them)."
@@ -572,6 +591,8 @@ gate_rounds:
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 16, nits: 7}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 4, nits: 9}
   - {gate: decision-scout, round: 4, verdict: NO_FLAGS, scout_input_fingerprint: "v1:2b8dca5418f056141c8fef4e2a6167b009edd9e8928d6bf2ce70a40e0a8fc607"}
+  - {gate: decision-scout, round: 5, verdict: NO_FLAGS, scout_input_fingerprint: "v1:a68033b999dff032447cfceae8a96ca68bc952c6619a51189289d5f52a931430"}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 2, nits: 11}
   - {gate: wording-check, round: 1, verdict: FAIL, digest: f6c0fd645925c434c01aa8df548d708127cbcfdbf0576fd408a684f99955b702, base: 013411ea495131d2a452823b1dade68e314a5130, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 2, verdict: FAIL, digest: b6a28e40475b85ddf637b6c39159d5ae4fac4fc9bf09068cedb3207d4ae2bf51, base: 013411ea495131d2a452823b1dade68e314a5130, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 3, verdict: PASS, digest: 1bff547d3e77c113a8820a6f41fcf6538a736b5e21c4fb8be5383901e0d3e1f0, base: 013411ea495131d2a452823b1dade68e314a5130, selection: complete}  # pragma: allowlist secret
@@ -583,13 +604,13 @@ pre_implementation_checklist:
   - Acceptance criteria understood and verifiable
 execution_steps:
   - "Pre: on main, no persona-verdict*.yml exists and no other open PR creates one (mcp__github__list_pull_requests); git-ops.yaml and ports.yaml are not touched."
-  - "Create scripts/personas/ (run, resolve_pr, route, materialise, post_verdict) and their mirror tests under tests/personas/; post: VP 1 green."
-  - "Create tests/fixtures/persona_verdict/ (probe.py, probe_schema.json, fixture_pr/{proceed,revise,fail,malformed}.txt) and tests/ci/test_persona_verdict_isolation.py; post: VP 2 green including the negative control."
+  - "Create scripts/personas/ (run, resolve_pr, route, snapshot, materialise, execute, post_verdict), the probe fixtures (probe.py, probe_schema.json, fixture_pr/{proceed,revise,fail,malformed}.txt) and their mirror tests under tests/personas/ (including test_probe, test_snapshot and test_execute); post: VP 1 green."
   - "Create the two workflows (SHA-pinned uses: resolved from the tags the repo already uses, with version comments); post: VP 4 green."
+  - "Create tests/ci/test_persona_verdict_isolation.py (it parses persona-verdict.yml, so after the workflows); post: VP 2 green including the negative control."
   - "Create validate_persona_verdict_chain with its mirror test, the _manifest Entry (test__manifest.py is parametrised over Entries and stays unchanged), and the ci_rca_taxonomy rows; post: VP 3 green."
   - "Add READY_HEAD_PERSONAS to scripts/session/merge_checks.py with its test, and the three capabilities.yaml boundary_patterns rows; post: VP 10 BOUNDARY_OK."
   - "Place the six sidecar blocks (five in docs/ROADMAP-PLATFORM.yaml with {{DATE}} set to the build date, one in tests/roadmap/test_verdict_persona_criteria.py); post: VP 5 OK and bin/venv-python -m pytest tests/roadmap/test_verdict_persona_criteria.py -q green."
-  - "Before the PR is ready: update_rec rec-5041 through scripts.ops_data_portal, appending to its context that part 1 (snapshot isolation) is done by PLAN-persona-verdict-chain's tests/ci/test_persona_verdict_isolation.py and parts 2 and 3 belong to PLAN-persona-verdict-egress, and setting its acceptance to bin/venv-python -m pytest tests/ci/test_persona_verdict_isolation.py tests/ci/test_persona_verdict_egress.py -q (the egress test, red until that plan builds; if the portal refuses that acceptance, keep the context note, leave the acceptance and report it); post: VP 11."
+  - "Before the PR is ready: update_rec rec-5041 through scripts.ops_data_portal, appending to its context that part 1 (snapshot isolation) is done by PLAN-persona-verdict-chain's tests/ci/test_persona_verdict_isolation.py and parts 2 and 3 belong to PLAN-persona-verdict-egress, and setting its acceptance to bin/venv-python -m pytest tests/ci/test_persona_verdict_isolation.py tests/ci/test_persona_verdict_egress.py -q (the egress test, red until that plan builds); post: VP 11. A portal refusal of that acceptance is a STOP to the plan owner, not a fallback."
   - "Execute Verification Plan -- VP 6 and VP 7 before the PR is ready; loop until pass; on unrecoverable V3 failure stop and RCA (Decision 55)"
   - "After merge: VP 8 and VP 9; report the run ids and conclusions to the coordinator."
   - "Report: what was implemented, verification results"
