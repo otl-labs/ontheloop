@@ -114,7 +114,10 @@ scope:
       read the base through `lambda rel: base_text if rel == _REGISTRY_REL_PATH else (base_reader or
       _marker_guard.default_base_reader)(rel)` (the registry is still read once; base_corpus reads docs/DECISIONS.md and
       the archive through the injected reader, so fixtures can supply them; the existing `lambda _rel: base_text` would
-      feed it the registry and make every mention look fresh). A seed marker therefore never authorizes a later raise or re-registration (scout r2, Decision 128).
+      feed it the registry and make every mention look fresh). When base_corpus cannot read the base corpus, legs (b) and (c) follow its existing behaviour: one loud
+      SKIP, advisory locally (PR CI always reaches origin/main). The examined declaration counts byte_budgets entries
+      with the other two sections. A seed marker therefore never authorizes a later raise or re-registration (scout r2,
+      Decision 128).
   - file: scripts/checks/contracts/_amendment_retention.py
     action: Create
     purpose: >-
@@ -130,8 +133,10 @@ scope:
   - file: scripts/checks/contracts/validate_contract_drift.py
     action: Modify
     purpose: >-
-      Pass 2 calls rewrite_violation and retention_violation for every changed depth-1 contract with a base, appending
-      "Contract drift (amendment)" and "Contract drift (retention)".
+      Pass 2 calls retention_violation (with rows_dropped) for every changed depth-1 contract with a base, and
+      rewrite_violation only when base and head are both class_d (the branch that already runs
+      check_amendment_log_for_class_d; ritual contracts log field edits in field-level rows, contracts_enforcement),
+      appending "Contract drift (amendment)" and "Contract drift (retention)".
     new_imports: [scripts.checks.contracts._amendment_retention]
   - file: scripts/roadmap/plan_lint/headroom.py
     action: Modify
@@ -153,8 +158,9 @@ scope:
     purpose: >-
       test_base_is_read_once_for_every_leg keeps asserting the registry is read exactly once and now also admits the
       freshness legs' reads of docs/DECISIONS.md and docs/DECISIONS_ARCHIVE.md through the injected reader (the B3 base
-      reader; the old exact-list assertion predates fresh_mention legs on this registry). No other change here (381 of
-      500 SLOC).
+      reader; the old exact-list assertion predates fresh_mention legs on this registry), and
+      test_live_registry_examines_every_entry's expected count adds the byte_budgets extractor's entries. No other
+      change here (381 of 500 SLOC).
   - file: tests/checks/structural/test_budget_raises_bytes.py
     action: Create
     purpose: >-
@@ -172,7 +178,7 @@ scope:
       duplicate dates) and the drift wiring (rec-4119 acceptance).
   - file: tests/roadmap/plan_lint/test_derivations.py
     action: Modify
-    purpose: test_size_headroom_reports_bytes_for_contracts.
+    purpose: TestHeadroom::test_size_headroom_reports_bytes_for_contracts (a method in the existing TestHeadroom class).
 bundled_recommendations: [rec-5262, rec-4119]
 followon_recs: []
 infrastructure_dependencies:
@@ -210,8 +216,11 @@ verification_plan:
     command: >-
       bin/venv-python -m pytest -q tests/checks/structural/test_size_limits_bytes.py
       tests/checks/structural/test_budget_raises_bytes.py
-      tests/checks/structural/test_budget_raises.py::test_base_is_read_once_for_every_leg
-    expected: All selected tests pass; before the build they fail (module and class absent).
+      tests/checks/structural/test_budget_raises.py::TestExaminedDeclaration::test_base_is_read_once_for_every_leg
+      tests/checks/structural/test_budget_raises.py::TestExaminedDeclaration::test_live_registry_examines_every_entry
+    expected: >-
+      All selected tests pass; before the build the step is red (the two new modules are absent; the two existing
+      read-once and examined-count tests pass on the base and guard the edits to them).
     fix_if: A failure names the leg; fix the code, never the fixture's expectation.
     hermetic: true
     expected_literals: [" passed"]
@@ -230,7 +239,7 @@ verification_plan:
   - step: 4
     phase: pre-deploy
     action: Headroom line reports bytes and growth (red before, green after).
-    command: bin/venv-python -m pytest -q tests/roadmap/plan_lint/test_derivations.py::test_size_headroom_reports_bytes_for_contracts
+    command: bin/venv-python -m pytest -q tests/roadmap/plan_lint/test_derivations.py::TestHeadroom::test_size_headroom_reports_bytes_for_contracts
     expected: The test passes; before the build it does not exist.
     fix_if: A failure names the missing column; fix headroom.py.
     hermetic: true
@@ -325,7 +334,9 @@ test_obligations:
     test_selector: tests/checks/contracts/test_amendment_log_retention.py
     red_green_expectation: red before (module absent), green after.
   - source: scripts/checks/contracts/validate_contract_drift.py
-    behavior: Pass 2 reports a retention violation, and a reworded old row offered as the new row, on a changed contract.
+    behavior: >-
+      Pass 2 reports a retention violation and a dropped row on any changed contract, and a reworded old row offered as
+      the new row on a class_d contract; a ritual contract's field edit carrying only a field-level row passes.
     verification_step: 3
     test_selector: tests/checks/contracts/test_amendment_log_retention.py::test_drift_pass2_reports_retention
     red_green_expectation: >-
@@ -340,7 +351,7 @@ test_obligations:
   - source: scripts/roadmap/plan_lint/headroom.py
     behavior: A contract's headroom line carries bytes, bytes per line and the 30-day delta.
     verification_step: 4
-    test_selector: tests/roadmap/plan_lint/test_derivations.py::test_size_headroom_reports_bytes_for_contracts
+    test_selector: tests/roadmap/plan_lint/test_derivations.py::TestHeadroom::test_size_headroom_reports_bytes_for_contracts
     red_green_expectation: "red before (fails on the base, whose headroom line has no byte column), green after."
   - source: docs/contracts/glossary.yaml
     behavior: read_as.rule states the amendment_log compaction exception (Decision {{N}} cl.5).
@@ -418,8 +429,8 @@ constraints:
   - "Write terse rows in flow style, one line each, keeping date, semantic_break and change_class and a summary of at most 160 characters led by the PLAN slug, rec or Decision the original names; drop migration_story from compacted rows only."
   - Seed byte_budgets at the measured head size after compaction, never rounded up; no other budget changes (Decisions 128, 166 point 6).
   - "Merge one at a time with other builds editing docs/DECISIONS.md (reviews and delegation-and-cap first) and with unbuilt plans scoping config/structural_size_budgets.yaml (bootstrap-ci-gated-apply, environment-gates-fail-closed, scheduled-workflow-dispatch, trusted-plan-cutover): whichever builds second rebases."
-  - "Before merge, post on issue #1963 (Decision Growth entry) naming the nine compacted contracts, the 49,152-byte limit, and that unbuilt plans adding a full amendment_log row to a contract holding 5 or more full rows must compact one older row in the same change (e.g. telemetry-late-hook-records on ports.yaml and telemetry_*); the operator approved the one-time compaction (thread, 2026-11-17)."
-  - "If more than the four named contracts stay over 49,152 bytes after compaction (telemetry_agents.yaml and ducklake_telemetry_writer.yaml are estimated within about 500 bytes of it, more if test-read rows stay full), stop and send a plan-defect report: the bound words name the roster, so a fifth seed needs a new approval run."
+  - "Before merge, post on issue #1963 (Decision Growth entry) naming the nine compacted contracts, the 49,152-byte limit, that unbuilt plans adding a full amendment_log row to a contract holding 5 or more full rows must compact one older row in the same change, and that no change may drop a top-level row any more (e.g. telemetry-late-hook-records on ports.yaml and telemetry_*); the operator approved the one-time compaction (thread, 2026-11-17)."
+  - "If more than the four named contracts stay over 49,152 bytes after compaction (telemetry_agents.yaml, ducklake_telemetry_writer.yaml and deploy-paths.yaml are estimated within about 300 to 1,000 bytes of it, less if test-read rows stay full), stop and send a plan-defect report: the bound words name the roster, so a fifth seed needs a new approval run. Measure the compacted sizes in step 5 before writing any other file's change, so a stop costs little."
   - No rescue agents or workaround loops (Decision 55).
 context:
   - "Decision-scout r1 FLAGS_FOUND. Decisions triaged: 217 of 217. Roadmap items intersected: 5; CONFLICT: 0; RELATED: 5. Serves: NS.4 4/5. CITE: 86, 128, 150, 165, 167, 168. WARN 166 adopted: a new Decision authorizes the roster and amends 166 cl.3 and reversal (d); markers never cite dec-166. WARN 243 adopted: north-star.yaml exempt from retention. SPIRIT 165 adopted. RELATED 210 adopted: top-level logs only."
@@ -453,6 +464,7 @@ gate_rounds:
   - {gate: wording-check, round: 4, verdict: PASS, digest: ed3e1b506f92fb1d40373bbbea0f0227ff87b8125326b6a5148050d5a5a391ca, base: c37b228aa1b5d0b820c45193d3cc35716f774fe5, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 6, nits: 6}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 3, nits: 5}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 5}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
