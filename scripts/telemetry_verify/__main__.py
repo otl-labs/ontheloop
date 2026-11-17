@@ -1,4 +1,4 @@
-"""python -m scripts.telemetry_verify monitor|completeness|arrival (PLAN-telemetry-verification-monitor).
+"""python -m scripts.telemetry_verify monitor|arrival (PLAN-telemetry-verification-monitor).
 
 Each command prints one line of counts, class names, verb names and join ids (Decision 101: the output lands in public Actions
 logs, so never a row value, session id, ref, branch, error body or URL host). Exit 0 when the run completed (whatever the
@@ -19,21 +19,16 @@ from typing import Any, Callable, Mapping
 
 from scripts.rec_episode import find_recs
 from scripts.telemetry_capture import read_route
-from scripts.telemetry_verify import completeness, monitor, session_presence
+from scripts.telemetry_verify import monitor, session_presence
 from scripts.telemetry_verify.alarms import ALARM_SOURCE, raise_alarms
 from scripts.telemetry_verify.silent_checks import REPORT_ONLY_CHECKS
 
-DEFAULT_LISTS_DIR = "/mnt/project-files/telemetry-slice4/completeness/latest"
 MONITOR_FILE = "scripts/telemetry_verify/monitor.py"
-COMPLETENESS_FILE = "scripts/telemetry_verify/completeness.py"
-_COMPLETENESS_CLASS = "completeness_listed_not_captured"
 _MONITOR_DEFAULTS = "AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_verify monitor"
-_COMPLETENESS_DEFAULTS = "AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_verify completeness"
 
 
 def acceptance_for(cls: str) -> str:
-    base = _COMPLETENESS_DEFAULTS if cls == _COMPLETENESS_CLASS else _MONITOR_DEFAULTS
-    return f"{base} --no-alarms --assert-zero {cls}"
+    return f"{_MONITOR_DEFAULTS} --no-alarms --assert-zero {cls}"
 
 
 def _day(text: str) -> str:
@@ -63,17 +58,13 @@ def parser() -> argparse.ArgumentParser:
     mon = sub.add_parser("monitor")
     mon.add_argument("--quiet-day", type=_day, default=None)
     mon.add_argument("--skip-trees", type=_skip, default=0)
-    comp = sub.add_parser("completeness")
-    comp.add_argument("--lists-dir", default=DEFAULT_LISTS_DIR)
-    comp.add_argument("--judged-day", type=_day, default=None)
     arr = sub.add_parser("arrival")
     arr.add_argument("--junit-xml", default=None, metavar="PATH")
     arr.add_argument("--as-of", type=_instant, default=None)
     arr.add_argument("--no-lost-windows", action="store_true")
     arr.add_argument("--repo", default=None)
-    for each in (mon, comp):
-        each.add_argument("--no-alarms", action="store_true")
-        each.add_argument("--assert-zero", default=None, metavar="CLASS")
+    mon.add_argument("--no-alarms", action="store_true")
+    mon.add_argument("--assert-zero", default=None, metavar="CLASS")
     return built
 
 
@@ -126,25 +117,6 @@ def monitor_line(report: monitor.MonitorReport, findings: Mapping[str, int]) -> 
         "alarms": _alarms(findings),
     }
     return "MONITOR " + _fmt(pairs)
-
-
-def completeness_line(result: completeness.CompletenessResult, status: str, findings: Mapping[str, int]) -> str:
-    return "COMPLETENESS " + _fmt(
-        {
-            "judged_day": result.judged_day,
-            "status": status,
-            "listed": result.listed,
-            "listed_and_captured": result.listed_and_captured,
-            "listed_not_captured": result.listed_not_captured,
-            "unexplained_not_captured": result.unexplained_not_captured,
-            "captured_not_listed": result.captured_not_listed,
-            "listed_unjoinable": result.listed_unjoinable,
-            "listed_scope_unknown": result.listed_scope_unknown,
-            "captured_without_key": result.captured_without_key,
-            "captured_host_runs": result.captured_host_runs,
-            "alarms": _alarms(findings),
-        }
-    )
 
 
 def _file(
@@ -226,41 +198,6 @@ def run_monitor_command(
     return 0 if _file(findings, scope=scope, now=now, portal=portal, file=MONITOR_FILE, reader=reader) else 1
 
 
-def run_completeness_command(
-    args: argparse.Namespace, *, reader: Any, now: datetime, portal: Callable[..., Any] | None = None
-) -> int:
-    judged = args.judged_day or (now.date() - timedelta(days=2)).isoformat()
-    empty = completeness.CompletenessResult(judged)
-    try:
-        catalog = getattr(reader, "catalog", None) or read_route.resolve_catalog()
-        first = completeness.first_judged_day(catalog)
-        if first is None or judged < first:
-            print(completeness_line(empty, "before_v4" if catalog == read_route.DEFAULT_CATALOG else "before_catalog", {}))
-            return 2
-        lists = completeness.load_lists(Path(args.lists_dir))
-        if not completeness.lists_cover(lists, judged):
-            print(completeness_line(empty, "lists_short", {}))
-            return 2 if args.assert_zero else 1
-        center = date.fromisoformat(judged)
-        roots = reader.named(
-            "telemetry_root_sessions",
-            day_from=(center - timedelta(days=1)).isoformat(),
-            day_to=(center + timedelta(days=1)).isoformat(),
-        )
-        result = completeness.compare_sessions(roots, lists.rows, judged_day=judged)
-    except Exception as exc:  # noqa: BLE001 -- the class alone is printed
-        print(f"COMPLETENESS_STOP class={type(exc).__name__}")
-        return 2 if args.assert_zero else 1
-    findings = result.findings()
-    print(completeness_line(result, "completed", findings))
-    verdict = _verdict(args, True, findings, result.denominators())
-    if verdict is not None:
-        return verdict
-    if args.no_alarms:
-        return 0
-    return 0 if _file(findings, scope=judged, now=now, portal=portal, file=COMPLETENESS_FILE, reader=reader) else 1
-
-
 def run_arrival_command(args: argparse.Namespace, *, reader: Any, now: datetime) -> int:
     repo = args.repo or os.environ.get("GITHUB_REPOSITORY") or session_presence.DEFAULT_REPO
     result = session_presence.run(
@@ -289,9 +226,7 @@ def main(
         reader = read_route.make_routed_reader()
     if args.command == "arrival":
         return run_arrival_command(args, reader=reader, now=when)
-    if args.command == "monitor":
-        return run_monitor_command(args, reader=reader, now=when, budget=budget, portal=portal)
-    return run_completeness_command(args, reader=reader, now=when, portal=portal)
+    return run_monitor_command(args, reader=reader, now=when, budget=budget, portal=portal)
 
 
 if __name__ == "__main__":
