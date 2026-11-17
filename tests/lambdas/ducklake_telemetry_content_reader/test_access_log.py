@@ -64,6 +64,8 @@ def test_rest_and_function_url_shapes_yield_the_caller_name(capsys: pytest.Captu
     session_arn = f"arn:aws:iam::{account}:user/agent-platform-session"
     access_log.write(_rest_event(session_arn), "v", 200, 0, 0, {}, None, None)
     assert _line(capsys)["role"] == "agent-platform-session"
+    access_log.write(_rest_event(session_arn, extra={"authorizer": {}}), "v", 200, 0, 0, {}, None, None)
+    assert _line(capsys)["role"] == "agent-platform-session"
     access_log.write(caller_event({}, role="PlatformDev"), "v", 200, 0, 0, {}, None, None)
     assert _line(capsys)["role"] == "PlatformDev"
 

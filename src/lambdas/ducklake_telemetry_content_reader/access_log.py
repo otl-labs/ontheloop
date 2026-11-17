@@ -16,8 +16,9 @@ _FALLBACK = {"event": EVENT, "role": "unknown", "verb": "unknown", "status": 500
 
 
 def _rest_caller(context: Any) -> dict[str, Any] | None:
-    identity = context.get("identity")
-    if context.get("apiId") and isinstance(identity, dict) and "authorizer" not in context:
+    identity, authorizer = context.get("identity"), context.get("authorizer")
+    has_iam = isinstance(authorizer, dict) and "iam" in authorizer
+    if context.get("apiId") and isinstance(identity, dict) and not has_iam:
         return identity
     return None
 
