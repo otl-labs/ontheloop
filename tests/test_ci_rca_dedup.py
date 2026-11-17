@@ -280,3 +280,56 @@ class TestDataclasses:
         assert v.fingerprint == "fp-a"
         assert v.matched_rec_id == "rec-1"
         assert v.run_agent is False
+
+
+class TestDefaultsAndSiblings:
+    def test_default_finder_and_bumper_delegate_to_the_runtime_helpers(self):
+        import scripts.ci_rca.dedup as dedup_mod
+
+        with (
+            patch("scripts.ops_portal.ci_rca_lifecycle.newest_open_in_chain", return_value="rec-3") as find,
+            patch("scripts.ops_portal.ci_rca_runtime.bump_ci_rca_occurrence") as bump,
+        ):
+            assert dedup_mod._default_finder("fp", profile="p") == "rec-3"
+            dedup_mod._default_bumper("rec-3", profile="p")
+        find.assert_called_once_with("fp", profile="p")
+        bump.assert_called_once_with("rec-3", profile="p")
+
+    def test_sibling_fingerprints_for_ci_canary_and_other_workflows(self):
+        import scripts.ci_rca.dedup as dedup_mod
+        from scripts.ci_rca.fingerprint import compute_fingerprint_v2
+
+        ci = compute_fingerprint_v2("ci", "c", "s")
+        canary = compute_fingerprint_v2("main_canary", "c", "s")
+        base = {"failure_category": "c", "error_signature": "s"}
+        assert dedup_mod.sibling_fingerprints({**base, "workflow_name": "CI", "fingerprint": ci}) == [ci, canary]
+        assert dedup_mod.sibling_fingerprints({**base, "workflow_name": "Main Canary", "fingerprint": canary}) == [canary, ci]
+        assert dedup_mod.sibling_fingerprints({**base, "workflow_name": "notice-digest", "fingerprint": "x"}) == ["x"]
+        assert dedup_mod.sibling_fingerprints({"workflow_name": "CI", "fingerprint": "x"}) == ["x"]
+        assert dedup_mod.sibling_fingerprints({}) == []
+
+    def test_sibling_file_lists_each_bundle_and_survives_a_write_error(self, tmp_path: Path):
+        import scripts.ci_rca.dedup as dedup_mod
+
+        dedup_mod._write_sibling_file(tmp_path, ["fp-a", ["fp-b", "fp-c"], ""])
+        assert (tmp_path / "sibling-fingerprints.txt").read_text(encoding="utf-8") == "fp-a\nfp-b fp-c\n"
+        dedup_mod._write_sibling_file(tmp_path / "missing", ["fp-a"])
+
+    def test_list_entry_closed_head_drop_unless_a_regression_is_read(self):
+        readings = {"fp-a": "drop", "fp-b": "drop"}
+        result = decide([["fp-a", "fp-b"]], finder=lambda fp: None, closed_head_resolver=lambda fp: readings[fp])
+        assert result.deduped is True
+        readings["fp-b"] = "regression"
+        result = decide([["fp-a", "fp-b"]], finder=lambda fp: None, closed_head_resolver=lambda fp: readings[fp])
+        assert result.run_agent is True
+
+    def test_main_reports_a_closed_head_drop(self, tmp_path: Path, capsys):
+        import scripts.ci_rca.dedup as dedup_mod
+
+        (tmp_path / "a.json").write_text(json.dumps({"fingerprint": "fp-a"}))
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(dedup_mod, "_default_finder", lambda fp, profile=None: None)
+            mp.setattr(dedup_mod, "_default_closed_head_resolver", lambda fp, profile=None: "drop")
+            assert main(["--bundles-dir", str(tmp_path)]) == 0
+        assert "closed head" in capsys.readouterr().out
+        assert (tmp_path / "sibling-fingerprints.txt").read_text(encoding="utf-8") == "fp-a\n"

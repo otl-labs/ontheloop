@@ -308,3 +308,11 @@ def test_unset_keeps_head_caret(tmp_path):
     _range_repo(tmp_path)
     with patch("scripts.ci_rca.vacuous_pass.ROOT", tmp_path):
         assert merged_diff_files() == ["c.py"]
+
+
+def test_no_tests_ran_without_deselection_is_vacuous():
+    assert parse_vacuous_pass("========== no tests ran in 0.01s ==========") is True
+
+
+def test_no_tests_ran_with_deselection_is_not_vacuous():
+    assert parse_vacuous_pass("no tests ran; 3 deselected") is False

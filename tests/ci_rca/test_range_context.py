@@ -445,3 +445,22 @@ def test_observe_pages_until_a_short_page(repo: Repo) -> None:
     api = Paged()
     assert rc.cmd_observe(argparse.Namespace(merge_sha="HEAD"), api=api, git=repo.git) == 0
     assert len(api.pages) == 2
+
+
+def test_probe_fails_when_resolve_prev_reads_past_the_window(repo: Repo) -> None:
+    c = probe_chain(repo)
+    api = RangeApi()
+    api.add(c[3])
+    api.add(c[2], step_conclusion="skipped")
+    api.add(c[1])
+    assert probe(api, repo, depth=2) == (1, "probe=fail resolve_prev did not return the nearest started commit")
+
+
+def test_probe_fails_on_a_started_plans_only_commit(repo: Repo) -> None:
+    c = probe_chain(repo)
+    api = RangeApi()
+    api.add(c[3])
+    api.add(c[2])
+    api.add(c[1])
+    code, out = probe(api, repo)
+    assert code == 1 and out == f"probe=fail oracle says plans-only for started commit {c[1]}"

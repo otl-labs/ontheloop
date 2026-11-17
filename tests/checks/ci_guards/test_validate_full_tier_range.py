@@ -88,3 +88,9 @@ def test_missing_contract_is_red(tmp_path: Path) -> None:
 def test_registered_in_fast_tier() -> None:
     assert "validate_full_tier_range" in [step.name for step in registry.pre_sequence()]
     assert registry.resolve("validate_full_tier_range") is v.validate_full_tier_range
+
+
+def test_non_mapping_contract_is_red(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    (root / CONTRACT).write_text("- a\n- b\n", encoding="utf-8")
+    assert _run(root) == [LABEL]
