@@ -24,8 +24,8 @@ scope:
   - file: src/row_rules/rules.py
     action: Modify
     purpose: >-
-      Literals only (its coverage is measured by tests/row_rules/test_rules.py alone, which is at its SLOC cap, and the
-      package must stay a stdlib leaf): _COLUMN_KEYS gains json_object and per_write; _DATEABLE_KINDS gains json_object
+      Literals only (its coverage is measured by tests/row_rules/test_rules.py alone, which is at 498 of 500 SLOC, so
+      evaluation follows plan A's adapter precedent): _COLUMN_KEYS gains json_object and per_write; _DATEABLE_KINDS gains json_object
       (so its exclude_before is recorded and the existing-row select fetches the column); WAIVABLE_KINDS gains
       json_object (the mark-then-drop removal every dated row leg has, and the conformance check's _SUPPORTED set); a new
       constant WRITER_SHAPE_KINDS = frozenset({"json_object"}) beside WRITER_REFERENCE_KINDS. The engine records, never
@@ -41,7 +41,7 @@ scope:
     action: Modify
     purpose: >-
       json_object_spec(column, params) validates one projected leg and raises RuleProjectionError on a malformed one;
-      json_object_columns(fields) builds every column's spec and refuses a leg that is also exempt; check_write calls
+      json_object_columns(fields) builds every column's spec and refuses a leg on a column whose sql_type is not VARCHAR; check_write calls
       check_json_objects after check_row, on every path that calls check_write (write_scd2, file_scd2,
       src/common/ducklake_telemetry_registration.py, the portal), with the dated binding below. A refusal raises
       RowRuleViolationError(table, "json_object", column, exclude_before) and
@@ -81,7 +81,8 @@ scope:
     action: Modify
     purpose: >-
       A json_object arm in _params_narrowed: free when max_bytes does not shrink and every base version is present and
-      equal in head (versions only added); any other params change, and an earlier exclude_before on a
+      equal in head (versions only added), applied after the existing advisory strip (Decision 269); any other params
+      change, and an earlier exclude_before on a
       WRITER_SHAPE_KINDS leg, is refused outright with no census-token route (the census compiles nothing for it), naming
       the two honest paths: a new schema_version, or a temporary exemption, the drop, then a new dated leg. The same
       date gap on WRITER_REFERENCE_KINDS is rec-5281.
@@ -111,8 +112,10 @@ scope:
   - file: scripts/contracts_schema.py
     action: Modify
     purpose: >-
-      FieldSpec gains per_write: bool | None = None (a column written fresh on every write, never carried forward by
-      an update); a model validator refuses per_write true on a field whose nullable is not true.
+      FieldSpec gains per_write: bool | None = None, described as "never carried forward from the prior row by a portal
+      update path (update_rec, update_decision); the writer stores what it is sent" (no write-time guarantee the writer
+      cannot give, Decision 269 Intent); a model validator refuses per_write true on a field whose nullable is not true or whose derivation is
+      realized (a derived column is never caller-written). On an event or control table it is inert (no update path).
     new_imports: []
   - file: scripts/schema_to_field_semantics.py
     action: Modify
@@ -146,8 +149,7 @@ scope:
   - file: tests/test_ops_data_portal_validators.py
     action: Modify
     purpose: >-
-      The portal pre-check nodes (step 4); 435 of 500 SLOC before plan B's build rewrites it, so re-measure after the
-      rebase and stay under 500.
+      The portal pre-check nodes (step 4); 437 of 500 SLOC after plan B's build, so stay under 500.
   - file: tests/ops_data_portal/test_update_per_write_column.py
     action: Create
     purpose: The update_rec and update_decision per_write nodes (step 4).
@@ -160,12 +162,14 @@ scope:
       The two generator per_write nodes (step 5), here because the coverage gate measures
       scripts/schema_to_field_semantics.py by this mapped file alone (100%, no baseline entry). Room (497 of 500 SLOC)
       comes from moving TestProjectRole out verbatim: about 482 SLOC after, so the two nodes fit in 17; measured
-      2026-11-17, the file without TestProjectRole still covers the generator 213/213.
+      2026-11-17, the file without TestProjectRole still covers the generator 213/213. If the two nodes do not fit,
+      move another class out only after re-measuring 100% with the mapped file alone; never a coverage_baseline entry.
   - file: tests/test_schema_to_field_semantics_columns.py
     action: Create
     purpose: >-
-      TestProjectRole moved verbatim from tests/test_schema_to_field_semantics.py (no node graduated), and the
-      lasting-rule node test_projected_per_write_equals_contract_declared (step 5; needs no coverage mapping).
+      TestProjectRole moved from tests/test_schema_to_field_semantics.py (no node graduated) with its own copy of that
+      file's importlib loader stanza (cross-test imports are banned), and the lasting-rule node
+      test_projected_per_write_equals_contract_declared (step 5; needs no coverage mapping).
 bundled_recommendations: []
 followon_recs:
   - rec-5281
@@ -332,7 +336,9 @@ verification_plan:
       want=['deploy-maintenance','maintenance-smoke','reconcile-gate','deploy-serving','smoke','deploy-telemetry-twin','telemetry-twin-smoke','deploy-telemetry','telemetry-smoke'];
       assert all(jobs.get(w)=='success' for w in want),jobs;print('DEPLOY_OK')"
     expected: Every named deploy and smoke job concluded success (a skipped job fails this step), then DEPLOY_OK.
-    fix_if: A red job is root-caused and fixed forward, never re-run to green (Decision 55).
+    fix_if: >-
+      A red job is root-caused and fixed forward, never re-run to green (Decision 55). A telemetry red attributable to
+      rec-5247 (open) is reported to the coordinator with the run id and is not fixed in this plan.
     hermetic: false
     graduation: not-applicable
   - step: 9
@@ -421,7 +427,8 @@ constraints:
     Code reaches production only through deploy-ducklake-lambdas.yml (Decisions 125, 126, 254); no Terraform change, no
     column add, no contract declares json_object or per_write, no admin step, no governed contract text.
   - >-
-    src/row_rules stays a pure stdlib leaf with literal-only edits; every evaluation lives in the ops writer adapter.
+    src/row_rules gets literal-only edits (its coverage test is at its SLOC cap); every evaluation lives in the ops
+    writer adapter (plan A's precedent).
     tests/row_rules/test_rules.py gains exactly one line, the json_object _WAIVED_RULES entry (SLOC cap).
   - field_semantics.yaml is regenerated, never hand-edited, and must come out byte-identical.
   - >-
@@ -453,8 +460,10 @@ context:
     Decision-scout r1 FLAGS_FOUND: SPIRIT NOTE 210 cl.3 (the draft hard-coded the column name in update_rec), resolved
     by the per_write attribute. r2 FLAGS_FOUND, CITE 65, 79, 210, 268; SPIRIT NOTE NS.5: per_write is a portal update
     semantic a direct writer caller can bypass. Accepted with note: not a data rule; plan E's alarm watches the
-    residual, plan F's hook trips direct calls, and C2's brief carries a writer-clock key option. r3 (written plan), r4 and r5 (after critiques r1, r2): the same. Decisions triaged:
-    217 of 217. Roadmap items intersected: 14; CONFLICT: 0; RELATED: 14. Serves: NS.5 4/5.
+    residual, plan F's hook trips direct calls, and C2's brief carries a writer-clock key option. r3 (written plan), r4
+    and r5 (after critiques r1, r2): the same. r6 (rebased on Decision 269): the same, plus SPIRIT NOTE 269 Intent on
+    the same residual, resolved by wording per_write as a portal-path attribute only. Decisions triaged: 218 of 218.
+    Roadmap items intersected: 14; CONFLICT: 0; RELATED: 14. Serves: NS.5 4/5.
   - >-
     Precedent: plan A (Decision 268, #2098; its Amendment 2) put reference evaluation in this adapter for the same
     reasons. C2 (separate thread, brief /mnt/project-files/rec-provenance-column/BRIEF-plan-C2.md) declares
@@ -465,20 +474,22 @@ context:
     files none). Deferral: this plan shares no file with it and repairs nothing in it, but step 8 needs telemetry-smoke
     green, so the build re-runs red_overlap and waits for a clear verdict or the operator's ruling.
   - >-
-    Overlaps: PLAN-rec-lints-advisory build #2099 (_rule_grammar, _rule_ratchet, write_validators and their tests);
-    unbuilt PLAN-telemetry-producer-admission-plan-review-capture (contracts_schema.py). Second to build rebases.
+    Overlaps: PLAN-rec-lints-advisory build #2099 merged (46ef5e26; this plan is rebased on it); unbuilt
+    PLAN-telemetry-producer-admission-plan-review-capture (contracts_schema.py). Second to build rebases.
   - >-
     Critique r1 REVISE (4 blocking, 5 nits), all taken: B1 per_write nodes in the coverage-mapped generator test; B2
     moment-claim node restated as a lasting rule; B3 map type params declared; B4 json_object ratchet arm and waivable;
     N1-N5 wording, update_decision honours per_write, step 6 reworded. Critique r2 REVISE (2 blocking, 6 nits), all
     taken: test_rules.py one-line entry; earlier date refused for json_object (rec-5281 for the reference kind and the
-    data-modeling-standard RATCHET text); pre_globs closure; C2-ready projection test; --check in step 5.
+    data-modeling-standard RATCHET text); pre_globs closure; C2-ready projection test; --check in step 5. Critique r3
+    PROCEED (7 nits, all taken after the rebase onto #2099: wording, VARCHAR and derived-column refusals, loader stanza,
+    rec-5247 step 8 disposition, kept shards refreshed, re-scout).
   - >-
     Graduated shards kept (node ids unchanged; nodes only added): ops-dependency-reference-conformance,
     ops-dependency-reference-precheck-and-gate, ops-dependency-reference-projection, ops-row-rules-projection,
     ops-row-rules-writer, ops-rule-census-dq-kinds, portal-gate-is-the-writer-gate, portal-producer-rules-follow-exemptions,
     portal-removal-ledger-by-mutation, portal-update-gate-never-stricter, rec-portal-glossary-lint-new-text-only,
-    rec-portal-glossary-lint-refuses, repair-dependency-tokens-dry-run-safe, rule-grammar-bans-enforced,
+    rec-portal-glossary-lint-reports, rule-grammar-advisory-leg, repair-dependency-tokens-dry-run-safe, rule-grammar-bans-enforced,
     write-time-conformance-arms-fail-closed, none-grandfathered-kind-unrepresentable,
     dependencies-reference-reader-loud-fail, executor-loop-kernel-path-not-automatable, growth-safe-snapshot-pins,
     control-class-registry-projection, field-semantics-event-dispatch, field-semantics-reconcile-scope-subset-rejection,
@@ -491,8 +502,10 @@ gate_rounds:
   - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:49af7c28717e049023b248dad919302eaaa017b947063395f4c6e0bd299513d7"}
   - {gate: decision-scout, round: 4, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:1d83db02f34a9a35045a179196dc10f31e8043228c8ff0fd20a951fa0779c80b"}
   - {gate: decision-scout, round: 5, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:cbe399ff2f358733460a59edc1823028718a57007889f70d7512eddd6649b150"}
+  - {gate: decision-scout, round: 6, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:d14db61af050fccc307f24275e6259d2ec0207f3c5587de5d663e3db9b9c7b44"}
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 4, nits: 5}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 6}
+  - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 7}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -500,7 +513,7 @@ pre_implementation_checklist:
   - All files in scope located and readable
   - Acceptance criteria understood and verifiable
   - red_overlap re-run clear against this plan, or the operator rules to proceed (Decision 254 cl.6)
-  - Plan B's build (#2099) merged, then rebase on origin/main
+  - Rebase on origin/main (plan B's build #2099 merged 2026-11-17, 46ef5e26)
 execution_steps:
   - >-
     src/row_rules/rules.py literals and the one tests/row_rules/test_rules.py line; src/common/ducklake_write_rules.py
