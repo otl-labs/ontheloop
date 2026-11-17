@@ -139,7 +139,7 @@ def test_scalar_resembling_an_alias_is_not_an_alias() -> None:
 
 def test_probe_routes_only_on_fixture_only_diffs(bound_root: Path) -> None:
     base = route.PROBE_DIR
-    four = [_f(f"{base}{s}.txt") for s in ("malformed", "proceed", "fail", "revise")]
+    four = [_f(f"{base}{s}.txt") for s in ("malformed", "proceed", "fail", "revise", "block", "flags")]
     assert _route(four, ROOT) == [f"verdict_probe.{s}" for s in route.PROBE_STEMS]
     assert _route(four[:1], ROOT) == ["verdict_probe.malformed"]
     assert _route([*four, _f("scripts/x.py")], ROOT) == []
@@ -188,3 +188,14 @@ def test_main_logs_routes_and_writes_the_routes_file(
         "plan_paths": [],
     }
     assert (tmp_path / "out").read_text() == "routes=1\n"
+
+
+def test_an_override_resolution_yields_no_routes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+    monkeypatch.setattr(route, "changed_files", lambda *a: (_ for _ in ()).throw(AssertionError("compare")))
+    res = {"resolved": True, "override": {"run_id": 1}, "head_sha": "a" * 40, "base_ref": "main", "draft": False}
+    route.resolve_pr.RESOLUTION.parent.mkdir(parents=True)
+    route.resolve_pr.RESOLUTION.write_text(json.dumps(res))
+    assert route.main([]) == 0
+    assert json.loads(route.ROUTES.read_text())["routes"] == []
