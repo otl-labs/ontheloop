@@ -1,0 +1,176 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: capture-pin-live-main-base
+intent: >-
+  Record each cloud session's start commit (telemetry_sessions.checkout_base_sha, the back-validation key) from now on.
+  The SessionStart capture pin hook resolves the merge-base against the default branch's live tip instead of a
+  remote-tracking ref that, in a fresh cloud container, is days stale and sits in a shallow history, so the line no
+  longer reads base=unknown (rec-4426). Every day without it is lost baseline for proving fixes (operator, 2026-11-17).
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-capture-pin-live-main-base.yaml
+phase: >-
+  T3.4 prerequisite capture (c1, "telemetry delta proves fix"): starts recording the session start commit the
+  fix-proof exposure test keys on. Closes no exit criterion, so closes_criteria is empty.
+closes_criteria: []
+cites: [dec:163, dec:176, dec:189, dec:244]
+scope:
+  - file: .claude/hooks/session_start_log_turn.sh
+    action: Modify
+    purpose: >-
+      Rule PV-1's base resolution changes; the line grammar, checkout, dirty, the project_ref line, stdout, exit code
+      and the no-index-refresh rule do not. New order: (1) read the default branch's live tip with one bounded
+      `git -C "$repo" ls-remote --exit-code origin refs/heads/main` (read-only, no local write); (2) when it yields a
+      sha S, base is `git merge-base HEAD S`, accepted at once when it equals HEAD or S (a direct ancestry fact, exact
+      even in a shallow history) and otherwise only once `git rev-parse --is-shallow-repository` prints false;
+      unresolved (S not yet local, or the history still shallow), it re-tries once a second until a wait bound
+      (15 s by default; a --base-wait-seconds=<0..60> argument overrides it for tests, any other value reads as the default; settings.json does not pass it, so no user-set setting is added) and then prints
+      base=unknown, never the tracking ref; (3) only when the live read fails (no origin remote, offline) does it keep
+      today's `git -C "$repo" merge-base HEAD origin/main`. Every git call stays under the existing 5 s bound. Header
+      comment updated to say so and to name rec-4426.
+    new_imports: []
+  - file: tests/telemetry/test_session_start_log_turn_base.py
+    action: Create
+    purpose: >-
+      rec-4426's named acceptance file. Builds a bare origin and a clone in tmp_path (no network) and runs a copy of
+      the hook. Nodes: test_base_resolved_when_origin_main_fetched_late (the cloud case: origin/main tracking ref
+      stale at an older commit, HEAD at the live tip, so today's script prints the stale commit or unknown; the new
+      one prints the live tip); test_base_waits_for_a_late_fetch_of_the_live_tip (HEAD on a work branch, the live tip
+      one commit ahead and absent locally, a background `git fetch origin main` after about 1 s; prints the fork
+      commit within the bound); test_unresolvable_live_tip_prints_unknown_not_the_tracking_ref (the live tip never
+      arrives, --base-wait-seconds=1; base=unknown although origin/main resolves); test_shallow_history_waits_
+      for_unshallow (a --depth 1 clone whose fork point is below the boundary prints unknown with the bound at 1);
+      test_no_origin_remote_keeps_the_tracking_ref (the existing local behaviour); test_wait_bound_values (--base-wait-seconds 0, 60,
+      61, -1, "x"); the existing one-ref-flag rule for --project-ref is unaffected by the new argument.
+    new_imports: []
+bundled_recommendations: [rec-4426]
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - >-
+    With a stale origin/main tracking ref and HEAD at the default branch's live tip, the hook prints base=<live tip>;
+    with the live tip unreachable it prints base=unknown, never the stale ref; with no origin remote it prints what
+    it prints today.
+  - "tests/hooks/test_session_start_log_turn.py passes unedited (pin line grammar, one stderr write, no index refresh)."
+  - >-
+    After the merge, the first session started on the merged main has a pin line whose base is a sha equal to
+    `git merge-base HEAD origin/main` read later in that session, and rec-4426 is closed by the squash's Resolves
+    trailer.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The cloud case resolves the live tip (rec-4426 acceptance).
+    command: bin/venv-python -m pytest "tests/telemetry/test_session_start_log_turn_base.py::test_base_resolved_when_origin_main_fetched_late" -q
+    expected: exit 0; red before (the file is new; against the unchanged hook the node prints the stale tracking commit).
+    fix_if: base reads the tracking ref (step order wrong) or unknown (ls-remote parse or the ancestry shortcut)
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: capture-pin-base-from-live-main
+  - step: 2
+    phase: pre-deploy
+    action: The whole new file passes (late fetch, unknown not tracking ref, shallow, no remote, bound values).
+    command: bin/venv-python -m pytest tests/telemetry/test_session_start_log_turn_base.py -q
+    expected: exit 0
+    fix_if: a node fails; fix the hook, never the node's expectation
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: waive
+    graduation_waiver_reason: >-
+      Step 1 graduates the acceptance node; the full tier runs this whole file on every main run.
+  - step: 3
+    phase: pre-deploy
+    action: The existing hook suite still passes unedited.
+    command: bin/venv-python -m pytest tests/hooks/test_session_start_log_turn.py -q
+    expected: exit 0
+    fix_if: the grammar, the single stderr write or the literal origin/main fallback line changed
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: waive
+    graduation_waiver_reason: Existing nodes already guarded by the turn-capture-hook-labels shard and the full tier.
+  - step: 4
+    phase: pre-deploy
+    action: >-
+      In this real cloud container, the edited hook against a scratch clone made the way the cloud makes it (shallow,
+      tracking ref stale) prints the live tip.
+    command: >-
+      D="$(mktemp -d)" && git clone -q --depth 50 "file://$PWD" "$D/r" && T="$(git -C "$D/r" rev-parse HEAD)" &&
+      git -C "$D/r" update-ref refs/remotes/origin/main "$(git -C "$D/r" rev-parse HEAD~40)" &&
+      git -C "$D/r" remote set-url origin "$(git remote get-url origin)" && mkdir -p "$D/r/.claude/hooks" &&
+      cp .claude/hooks/session_start_log_turn.sh "$D/r/.claude/hooks/" &&
+      bash "$D/r/.claude/hooks/session_start_log_turn.sh" 2>&1 >/dev/null | tee /dev/stderr | grep -q "base=$(git ls-remote origin refs/heads/main | cut -f1)" ; echo "exit=$?"
+    expected: >-
+      prints the pin line and exit=0 when the scratch HEAD is main's live tip; when main moved since the build's
+      rebase, the line names the fork commit or unknown, never HEAD~40 (record the line in the PR body).
+    fix_if: base equals the HEAD~40 commit (the tracking ref was used despite a live tip)
+    hermetic: false
+    graduation: not-applicable
+  - step: 5
+    phase: pre-deploy
+    action: Full tier, then HEAD attestation, after the build commit and rebase and before the push (handoff_policy); start it from the top-level session, backgrounded with a 2 h limit, and read only the attestation.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: the full tier exits 0 and the validation result attests the current HEAD's tree
+    fix_if: any failure; fix and rerun the full tier from the start
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion), and step 1 carries the durable regression.
+  - step: 6
+    phase: post-deploy
+    action: >-
+      The first session STARTED on the merged main (a new thread, not the build session, whose hooks loaded from the
+      older checkout) reads its own pin line and compares it with the merge-base read later in that session.
+    command: >-
+      T="$(ls -t ~/.claude/projects/*/*.jsonl | head -1)" && L="$(grep -o 'capture pin checkout=[0-9a-f]* base=[0-9a-z]*' "$T" | head -1)" &&
+      echo "$L" && test "${L##*base=}" = "$(git merge-base HEAD origin/main)"
+    expected: >-
+      prints the line and exits 0 (base is a sha equal to the merge-base); the coordinator relays the line from the
+      next new thread's first status.
+    fix_if: base=unknown in a session started on the merged main; read the hook's timing against sync_main and file a rec, fix forward
+    hermetic: false
+  - step: 7
+    phase: post-deploy
+    action: rec-4426 is closed by the merge's Resolves trailer, its closure_artifact shard resolving once the graduated shard is on main.
+    command: >-
+      AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids,
+      make_reader; rows, _ = fetch_recs_by_ids(make_reader(), ['rec-4426']); print(rows[0]['id'], rows[0]['status'])"
+    expected: prints rec-4426 closed after the closure job runs on the merge commit; record that run id.
+    fix_if: >-
+      still open: read the closure job's log for a refusal marker; never close it with a direct status write after a
+      Decision 186 refusal.
+    hermetic: false
+test_obligations:
+  - source: .claude/hooks/session_start_log_turn.sh
+    behavior: base comes from the live default-branch tip, waits boundedly, never falls back to a tracking ref once a live tip is known
+    verification_step: 1
+    test_selector: tests/telemetry/test_session_start_log_turn_base.py::test_base_resolved_when_origin_main_fetched_late
+    red_green_expectation: red before (stale tracking commit printed), green after
+constraints:
+  - "The pin line grammar is unchanged, so src/turn_capture/provenance.py, PARSER_VERSION and every contract stay untouched; checkout_base_sha's contract text (telemetry_sessions.yaml) already reads 'the merge-base of the checkout with the repository's default branch at that start ... NULL when it could not be resolved, never guessed'."
+  - "The hook writes nothing locally: ls-remote and merge-base only; no fetch, no ref update, no index refresh (it runs beside session_start_sync_main and session_start_deepen_history, which do write)."
+  - "No existing assertion is loosened (Decision 235); tests/hooks/test_session_start_log_turn.py is not edited."
+  - "No rescue agents or workaround loops (Decision 55)."
+context:
+  - "Decision-scout verdict NO_FLAGS (round 1). CITE: 189 (cl.1: VP 1 graduates, so the plan PR replays it red-before against a tree without the test file), 176 (the shard file name equals graduation_check_id), 244 (cl.1: the graduated node is a standing full-tier guard, so it is the deterministic node; the timing nodes stay ungraduated), 163 (cl.2: VP 5 runs the full tier). CONTRADICT: none. SPIRIT: none. RELATED: 55, 132, 224 (the wait bound is a test-only argument settings.json never passes, so no user-set setting), 211 (main is hard-coded as today; another default branch name reads unknown, never guessed), 199, 221, 235, 254, 57. Decisions triaged: 217 of 217. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2. Serves: NS.6 4/5."
+  - "Red overlap (scripts.ci_rca.red_overlap, 2026-11-17, main 3988bb09): verdict blocked; red rec-5247 (telemetry reader smoke 504 on sessions_window; slo_breached, product_regression, shared paths none). Deferral rationale: this plan edits none of its files and does not repair it; rec-5247 is owned by this workspace (operator ruling 2026-11-17, a separate thread plans its fix); Decision 254 cl.6 replaced the past-SLO block with an operator alarm and red_overlap's slo_breached rule predates it (rec-5108). The build re-runs red_overlap at its start."
+  - "plan_obligations: PLAN-telemetry-capture-hook-labels also scopes the hook; it built and merged as #1903 (a6d2e85a), so nothing is in flight on the file."
+  - "Root cause (read this session, 2026-11-17, reflog of a fresh project-thread container): refs/remotes/origin/main came from the image (2026-11-14, depth 50, 4bdf58a9); HEAD was fetched to 3988bb09 at 12:57:14Z; the pin hook ran at 12:57:18.5Z and printed base=unknown; session_start_sync_main moved origin/main at 12:57:19Z and deepen_history unshallowed after. So at hook time the tracking ref was three days stale in a shallow history, and merge-base found nothing; had it found something it would have been the stale commit. The rec's 'race with sync_main' reading holds in part. In this thread the pin attachment landed before the first prompt, so the open row would carry the facts (rec-4641 covers threads where it does not)."
+  - "Live read: `git ls-remote origin refs/heads/main` from this container returned main's tip through the git proxy (2026-11-17). In a fresh session HEAD is main's tip, so merge-base HEAD S equals HEAD and resolves at once with no wait."
+  - "Related, not bundled: rec-4641 (read-time recovery of checkout facts when the pin lands after the open row, a reader change); rec-5269 (deploy events) and rec-5270 (merge-to-session links), the other two baseline recordings of the same operator ruling."
+  - "Approvals: the operator said write the plan on 2026-11-17 13:12Z in this planning thread, after the presentation of the approach (live tip, bounded wait, unknown never the stale ref, offline keeps the tracking ref, main hard-coded)."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: NO_FLAGS, scout_input_fingerprint: "v1:2a4fd85d7dcc2b2dd455d6fda1a84c11b66d242543d2ea6f085c4d3b22b99b37"}  # pragma: allowlist secret
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "Hook: the PV-1 base change in .claude/hooks/session_start_log_turn.sh as scoped; the new test file; run VP 1-3."
+  - "Add the graduated shard config/agent/verification_registry/entries/capture-pin-base-from-live-main.yaml (VP 1's graduation)."
+  - "VP 4 in the build container."
+  - "CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; commit with Resolves: rec-4426; git fetch origin main && git rebase origin/main; VP 5 (full tier backgrounded from the top-level session, then --verify-head); push; open the PR; subscribe; code review in a fresh context; merge on code review PROCEED and green CI with Resolves: rec-4426 in the squash body; VP 7; hand VP 6 to the coordinator for the next new thread."
+  - "Report: what was implemented, verification results"
+rollback: Revert the build PR; the hook returns to the tracking-ref merge-base (base=unknown in fresh cloud sessions).
