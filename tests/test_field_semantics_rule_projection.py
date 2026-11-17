@@ -26,7 +26,7 @@ from scripts.contract_rules import CONTRACTS_DIR, DeclaredRule, declared_rules
 from scripts.schema_to_field_semantics import generate
 from src.row_rules.rules import RuleProjectionError
 
-_BASE_COLUMN_KEYS = frozenset({"role", "sql_type", "nullable", "description", "semantics"})
+_BASE_COLUMN_KEYS = frozenset({"role", "sql_type", "nullable", "description", "semantics", "per_write"})
 
 _Reader = Callable[[str], "tuple[DeclaredRule, ...]"]
 
@@ -42,6 +42,8 @@ def _expected_value(rule: DeclaredRule):
         return rule.params["pattern"]
     if rule.kind == "array_element_reference":
         return True
+    if rule.kind == "json_object":
+        return {"max_bytes": rule.params["max_bytes"], "versions": rule.params["versions"]}
     return rule.params["value"]
 
 
@@ -260,3 +262,13 @@ def test_dependencies_projects_writer_reference() -> None:
     assert columns["dependencies"]["array_element_reference"] is True
     assert "write_time_exemptions" not in columns["dependencies"]
     assert generate()["ops_tables"]["ops_recommendations"]["columns"]["dependencies"]["array_element_reference"] is True
+
+
+def test_json_object_projects_its_params() -> None:
+    params = {"max_bytes": 64, "versions": {1: {"required": {"schema_version": "integer"}}}}
+    rule = DeclaredRule("t", "j", "json_object", params, "2026-12-01")
+    with patch.object(projection, "declared_rules", return_value=(rule,)):
+        out = projection.project_row_rules("t", {"j": {"sql_type": "VARCHAR", "nullable": True}})
+    assert out["j"]["json_object"] == params
+    assert out["j"]["exclude_before"] == {"json_object": "2026-12-01"}
+    assert projection._rule_value(rule) == params

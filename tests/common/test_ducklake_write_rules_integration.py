@@ -188,3 +188,47 @@ def test_the_census_sql_and_the_engine_agree_row_for_row(con: Any) -> None:
         assert census_ids == _engine_ids(con, rule), (rule.column, rule.kind)
         compared += 1
     assert compared >= 25
+
+
+_JSON_LEG = {
+    "max_bytes": 200,
+    "versions": {1: {"required": {"schema_version": "integer", "writer": "string"}, "optional": {"n": "number?"}}},
+}
+
+
+@pytest.fixture
+def json_leg() -> Any:
+    import copy  # noqa: PLC0415
+
+    import src.common.ducklake_scd2_schema as schema  # noqa: PLC0415
+    import src.common.ducklake_writes as writes  # noqa: PLC0415
+
+    semantics = copy.deepcopy(schema.load_field_semantics())
+    column = semantics["ops_tables"][TABLE]["columns"]["context_v2_json"]
+    column.update({"json_object": _JSON_LEG, "per_write": True})
+    with (
+        patch.object(schema, "load_field_semantics", return_value=semantics),
+        patch.object(writes, "load_field_semantics", return_value=semantics),
+    ):
+        yield
+
+
+def test_a_malformed_json_object_is_rejected_on_every_write_verb(con: Any, json_leg: Any) -> None:
+    good = '{"schema_version": 1, "writer": "w", "n": 1.5}'
+    _seed(con, "01ULIDJSON1", OLD, id="rec-60")
+    before = _state(con)
+    with pytest.raises(RowRuleViolationError) as raised:
+        rt.file_scd2(con, ops_rec_fields(context_v2_json="not json"), table=TABLE)  # file_ops
+    assert (raised.value.rule, raised.value.column) == ("json_object", "context_v2_json")
+    assert _state(con) == before  # history, current and the counter unchanged
+    with pytest.raises(RowRuleViolationError):  # write_ops, a caller-keyed new-key insert
+        rt.write_scd2(con, ops_rec_record(id="rec-902", context_v2_json='{"schema_version": 2}'), table=TABLE)
+    with pytest.raises(RowRuleViolationError):  # update_ops, undated leg binds an existing row
+        rt.write_scd2(
+            con, ops_rec_record(id="rec-60", context_v2_json='{"schema_version": 1}'), table=TABLE, require_exists=True
+        )
+    assert _state(con) == before
+    ok = rt.file_scd2(con, ops_rec_fields(context_v2_json=good), table=TABLE)
+    assert con.execute(f"SELECT context_v2_json FROM {CURRENT} WHERE id = ?", [ok.rec_id]).fetchone()[0] == good
+    rt.write_scd2(con, ops_rec_record(id="rec-60", status="closed"), table=TABLE, require_exists=True)  # absent -> NULL
+    assert con.execute(f"SELECT context_v2_json FROM {CURRENT} WHERE id = 'rec-60'").fetchone()[0] is None

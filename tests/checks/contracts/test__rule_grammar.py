@@ -223,3 +223,28 @@ def test_advisory_only_true_on_repository_state_kinds() -> None:
         {"array_element_reference": {"advisory": True}, "write_time_exemptions": {"array_element_reference": cross}}
     )
     assert any("unknown sub-key" in e and "advisory" in e for e in errors)
+
+
+_JSON_LEG = {"max_bytes": 64, "versions": {1: {"required": {"schema_version": "integer"}}}}
+
+
+def test_scd2_json_object_leg_accepted() -> None:
+    assert _errors({"json_object": _JSON_LEG}) == []
+    assert _errors({"json_object": {**_JSON_LEG, "exclude_before": "2026-12-01"}}) == []
+
+
+def test_json_object_leg_malformed_params_refused() -> None:
+    errors = _errors({"json_object": {"max_bytes": 0, "versions": {}}})
+    assert any("json_object" in e and "max_bytes must be an integer" in e for e in errors), errors
+    errors = _errors({"json_object": {**_JSON_LEG, "bogus": 1}})
+    assert any("unknown sub-key" in e for e in errors), errors
+    assert any("must be a mapping" in e for e in _errors({"json_object": "x"}))
+
+
+def test_event_json_object_leg_outside_event_vocabulary() -> None:
+    errors = _errors({"json_object": _JSON_LEG}, cls="event")
+    assert any("outside the event vocabulary" in e for e in errors), errors
+
+
+def test_json_object_temporary_exemption_accepted() -> None:
+    assert _errors({"json_object": _JSON_LEG, "write_time_exemptions": {"json_object": _WHY}}) == []
