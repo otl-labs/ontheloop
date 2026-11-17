@@ -55,16 +55,20 @@ scope:
       subject_sha=None, source_event_id=None) -> list[FindingRow]. Behaviour: the persona is the executor-personas.yaml
       row whose registry_key equals identity.agent_type (scripts.persona_contracts.load_index); text is read for the
       LAST line that starts with BLOCK_MARKER, its rest parsed as one JSON object; a given result is used as is. The
-      object is validated (jsonschema, the dialect the persona contracts use) against a schema derived from the
-      persona contract's output_schema: its verdict property, the LISTS arrays with item properties restricted to the
-      mapped keys plus decision where an anchor or id needs it, every other property optional, plus optional
-      subject_sha (40 lower-case hex) and subject_dirty (boolean); additionalProperties is not enforced, so a full
-      validated run_persona result passes too. Status: parsed; block_absent (text has no marker line);
+      object is checked by a small stdlib checker in this module (no jsonschema: the fast tier never imports it,
+      tests/persona_contracts/test_schema.py::test_no_persona_module_imports_jsonschema) against a schema derived from
+      the persona contract's output_schema: its verdict property, the LISTS arrays with item properties restricted to
+      the mapped keys plus decision where an anchor or id needs it, every other property optional, plus optional
+      subject_sha and subject_dirty (boolean). The checker holds type, properties, required, items and enum only; it
+      drops pattern and length bounds, so a loosely formed finding id (a prose dimension such as src/x.py:12:Testing)
+      still parses and the run keeps its verdict; only a wrong type, a missing required key or an enum miss is
+      block_invalid. subject_sha is kept only when it is 40 lower-case hex, else NULL. additionalProperties is not
+      enforced, so a full validated run_persona result passes too. Status: parsed; block_absent (text has no marker line);
       block_invalid (bad JSON or schema failure); content_unavailable (text and result both None). Only parsed yields
       finding rows; every status yields the ordinal-0 verdict row (kind verdict, verdict NULL unless parsed), so a run
       is never dropped. subject_sha: the argument when given, else the object's. The function never raises on its
       inputs (an unknown agent_type is the one ValueError: not a verdict persona). No I/O beyond reading the two
-      contracts; no warehouse, network or transcript access; stdlib, yaml and jsonschema only. Under 500 SLOC.
+      contracts; no warehouse, network or transcript access; stdlib and yaml only. Under 500 SLOC.
     new_imports: [scripts.persona_contracts]
   - file: tests/telemetry/test_persona_findings.py
     action: Create
@@ -83,6 +87,9 @@ scope:
       (drift guard: every array property of each verdict persona contract's output_schema whose items carry a severity,
       plus decision_scout's cite and roadmap.rows, is in LISTS, every LISTS key exists in that schema, and the contract's
       verdict and severity accepted_values hold every enum value those schemas give, Decision 210);
+      test_the_check_holds_types_and_enums_but_not_id_patterns (a finding id with a prose dimension parses and keeps
+      its id as given; a findings item whose severity is a number, and an object without verdict, are block_invalid;
+      a subject_sha that is not 40 lower-case hex projects as NULL);
       test_the_code_review_skill_prints_the_block_the_projection_reads (the PERSONA_RESULT template line in
       .claude/skills/code-review/SKILL.md names exactly the keys the projected code_reviewer schema reads);
       test_contract_fields_match_the_row (the contract loads with scripts.contracts.load_contract as Class A, every
@@ -145,36 +152,47 @@ verification_plan:
     graduation_check_id: persona-findings-lists-cover-contracts
   - step: 4
     phase: pre-deploy
+    action: The contract and the projection's row stay one shape.
+    command: bin/venv-python -m pytest "tests/telemetry/test_persona_findings.py::test_contract_fields_match_the_row" -q
+    expected: exit 0; red before (the test file does not exist).
+    fix_if: a contract field and a FindingRow field differ; fix the row, never the contract (operator-approved text)
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: persona-findings-contract-matches-row
+  - step: 5
+    phase: pre-deploy
     action: The whole new test file.
-    command: bin/venv-python -m pytest tests/telemetry/test_persona_findings.py -q
+    command: bin/venv-python -m pytest tests/telemetry/test_persona_findings.py tests/persona_contracts/test_schema.py -q
     expected: exit 0
-    fix_if: any node fails
+    fix_if: any node fails; for test_no_persona_module_imports_jsonschema drop the import, never the guard
     hermetic: false
     graduation: waive
     graduation_waiver_reason: >-
-      A whole-file re-run of the file this plan creates (hermetic_authoring rule (v)); steps 1-3 graduate its standing
+      A whole-file re-run of the file this plan creates (hermetic_authoring rule (v)); steps 1-4 graduate its standing
       guards and the full tier runs the rest.
-  - step: 5
+  - step: 6
     phase: pre-deploy
-    action: Bind the contract and the skill edit to the approved words.
-    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug persona-findings-contract --base origin/main
-    expected: exit 0; every block matches word for word
+    action: Bind the contract and the skill edit to the approved words, the skill at its byte budget.
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug persona-findings-contract --base origin/main && test "$(wc -c < .claude/skills/code-review/SKILL.md)" -eq 12568
+    expected: exit 0; every block matches word for word and the skill is 12568 bytes
     fix_if: any word differs; fix the edit, never the sidecar (operator-approved text)
     hermetic: false
     graduation: waive
     graduation_waiver_reason: >-
       PR-relative to origin/main, so vacuous once merged; validate_merge_step's approved-text leg enforces the sidecar on
       every PR declaring this plan.
-  - step: 6
+  - step: 7
     phase: pre-deploy
     action: No physical table, writer, reader or registry change rides along.
     command: >-
-      git diff --name-only origin/main...HEAD | grep -E '^(config/lambda/ducklake/field_semantics.yaml|src/lambdas/|src/common/ducklake|src/telemetry/|src/turn_capture/|scripts/schema_to_field_semantics.py|scripts/field_semantics_event_projection.py|config/telemetry/)' ; test $? -eq 1
-    expected: exit 0 (grep finds no such path)
+      files=$(git diff --name-only origin/main...HEAD) && ! printf '%s\n' "$files" | grep -E '^(config/lambda/ducklake/field_semantics.yaml|src/lambdas/|src/common/ducklake|src/telemetry/|src/turn_capture/|scripts/schema_to_field_semantics.py|scripts/field_semantics_event_projection.py|config/telemetry/)'
+    expected: exit 0 (the diff reads and grep finds no such path; a failed diff fails the step)
     fix_if: a listed path changed; this plan derives at read only, so revert that change
     hermetic: false
-    graduation: not-applicable
-  - step: 7
+    graduation: waive
+    graduation_waiver_reason: PR-relative to origin/main, so vacuous once merged; constraints 2 and 3 bind every later plan through review.
+  - step: 8
     phase: pre-deploy
     action: Full tier, then HEAD attestation, after the build commit and rebase and before the push (handoff_policy); start it from the top-level session, backgrounded with a 2 h limit, and read only the attestation.
     command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
@@ -182,7 +200,7 @@ verification_plan:
     fix_if: any failure; fix and rerun the full tier from the start
     hermetic: false
     graduation: waive
-    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion), and steps 1-3 carry the durable guards.
+    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion), and steps 1-4 carry the durable guards.
 test_obligations:
   - source: scripts/persona_contracts/findings.py
     behavior: a persona run's PERSONA_RESULT line or validated result becomes one verdict row plus one row per finding; an unreadable result keeps only the verdict row
@@ -206,26 +224,28 @@ constraints:
   - "Finding text is never a field (CD.51); the row points at it by source_event_id, read through the masked content reader only (Decision 239)."
   - "The contract and the skill edit land word for word as docs/plans/approved/persona-findings-contract.yaml binds them (Decision 246); a change to either is a plan amendment that goes to the operator first."
   - "The plan-critique and decision-scout skills are not edited here (rec-5254 lands both together)."
+  - "scripts/persona_contracts/findings.py imports no jsonschema (test_no_persona_module_imports_jsonschema stays as it is)."
   - "No rescue agents or workaround loops (Decision 55)."
 context:
   - "Decision-scout round 2 (written plan and sidecar): NO_FLAGS, 216 of 216 triaged; CITE 231, 199 (the named read verb stays deferred to rec-5254, realized false), 200, 221, 229, 239, 246, 118; RELATED 210 (enum parity, now in the drift guard), 236, 207, 84, 87, 205, 206, 152, 228, 247, 263, 264, 168, 127, 128, 235, 244, 189, 250, 61, 59. Roadmap items intersected: 3; CONFLICT: 0; RELATED: 2. Serves: NS.6 4/5."
   - "Decision-scout verdict (round 1, on the draft): FLAGS_FOUND. CITE: 231 (cl.2 per-finding rows are the grader's input; cl.1 no run dropped at write), 199 (cl.1 derived at read; its derived-read-too-costly reversal is a materialization trigger; cl.3 identity read, never re-derived), 229 (cl.4 the dual-run this capture precedes), 118 (the contract passes validate_contract_drift in the same PR). CONTRACT WARN 200 (telemetry contracts $ref tenant_id and project_id): adopted, both fields added. SPIRIT NOTE NS.5 (a view no named verb serves): adopted, derived_by names the library function and governance_notes name rec-5254's named read path. SPIRIT NOTE 221 (one journal): adopted, a later physical copy is a rebuildable derived table, never a second journal. RELATED: 239, 236, 207, 210, 87, 205, 263, 264, 152, 228, 84, 86, 127, 128, 235. Decisions triaged: 216 of 216. Roadmap items intersected: 3; CONFLICT: 0; RELATED: 2. Serves: NS.6 4/5."
   - "Design: blind Fable consult /mnt/project-files/rec-4434-plan/advisor-brief/ADVICE.md, presentation PRESENTATION.md beside it. Operator sign-off 'write the plan' 2026-11-17 12:06 UTC, taking both recommendations (no physical table now; each in-session skill prints a machine line)."
   - "fork: storage | chosen: derived-at-read relation, no physical table | class: asked | precedent: Decision 199; data-modeling-standard.yaml derived-state; rec-4032 | precedent_kind: decision | reversible: yes | persisted: docs/contracts/telemetry_persona_findings.yaml"
-  - "fork: in-session source | chosen: the skill prints a PERSONA_RESULT line shaped by the persona contract | class: asked | precedent: docs/contracts/personas/code_reviewer.yaml output_schema | precedent_kind: contract | reversible: yes | persisted: .claude/skills/code-review/SKILL.md"
+  - "fork: in-session source | chosen: the skill prints a PERSONA_RESULT line shaped by the persona contract | class: asked | precedent: docs/contracts/executor-personas.yaml#persona_contract.fields.output_schema | precedent_kind: contract | reversible: yes | persisted: .claude/skills/code-review/SKILL.md"
   - "fork: split | chosen: plan A now, plan B rec-5254 after rec-4696 plan 2 and T6 (rec-4028); rec-4434 stays open until B | class: consistency-only | precedent: Decision 247 | precedent_kind: decision | reversible: yes | persisted: followon_recs"
-  - "fork: head SHA join | chosen: subject_sha recorded, the PR mapping left to PLAN-code-reviewer-add-dual-run (in-session runs often judge uncommitted state; told the coordinator for P1's planner) | class: consistency-only | precedent: audits/verdict-personas-on-actions-66ab746e.yaml:136-160 | precedent_kind: audit | reversible: yes | persisted: subject_sha semantics"
+  - "fork: head SHA join | chosen: subject_sha recorded, the PR mapping left to PLAN-code-reviewer-add-dual-run (in-session runs often judge uncommitted state; told the coordinator for P1's planner) | class: consistency-only | precedent: docs/contracts/executor-personas.yaml#persona_contract.fields.input_schema | precedent_kind: contract | reversible: yes | persisted: subject_sha semantics"
   - "Self-review gap (Decision 229 Problem): this build's in-session code review runs the skill text it edits; it closes at the code_reviewer flip (rec-4476)."
   - "Definition hash: the skill edit changes code_reviewer's definition_sha256 (rec-4433). No dual-run window exists yet (P1 waits on T6, T7, T8), so nothing restarts."
   - "Prose budget: .claude/skills/code-review/SKILL.md is at 12568 of 12568 B (plan_obligations NEAR_CAP, headroom 0); the sidecar's compaction keeps it at exactly 12568, so config/prose_budgets.yaml does not change. If main moves the file first, re-measure and re-place through a plan amendment."
   - "No unbuilt plan edits these scope files (plan_obligations at plan write). CI Reform's #2071 (wording routing, open) gates edits a plan's own sidecar does not bind; both always-ask files are bound here."
   - "Related-work check (red_overlap at plan write 2026-11-17): blocked by rule 1 only, on rec-5247 (telemetry-reader smoke 504 on sessions_window) and rec-5248 (telemetry-arrival unreadable on the 7-day roots read), both Critical ci_rca reds past their 4 h SLO with shared: [] (no path in common). Deferral rationale: this plan neither repairs nor touches either (no reader, Lambda or telemetry_verify path; it reads no warehouse), so it proceeds as planning only; the build re-runs red_overlap before /implement and, per slo_clock, its full tier waits for their repair if they are still red."
-  - "Graduated shards added by the build (sanction_rows, no scope row): persona-findings-code-review-block, persona-findings-skill-block-in-step, persona-findings-lists-cover-contracts."
+  - "Graduated shards added by the build (sanction_rows, no scope row): persona-findings-code-review-block, persona-findings-skill-block-in-step, persona-findings-lists-cover-contracts, persona-findings-contract-matches-row."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:7528bd4a8e684d8b2eae784489b404681a894ac8d241251b3ffaf9ee12472caa"}  # pragma: allowlist secret
   - {gate: wording-check, round: 1, verdict: FAIL, digest: 455526d3a1f5e6da496fb579b62ed721a83e950894aafe6a895366c1be36b1fc, base: 58985f485a500a954eceeed12c300ef9a7509f55, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 2, verdict: PASS, digest: 31a803a1479d3912cb3fdb84d8045f7074232bf8205cd57aea36a901da4bd96f, base: 58985f485a500a954eceeed12c300ef9a7509f55, selection: complete}  # pragma: allowlist secret
   - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: "v1:57d698fed024d33b5c712d2ed68acea54b15b2c0135ca593d1125420c123466d"}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 5}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -234,10 +254,10 @@ pre_implementation_checklist:
   - All files in scope located and readable
   - Acceptance criteria understood and verifiable
 execution_steps:
-  - "Contract and skill: place sidecar blocks c01 and k01-k07 (bin/venv-python -m scripts.roadmap.approved_text apply, or by hand word for word, {{DATE}} filled with the build date); confirm the skill is 12568 bytes; VP 5."
+  - "Contract and skill: place sidecar blocks c01 and k01-k07 (bin/venv-python -m scripts.roadmap.approved_text apply, or by hand word for word, {{DATE}} filled with the build date); confirm the skill is 12568 bytes; VP 6."
   - "Projection: write scripts/persona_contracts/findings.py as its scope row says."
-  - "Tests: the four fixtures and tests/telemetry/test_persona_findings.py; run VP 1-4."
-  - "Graduate VP 1-3 into config/agent/verification_registry/entries/ with their graduation_check_id slugs."
-  - "CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; commit (no Resolves trailer: rec-4434 stays open for rec-5254); git fetch origin main && git rebase origin/main; VP 5; VP 6; VP 7 (full tier backgrounded from the top-level session, then --verify-head; a timeout is BLOCKED, no push); push; open the PR; subscribe; code review; merge on code review PROCEED and green CI under standing authorisation (validate_merge_step reads the sidecar's approval)."
+  - "Tests: the four fixtures and tests/telemetry/test_persona_findings.py; run VP 1-5."
+  - "Graduate VP 1-4 into config/agent/verification_registry/entries/ with their graduation_check_id slugs."
+  - "CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; commit (no Resolves trailer: rec-4434 stays open for rec-5254); git fetch origin main && git rebase origin/main; VP 6; VP 7; VP 8 (full tier backgrounded from the top-level session, then --verify-head; a timeout is BLOCKED, no push); push; open the PR; subscribe; code review; merge on code review PROCEED and green CI under standing authorisation (validate_merge_step reads the sidecar's approval)."
   - "Report: what was implemented, verification results, merge SHA."
 rollback: Revert the build PR; nothing is stored or deployed, so no data or infrastructure rollback exists.
