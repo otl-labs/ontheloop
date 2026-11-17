@@ -1,0 +1,221 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: deploy-event-record
+intent: >-
+  Make the history of every governed Lambda code deploy readable and complete enough to date a fix's effective day
+  (the deploy of the first last-green commit covering it). Each deploy already overwrites one record per function,
+  and the bucket's versioning keeps every overwritten copy (Decision 100: the native primitive, not a second store).
+  This plan adds the run and trigger facts the record lacks, declares the versions as the deploy history, and adds a
+  guard that no lifecycle rule ever expires them (rec-5269; operator ruling 2026-11-17, start recording now).
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-deploy-event-record.yaml
+phase: >-
+  T3.4 prerequisite capture (c1, "telemetry delta proves fix"): the fix-attempt stamp's effective day reads this
+  history. Closes no exit criterion, so closes_criteria is empty.
+closes_criteria: []
+cites: [dec:100, dec:246, dec:254]
+scope:
+  - file: scripts/build_lambda_deploy.py
+    action: Modify
+    purpose: >-
+      `_write_ducklake_deploy_record`'s record (both channels, ducklake and prod) gains five keys beside the four it
+      has: schema_version 2 (the four-key shape is version 1, implied by absence), run_id and run_attempt
+      (GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT as the strings the environment holds, else null),
+      trigger (GITHUB_EVENT_NAME, else "break_glass"), workflow (GITHUB_WORKFLOW, else null). Same key, same single
+      `aws s3 cp` call, same failure handling; the four existing keys keep their names, values and rules. Docstring
+      updated.
+    new_imports: []
+  - file: docs/contracts/build-lambda.yaml
+    action: Modify
+    purpose: >-
+      Exactly the three blocks of docs/plans/approved/deploy-event-record.yaml, word for word: an amendment_log entry;
+      deploy_record.shape gains the five keys; a new deploy_record.history entry declaring the bucket's noncurrent
+      versions as the append-only deploy history (grain function x deploy), the earliest version dated 2026-07-13, no
+      lifecycle rule under deploy-records/ (naming the VP 2 node), the fix-proof effective-day consumer, source_git_sha
+      never the last-green authority (Decision 254 cl.2), no named-verb read path until a journal load (rec-5077),
+      and per-account scope until SIT stands (Decision 252 cl.6; rec-5028, rec-5033).
+    new_imports: []
+  - file: docs/plans/approved/deploy-event-record.yaml
+    action: Create
+    purpose: >-
+      Approved-text sidecar binding the three build-lambda.yaml blocks word for word (Decision 246); added by this plan
+      PR (the build never edits it); the operator approves it on the approved-text Environment gate.
+    new_imports: []
+  - file: tests/build_lambda_deploy/test_deploy_records.py
+    action: Modify
+    purpose: >-
+      Additive only, existing nodes byte-identical. New node test_record_carries_run_facts (rec-5269's acceptance):
+      with GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT, GITHUB_EVENT_NAME and GITHUB_WORKFLOW set, the record carries
+      schema_version 2 and the four values; new node test_break_glass_record_carries_null_run_facts (none set: run_id
+      and run_attempt null, workflow null, trigger break_glass, schema_version 2; the node calls monkeypatch.delenv on
+      GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT, GITHUB_WORKFLOW, GITHUB_EVENT_NAME, LAMBDA_ARTIFACT_SHA and GITHUB_SHA, since
+      GitHub Actions sets them and tests/conftest.py strips only GITHUB_EVENT_NAME).
+    new_imports: []
+  - file: tests/checks/iam_tf/test_ducklake_maintenance_tf_invariants.py
+    action: Modify
+    purpose: >-
+      Additive only. New node TestDataLakeLifecycleGoverned::test_no_rule_reclaims_deploy_record_history: the data_lake
+      bucket's versioning status is Enabled, every lifecycle rule carries a filter prefix (no bucket-wide rule), and no
+      rule's prefix (resolved from its declared local) is a prefix of "deploy-records/" or starts with it. Red cases in
+      the same node on synthetic text, each calling the node's module-level predicate under
+      pytest.raises(AssertionError) as this module's existing red cases do: a rule with prefix "deploy-records/", a
+      rule with an empty filter, a rule whose ${local.*} prefix does not resolve (fails closed), and versioning
+      status "Suspended" all fail.
+    new_imports: []
+bundled_recommendations: [rec-5269]
+followon_recs: []
+infrastructure_dependencies:
+  - "None: no IAM, Terraform or workflow edit. The record write uses the deploy role's existing PutObject on deploy-records/<channel>/*; versioning is already Enabled (terraform/personal/main.tf aws_s3_bucket_versioning.data_lake)."
+acceptance_criteria:
+  - "Every governed deploy's record carries schema_version 2, run_id, run_attempt, trigger and workflow beside its four existing keys; a break-glass record carries nulls and trigger break_glass."
+  - "A test fails if the data_lake bucket's versioning is not Enabled or any lifecycle rule could expire noncurrent versions under deploy-records/."
+  - "Existing record readers (deploy_gate.py, code_drift.py, the smoke freshness checks, lambda_telemetry_golden_gates.py and restore_rehearsal_aws.py, all reading keys with .get) and existing tests are unchanged and pass."
+  - "After the merge, a governed ducklake run (the earliest VP 6's listing finds) whose gate sha descends from the merge commit and whose deploy-maintenance job succeeded writes schema_version 2 records naming that run, with source_git_sha equal to its gate sha; rec-5269 is closed by the squash's Resolves trailer."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The record carries the run facts (rec-5269 acceptance).
+    command: bin/venv-python -m pytest "tests/build_lambda_deploy/test_deploy_records.py::TestWriteDucklakeDeployRecord::test_record_carries_run_facts" "tests/build_lambda_deploy/test_deploy_records.py::TestWriteDucklakeDeployRecord::test_break_glass_record_carries_null_run_facts" -q
+    expected: exit 0; red before (the node is new and the record has four keys).
+    fix_if: a key is missing, misnamed or not null-safe
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: deploy-record-carries-run-facts
+  - step: 2
+    phase: pre-deploy
+    action: The history guard holds on the real Terraform and fails on the synthetic bad rules.
+    command: bin/venv-python -m pytest "tests/checks/iam_tf/test_ducklake_maintenance_tf_invariants.py::TestDataLakeLifecycleGoverned::test_no_rule_reclaims_deploy_record_history" -q
+    expected: exit 0; red before (the node is new).
+    fix_if: the prefix resolution misses a rule or the red cases pass
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: deploy-record-history-never-reclaimed
+  - step: 3
+    phase: pre-deploy
+    action: The existing deploy and lifecycle suites pass with no node edited.
+    command: bin/venv-python -m pytest tests/build_lambda_deploy tests/test_build_lambda.py tests/test_build_lambda_packaging.py tests/checks/iam_tf/test_ducklake_maintenance_tf_invariants.py tests/ci/test_deploy_gate.py tests/convergence_health/code_drift -q
+    expected: exit 0
+    fix_if: a reader or an existing node fails (a renamed or retyped existing key)
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: waive
+    graduation_waiver_reason: Existing suites, already run by the full tier; steps 1 and 2 graduate the new behaviour.
+  - step: 4
+    phase: pre-deploy
+    action: Bind the contract edits to the approved words.
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug deploy-event-record --base origin/main
+    expected: exit 0; both edits match word for word
+    fix_if: any word differs; fix the edit, never the sidecar
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: PR-relative to origin/main, so vacuous once merged; validate_merge_step's approved-text leg enforces the sidecar.
+  - step: 5
+    phase: pre-deploy
+    action: Full tier, then HEAD attestation, after the build commit and rebase and before the push (handoff_policy); start it from the top-level session, backgrounded with a 2 h limit, and read only the attestation.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: the full tier exits 0 and the validation result attests the current HEAD's tree
+    fix_if: any failure; fix and rerun the full tier from the start
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion), and steps 1 and 2 carry the durable regressions.
+  - step: 6
+    phase: post-deploy
+    action: >-
+      The first governed ducklake deploy after the merge whose gate sha descends from the merge commit and whose
+      deploy-maintenance job succeeded writes version 2 records (scripts/build_lambda_deploy.py is not a watched source
+      path, so this is the next deploy the gate ships on a watched-path change; it may be days). Runs that were
+      gate-skipped also conclude success, so the run is chosen by its jobs and gate sha, never by run conclusion.
+    command: >-
+      git fetch -q origin main && MS="$(git log origin/main -1 --format=%H --grep='Resolves: rec-5269')" &&
+      M="$(git show -s --format=%cI "$MS")" &&
+      for id in $(gh api "repos/otl-labs/ontheloop/actions/workflows/deploy-ducklake-lambdas.yml/runs?branch=main&per_page=100&created=%3E%3D${M%%+*}"
+      --jq '.workflow_runs | sort_by(.created_at) | .[].id'); do
+      J="$(gh api "repos/otl-labs/ontheloop/actions/runs/$id/jobs?per_page=100" --jq '.jobs[] | [.id, .name, .conclusion] | @tsv')";
+      printf '%s\n' "$J" | grep -qP '\tdeploy-maintenance\tsuccess$' || continue;
+      G="$(printf '%s\n' "$J" | awk -F'\t' '$2 ~ /^gate/ {print $1; exit}')";
+      S="$(gh api "repos/otl-labs/ontheloop/actions/jobs/$G/logs" | grep -o 'DEPLOY-GATE deploy reason=[^ ]* sha=[0-9a-f]*' | head -1 | sed 's/.*sha=//')";
+      git merge-base --is-ancestor "$MS" "$S" && { echo "run=$id gate_sha=$S"; break; }; done
+    expected: >-
+      prints one line run=<id> gate_sha=<S> for the earliest qualifying run among the newest 100 runs since the merge
+      (any qualifying run proves version 2 records); no line means no qualifying deploy has shipped yet (wait for one, never an
+      RCA). Agent sessions have no S3 read, so the coordinator then asks the operator for one CloudShell paste:
+      `aws s3 cp s3://<data lake bucket>/deploy-records/ducklake/agent-platform-ducklake-maintenance.json -` shows
+      schema_version 2, run_id equal to <id> and source_git_sha equal to <S>, provided no later deploy has shipped
+      since (otherwise read that object's version written by run <id>). The maintenance record is written by the
+      ungated deploy-maintenance job; the writer's record can be held behind reconcile-gate. The prod channel's record
+      is read the same way after its next deploy.
+    fix_if: >-
+      the qualifying run's record lacks schema_version 2 or names another run, or a freshness step fails on the new
+      record; stop and RCA (Decision 55)
+    hermetic: false
+  - step: 7
+    phase: post-deploy
+    action: rec-5269 is closed by the merge's Resolves trailer, its closure_artifact shard resolving once the graduated shard is on main.
+    command: >-
+      AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids,
+      make_reader; rows, _ = fetch_recs_by_ids(make_reader(), ['rec-5269']); print(rows[0]['id'], rows[0]['status'])"
+    expected: prints rec-5269 closed after the closure job runs on the merge commit; record that run id.
+    fix_if: still open; read the closure job's log for a refusal marker; never close it with a direct status write.
+    hermetic: false
+test_obligations:
+  - source: scripts/build_lambda_deploy.py
+    behavior: the deploy record carries schema_version 2 and the run facts, null-safe for break-glass
+    verification_step: 1
+    test_selector: tests/build_lambda_deploy/test_deploy_records.py::TestWriteDucklakeDeployRecord::test_record_carries_run_facts
+    red_green_expectation: red before (four-key record), green after
+  - source: scripts/build_lambda_deploy.py
+    behavior: a break-glass deploy record carries null run facts and trigger break_glass
+    verification_step: 1
+    test_selector: tests/build_lambda_deploy/test_deploy_records.py::TestWriteDucklakeDeployRecord::test_break_glass_record_carries_null_run_facts
+    red_green_expectation: red before (no schema_version or trigger key), green after
+  - source: docs/contracts/build-lambda.yaml
+    behavior: the deploy_record words equal the approved sidecar
+    verification_step: 4
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug deploy-event-record --base origin/main
+    waiver_reason: >-
+      Contract prose, not behaviour: the words are bound by the approved-text check (VP 4 and validate_merge_step),
+      and the history entry's one enforceable rule is proven by VP 2's lifecycle guard node.
+constraints:
+  - "Grain first (data-modeling-standard.yaml): the history's grain is one noncurrent version per successful function deploy, insert-only by versioning; the current record stays the pointer its readers use."
+  - "No IAM, Terraform or workflow edit: the two deploy workflows and scripts/ci/deploy_gate.py are another workspace's active area (rec-5108, rec-5028, rec-5033)."
+  - "Logs print keys and counts only (Decision 101); no account id."
+  - "No existing assertion is loosened or edited (Decision 235)."
+  - "No rescue agents or workaround loops (Decision 55)."
+context:
+  - "Decision-scout verdict: round 2 FLAGS_FOUND, two NOTEs and no WARN (round 1 WARN Decision 100 resolved by the pivot to native versions). CITE 100, 246, 254. Decisions triaged: 217 of 217. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2. Serves: NS.6 4/5."
+  - "Scout NOTE Decision 252 (SIT): the history is per account; when SIT stands the effective day re-keys to the SIT deploy (Decision 252 cl.6, Decision 254 sit-stood-up; rec-5028/rec-5033) and replicating deploy-records/ into SIT is out of scope. Goes into the history entry and sidecar text."
+  - "Scout NOTE NS.5: no named verb reads the history until a journal load copies it (rec-5077 designs that journal's writer); agent sessions cannot list versions (Decision 256). In the history entry and sidecar text."
+  - "Consult: /mnt/project-files/baseline-signals/advisor-brief/ADVICE.md (blind Fable, 2026-11-17) recommended immutable event objects under the existing prefix; set aside after the scout's Decision 100 finding (the advisor did not weigh versioning). Kept from it: trigger and run facts; failures stay in run logs."
+  - "History before this plan (operator CloudShell read, 2026-11-17 13:38Z): deploy-records/ holds 12 current records and 584 noncurrent versions (133 KB), the oldest dated 2026-07-13, so versioning has kept every overwritten four-key record since then. Agent sessions still have no S3 read (Decision 256); VP readbacks that list versions are operator CloudShell steps."
+  - "Registry shards kept (the TF test file change is additive): data-lake-lifecycle-per-rule-invariants, gc-ops-enablement-baseline-fixture-gate and maintenance-alarm-descriptions-threshold-free. The last two already name nodes that moved to test_ducklake_maintenance_gc_rule_invariants.py ('not found'); filed as rec-5278, not fixed here (Decision 59)."
+  - "rec-5269 asked for a channel field; the channel is the record key's prefix (deploy-records/<channel>/), which the history entry names, so no key is added for it."
+  - "Overlap: asked CI Reform on the coordinator log 2026-11-17 13:25Z about rec-5108, rec-5028, rec-5033 on the deploy channel; this plan edits none of their files."
+  - "Approvals: the operator chose 'Extend record, use S3 versions' on the plan 2 card (2026-11-17 13:39Z) and said write the plan (13:41Z) in this planning thread. The sidecar's words still need the approved-text Environment approval (Decision 246)."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:d48031c96359ce6178984b355ff05224fc467093fd2a064099e928880ccfd406"}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:012d7332693e20f0c30c57b945de4bd5b673207ded1d270f47839820c02aa140"}  # pragma: allowlist secret
+  - {gate: wording-check, round: 1, verdict: PASS, digest: f152b0edfdaf3b15bbb54d13ad403aae14001410762aa704467cfbb7f5616e5c, base: 56de98884df85d742b71ed8199431e2c7b4ccd90, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 1, nits: 8}
+  - {gate: wording-check, round: 2, verdict: PASS, digest: 368cc47e004ecf35f8d262bc8e793e4ea4b3510376b37e72da226194e0d1351f, base: 56de98884df85d742b71ed8199431e2c7b4ccd90, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 5}
+  - {gate: wording-check, round: 3, verdict: PASS, digest: f79a2e3924652c40b3f43a8f25de17a92a34994caf35446b7f4a2592bef8a28d, base: 56de98884df85d742b71ed8199431e2c7b4ccd90, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 4}
+  - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 4}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "The five keys in scripts/build_lambda_deploy.py; the two test nodes; the lifecycle guard node; VP 1-3."
+  - "The deploy_record edits in docs/contracts/build-lambda.yaml word for word from the sidecar; VP 4. If another change to build-lambda.yaml lands first and an anchor no longer matches, stop: the sidecar is re-anchored and re-approved through a new approval run, never hand-edited. PLAN-telemetry-content-reader-lock and PLAN-scheduled-workflow-dispatch also edit this file; building this plan first avoids that cycle."
+  - "Add the graduated shards config/agent/verification_registry/entries/deploy-record-carries-run-facts.yaml and deploy-record-history-never-reclaimed.yaml (VP 1 and 2's graduations)."
+  - "CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; commit with Resolves: rec-5269; git fetch origin main && git rebase origin/main; VP 5; push; open the PR; subscribe; code review in a fresh context; merge on code review PROCEED and green CI with Resolves: rec-5269 in the squash body; VP 6 and 7."
+  - "Report: what was implemented, verification results"
+rollback: Revert the build PR; records return to four keys; versions already written stay (insert-only, harmless).
