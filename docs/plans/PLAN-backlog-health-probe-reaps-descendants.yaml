@@ -25,7 +25,7 @@ scope:
       uses. With a new PID namespace whose init is unshare's forked child, killing unshare on TimeoutExpired kills the
       namespace init (PR_SET_PDEATHSIG via --kill-child) and the kernel kills every process left in the namespace.
       (2) run_one makes its scratch dir with tempfile.mkdtemp and removes it in a finally through a helper that retries
-      shutil.rmtree on OSError up to 5 attempts 0.2 s apart with an injectable sleep (the namespace teardown is
+      shutil.rmtree on OSError up to 10 attempts 0.5 s apart (about 4.5 s, spent only on the failure path) with an injectable sleep (the namespace teardown is
       asynchronous to unshare's exit, so a just-killed descendant can lag by milliseconds), and re-raises the last
       OSError when every attempt fails, so a real escape (the namespace did not engage) still fails the job loudly as
       today (Decision 55: no hidden workaround). Removal never changes a verdict. (3) Module docstring names unshare -rpmn --fork
@@ -38,10 +38,18 @@ scope:
       TestRunOne::test_scratch_removal_retries_then_succeeds, TestRunOne::test_scratch_removal_raises_after_bounded_retries,
       TestRunOne::test_timeout_kills_descendants): run_one's argv starts with the shared PID-namespace prefix; isolation_available's argv starts with the
       same prefix; a scratch removal that fails once then succeeds leaves no dir and keeps the verdict; a removal that
-      fails on every attempt raises OSError after exactly 5 attempts; and one live node (skipped only when
+      fails on every attempt raises OSError after exactly 10 attempts (sleep injected, so the node takes no wall time); and one live node (skipped only when
       the real primitive is unavailable) where a timed-out command whose descendant keeps writing into
       PYTHONPYCACHEPREFIX returns TIMEOUT with no surviving descendant and no OSError. test_uses_isolated_argv's -rmn
       membership assertion moves to the new prefix (the only existing assertion edited; it is tightened, not loosened).
+      The prefix nodes assert the literal tokens -rpmn, --fork and --kill-child in order before --, never equality with
+      probe's own constant. The live node skips only when probe.isolation_available(tmp_path) is false, with a skip
+      reason starting "env: " (validate_test_skip_citations); its command runs a descendant carrying a unique argv
+      marker that appends a heartbeat to a file outside the bind (tmp_path's sibling) and writes into
+      PYTHONPYCACHEPREFIX; after run_one returns TIMEOUT (timeout=1) it waits 1 s and asserts no /proc/*/cmdline holds
+      the marker and the heartbeat file stopped growing; a finally pkills the marker so a red-before run leaves nothing
+      behind. The module docstring's "Hermetic: never depends on a real unshare" sentence is rewritten to say every node
+      is hermetic except test_timeout_kills_descendants, which needs the real primitive and skips without it.
     new_imports: []
 bundled_recommendations: [rec-3691]
 followon_recs: []
@@ -49,7 +57,7 @@ infrastructure_dependencies: []
 acceptance_criteria:
   - "Every probe command and the availability probe run under unshare -rpmn --fork --kill-child, built from one shared prefix."
   - "A probe command that times out leaves no live descendant, and run_one returns TIMEOUT without raising."
-  - "Scratch removal retries a lagging teardown (5 attempts, 0.2 s apart), never changes a verdict, and still raises if a directory cannot be removed."
+  - "Scratch removal retries a lagging teardown (10 attempts, 0.5 s apart), never changes a verdict, and still raises if a directory cannot be removed."
   - "After merge, a dispatched backlog-health run on main (dry_run) and the next scheduled run both finish with the probe job green."
 verification_plan:
   - step: 1
@@ -80,7 +88,7 @@ verification_plan:
     hermetic: true
     expected_literals: [" passed"]
     graduation: waive
-    graduation_waiver_reason: Duplicates the already-graduated backlog-health-package-suite and backlog-probe-* checks.
+    graduation_waiver_reason: The probe file is graduated whole (backlog-probe-never-false-pass) and the package suite by backlog-health-package-suite; the workflow test file is already run by the full tier, and step 1 carries the new regression.
   - step: 4
     phase: pre-deploy
     action: Full tier, then HEAD attestation, after the build commit and rebase and before the push (handoff_policy); start it backgrounded from the top-level session with a 2 h limit.
@@ -90,6 +98,21 @@ verification_plan:
     hermetic: false
     graduation: waive
     graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion).
+  - step: 9
+    phase: pre-deploy
+    action: >-
+      Before merge, prove the primitive on a GitHub runner: dispatch backlog-health on the build PR's branch with
+      dry_run=true (writes no rec), so a -p failure never reaches the Decision 201 closure gate.
+    command: gh workflow run backlog-health.yml --repo otl-labs/ontheloop --ref BUILD_BRANCH -f dry_run=true
+    expected: >-
+      the probe job concludes success and its log has no OSError; record the run id in the PR body (substitute the build
+      branch name; from a session use mcp__github__actions_run_trigger with ref set to the branch).
+    fix_if: >-
+      probe fails with OSError or every verdict is isolation_unavailable: the flags did not engage on the runner; stop
+      and report, do not merge. If census fails on credentials (the branch role may not trust a non-main ref, UNPROVEN),
+      record that and rely on VP 5 and VP 8 after merge.
+    hermetic: false
+    graduation: not-applicable
   - step: 5
     phase: post-deploy
     action: Dispatch backlog-health on main with dry_run=true (writes no rec) and read its jobs.
@@ -103,7 +126,8 @@ verification_plan:
     hermetic: false
   - step: 6
     phase: post-deploy
-    action: The next scheduled run (Monday 2026-11-23 10:00Z) succeeds and the liveness probe agrees; then close rec-5094 with the operator's word, since its source says a human closes it.
+    action: >-
+      The next scheduled run (Monday 2026-11-23 10:00Z) succeeds and the liveness probe agrees; then close rec-5094 with the operator's word, since its source says a human closes it: bin/venv-python -m scripts.ops_data_portal --update-rec rec-5094 --status closed --resolution naming the run id.
     command: bin/venv-python -m scripts.convergence_health --liveness-probe backlog-health.yml success
     expected: the probe reports a scheduled success within threshold; record the run id
     fix_if: still stale; read the scheduled run's failed job before anything else
@@ -120,17 +144,20 @@ verification_plan:
   - step: 8
     phase: post-deploy
     action: >-
-      The Decision 201 closure gate's sandbox (ci.yml trailer-acceptance-evaluate, which runs this same run_all) still
-      engages on the merge commit: its job succeeds and rec-3691's verdict is holds, not isolation_unavailable.
+      The Decision 201 closure gate's sandbox (ci.yml trailer-acceptance-evaluate calls this same run_all, which runs
+      isolation_check even on an empty payload) still engages on the merge commit.
     command: >-
-      gh run list --repo otl-labs/ontheloop --workflow ci.yml --branch main --commit MERGE_SHA --json databaseId,conclusion
+      SHA=$(git fetch -q origin main && git log origin/main -1 --format=%H --grep='backlog-health-probe-reaps-descendants') &&
+      gh run list --repo otl-labs/ontheloop --workflow ci.yml --commit "$SHA" --json databaseId,conclusion
     expected: >-
-      the ci.yml run on the merge SHA has trailer-acceptance-evaluate success and its acceptance_verdict artifact records
-      rec-3691 holds; record the run id. (From a session, use mcp__github__actions_list list_workflow_runs and
-      list_workflow_jobs.)
+      that run's trailer-acceptance-evaluate job log shows the line [rec_trailer_acceptance evaluate] sha=<merge sha>
+      isolation_available=True (equivalently acceptance_verdict.json top-level isolation_available true); record the run
+      id. rec-3691's acceptance is a single pytest node, so its holds verdict comes from trailer-junit-verdict's
+      junit_verdict.json, not acceptance_verdict.json (cmd_evaluate always exits 0, so job success alone proves
+      nothing). From a session, use mcp__github__actions_list list_workflow_runs / list_workflow_jobs and get_job_logs.
     fix_if: >-
-      isolation_unavailable: -p does not engage on that runner; revert the build PR (closures are refused until it is)
-      and report to the coordinator
+      isolation_available=False: -p does not engage on that runner; revert the build PR (probeable closures are refused
+      until it is) and report to the coordinator
     hermetic: false
 test_obligations:
   - source: scripts/backlog_health/probe.py
@@ -151,11 +178,12 @@ context:
   - "Red overlap (scripts.ci_rca.red_overlap, 2026-11-17T19:15Z): verdict blocked by rec-5247 (telemetry-reader smoke 504; slo_breached, product_regression, shared paths none). Deferral rationale: Feedback Loop owns it (coordinator log 2026-11-17 12:58Z), this plan edits none of its files and does not repair it; Decision 254 cl.6 makes the past-SLO case an operator alarm, and red_overlap's slo_breached rule predates it (rec-5108). The build re-runs red_overlap at its start."
   - "Ownership: the operator handed this red to CI Reform 2026-11-17; claimed on the coordinator log (issue #1963, CI Reform 19:08Z entry)."
   - "rec-5094 is not bundled: its liveness acceptance is undecidable by the trailer gate and its source says a human closes it, so VP 6 closes it by hand with the operator's word. rec-3691's grep acceptance is replaced at plan write by the VP 1 node TestRunOne::test_argv_uses_pid_namespace_prefix."
-  - "Decision 201 cl.4: ci.yml's trailer-acceptance evaluator runs rec-authored commands through this same probe.run_all sandbox, so the change reaches the closure gate too (VP 8). Its job already runs the same AppArmor sysctl as the probe job. ci.yml's comments saying unshare -rmn (lines 266, 296) are left stale, as is backlog-health.yml's header (comment-only; kept out of scope so the plan touches no workflow)."
+  - "Decision 201 cl.4: ci.yml's trailer-acceptance evaluator runs rec-authored commands through this same probe.run_all sandbox, so the change reaches the closure gate too (VP 8). Its job already runs the same AppArmor sysctl as the probe job. ci.yml's comments saying unshare -rmn (lines 266, 296) are left stale, as are backlog-health.yml's header, scripts/rec_trailer_acceptance.py line 14, scripts/checks/ci_guards/validate_sandbox_runner_test_deps.py lines 11 and 24, and tests/test_backlog_health_workflow.py line 27 (all comment or docstring only; kept out of scope so the plan touches no workflow or guard)."
   - "Adjacent, not bundled: rec-4079 (COVERAGE_FILE in the probe env plus an acceptance-lint change) edits the same function; it needs its own plan."
   - "Graduated shards kept unchanged: backlog-probe-never-false-pass, backlog-probe-sole-rec-authored-executor, backlog-health-probe-runs-compound-commands, backlog-health-package-suite."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:8f505cf1c1f30c83aac20de57ffbcf78ad2ac9bd2437dcb0c9f00ab072c65cb2"}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 1, nits: 9}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -166,6 +194,6 @@ execution_steps:
   - "probe.py: add the shared prefix constant and use it in _isolated_argv and isolation_available; switch run_one to mkdtemp plus the bounded-retry removal helper in a finally; update the docstring. Pre: VP 1 red. Post: VP 1 and 2 green."
   - "tests: add the new nodes and move test_uses_isolated_argv's assertion to the prefix; run VP 1-3."
   - "Add the graduated shard config/agent/verification_registry/entries/backlog-probe-reaps-descendants.yaml (VP 1's graduation)."
-  - "CLOSURE (implement skill Commit Flows): commit with Resolves: rec-3691; rebase on origin/main; VP 4; push; open the PR; code review in a fresh context; merge on PROCEED and green CI with Resolves: rec-3691 in the squash body; then VP 5, 7 and 8 at once and VP 6 after the Monday run (Decision 267: cron can drop a tick; if the Monday tick is missing, dispatch instead of waiting)."
+  - "CLOSURE (implement skill Commit Flows): commit with Resolves: rec-3691; rebase on origin/main; VP 4; push; open the PR; VP 9 (pre-merge dispatch on the PR branch); code review in a fresh context; merge on PROCEED and green CI with Resolves: rec-3691 in the squash body; then VP 5, 7 and 8 at once and VP 6 after the Monday run (Decision 267: cron can drop a tick; if the Monday tick is missing, dispatch instead of waiting)."
   - "Report: what was implemented, verification results, run ids"
 rollback: Revert the build PR; backlog-health returns to failing on any probe timeout.
