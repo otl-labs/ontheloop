@@ -27,7 +27,7 @@ scope:
   - file: .github/workflows/persona-image-publish.yml
     action: Create
     purpose: >-
-      The channel. on: workflow_run (workflows [CI], types [completed], branches [main]) and workflow_dispatch with two
+      The channel, name persona-image-publish (the taxonomy key). on: workflow_run (workflows [CI], types [completed], branches [main]) and workflow_dispatch with two
       boolean inputs, force (bypasses only the already-published and no-change skips, never the full-tier target,
       deploy-gate.yml's meaning) and first_publish (a DENIED record read counts as absent; for the package's first push
       only). Workflow permissions contents: read; concurrency group persona-image-publish, cancel-in-progress false. Job
@@ -51,7 +51,7 @@ scope:
   - file: scripts/ci/deploy_gate.py
     action: Modify
     purpose: >-
-      Channel persona_image (Decision 249 cl.2 reused, never re-implemented). _channel_inputs becomes a closed map
+      Channel persona_image (Decision 249 cl.2 reused, never re-implemented; the module docstring names three channels). _channel_inputs becomes a closed map
       (ducklake, prod, persona_image) raising GateError on any other name (today any non-ducklake name falls to the prod
       lists). persona_image returns (["image"], the pin's inputs(): build.files plus build.copy, read through
       importlib of src.persona_hosts.image_pin), so config/persona_image.yaml is never a watched path and a pin merge
@@ -67,7 +67,7 @@ scope:
     purpose: >-
       Stdlib GHCR channel-record reader (Decision 100: a thin reader of the registry's own API).
       read_record(image: str, *, token: str | None, first_publish: bool = False, opener=urllib.request.urlopen) ->
-      str | None: GET https://ghcr.io/token?scope=repository:<owner/name>:pull (Basic auth with the token when set),
+      str | None, every request with a 30 s timeout: GET https://ghcr.io/token?service=ghcr.io&scope=repository:<owner/name>:pull (Basic auth with the token when set),
       then the manifest of tag main (Accept the OCI and Docker v2 manifest types; an index is refused), then its config
       blob; returns Labels["org.opencontainers.image.revision"] (None when the label is absent). Returns None only on an
       explicit NAME_UNKNOWN or MANIFEST_UNKNOWN registry error, or a DENIED one when first_publish is set; every other
@@ -80,7 +80,8 @@ scope:
       The publish job's two steps, so the workflow's run bodies stay one line each (Decision 162). build --sha S:
       build_image(root, BuildOptions(labels={"org.opencontainers.image.revision": S,
       "org.opencontainers.image.licenses": "BUSL-1.1"})) and image_id=<id> to GITHUB_OUTPUT. push --image-id I --sha S:
-      reads the image name with load_pin; docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin with the token on
+      reads the image name with load_pin (the image output is that bare name, never with :main, as subject-name needs);
+      docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin with the token on
       stdin (never argv), docker tag I <image>:main, docker push, reads the pushed digest from docker inspect's
       RepoDigests, fetches that manifest with a pull token and asserts its config.digest equals I (classic store) or the
       digest equals I (containerd store), else exits 1 before anything is attested; asserts the pushed config's revision
@@ -138,6 +139,9 @@ scope:
       /scripts/ci/persona_image_publish.py and /scripts/ci/registry_record.py, as publish-ontheloop.yml is: the channel
       writes a public package and signs under its workflow identity, so a change to it takes the operator's final-diff
       word (coordinator.yaml standing_authorisation; scout r2's Decision 143 cl.1 residual). Procedural until rec-2827.
+      Left out on purpose: deploy_gate.py (shared with the Lambda channels) and the image inputs (build.py,
+      image_pin.py, the suite, config/persona_image.yaml) stay agent-mergeable; the reviewed pin PR plus the
+      attestation is their control.
   - file: config/composite_action_body_baseline.yaml
     action: Modify
     purpose: >-
@@ -165,8 +169,9 @@ scope:
       Mirror test without a daemon (subprocess patched): build passes both labels; push sends the token on stdin and
       never in argv, refuses when the pushed manifest is not the tested image or the revision label differs, writes
       image and digest outputs and the summary, and logs out on failure. test_workflow_shape over the workflow file:
-      the two triggers and their filters, the guard on gate (tests/verify_ci_workflow/test_dispatch_bot_guard.py's
-      guard_problems is empty), publish needs gate and reads its deploy output, attest needs publish and holds only
+      name persona-image-publish, the two triggers and their filters, the dispatcher-bot guard literal on gate (the
+      guard's own repository-wide test, tests/verify_ci_workflow/test_dispatch_bot_guard.py, covers the file without an
+      import, which validate_no_cross_test_imports refuses), publish needs gate and reads its deploy output, attest needs publish and holds only
       its one uses: step with push-to-registry false, per-job permissions exactly as above (id-token only on attest)
       and contents: read at workflow level, every uses: a 40-hex SHA with a version comment, persist-credentials false
       on every checkout, the suite step before the push step, no secrets or AWS action, no step
@@ -202,7 +207,7 @@ verification_plan:
   - step: 1
     phase: pre-deploy
     action: The gate's persona_image channel, the registry reader, the publish script and the workflow's shape.
-    command: bin/venv-python -m pytest tests/ci/test_deploy_gate.py tests/ci/test_registry_record.py tests/ci/test_persona_image_publish.py tests/persona_hosts/local_container/test_build.py -q
+    command: bin/venv-python -m pytest tests/ci/test_deploy_gate.py tests/ci/test_registry_record.py tests/ci/test_persona_image_publish.py tests/persona_hosts/local_container/test_build.py tests/verify_ci_workflow/test_dispatch_bot_guard.py -q
     expected: Exit 0, every node passes. Red before (channel, modules and workflow absent).
     fix_if: A pin-file path watched, a DENIED read treated as absent without first_publish, a token in argv, or a missing permission or pin; fix the code, never the test.
     hermetic: false
@@ -279,12 +284,16 @@ verification_plan:
       g=lambda p:json.load(u.urlopen(u.Request('https://api.github.com/repos/otl-labs/ontheloop/'+p,headers={'Accept':'application/vnd.github+json'})));
       runs=g('actions/workflows/persona-image-publish.yml/runs?branch=main&per_page=20')['workflow_runs'];
       J=lambda r:{j['name']:j['conclusion'] for j in g('actions/runs/%d/jobs'%r['id'])['jobs']};
-      hit=[(r,J(r)) for r in runs if r['conclusion']=='success'];hit=[(r,j) for r,j in hit if j.get('publish')=='success'][:1];
+      hit=[(r,j) for r,j in ((r,J(r)) for r in runs) if j.get('publish')=='success'][:1];
       assert hit,'no run published yet';r,j=hit[0];print('run',r['id'],r['event'],j);assert j.get('attest')=='success'"
-    expected: The newest run whose publish job succeeded also has attest success; record its run id and the summary's digest and source commit in the PR and the handoff.
+    expected: >-
+      The newest run whose publish job succeeded also has attest success. Record its run id, and export the run
+      summary's digest and source commit as PUBLISHED_DIGEST and PUBLISHED_SHA (read through mcp__github__get_job_logs
+      or the run page) for VP 8-9; record all three in the PR and the handoff.
     fix_if: >-
-      A gate failure on the record read: the first_publish dispatch (once). A suite failure: fix forward through a new
-      PR (nothing was pushed). A push refused: operator step A3. Never push by hand.
+      A gate failure on the record read: the first_publish dispatch (once), then close the ci-rca rec that failure
+      filed with update_rec, citing the first_publish run id. A suite failure: fix forward through a new PR (nothing
+      was pushed). A push refused: operator step A3. Never push by hand.
     hermetic: false
     graduation: waive
     graduation_waiver_reason: A one-time read of the first run; the ci_rca watch on the workflow is the standing signal.
@@ -295,10 +304,14 @@ verification_plan:
       sha. gh's session auth is unproven (critique r1 found GH_TOKEN invalid for gh auth status); if gh cannot verify,
       record UNPROVEN and leave the proof to PLAN-persona-image-pin's pr-validate verification.
     command: >-
-      D=<digest from VP 7>; S=<source commit from VP 7>; I=$(bin/venv-python -c "from pathlib import Path;from src.persona_hosts import load_pin;print(load_pin(Path('.')).image)");
-      gh attestation verify "oci://$I@$D" --repo otl-labs/ontheloop --signer-workflow otl-labs/ontheloop/.github/workflows/persona-image-publish.yml --source-ref refs/heads/main --deny-self-hosted-runners &&
+      D=${PUBLISHED_DIGEST:?from VP 7}; S=${PUBLISHED_SHA:?from VP 7}; I=$(bin/venv-python -c "from pathlib import Path;from src.persona_hosts import load_pin;print(load_pin(Path('.')).image)");
+      (gh attestation verify "oci://$I@$D" --repo otl-labs/ontheloop --signer-workflow otl-labs/ontheloop/.github/workflows/persona-image-publish.yml --source-ref refs/heads/main --deny-self-hosted-runners ||
+      bin/venv-python -c "import json,urllib.request as u;a=json.load(u.urlopen('https://api.github.com/repos/otl-labs/ontheloop/attestations/$D'))['attestations'];print('ATTESTATION_PRESENT',len(a),'(signer unverified: gh unavailable)');assert a") &&
       docker buildx imagetools inspect "$I@$D" --format '{{json .Image.Config.Labels}}' | bin/venv-python -c "import json,sys;l=json.load(sys.stdin);assert l['org.opencontainers.image.revision']=='$S' and l['org.opencontainers.image.licenses']=='BUSL-1.1';print('LABELS_OK')"
-    expected: gh reports the attestation verified for the signer workflow on refs/heads/main, and the last line is LABELS_OK.
+    expected: >-
+      gh reports the attestation verified for the signer workflow on refs/heads/main (or, when gh cannot run, the
+      anonymous attestations API lists at least one for the digest and the signer check is recorded UNPROVEN), and the
+      last line is LABELS_OK.
     fix_if: An unknown gh flag means the flags differ from this plan (UNPROVEN until now); record the working invocation in the handoff for PLAN-persona-image-pin, never drop the signer-workflow check.
     hermetic: false
     graduation: waive
@@ -309,13 +322,13 @@ verification_plan:
       [post-deploy] After the operator's words for A1 and A2 (and A3 only if needed), the digest is public: read it with
       no registry login.
     command: >-
-      D=<digest from VP 7>; I=$(bin/venv-python -c "from pathlib import Path;from src.persona_hosts import load_pin;print(load_pin(Path('.')).image)");
-      S=<source commit from VP 7>; bin/venv-python -c "from scripts.ci.registry_record import read_record as r;v=r('$I',token=None);print('record',v);assert v=='$S'" &&
+      D=${PUBLISHED_DIGEST:?from VP 7}; S=${PUBLISHED_SHA:?from VP 7}; I=$(bin/venv-python -c "from pathlib import Path;from src.persona_hosts import load_pin;print(load_pin(Path('.')).image)");
+      bin/venv-python -c "from scripts.ci.registry_record import read_record as r;v=r('$I',token=None);print('record',v);assert v=='$S'" &&
       (DOCKER_CONFIG=$(mktemp -d) docker manifest inspect "$I@$D" >/dev/null || echo 'docker read UNPROVEN through the proxy') && echo ANONYMOUS_READ_OK
     expected: >-
       The record line names the source commit (the channel's own reader, anonymous, reads the main tag back as a single
       manifest) and the last line is ANONYMOUS_READ_OK: the one check that proves the operator's steps worked.
-    fix_if: DENIED means the package is still private; ask the operator for the step by name, never change visibility from a session.
+    fix_if: DENIED means the package is still private; ask the operator for the step by name, never change visibility from a session. A record naming a later commit means a later publish moved main; re-read VP 7 for that run.
     hermetic: false
     graduation: waive
     graduation_waiver_reason: A one-time proof of an irreversible operator step.
@@ -334,6 +347,11 @@ test_obligations:
     verification_step: 1
     test_selector: tests/ci/test_persona_image_publish.py::test_workflow_shape
     red_green_expectation: red before (workflow absent), green after
+  - source: .github/workflows/persona-image-publish.yml
+    behavior: the gate job refuses the dispatcher bot's runs (Decision 267 cl.3)
+    verification_step: 1
+    test_selector: tests/verify_ci_workflow/test_dispatch_bot_guard.py::test_dispatchable_workflow_is_registered_or_guarded
+    red_green_expectation: red if the new workflow lacks the guard, green after
   - source: scripts/ci/deploy_gate.py
     behavior: closed channel map, persona_image inputs without the pin file, pre_channel_target, registry reader selection
     verification_step: 1
@@ -358,7 +376,7 @@ test_obligations:
     behavior: a prebuilt image id replaces the in-suite build
     verification_step: 4
     test_selector: tests/persona_hosts/conformance_suite.py
-    waiver_reason: The suite is itself a test module; VP 4 runs it on a prebuilt id and the publish job runs that path on every publish.
+    waiver_reason: The suite is itself a test module; VP 4 runs its prebuilt-id path in session and every publish runs it in CI. Its refusal legs (malformed or non-local id) run only by hand in VP 4, a known gap accepted because a wrong id fails the suite closed either way.
   - source: .github/CODEOWNERS
     behavior: the operator owns the channel's workflow and its two scripts
     verification_step: 2
@@ -424,12 +442,13 @@ constraints:
   - No rescue agents or workaround loops (Decision 55); never skip, disable or quarantine a test (Decision 235).
 context:
   - >-
-    Decision-scout r1-r2 FLAGS_FOUND (218 of 218, CONFLICT 0); CITE 126, 162, 205, 212, 246, 249, 254, 267. Adopted: D48
+    Decision-scout r1-r3 FLAGS_FOUND (218 of 218, CONFLICT 0); CITE 126, 162, 205, 212, 246, 249, 254, 267. Adopted: D48
     (post-deploy VP 7-9), D163 (VP 5), D205 spirit (persist-credentials false, suite before login, no token in test
     containers; separate build and push jobs rejected: containers carry no job env, moving the image costs minutes).
   - >-
-    Scout r2 notes: D143 cl.1 residual, the publish token is scoped only by workflow YAML an agent merge can edit, so the
-    control outside the merge loop is the reviewed pin PR (an attestation alone never proves review); D212 cl.6, no
+    Scout r2-r3 notes: D143 cl.1 residual, the publish token is scoped only by workflow YAML an agent merge can edit, so the
+    control outside the merge loop is the reviewed pin PR (an attestation alone never proves review); CODEOWNERS is
+    procedural until rec-2827, and the operator is asked before A2 whether it needs its own Decision; D212 cl.6, no
     registry port now (cl.7 grows adapters on demand; 234 cl.4 hedge in SA-14); D128, SA-03's reflow is a stopgap and
     rec-5274 the real relief.
   - >-
@@ -464,8 +483,10 @@ context:
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:104da68d0512845b06c6ea0f3f0fd66168488d6492845d3e6f913a8dc945a434"}
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:81d75d8df856bb6ae71a0e9440e947242d54c445d82b487d13975e02f865deb0"}
+  - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:c5a5c33dd5adcb24600d32878b727657e430ceea7b8456d5387ed9774ee18368"}
   - {gate: wording-check, round: 1, verdict: FAIL, digest: 12deeeebb013324e8c2955e54c12e07e6873d218cfdacf3fda6aeef3cabc54e0, base: d98906cb276ed169bc961da1ae8b9d0ce3a8c9a8, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 2, verdict: PASS, digest: 11659336334a406af399a9d8a668d1c5f14b78057f1e2712428d58a835919528, base: d98906cb276ed169bc961da1ae8b9d0ce3a8c9a8, selection: complete}  # pragma: allowlist secret
+  - {gate: wording-check, round: 3, verdict: PASS, digest: e2195f5b3f6ccebdb6cf17b61318cf8169317171b9e5f7d7a3d54ae1174ce252, base: d98906cb276ed169bc961da1ae8b9d0ce3a8c9a8, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
