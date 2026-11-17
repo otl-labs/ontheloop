@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import yaml
 
 from scripts.session import merge_checks as mc
@@ -191,3 +192,111 @@ def test_ready_head_personas_are_plan_class_personas() -> None:
     assert mc.READY_HEAD_PERSONAS
     assert mc.READY_HEAD_PERSONAS <= set(mc.PERSONA_CLASSES)
     assert all(mc.PERSONA_CLASSES[p] == "plan" for p in mc.READY_HEAD_PERSONAS)
+
+
+_CODE = "persona-verdict/code_reviewer"
+_APP = 900001
+
+
+def app_run(
+    name: str, app_id: object = _APP, conclusion: str = "success", run_id: int = 1, started: str = "2026-11-17T10:00:00Z"
+):
+    return {
+        "name": name,
+        "status": "completed",
+        "conclusion": conclusion,
+        "started_at": started,
+        "id": run_id,
+        "app": {"slug": "verdict-app", "id": app_id},
+    }
+
+
+def _cfg(*rows: str) -> str:
+    return "settings:\n" + "".join(rows)
+
+
+def _row(defaults: str) -> str:
+    return f"  - id: gates.verdict_app.app_id\n    defaults: {defaults}\n"
+
+
+def test_verdict_app_id_reads_the_row() -> None:
+    assert mc.verdict_app_id(_cfg("  - id: other\n")) is None
+    assert mc.verdict_app_id(_cfg(_row("{local: null, cloud: null}"))) is None
+    assert mc.verdict_app_id(_cfg(_row("{local: 42, cloud: 42}"))) == 42
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "a: [",
+        "other: 1\n",
+        _cfg(_row("{local: 1, cloud: 1}"), _row("{local: 1, cloud: 1}")),
+        _cfg(_row("{local: 1, cloud: 2}")),
+        _cfg(_row("{local: '1', cloud: '1'}")),
+        _cfg(_row("{local: true, cloud: true}")),
+        _cfg(_row("{local: 0, cloud: 0}")),
+        _cfg(_row("{local: -1, cloud: -1}")),
+        _cfg(_row("{local: null, cloud: 4}")),
+    ],
+    ids=["unparseable", "no-settings", "duplicate", "split", "string", "bool", "zero", "negative", "null-vs-int"],
+)
+def test_verdict_app_id_reasons(text: str) -> None:
+    assert isinstance(mc.verdict_app_id(text), str)
+
+
+@pytest.mark.parametrize(
+    ("runs", "pin", "kind", "needle"),
+    [
+        ([app_run(_CODE)], _APP, mc.CLEAR, ""),
+        ([run(_CODE, app="github-actions")], _APP, mc.REFUSE, "no run by the verdict App (app id 900001)"),
+        ([app_run(_CODE), run(_CODE, "failure", run_id=5, started="2026-11-17T12:00:00Z")], _APP, mc.CLEAR, ""),
+        (
+            [app_run(_CODE), app_run(_CODE, conclusion="failure", run_id=2, started="2026-11-17T11:00:00Z")],
+            _APP,
+            mc.REFUSE,
+            "concluded failure",
+        ),
+        (
+            [app_run(_CODE, conclusion="failure", run_id=1), app_run(_CODE, run_id=2, started="2026-11-17T11:00:00Z")],
+            _APP,
+            mc.CLEAR,
+            "",
+        ),
+        ([app_run(_CODE)], None, mc.REFUSE, "has no verdict App"),
+        ([app_run(_CODE, app_id=True)], 1, mc.REFUSE, "no run by the verdict App"),
+        ([{**app_run(_CODE), "app": {"slug": "x"}}], _APP, mc.REFUSE, "no run by the verdict App"),
+    ],
+    ids=[
+        "app-ok",
+        "forged-ignored",
+        "foreign-fail-ignored",
+        "newest-app-failed",
+        "newest-app-ok",
+        "empty-pin",
+        "bool-id",
+        "no-id",
+    ],
+)
+def test_pinned_name_counts_only_the_app(runs: list[dict[str, object]], pin: int | None, kind: str, needle: str) -> None:
+    result = mc.verdict([_CODE], runs, len(runs), pins={_CODE: pin})
+    assert result.kind == kind
+    assert needle in " ".join(result.reasons)
+
+
+def test_an_unpinned_name_keeps_the_slug_rule() -> None:
+    runs = green()
+    assert mc.verdict(REQ, runs, 2, pins={_CODE: _APP}) == mc.Verdict(mc.CLEAR)
+
+
+@pytest.mark.parametrize(
+    ("base", "head", "changed"), [(None, 5, True), (5, None, True), (5, 6, True), (5, 5, False), (None, None, False)]
+)
+def test_app_id_changed(base: int | None, head: int | None, changed: bool) -> None:
+    assert mc.app_id_changed(base, head) is changed
+
+
+@pytest.mark.parametrize("app", [7, None])
+def test_persona_pins_cover_every_persona_name(app: int | None) -> None:
+    names = [mc.persona_check_name(p) for p in mc.PERSONA_CLASSES]
+    pins = mc.persona_pins([*names, "pr-validate", "persona-verdict/code_reviewr", f"{names[0]}-x"], app)
+    assert pins == dict.fromkeys(names, app)
