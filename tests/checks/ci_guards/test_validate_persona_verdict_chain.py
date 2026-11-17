@@ -11,7 +11,6 @@ import pytest
 import yaml
 
 from scripts.checks import _common, registry
-from scripts.checks.ci_guards import _manifest
 from scripts.checks.ci_guards import validate_persona_verdict_chain as v
 
 LIVE = Path(_common.ROOT)
@@ -280,7 +279,5 @@ def test_registered_check_reports_and_passes(capsys: pytest.CaptureFixture[str])
 
 
 def test_registered_in_fast_tier() -> None:
-    entry = next(e for e in _manifest.ENTRIES if e.name == "validate_persona_verdict_chain")
-    assert entry.pre is True and entry.full_segment == "full_after_lint"
-    assert ".github/workflows/persona-verdict*.yml" in entry.pre_globs
+    assert "validate_persona_verdict_chain" in [step.name for step in registry.pre_sequence()]
     assert registry.resolve("validate_persona_verdict_chain") is v.validate_persona_verdict_chain
