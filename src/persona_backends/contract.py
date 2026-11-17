@@ -31,6 +31,7 @@ class LoadedContract:
     prompt: str
     prompt_sha256: str
     blob_names: tuple[str, ...]
+    verdict_consistency: dict[str, Any] | None = None
 
 
 def _integer(budget: dict[str, Any], key: str) -> int:
@@ -38,6 +39,33 @@ def _integer(budget: dict[str, Any], key: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise RunRefused(f"contract budget {key} is missing or not an integer")
     return value
+
+
+def _rule_malformed(rule: Any) -> bool:
+    def condition_ok(cond: Any) -> bool:
+        if not isinstance(cond, dict) or not isinstance(cond.get("array"), str):
+            return False
+        if set(cond) == {"array"}:
+            return True
+        values = cond.get("in")
+        return (
+            set(cond) == {"array", "field", "in"}
+            and isinstance(cond["field"], str)
+            and isinstance(values, list)
+            and bool(values)
+            and all(isinstance(v, str) for v in values)
+        )
+
+    def case_ok(case: Any) -> bool:
+        if not isinstance(case, dict) or set(case) != {"verdict", "any"} or not isinstance(case["verdict"], str):
+            return False
+        conditions = case["any"]
+        return isinstance(conditions, list) and bool(conditions) and all(condition_ok(c) for c in conditions)
+
+    if not isinstance(rule, dict) or set(rule) != {"cases", "otherwise"} or not isinstance(rule["otherwise"], str):
+        return True
+    cases = rule["cases"]
+    return not (isinstance(cases, list) and bool(cases) and all(case_ok(c) for c in cases))
 
 
 def load(contract_path: Path) -> LoadedContract:
@@ -68,6 +96,9 @@ def load(contract_path: Path) -> LoadedContract:
     budget = data.get("budget") or {}
     values = {key: _integer(budget, key) for key in _BUDGET_KEYS}
     failure_ids = tuple(str(row["id"]) for row in data.get("failure_outputs") or [] if isinstance(row, dict) and "id" in row)
+    rule = data.get("verdict_consistency")
+    if rule is not None and _rule_malformed(rule):
+        raise RunRefused("verdict_consistency is malformed")
     return LoadedContract(
         persona=str(data.get("persona", "")),
         contract_version=int(data.get("contract_version", 0)),
@@ -81,4 +112,5 @@ def load(contract_path: Path) -> LoadedContract:
         prompt=prompt_bytes.decode("utf-8"),
         prompt_sha256=digest,
         blob_names=tuple(blobs),
+        verdict_consistency=rule,
     )

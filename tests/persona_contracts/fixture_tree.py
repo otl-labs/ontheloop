@@ -23,7 +23,29 @@ INDEX_REL = "docs/contracts/executor-personas.yaml"
 REGISTRY_REL = "config/agent/data_quality/source_registry.yaml"
 SKILL_REL = ".claude/skills/fixture-verdict/SKILL.md"
 VERDICT_LINE = "Verdict: PROCEED or REVISE"
-VERDICT_RULE = "Return REVISE when any blocking finding remains."
+VERDICT_RULE = "Return REVISE when any blocking finding remains, else PROCEED."
+RULE: dict[str, Any] = {
+    "cases": [{"verdict": "REVISE", "any": [{"array": "findings", "field": "severity", "in": ["blocking"]}]}],
+    "otherwise": "PROCEED",
+}
+_COND: dict[str, Any] = {"array": "findings", "field": "severity", "in": ["blocking"]}
+MALFORMED_RULES: dict[str, Any] = {
+    "missing_otherwise": {"cases": RULE["cases"]},
+    "empty_cases": {"cases": [], "otherwise": "PROCEED"},
+    "case_without_any": {"cases": [{"verdict": "REVISE"}], "otherwise": "PROCEED"},
+    "empty_any": {"cases": [{"verdict": "REVISE", "any": []}], "otherwise": "PROCEED"},
+    "field_without_in": {
+        "cases": [{"verdict": "REVISE", "any": [{"array": "findings", "field": "severity"}]}],
+        "otherwise": "PROCEED",
+    },
+    "empty_in": {"cases": [{"verdict": "REVISE", "any": [{**_COND, "in": []}]}], "otherwise": "PROCEED"},
+    "extra_key": {**RULE, "extra": 1},
+    "non_list_in": {"cases": [{"verdict": "REVISE", "any": [{**_COND, "in": "blocking"}]}], "otherwise": "PROCEED"},
+    "non_str_verdict": {"cases": [{"verdict": 5, "any": [_COND]}], "otherwise": "PROCEED"},
+    "non_str_array": {"cases": [{"verdict": "REVISE", "any": [{**_COND, "array": 5}]}], "otherwise": "PROCEED"},
+    "case_not_mapping": {"cases": ["REVISE"], "otherwise": "PROCEED"},
+    "condition_not_mapping": {"cases": [{"verdict": "REVISE", "any": ["findings"]}], "otherwise": "PROCEED"},
+}
 _COPIED = (
     INDEX_REL,
     "docs/contracts/inference-provider.yaml",
@@ -62,7 +84,17 @@ def _contract_dict() -> dict[str, Any]:
         "output_schema": {
             **object_schema,
             "required": ["verdict"],
-            "properties": {"verdict": {"type": "string", "enum": ["PROCEED", "REVISE"]}},
+            "properties": {
+                "verdict": {"type": "string", "enum": ["PROCEED", "REVISE"]},
+                "findings": {
+                    "type": "array",
+                    "items": {
+                        **object_schema,
+                        "required": ["severity"],
+                        "properties": {"severity": {"type": "string", "enum": ["blocking", "nit"]}},
+                    },
+                },
+            },
         },
         "capabilities": ["read_input:diff"],
         "budget": {
@@ -81,6 +113,7 @@ def _contract_dict() -> dict[str, Any]:
         "Failures:\n$failure_outputs\n\nSchema:\n$output_schema\n",
         "rendered_prompt_sha256": "0" * 64,
         "skill_tether": {"skill": "fixture-verdict", "verdict_line": VERDICT_LINE, "verdict_rule": VERDICT_RULE},
+        "verdict_consistency": RULE,
     }
 
 
@@ -284,6 +317,26 @@ def _registry_entry_not_mapping(root: Path) -> None:
     (root / REGISTRY_REL).write_text("entries: [x]\n", encoding="utf-8")
 
 
+def _rule(rule: Any) -> Callable[[Path], None]:
+    return lambda root: edit_contract(root, lambda c: c.__setitem__("verdict_consistency", rule), rerender=True)
+
+
+def _rule_cond(**change: Any) -> Callable[[Path], None]:
+    cond = {**_COND, **change}
+    return _rule({"cases": [{"verdict": "REVISE", "any": [cond]}], "otherwise": "PROCEED"})
+
+
+def _rule_untethered(root: Path) -> None:
+    edit_text(root, SKILL_REL, "blocking finding", "serious finding")
+    edit_contract(
+        root,
+        lambda c: c["skill_tether"].__setitem__(
+            "verdict_rule", "Return REVISE when any serious finding remains, else PROCEED."
+        ),
+        rerender=True,
+    )
+
+
 MUTATORS: dict[str, Callable[[Path], None]] = {
     "contract_file_deleted": _contract_deleted,
     "parameter_missing_on_read_input": _set("capabilities", ["read_input"]),
@@ -330,6 +383,12 @@ MUTATORS: dict[str, Callable[[Path], None]] = {
     "registry_key_duplicate": _key_duplicate,
     "registry_unreadable": _registry_unreadable,
     "registry_entry_not_mapping": _registry_entry_not_mapping,
+    **{f"verdict_rule_malformed_{name}": _rule(rule) for name, rule in MALFORMED_RULES.items()},
+    "verdict_rule_array": _rule_cond(array="nonesuch"),
+    "verdict_rule_field": _rule_cond(field="nonesuch"),
+    "verdict_rule_in_outside_enum": _rule_cond(**{"in": ["blocking", "fatal"]}),
+    "verdict_rule_coverage": _rule({**RULE, "otherwise": "REVISE"}),
+    "verdict_rule_untethered": _rule_untethered,
 }
 
 EXPECTED: dict[str, str] = {
@@ -378,4 +437,10 @@ EXPECTED: dict[str, str] = {
     "registry_key_duplicate": "is not unique",
     "registry_unreadable": "source_registry.yaml is unreadable",
     "registry_entry_not_mapping": "source_registry.yaml is unreadable",
+    **{f"verdict_rule_malformed_{name}": "verdict_consistency is malformed" for name in MALFORMED_RULES},
+    "verdict_rule_array": "is not an array of output_schema",
+    "verdict_rule_field": "is not an enum property of",
+    "verdict_rule_in_outside_enum": "is outside findings[].severity's enum",
+    "verdict_rule_coverage": "verdicts differ from the verdict enum",
+    "verdict_rule_untethered": "absent from skill_tether.verdict_rule",
 }

@@ -6,6 +6,7 @@ import yaml
 
 from src.persona_backends.contract import BUILT, RunRefused, load
 from tests.persona_backends.fakes import FIXTURE
+from tests.persona_contracts.fixture_tree import MALFORMED_RULES
 
 INDEX = Path(__file__).resolve().parents[2] / "docs" / "contracts" / "executor-personas.yaml"
 
@@ -84,3 +85,20 @@ def test_capability_naming_an_undeclared_blob_is_refused(tmp_path):
     contract = _copy(tmp_path, lambda d: d["capabilities"].append("read_input:ghost"))
     with pytest.raises(RunRefused, match="ghost"):
         load(contract)
+
+
+def test_present_rule_loads_and_absent_is_none(tmp_path):
+    rule = {"cases": [{"verdict": "REVISE", "any": [{"array": "findings"}]}], "otherwise": "PROCEED"}
+    assert load(_copy(tmp_path, lambda d: d.__setitem__("verdict_consistency", rule))).verdict_consistency == rule
+    assert load(FIXTURE).verdict_consistency is None
+
+
+@pytest.mark.parametrize("name", sorted(MALFORMED_RULES))
+def test_malformed_verdict_rule_is_refused(tmp_path, name):
+    with pytest.raises(RunRefused, match="verdict_consistency is malformed"):
+        load(_copy(tmp_path, lambda d: d.__setitem__("verdict_consistency", MALFORMED_RULES[name])))
+
+
+def test_non_mapping_verdict_rule_is_refused(tmp_path):
+    with pytest.raises(RunRefused, match="verdict_consistency is malformed"):
+        load(_copy(tmp_path, lambda d: d.__setitem__("verdict_consistency", ["REVISE"])))
