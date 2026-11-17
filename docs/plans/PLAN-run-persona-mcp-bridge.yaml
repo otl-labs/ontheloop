@@ -22,7 +22,8 @@ phase: >-
   T4.32 c1 (backend leg, part: the warehouse_read MCP consumption the item's T4.10a c7 annotation hands to c1); closes
   no criterion (c1's credential, chain, image and adapter legs stay open). T4.32 is in_progress and the backend plan's
   build merged (#2132, eed2f6e4). src/persona_backends is excluded from the data-pipeline bundle and scripts/run_persona.py
-  is in no bundle, so nothing deploys (V2).
+  is in no bundle, so nothing deploys (V2). closes_criteria is [] by exit-criteria-ledger.yaml's plan_closes_criteria
+  default for a leg of an in_progress item (as PLAN-persona-image-channel).
 closes_criteria: []
 cites: [dec:84, dec:205, dec:206, dec:212, dec:246, dec:256, dec:263]
 scope:
@@ -31,7 +32,8 @@ scope:
     purpose: >-
       The stdio MCP client (mcp 2.3.0; litellm.experimental_mcp_client is not used: experimental, not built for the mcp
       2.x client, and the spec conversion here is a few lines). `open_bridge(server: StdioServerParameters, verbs:
-      tuple[str, ...], *, errlog: TextIO, startup_timeout: float)` is an async context manager yielding a Bridge: it runs
+      tuple[str, ...], *, errlog: TextIO, startup_timeout: float)` (errlog must be a file object with a real fileno, as
+      Popen needs one: tests pass a tmp file, never StringIO) is an async context manager yielding a Bridge: it runs
       stdio_client(server, errlog=errlog) and ClientSession, and initialize() plus list_tools() under
       anyio.fail_after(startup_timeout), raising BridgeTimeout when that expires. It raises BridgeUnavailable (class name
       only in its text, Decision 101) when the server cannot spawn (OSError), exits or fails during startup (an
@@ -44,7 +46,12 @@ scope:
       object return "error: ..." text without a server call; a result with is_error returns "error: " + its text; otherwise the
       text contents joined by newlines; any reply past read_input.READ_CAP_BYTES is cut at that byte count (on a
       character boundary) and ends "[truncated: <total> bytes]". A failure of the session itself (closed stream, an
-      MCPError, a BaseExceptionGroup, the process gone) raises BridgeFailed (class name only). The server's stderr goes
+      MCPError, a BaseExceptionGroup, the process gone) raises BridgeFailed (class name only). An exception raised in the
+      context's body (the run loop's RunAborted, RunRefused or any other) leaves open_bridge as itself, never wrapped:
+      stdio_client and ClientSession each own an anyio task group, so a body exception otherwise surfaces as a nested
+      ExceptionGroup (measured: ExceptionGroup([ExceptionGroup([E])])); open_bridge records the body's exception and,
+      when a BaseExceptionGroup leaves the client contexts, re-raises that recorded exception, so only failures that
+      originate in the session become BridgeFailed. The server's stderr goes
       only to the injected errlog, never to the run's own stdout or stderr. Names no persona id and no scripts path.
   - file: src/persona_backends/contract.py
     action: Modify
@@ -65,11 +72,14 @@ scope:
       verbs, startup_timeout=deadline - clock()) around the run loop: BridgeTimeout returns failure budget_exhausted
       (detail "max_wall_clock_seconds reached while the MCP server started"), and BridgeUnavailable aborts with kind
       tool_server_unavailable (header and end records written, no model call). The tool list is the read_input spec when
-      the contract names a read_input blob, then the bridge's specs; the opening user message keeps its read_input blob
+      the contract names a read_input blob, then the bridge's specs (an empty list is sent as no tools, None, never []); the opening user message keeps its read_input blob
       lines only when the contract names a blob. Tool dispatch becomes async: read_input is served as now, a named verb
       awaits Bridge.call under asyncio.wait_for(deadline - clock() measured when the call starts) (a timeout returns
       budget_exhausted, as a transport timeout does), any other name gets "error: unknown tool"; BridgeFailed aborts with
-      kind tool_server_error. Tool turns keep the plan-1 turn
+      kind tool_server_error. A RunAborted the loop raises while the bridge is open (transport outage or exception)
+      reaches run_persona's caller as itself with its own kind (open_bridge's unwrapping above), never as an
+      ExceptionGroup or as tool_server_error. mcp and mcp_bridge are imported inside the warehouse branch, so a run
+      that names no warehouse_read never loads them. Tool turns keep the plan-1 turn
       record shape (tool_calls names, tool_result_bytes). A tool call spends no turn (a turn is a provider attempt).
       Stays under 500 SLOC.
   - file: scripts/run_persona.py
@@ -94,8 +104,11 @@ scope:
       the client meets the real server projection. The fake reader's describe() lists two agent-facing verbs (one with a
       required array argument) and one agent_facing false verb; named() returns synthetic rows, or rows past the byte
       cap in mode big. Mode crash raises in describe() (the server exits at startup); mode die exits the process on the
-      first call; mode hang answers nothing after starting (initialize never returns). Synthetic values only (Decision
-      101).
+      first call; mode hang answers nothing after starting (initialize never returns); mode slow answers initialize and
+      list_tools but named() blocks (a call never returns). Mode crash first writes the line FAKE-SERVER-STDERR-MARKER to
+      stderr and, when FAKE_MCP_RAN_FILE is set in its environment, creates that file, so a test can tell a server that
+      ran from one that never spawned. Synthetic values only (Decision 101). Hang, slow and die cases cost a subprocess
+      plus the client's kill escalation each, so each mode is exercised by the fewest cases that pin it.
   - file: tests/persona_backends/test_mcp_bridge.py
     action: Create
     purpose: >-
@@ -106,7 +119,11 @@ scope:
       test_missing_verb_is_unavailable (names the verb); test_server_crash_at_start_is_unavailable;
       test_spawn_failure_is_unavailable (a command that does not exist); test_startup_hang_times_out (mode hang with a
       short startup_timeout raises BridgeTimeout); test_unnamed_verb_call_makes_no_server_call;
-      test_server_stderr_goes_only_to_errlog; test_server_dying_mid_run_is_bridge_failed.
+      test_server_stderr_goes_only_to_errlog (mode crash with errlog a tmp file under capfd: the marker line is in the
+      file, a positive control, and absent from the captured fd 1 and fd 2; the error raised is BridgeUnavailable with the
+      FAKE_MCP_RAN_FILE present, so a spawn failure cannot satisfy it); test_server_dying_mid_run_is_bridge_failed;
+      test_body_exception_leaves_unwrapped (a sentinel raised inside the open_bridge context is caught as itself, not a
+      BaseExceptionGroup, and not BridgeFailed).
   - file: tests/persona_backends/test_contract.py
     action: Modify
     purpose: >-
@@ -123,18 +140,26 @@ scope:
       test_input_incomplete_starts_no_server; test_unavailable_server_aborts_before_any_call (kind
       tool_server_unavailable, zero transport calls, end record aborted); test_server_failure_mid_run_aborts (kind
       tool_server_error); test_startup_hang_returns_budget_exhausted (mode hang, a contract copy with
-      max_wall_clock_seconds 1: the run returns budget_exhausted within seconds, with no transport call); test_contract_without_read_input_blob_offers_no_read_input_tool (no
-      read_input tool and no blob lines in the opening message); a contract without warehouse_read starts no server
+      max_wall_clock_seconds 1: the run returns budget_exhausted within seconds, with no transport call);
+      test_warehouse_call_past_deadline_returns_budget_exhausted (mode slow, max_wall_clock_seconds 2, the fake
+      transport asks for one named verb: failure budget_exhausted, an end record written, elapsed bounded);
+      test_transport_outage_with_bridge_open_aborts (the fake transport raises an outage after the bridge opened:
+      RunAborted kind outage, not an ExceptionGroup and not tool_server_error); test_contract_without_read_input_blob_offers_no_read_input_tool (no
+      read_input tool and no blob lines in the opening message); a contract naming no tools sends tools None; a contract without warehouse_read starts no server
       (mcp_server pointing at a command that does not exist still succeeds).
   - file: tests/test_run_persona.py
     action: Modify
     purpose: >-
       test_server_module_matches_index_binding (MCP_SERVER_MODULE as a path, scripts/agent_sdk/mcp_server.py, equals the
       warehouse_read row's binding server in executor-personas.yaml); test_server_env_withholds_inference_keys (an
-      environ holding every api_key row's variable in docs/contracts/project-configuration.yaml (read from the file, so
-      DEEPSEEK_API_KEY and ANTHROPIC_API_KEY today), GITHUB_TOKEN and AWS_ACCESS_KEY_ID yields exactly
-      {AWS_ACCESS_KEY_ID}); test_server_parameters_run_the_module_from_the_root; test_main_passes_no_server_stderr (the
-      entry point's stderr holds no server output on a tool_server_unavailable abort); the isolated-mode subprocess refusal case names
+      environ holding every kind: secret row's non-null variable in docs/contracts/project-configuration.yaml (read from
+      the file: DEEPSEEK_API_KEY, ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, GITHUB_TOKEN and
+      WORKFLOW_DISPATCH_APP_PRIVATE_KEY today) plus AWS_ACCESS_KEY_ID yields exactly {AWS_ACCESS_KEY_ID});
+      test_server_parameters_run_the_module_from_the_root; test_main_passes_no_server_stderr (server_parameters
+      monkeypatched to the fake server in mode crash with FAKE_MCP_RAN_FILE set, main() run under capfd on a contract
+      copy naming warehouse_read: exit 4, abort kind tool_server_unavailable, the ran file exists, and
+      FAKE-SERVER-STDERR-MARKER is absent from captured fd 1 and fd 2; this also proves a warehouse run's abort exits
+      4, not a traceback with exit 1); the isolated-mode subprocess refusal case names
       read_repo in place of warehouse_read:x.
   - file: docs/contracts/executor-personas.yaml
     action: Modify
@@ -278,7 +303,7 @@ verification_plan:
   - step: 8
     phase: pre-deploy
     action: >-
-      After the rebase onto origin/main, ports.yaml (at 498 of 500 effective lines when planned; nine unbuilt plans also
+      After the rebase onto origin/main, ports.yaml (at 498 of 500 effective lines when planned; eleven unbuilt plans also
       scope it) stays within its 500-line cap with e03's line placed.
     command: >-
       bin/venv-python -c "from pathlib import Path;from scripts.checks.structural._classify import effective_lines as e;
@@ -317,17 +342,17 @@ verification_plan:
     graduation: not-applicable
 test_obligations:
   - source: src/persona_backends/mcp_bridge.py
-    behavior: Only named verbs offered or called, text replies with the cap, error text, the startup bound, stderr kept to errlog, and spawn, start or session failures raised as typed errors.
+    behavior: Only named verbs offered or called, text replies with the cap, error text, the startup bound, stderr kept to errlog, spawn, start or session failures raised as typed errors, and body exceptions leaving unwrapped.
     verification_step: 1
     test_selector: tests/persona_backends/test_mcp_bridge.py
     red_green_expectation: red before (module and test absent), green after.
   - source: src/persona_backends/contract.py
     behavior: BUILT equals every T4.32:c1-owned binding in the live index; warehouse_read verbs load in order; a verb named read_input is refused.
     verification_step: 2
-    test_selector: tests/persona_backends/test_contract.py::test_capability_gate_matches_index
+    test_selector: tests/persona_backends/test_contract.py
     red_green_expectation: red before (the widened test sees warehouse_read owned by T4.32:c1 but not in BUILT), green after.
   - source: src/persona_backends/litellm_backend.py
-    behavior: A warehouse tool turn returns the server's text; the server starts only for warehouse_read and after the input check, within the run's wall clock; refusal without a server; the two abort kinds.
+    behavior: A warehouse tool turn returns the server's text; the server starts only for warehouse_read and after the input check, within the run's wall clock; a call past the deadline returns budget_exhausted; a transport abort with the bridge open keeps its kind; refusal without a server; the two abort kinds.
     verification_step: 2
     test_selector: tests/persona_backends/test_litellm_backend.py
     red_green_expectation: red before (run_persona takes no mcp_server argument), green after.
@@ -372,7 +397,8 @@ context:
     CONFLICT: 0; RELATED: 6. Serves: NS.5 4/5. CITE: 84, 205, 206, 212, 246, 256, 263. r1's WARN 212 (cl.3: the
     server env presumes an AWS identity) is recorded in ports.yaml PC-01 (e04); r1-r2's NOTE 263 (cl.2: the
     persona-verdict role has no reader grant and its session can read the inference keys; cl.4) is deferred to
-    rec-5312, which lands before any verdict contract names warehouse_read. Operator chose these on
+    rec-5312, which lands before any verdict contract names warehouse_read; nothing enforces that order today (the
+    guard is the human order of plans; rec-5312's acceptance can add a tripwire). Operator chose these on
     /mnt/project-files/run-persona-backend/PRESENTATION-plan4.md ("write the plan", 2026-11-17).
   - >-
     Split settled on a blind consult (run-persona-backend/advisor-brief-split/ADVICE.md): plan 1 (#2111, built #2132),
@@ -391,7 +417,9 @@ context:
     (DeepSeek and the Claude fallback through LiteLLM; no step here sends the specs to a provider). No current persona
     contract names warehouse_read, so no verdict persona's behaviour changes. A later offline replay of such a persona
     needs point-in-time reads (Decision 231 cl.3); PC-01's ports list stays [ops_verbs, persona_compute_host] (approved
-    text names the run_persona dependency in its description).
+    text names the run_persona dependency in its description). Also UNPROVEN: server_env leaves out PYTHONPATH,
+    PYTHONHOME and locale variables, and VP7 proves only the CC-web venv; the persona image (T4.32 c2/c3) case belongs
+    to rec-5312 or the image plan.
   - >-
     Red-overlap 2026-11-17: blocked, slo_breached, on rec-5247 (telemetry-reader smoke 504; Feedback Loop's), shared
     paths none. Deferral: this plan touches no telemetry path, and its build still needs a green full tier.
@@ -400,7 +428,9 @@ context:
     run-persona-litellm-backend-contract-tool-events, run-persona-litellm-backend-loop.
   - >-
     ports.yaml is at 498 of 500 effective lines; e04 appends to PC-01's last line (lines may run to 2000 chars), so the
-    change adds one line (e03). Unbuilt plans also scoping ports.yaml rebase as usual.
+    change adds one line (e03). Eleven unbuilt plans also scope ports.yaml and rebase as usual; if this plan builds
+    first, e03's row shifts PLAN-merge-annotate-producer's two-line amendment_log anchor, which is that plan's
+    re-approval, not this plan's defect.
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:02b8563356b71f7c68abbff9377ef2b27326dcec67455545360c65bb98e5ab37"}
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:b65349f2799172711d0bf24294872ce989ba50c6d09df87b34c3b9b36cfbf5fa"}
@@ -408,6 +438,7 @@ gate_rounds:
   - {gate: wording-check, round: 1, verdict: PASS, digest: 93668879fc681e840bf9a6b4d5ee565f549a900d06517cc429b80bd9122eaf1a, base: f5833a4fa3a0e06d803ac4fdeba5f523167f7210, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 5, nits: 13}
   - {gate: decision-scout, round: 4, verdict: NO_FLAGS, scout_input_fingerprint: "v1:daca14bcb4dfcfed5b2ecb7809cff4445e129e17043e853d5ef28383a3955b79"}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 3, nits: 10}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
