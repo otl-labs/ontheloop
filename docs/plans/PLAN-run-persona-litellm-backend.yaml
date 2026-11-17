@@ -112,7 +112,9 @@ scope:
       [{role, model, attempt, outcome, latency_ms}], attempts_known, probe_turn (1 after a fail-over, else 0), record (the CallRecord as a dict, or null on a raise), failed_over,
       finish_reason, tool_calls [names], tool_result_bytes [ints], kind (tool | terminal_valid | terminal_invalid |
       transport_error), revision, message (the assistant message as returned, or null), started_at_ms, ended_at_ms}; and
-      an end record {outcome, failure (or null), turns_used, revisions_used, ended_at_ms}. `write_atomic(path, header,
+      an end record {outcome, failure (or null), turns_used, revisions_used, ended_at_ms}. On RunAborted the aborting call
+      still gets a turn record (kind transport_error, with its attempts or attempts_known false) and the end record has
+      outcome "aborted", failure null and an error field naming the kind, so the file is always whole. `write_atomic(path, header,
       turns, end)` writes one JSON document to <path>.tmp then os.replace. It holds no telemetry row shape: the producer
       plan (rec-4028) maps it (Decision 221 cl.7: a hand-off, not a second journal).
   - file: scripts/run_persona.py
@@ -168,7 +170,8 @@ scope:
       max_attempts 2, and turns_used never passes 6); test_deadline_returns_budget_exhausted (fake clock); test_wait_for_timeout_returns_budget_exhausted;
       test_input_incomplete_makes_no_call; test_type_error_returns_input_unusable_when_listed;
       test_fail_over_keeps_fallback_role (later calls pass role warm_fetched_escape_hatch, only the first passes
-      fail_over=True); test_fallback_unavailable_counts_upper_bound; test_outage_raises_run_aborted_with_events;
+      fail_over=True); test_fallback_unavailable_counts_upper_bound; test_fallback_setup_refusal_counts_probe (F set; a missing_credential
+      raise carrying A primary outages counts the probe and aborts); test_outage_raises_run_aborted_with_events;
       test_malformed_output_is_a_repair_turn; test_unknown_tool_gets_error_text;
       test_non_transport_exception_aborts (a plain exception from the transport is RunAborted transport_exception); every call passes response_format
       json_object and the read_input tool; the facade refuses claude_cli, codex_cli and a non-None workspace.
@@ -429,52 +432,33 @@ constraints:
 context:
   - >-
     Decision-scout r5 (2026-11-17): Verdict: NO_FLAGS. Decisions triaged: 216 of 216. Roadmap items intersected: 8;
-    CONFLICT: 0; RELATED: 8. Serves: NS.1, NS.3 3/5. CITE: 117, 173, 205, 206, 212, 246. r1 FLAGS_FOUND on 163 (no
-    full-tier step) and 131 (CLI test path), both fixed (/mnt/project-files/run-persona-backend/SCOUT-r1.md); r4
-    FLAGS_FOUND on 249 (VP5 read deploy push paths that no longer exist), fixed by checking the deploy gate's
-    pathspecs.
+    CONFLICT: 0; RELATED: 8. Serves: NS.1, NS.3 3/5. CITE: 117, 173, 205, 206, 212, 246. r1 flags (163, 131) and r4's
+    (249: VP5 read deploy push paths that no longer exist) fixed. /mnt/project-files/run-persona-backend/SCOUT-r1.md.
   - >-
-    Split settled on a blind consult (/mnt/project-files/run-persona-backend/advisor-brief-split/ADVICE.md and
-    ADVICE-followup.md): this backend, then rec-5052 (verdict consistency) and rec-4028 (telemetry producer, which owns
-    definition_sha256, the usage mapping move out of litellm_wire.read_response and the root-session envelope text), then
-    the warehouse_read MCP bridge (rec-5267). Design advice: advisor-brief-design/ADVICE.md (json_object plus local
-    check, forced tool calls refused on the Claude fallback with thinking at litellm_wire.py:133-136; every attempt a
-    turn; pure events hand-off; backend in src, entry point in scripts).
-  - >-
-    Sign-off: operator "write the plan" 2026-11-17 on /mnt/project-files/run-persona-backend/PRESENTATION.md.
+    Split settled on a blind consult (run-persona-backend/advisor-brief-split/ADVICE.md, ADVICE-followup.md): this
+    backend, then rec-5052 (verdict consistency) and rec-4028 (producer: definition_sha256, the usage mapping move out of
+    litellm_wire.read_response, root-session envelope text), then rec-5267 (warehouse_read bridge). Design advice
+    (advisor-brief-design/ADVICE.md): json_object plus local check, since a forced tool call is refused on the Claude
+    fallback with thinking (litellm_wire.py:133-136). Sign-off: operator "write the plan" 2026-11-17 on PRESENTATION.md.
   - >-
     UNPROVEN until the fixture-run plan (sessions cannot read inference keys, Decision 256): DeepSeek json_object with
-    thinking and tools, non-empty content, real usage keys, reasoning_content round trip across tool turns
-    (litellm 1.106.2 injects a blank when it is lost), two user messages in a row after a first-call empty_output
-    repair, and turn counts against the provisional budgets. max_tokens 32000
-    is a provisional default, re-measured there.
+    thinking and tools, non-empty content, real usage keys, the reasoning_content round trip across tool turns, two user
+    messages in a row after a first-call empty_output repair, turn counts against the provisional budgets and the
+    provisional max_tokens 32000.
   - >-
-    The image plan (T7) needs litellm as a hash-locked runtime pin (requirements-dev.txt only today); jsonschema and
-    mcp are in requirements.txt. The verdict chain plan (#2097) runs a probe through scripts/personas/execute.py; the
-    fixture-run plan swaps in `scripts/run_persona.py --contract --input --events`.
+    The image plan (T7) needs litellm as a hash-locked runtime pin (requirements-dev.txt only today). The fixture-run
+    plan swaps #2097's probe for `scripts/run_persona.py --contract --input --events`. Shared files with unbuilt plans:
+    capabilities.yaml (#2097, telemetry-content-reader-lock, wording-approval-routing), file-router.yaml
+    (work-graph-edge-model), data-pipeline manifest (scheduled-workflow-dispatch); whichever builds second rebases. No
+    roadmap edit; ports.yaml unchanged (SA-11 records the layout; the producer plan flips the litellm adapter row).
   - >-
-    Shared files with unbuilt plans: config/agent/executor/capabilities.yaml (PLAN-persona-verdict-chain #2097,
-    PLAN-telemetry-content-reader-lock, PLAN-wording-approval-routing), docs/contracts/file-router.yaml
-    (PLAN-work-graph-edge-model), src/lambdas/data-pipeline/manifest.yaml (PLAN-scheduled-workflow-dispatch); whichever
-    builds second rebases. T4.32's files_in_scope does not list
-    src/persona_backends/ or scripts/run_persona.py; the plan adds no roadmap edit.
+    Red-overlap 2026-11-17: blocked, slo_breached, on rec-5247 and rec-5248 (telemetry reader smoke and read deadline),
+    shared paths none. Deferral: this plan touches no telemetry path, and its build still needs a green full tier.
   - >-
-    ports.yaml unchanged: SA-11 already records the layout this backend reads (contracts and rendered prompts under
-    docs/contracts/personas/). The run_persona litellm adapter row stays pending; the producer plan flips it.
-  - >-
-    Red-overlap 2026-11-17 (scripts.ci_rca.red_overlap): blocked, rule slo_breached, on rec-5247 (telemetry reader smoke
-    504) and rec-5248 (telemetry-arrival read deadline), shared paths none. Deferral: neither is repaired here, this plan
-    touches no telemetry reader, writer or verify path, and its build still needs a green full tier (Decision 163).
-  - >-
-    Port shape: executor-personas.yaml declares run_persona(contract, workspace, backend) -> (result, events) with
-    events as Decision 199 model_call rows. This backend also takes the materialised input and returns pre-telemetry
-    turn records; rec-4028's plan maps them to rows and reconciles the declared and built shapes before the Decision 212
-    conformance suite. scripts/tool_runtime.py (the retained workspace tool set) is the starting point for T4.15:c3's
-    read_repo, run_tests and edit_repo. plan_agent (T4.31) and implement_agent also name read_repo; they are compute
-    personas, so their litellm runs wait on T4.15:c3, the compute-plane leg they run on; a T4.15 planner should know c3
-    now owns those three bindings. rec-5267 (warehouse_read, an mcp_tool owned by T4.32:c1) must widen
-    test_capability_gate_matches_index's derivation, which counts only backend_tool bindings, when it builds the bridge.
-  - >-
+    Port shape: executor-personas.yaml declares events as Decision 199 model_call rows and no materialised_input
+    argument; rec-4028's plan reconciles that with these turn records before the Decision 212 conformance suite.
+    T4.15:c3 now owns read_repo, run_tests and edit_repo (plan_agent and implement_agent name read_repo; start from
+    scripts/tool_runtime.py). rec-5267 must widen test_capability_gate_matches_index past backend_tool bindings.
     CI Reform's #2071 (open): this plan's only contract edits ride its own sidecar, so its leg P holds.
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:33cd4fb6b4a6157f855bfcf2f54934167a811c1306e69c7b1c9dcff3827af1a4"}
@@ -487,6 +471,7 @@ gate_rounds:
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 9}
   - {gate: decision-scout, round: 5, verdict: NO_FLAGS, scout_input_fingerprint: "v1:c0cc48f49f1630f7ba5f5b17faa648001f6e5e2a9bbc1b013a1f7174d67b4c88"}
   - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 7}
+  - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 5}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
