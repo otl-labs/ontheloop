@@ -23,7 +23,7 @@ phase: >-
   ad_hoc_rec (soft-warn category; no tier_item claimed, so the Tier Item Freshness Gate is skipped): rec-5246 (High)
   and rec-4696 (High), a prerequisite on the operator's feedback-loop gate before T3.3/T3.4 waves 2-4. closes_criteria
   is empty.
-cites: [dec:239, dec:270, dec:249, dec:254, dec:154, dec:125, dec:126, dec:79, dec:238, dec:232, dec:246, dec:267]
+cites: [dec:239, dec:270, dec:249, dec:254, dec:154, dec:125, dec:126, dec:79, dec:238, dec:232, dec:246, dec:267, dec:162]
 closes_criteria: []
 amends:
   - dec:249#2
@@ -351,17 +351,39 @@ scope:
     action: Modify
     purpose: >-
       The workflow_run filter gains "deploy-telemetry-content" (validate_ci_rca_adjudication (b) pins it equal to the
-      taxonomy's watched set). "Fetch jobs JSON" and the designed-refusal check move ahead of "Fetch failed run logs",
-      and the log fetch runs only when steps.designed_refusal.outputs.skip != 'true': a rejected review's deploy job
-      never started and has no log, so fetch_logs would otherwise fail ci-rca before the predicate runs. Every later
-      step that reads the fetched log carries the same condition. NEAR_CAP check at build: re-measure against its
-      budget on the rebased base; the edit adds about four lines.
+      taxonomy's watched set). "Fetch jobs JSON" moves, byte-identical, ahead of "Fetch failed run logs", followed by a
+      new step "Rejected-deployment check" (id rejected_deployment) that runs designed_refusal
+      --rejected-deployment-only and reads no log. Both new positions sit above the Decision 72 / "local YAML-side
+      fail-closed guard" comment block, which stays directly above "Fetch failed run logs" (_ci_rca_fetch_source_comment);
+      that step's env and run stay byte-identical and its only change is an added if:
+      steps.rejected_deployment.outputs.skip != 'true' (inferred, not verified this session: a rejected review's deploy
+      job never started and has no log, so fetch_logs would otherwise fail ci-rca). "Designed-refusal check" stays
+      after the log fetch unchanged, so the persona-gate refusal still reads /tmp/ci-rca-failed.log (#2053, Decision
+      205 cl.1); it and every later step through "Run ci-rca agent" add the same rejected_deployment condition.
+      NEAR_CAP check at build: re-measure against its budget on the rebased base; the edit adds about twelve lines.
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: >-
+      r3_workflows gains one entry per new inline run: body (Decision 162 cl.3), each at its exactly measured count
+      with no padding and no marker (the ordinary registration path for a new body): every inline body in
+      deploy-telemetry-content.yml's build, deploy and record jobs, and ci-rca.yml's new Rejected-deployment check.
+      Bodies that only move (Fetch jobs JSON) keep their name-slug key and count. The build measures each count with the
+      guard's own parser at the final head; validate_composite_action_shell_bodies (VP 5) is the check.
+  - file: docs/contracts/ci-rca-lifecycle.yaml
+    action: Modify
+    purpose: >-
+      designed_refusal.rule gains the rejected-deployment case (deploy-telemetry-content only, a stepless deploy job,
+      classified by a log-free step before the log fetch, which it alone gates; the declared-jobs check still gates only
+      the agent steps, so the deploy-ducklake-lambdas reconcile-gate refusal still fetches its log and builds its
+      evidence as today), and amendment_log gains a dated field_add row, semantic_break false.
   - file: tests/verify_ci_workflow/test_ci_rca_and_canary.py
     action: Modify
     purpose: >-
-      New node: in ci-rca.yml the designed-refusal check precedes "Fetch failed run logs", and that step is conditioned
-      on skip != 'true'; the filter names deploy-telemetry-content. Existing order assertions that the move breaks are
-      updated to the new order, never deleted.
+      New nodes: in ci-rca.yml "Fetch jobs JSON" and "Rejected-deployment check" precede "Fetch failed run logs", which
+      is conditioned on steps.rejected_deployment.outputs.skip != 'true'; "Designed-refusal check" (the persona-capable
+      one) still follows "Fetch failed run logs"; the filter names deploy-telemetry-content. TestCiRcaAuthorityAnchor
+      and test_production_step_runtime_is_unchanged stay green unedited. Existing order assertions that the move
+      breaks are updated to the new order, never deleted.
   - file: scripts/ci_rca/designed_refusal.py
     action: Modify
     purpose: >-
@@ -369,12 +391,19 @@ scope:
       every failing job is deploy and that job ran no step (an empty or absent steps list: the Environment review was
       rejected, so the job never started). Any step failure after approval (digest, baseline, layer pin, read-back,
       the approvals preflight itself) still files a ci_rca rec (Decision 55), as does any gate, build or record
-      failure. main() ORs it beside is_designed_refusal; DESIGNED_REFUSAL_JOBS is unchanged.
+      failure. A new --rejected-deployment-only flag prints skip from is_rejected_deployment alone and reads no log;
+      the default path (is_designed_refusal OR is_persona_gate_refusal over the fetched log) is unchanged, and
+      DESIGNED_REFUSAL_JOBS is unchanged. The stepless shape of a rejected review is inferred; the predicate fails
+      closed, so if GitHub records it otherwise a ci_rca rec files (noise, never a hidden failure) and the shape is
+      fixed forward from that run's jobs JSON.
   - file: tests/test_ci_rca_designed_refusal.py
     action: Modify
     purpose: >-
       A deploy-telemetry-content run whose only failing job is deploy with no steps is a rejected deployment; a deploy
       job failing at a step, a build failure, and the same no-step shape under another workflow slug are not.
+      --rejected-deployment-only opens no log file; a terraform-apply-sandbox persona-refusal payload is still skipped by
+      the default path with its log present and is not skipped by --rejected-deployment-only (red if the persona leg
+      were moved ahead of the log).
   - file: scripts/checks/misc/sensitive_value_detectors.py
     action: Modify
     purpose: PROTECTED gains .github/workflows/deploy-telemetry-content.yml, scripts/ci/telemetry_content_deploy.sh and scripts/checks/ci_guards/validate_content_reader_lock.py (deploy_config.json is under the protected package path).
@@ -475,8 +504,10 @@ verification_plan:
       bin/venv-python -c "import importlib; f=[]; [getattr(importlib.import_module('scripts.checks.ci_guards.' + n),
       n)(f) for n in ('validate_content_reader_lock', 'validate_environment_reviewer_preflight',
       'validate_actions_account_id_masking', 'validate_workflow_dependency_install', 'validate_project_region',
-      'validate_ci_rca_adjudication', 'validate_actions_evidence')]; print('FAILED', f); raise SystemExit(1 if f else
-      0)" && bash -n scripts/ci/telemetry_content_deploy.sh && echo GUARDS_OK
+      'validate_ci_rca_adjudication', 'validate_actions_evidence', 'validate_composite_action_shell_bodies')];
+      import scripts.checks.contracts.validate_ci_rca_lifecycle_projection as c; c.validate_ci_rca_lifecycle_projection(f);
+      print('FAILED', f); raise SystemExit(1 if f else 0)" && bash -n scripts/ci/telemetry_content_deploy.sh && echo
+      GUARDS_OK
     expected: FAILED [] and GUARDS_OK print (each module's validate_<name>(failed) entry runs over the real tree; the modules have no __main__).
     fix_if: A finding names the workflow line; fix the workflow, never the check.
     hermetic: false
@@ -720,10 +751,10 @@ test_obligations:
     test_selector: tests/test_ci_rca_designed_refusal.py
     red_green_expectation: red before (the slug is undeclared), green after
   - source: .github/workflows/ci-rca.yml
-    behavior: The filter watches deploy-telemetry-content, and a skipped (rejected) run never reaches the log fetch.
+    behavior: The filter watches deploy-telemetry-content; a rejected run is classified before, and never reaches, the log fetch; the persona-capable designed-refusal check still follows the log fetch.
     verification_step: 1
     test_selector: tests/verify_ci_workflow/test_ci_rca_and_canary.py
-    red_green_expectation: red before (the log fetch precedes the refusal check and the filter lacks the workflow), green after
+    red_green_expectation: red before (no rejected-deployment step precedes the log fetch and the filter lacks the workflow), green after
 constraints:
   - "No rescue agents or workaround loops (Decision 55). No local Lambda deploy: the channel is the only path (Decision 239 cl.5, Decision 270 cl.3)."
   - "Never write an account id, ARN with an account, ExternalId, key, API id or host into the repo, a PR, a comment or the shared folder (Decision 101). The operator's VP 6 and VP 11 output is pasted with any account id removed."
@@ -752,6 +783,8 @@ context:
   - "Decision-scout r8 FLAGS_FOUND (r7 NOTE resolved; 246 cl.4 NOTE carried with the same disposition, the approval request also naming the ci_rca refusal predicate). New NOTE 55 SPIRIT: declaring the whole deploy job a designed refusal hid post-approval step failures -> narrowed to is_rejected_deployment (a stepless deploy job, the rejected review only). Advisories adopted: the remaining deploy-path files join the going-out list; the capacity reading and its trigger_response options go to the operator with the plan approval ask, before merge."
   - "Plan-critique r3 REVISE (3 blocking, 3 nits), all adopted: both recs' acceptance strengthened now to single decidable nodes and checked at the PR head before merge, VP 12 follows git-ops.yaml's verdict route; the capacity row is source assumed with live_signal job '*' (a reusable-workflow job reports as 'gate / gate', seen in run 44171155178); pre_globs cover every predicate input; nits: VP 8 tolerates batched non-IAM changes, rollback of a shared-module revert dispatches with force, VP 7 waived with a reason."
   - "Plan-critique r4 REVISE (1 blocking, 2 nits), all adopted: ci-rca.yml in scope (filter entry; the refusal check runs before the log fetch, which a never-started deploy job could not satisfy) with its test; the workflow's name stated; VP 5 calls each guard's validate_<name>(failed) entry (the modules have no __main__) and adds validate_ci_rca_adjudication and validate_actions_evidence; the evidence obligation moved to predicate (f) with the upload row's literal name; pre_globs add scripts/lambda_manifest.py. ci-rca.yml is a CI workflow edit with no sidecar words; the approval request names it with the other unbound edits (246 cl.4 disposition)."
+  - "Plan-critique r5 REVISE (1 blocking, 2 nits), all adopted: moving the designed-refusal check ahead of the log fetch would have emptied the persona-gate refusal's log read (#2053), so a separate log-free Rejected-deployment check runs first and the persona-capable check stays after the fetch, with a node pinning that order; the Decision 72 comment stays directly above the fetch step, whose env and run stay byte-identical; how GitHub records a rejected review (failure, no steps, no log) is labelled inferred, fails closed, and is fixed forward from the first rejected run's jobs JSON."
+  - "Decision-scout r9 FLAGS_FOUND. WARN Decision 162 cl.3: the new workflow's inline run: bodies had no r3_workflows entries -> config/composite_action_body_baseline.yaml joins scope with one measured entry per new body (ci-rca.yml's new step included), VP 5 runs validate_composite_action_shell_bodies, and 162 is cited. NOTE 246 cl.4 carried with the r8 disposition; the approval request names the ci-rca.yml reorder, filter entry and designed_refusal.py change. Advisories adopted: ci-rca-lifecycle.yaml's designed_refusal.rule and amendment_log join scope; the sibling reconcile-gate refusal is untouched because only the log-free rejected-deployment step gates the log fetch (critique r5). The ci-rca.yml change raised no new Decision flag. Decisions triaged: 219 of 219. Roadmap items intersected: 13; CONFLICT: 0; RELATED: 13. Serves: NS.9 4/5. CITE: 239, 270, 249, 254, 154, 125, 126, 79, 238, 232, 246, 267, 162."
   - "Decision 79: the manifest flip makes the artifact active; VP 9 (deploy and read-back) and VP 10 (the masked read) are its deploy and smoke steps."
   - "Rollback: before the first approval nothing changed in AWS but the IAM line; revert the PR (the sandbox apply removes the prefix). After a deploy, a bad reader is rolled back by a revert PR that ships through the channel with a fresh approval (a revert of a shared, non-protective module does not wake the channel: the operator dispatches with force after its merge) (a dispatch always targets main's newest green commit and the role trusts main only, so an older commit cannot be redeployed directly), or by the operator's admin tier; the placeholder returns only through an operator admin action."
 gate_rounds:
@@ -772,6 +805,8 @@ gate_rounds:
   - {gate: decision-scout, round: 8, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:bf409b8b32d5ac2abd6b680e229b827abfa6aa8a339d4c4f157ba5a291ef7a2e'}  # pragma: allowlist secret
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 3, nits: 3}
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 2}
+  - {gate: decision-scout, round: 9, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:74517f2b15e0e38dec4c935a36140059eaa09fa9efcfad1dde803c164c3e20fb'}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 2}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
