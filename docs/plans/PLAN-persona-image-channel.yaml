@@ -1,0 +1,490 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: persona-image-channel
+intent: >-
+  Give the digest-pinnable persona image its governed publish channel (T4.32 c2's channel legs; rec-4477): a workflow
+  that main's completed CI wakes builds the newest main commit whose full tier passed (Decision 249 clause 2's gate,
+  reused from scripts/ci/deploy_gate.py with the registry as the channel record), runs the conformance suite against
+  that exact image, pushes it to a public GHCR package under GITHUB_TOKEN packages: write, attests its build provenance
+  and writes the digest and source commit to the run summary; docs/contracts/deploy-paths.yaml gains the channel's row
+  and ports.yaml the image's structural assumption. Second of the three plans PLAN-persona-image-channel's hint splits
+  into (blind consults, settled): PLAN-persona-image-twin built the image; PLAN-persona-image-pin verifies and pins the
+  digest. Serves NS.1 and NS.3: one tested artefact for every persona compute host, run where its trigger originates.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-persona-image-channel.yaml
+phase: >-
+  T4.32 c2 (channel legs; c2 stays open: "the pushed digest is recorded in one repository file" needs
+  PLAN-persona-image-pin's first pin). T4.32 is in_progress. Builds after PLAN-persona-image-twin's build merges (it
+  publishes that plan's image with that plan's suite). Post-merge: the first publish run, the operator's admin steps
+  (organisation package setting, package visibility Public), then the anonymous read proof (V3).
+closes_criteria: []
+cites: [dec:126, dec:162, dec:205, dec:212, dec:246, dec:249, dec:254, dec:267]
+scope:
+  - file: .github/workflows/persona-image-publish.yml
+    action: Create
+    purpose: >-
+      The channel. on: workflow_run (workflows [CI], types [completed], branches [main]) and workflow_dispatch with two
+      boolean inputs, force (bypasses only the already-published and no-change skips, never the full-tier target,
+      deploy-gate.yml's meaning) and first_publish (a DENIED record read counts as absent; for the package's first push
+      only). Workflow permissions contents: read; concurrency group persona-image-publish, cancel-in-progress false. Job
+      gate (name gate): if is the dispatcher-bot guard (Decision 267 cl.3) && (main-only dispatch || a successful
+      same-repository push CI run), copied from deploy-ducklake-lambdas.yml's gate; permissions contents: read, actions:
+      read, packages: read; timeout 10; checkout (fetch-depth 0, persist-credentials false), setup-python 3.12, pip
+      install pyyaml, then python -m scripts.ci.deploy_gate resolve --channel persona_image with --force/--first-publish
+      from the inputs and GITHUB_TOKEN in env; outputs sha, deploy, reason. Job publish: needs gate, if
+      needs.gate.outputs.deploy == 'true'; permissions exactly contents: read, packages: write, id-token: write,
+      attestations: write; timeout 30; checkout the gate sha (persist-credentials false), setup-python 3.12, pip install
+      -r requirements-dev.txt; python -m scripts.ci.persona_image_publish build --sha <gate sha> (id build); python -m
+      pytest tests/persona_hosts/conformance_suite.py -q with PERSONA_IMAGE_UNDER_TEST set to the build's image_id (no
+      other env, no token); python -m scripts.ci.persona_image_publish push --image-id <id> --sha <gate sha> with
+      GITHUB_TOKEN in env (id push; outputs image, digest); actions/attest-build-provenance with subject-name
+      steps.push.outputs.image, subject-digest steps.push.outputs.digest, push-to-registry true. Every uses: pinned to a
+      full 40-hex commit SHA with a "# vX.Y.Z" comment, read at build time with git ls-remote of the action's newest
+      release tag. No secrets, no AWS, no LLM step (no run_persona, persona_compute_host or run_persona secret variable
+      in any step), no image reference literal (validate_persona_image_digest).
+  - file: scripts/ci/deploy_gate.py
+    action: Modify
+    purpose: >-
+      Channel persona_image (Decision 249 cl.2 reused, never re-implemented). _channel_inputs becomes a closed map
+      (ducklake, prod, persona_image) raising GateError on any other name (today any non-ducklake name falls to the prod
+      lists). persona_image returns (["image"], the pin's inputs(): build.files plus build.copy, read through
+      importlib of src.persona_hosts.image_pin), so config/persona_image.yaml is never a watched path and a pin merge
+      never re-publishes. decide gains a required-path set per channel (default (GATE_MODULE,)); persona_image adds
+      config/persona_image.yaml and the pin's build.dockerfile, so a green target older than the channel skips as
+      pre_channel_target. resolve's CLI: --channel choices ducklake, prod, persona_image; main passes
+      registry_record.read_record (bound to the pin's image and first_publish) as the reader for persona_image and
+      read_record_sha otherwise; --first-publish is refused for any other channel. freshness and its choices unchanged.
+      The module stays stdlib at import (test_module_imports_only_stdlib).
+  - file: scripts/ci/registry_record.py
+    action: Create
+    purpose: >-
+      Stdlib GHCR channel-record reader (Decision 100: a thin reader of the registry's own API).
+      read_record(image: str, *, token: str | None, first_publish: bool = False, opener=urllib.request.urlopen) ->
+      str | None: GET https://ghcr.io/token?scope=repository:<owner/name>:pull (Basic auth with the token when set),
+      then the manifest of tag main (Accept the OCI and Docker v2 manifest types; an index is refused), then its config
+      blob; returns Labels["org.opencontainers.image.revision"] (None when the label is absent). Returns None only on an
+      explicit NAME_UNKNOWN or MANIFEST_UNKNOWN registry error, or a DENIED one when first_publish is set; every other
+      HTTP, JSON or shape failure raises deploy_gate.GateError (fail closed, never a fall back to main HEAD). The image
+      name arrives as an argument (from load_pin), never a literal.
+  - file: scripts/ci/persona_image_publish.py
+    action: Create
+    purpose: >-
+      The publish job's two steps, so the workflow's run bodies stay one line each (Decision 162). build --sha S:
+      build_image(root, BuildOptions(labels={"org.opencontainers.image.revision": S,
+      "org.opencontainers.image.licenses": "BUSL-1.1"})) and image_id=<id> to GITHUB_OUTPUT. push --image-id I --sha S:
+      reads the image name with load_pin; docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin with the token on
+      stdin (never argv), docker tag I <image>:main, docker push, reads the pushed digest from docker inspect's
+      RepoDigests, fetches that manifest with a pull token and asserts its config.digest equals I (classic store) or the
+      digest equals I (containerd store), else exits 1 before anything is attested; asserts the pushed config's revision
+      label equals S; writes image and digest to GITHUB_OUTPUT and a job summary naming the digest, the source commit S
+      and the two pin lines to paste (digest, source_commit) for PLAN-persona-image-pin's pin PR; docker logout in a
+      finally.
+  - file: src/persona_hosts/local_container/build.py
+    action: Modify
+    purpose: >-
+      BuildOptions gains labels: dict[str, str] (default empty), each passed as --label k=v in sorted order; plan 1's
+      CA-secret and proxy handling unchanged.
+  - file: tests/persona_hosts/conformance_suite.py
+    action: Modify
+    purpose: >-
+      The image-under-test fixture reads PERSONA_IMAGE_UNDER_TEST; when set it must match sha256:<64 hex> and name a
+      local image (docker image inspect succeeds, else the suite fails naming it), and it replaces the build_image call;
+      unset, the suite builds from the tree as before. The fixture image still derives from it, so the publish job tests
+      the exact image it pushes. A test-harness variable set by the workflow, not user configuration (no
+      project-configuration row, as plan 1's DEEPSEEK_API_BASE).
+  - file: docs/contracts/deploy-paths.yaml
+    action: Modify
+    purpose: >-
+      Governing text, placed verbatim from the sidecar (blocks e01-e03): a publish_persona_image key after
+      publish_artifacts (description, trigger, actor_role agent, blocks_ref, recovery, status; it says why it is an
+      agent CI channel unlike the operator-only, Environment-gated publish_artifacts, Decision 126), the header's channel
+      enumeration, and one amendment_log row. 482 of 500 effective lines on 2026-11-17 (NEAR_CAP): the key is written in
+      about ten lines; measured on main at build time, if placing it would pass 500, STOP to this planning thread.
+  - file: docs/contracts/ports.yaml
+    action: Modify
+    purpose: >-
+      Governing text from the sidecar (blocks e04-e05): structural_assumptions SA-14 as one flow mapping (the image
+      assumes this repository's layout under /app at its build.copy paths, a docker-compatible engine honouring
+      run_image's run flags, and GHCR as a GitHub-specific record, Decision 234 cl.4's forge hedge; location dec-205,
+      because docker/persona/Dockerfile is not on main when the wording is rehearsed; status open; owning_item
+      "T4.24:c9") and one amendment_log row: +2 effective lines (498 of 500 on 2026-11-17; plan 1's build adds 1).
+      Relief measured on main at build time: rewrite one block-style row other than SA-14 (SA-01 first, if plan 1's build
+      has not already) as one flow mapping with its words unchanged until the file is at or under 500; if none remains,
+      STOP to this planning thread (rec-5274 is the real relief valve; never a budget raise).
+  - file: docs/contracts/actions-capacity.yaml
+    action: Modify
+    purpose: >-
+      Governing text from the sidecar (blocks e06-e07): a ledger row persona-image-publish (items [T4.32], unit
+      per_merge, source assumed, job_minutes_per_unit 2.0, basis naming the gate job's minute per CI completion and the
+      publish job's ~10 minutes on an assumed tenth of merges, live_signal null) and one amendment_log entry. live_signal
+      stays null because validate_actions_capacity fails a workflow path that is not on main, where the wording is
+      rehearsed; PLAN-persona-image-pin sets it as a pointer swap.
+  - file: docs/plans/approved/persona-image-channel.yaml
+    action: Create
+    purpose: The approved-text sidecar (blocks e01-e07), its operator approval run on GitHub (Decision 246).
+  - file: config/ci_rca_taxonomy.yaml
+    action: Modify
+    purpose: >-
+      One workflows row as one flow line: persona-image-publish {tier: not_a_gate, ci_rca: watched, owner: platform,
+      rationale: a governed CD channel whose failure is otherwise invisible, as the Lambda channels}. 492 of 500 on
+      2026-11-17 with twelve unbuilt plans adding rows: measured on main at build time, compact block-style rows to flow
+      style with their words unchanged until the row fits; if no relief remains, STOP to this planning thread.
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: >-
+      r3_workflows entries for each new inline run body at its effective line count (one each), keyed
+      ".github/workflows/persona-image-publish.yml::<job>::<step id>" as the guard derives them. No body writes
+      GITHUB_OUTPUT itself (the scripts do), so R1 is not engaged.
+  - file: tests/ci/test_deploy_gate.py
+    action: Modify
+    purpose: >-
+      New functions only (the graduated shard deploy-gate-decisions is kept unchanged): the closed map refuses an
+      unknown channel; persona_image's inputs equal load_pin(root).inputs() and exclude config/persona_image.yaml; a
+      target lacking the pin file skips pre_channel_target; resolve with an injected registry reader deploys on None
+      (baseline_unknown) and skips when the record equals the target; --first-publish with --channel prod exits 2;
+      the parametrized channel_inputs test gains persona_image.
+  - file: tests/ci/test_registry_record.py
+    action: Create
+    purpose: >-
+      Mirror test over a fake opener: label returned; label absent -> None; NAME_UNKNOWN and MANIFEST_UNKNOWN -> None;
+      DENIED -> GateError, and None under first_publish; a 500, a non-JSON body and an image index -> GateError; the
+      token request carries Basic auth only when a token is given; the scope names the image passed in.
+  - file: tests/ci/test_persona_image_publish.py
+    action: Create
+    purpose: >-
+      Mirror test without a daemon (subprocess patched): build passes both labels; push sends the token on stdin and
+      never in argv, refuses when the pushed manifest is not the tested image or the revision label differs, writes
+      image and digest outputs and the summary, and logs out on failure. test_workflow_shape over the workflow file:
+      the two triggers and their filters, the guard on gate (tests/verify_ci_workflow/test_dispatch_bot_guard.py's
+      guard_problems is empty), publish needs gate and reads its deploy output, per-job permissions exactly as above and
+      contents: read at workflow level, every uses: a 40-hex SHA with a version comment, persist-credentials false on
+      every checkout, the suite step before the push step and the attest step after it, no secrets or AWS action, no
+      step _persona_llm_signatures classifies as an LLM step.
+  - file: tests/persona_hosts/local_container/test_build.py
+    action: Modify
+    purpose: labels appear as sorted --label k=v pairs in the build argv; none by default.
+  - file: tests/checks/contracts/test_persona_image_channel.py
+    action: Create
+    purpose: >-
+      rec-4477's acceptance: test_deploy_paths_names_the_persona_image_channel asserts deploy-paths.yaml has a
+      publish_persona_image key whose trigger names .github/workflows/persona-image-publish.yml and Decision 249's gate
+      module, whose blocks_ref names config/persona_image.yaml, and whose actor_role is agent; and that the workflow file
+      exists and calls scripts.ci.deploy_gate resolve --channel persona_image.
+bundled_recommendations: [rec-4477]
+followon_recs: []
+infrastructure_dependencies:
+  - >-
+    No Terraform. The GHCR package ghcr.io/<owner>/<pin image name> is created by the first publish run, private and
+    linked to the repository through the Dockerfile's org.opencontainers.image.source label (UNPROVEN until that run).
+    Operator admin steps after it, each needing the operator's own words naming it (always_ask: public surface): (A1)
+    organisation Settings > Packages allows public container packages; (A2) the package's visibility set to Public
+    (irreversible); (A3) only if a publish run is refused, the package's Manage Actions access lists this repository
+    with Write. Proof: VP 9's anonymous read.
+acceptance_criteria:
+  - A completed, successful CI push run on main wakes the workflow; the gate deploys the newest commit whose full tier passed when an image input changed since the record, and skips otherwise with a printed reason.
+  - The publish job pushes only an image that passed the conformance suite, and the pushed manifest is that image.
+  - The pushed image carries a build-provenance attestation and revision and licenses labels; the run summary names its digest and source commit.
+  - deploy-paths.yaml names the channel (rec-4477's test passes), ports.yaml records SA-14, actions-capacity.yaml records the channel's load, all word for word as approved.
+  - After the operator's steps, the digest is readable with no registry login.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The gate's persona_image channel, the registry reader, the publish script and the workflow's shape.
+    command: bin/venv-python -m pytest tests/ci/test_deploy_gate.py tests/ci/test_registry_record.py tests/ci/test_persona_image_publish.py tests/persona_hosts/local_container/test_build.py -q
+    expected: Exit 0, every node passes. Red before (channel, modules and workflow absent).
+    fix_if: A pin-file path watched, a DENIED read treated as absent without first_publish, a token in argv, or a missing permission or pin; fix the code, never the test.
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: persona-image-channel-gate-and-publish
+  - step: 2
+    phase: pre-deploy
+    action: rec-4477's acceptance and the approved wording placed verbatim.
+    command: bin/venv-python -m pytest tests/checks/contracts/test_persona_image_channel.py -q && bin/venv-python -m scripts.roadmap.approved_text verify --slug persona-image-channel
+    expected: Exit 0 from both; approved_text verify reports the sidecar's digest unchanged and every block placed.
+    fix_if: A mismatch means the placed words differ from the approved words; restore them, never re-approve silently.
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: persona-image-channel-deploy-paths-row
+  - step: 3
+    phase: pre-deploy
+    action: The registered checks over the live tree, including the companions this change touches.
+    command: >-
+      bin/venv-python -c "from scripts.checks.contracts.validate_ports_contract import validate_ports_contract as a;
+      from scripts.checks.ci_guards.validate_ci_rca_taxonomy import validate_ci_rca_taxonomy as b;
+      from scripts.checks.ci_guards.validate_composite_action_shell_bodies import validate_composite_action_shell_bodies as c;
+      from scripts.checks.ci_guards.validate_persona_image_digest import validate_persona_image_digest as d;
+      from scripts.checks.ci_guards.validate_persona_trigger_policy import validate_persona_trigger_policy as e;
+      from scripts.checks.contracts.validate_actions_capacity import validate_actions_capacity as g;
+      f=[];[h(f) for h in (a,b,c,d,e,g)];print(*f,sep='\n');print(f'channel checks: {len(f)} failures');assert not f"
+    expected: The last line reports 0 failures.
+    expected_literals:
+      - 'channel checks: 0 failures'
+    fix_if: A failure names the file to fix; never loosen a check. A NEAR_CAP breach takes the scope row's relief or a STOP.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: All six are registered checks that already run in every tier; a shard would duplicate them.
+  - step: 4
+    phase: pre-deploy
+    action: The suite against a prebuilt image id in this cloud session (the publish job's path), when dockerd starts.
+    command: >-
+      (docker info >/dev/null 2>&1 || (sudo -n dockerd >/tmp/dockerd.log 2>&1 &)); timeout 30 sh -c 'until docker info >/dev/null 2>&1; do :; done';
+      ID=$(bin/venv-python -c "from pathlib import Path;from src.persona_hosts.local_container import build_image;print(build_image(Path('.')))") &&
+      PERSONA_IMAGE_UNDER_TEST=$ID bin/venv-python -m pytest tests/persona_hosts/conformance_suite.py -q
+    expected: Exit 0, every node passes on the prebuilt id.
+    fix_if: The suite rebuilt instead of using the id, or refused a valid id; fix the fixture. If dockerd cannot start, record UNPROVEN in the PR body and rely on VP 7.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: The publish job runs this path on every publish; plan 1's pr-validate step guards the default path.
+  - step: 5
+    phase: pre-deploy
+    action: Pre-handoff full tier on the committed, rebased tree (Decision 163), read through its evidence file.
+    command: bin/venv-python -m scripts.validate; bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: The verify-head read reports the full tier passed on HEAD's tree.
+    fix_if: Any failure; fix and re-run both from the start (timeout_disposition blocked).
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: pre-deploy
+    action: After the PR is pushed, pr-validate passed on its head (the PR touches plan 1's suite, so its conformance step ran).
+    command: >-
+      bin/venv-python -c "import json,subprocess,urllib.request as u;sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip();
+      g=lambda p:json.load(u.urlopen(u.Request('https://api.github.com/repos/otl-labs/ontheloop/'+p,headers={'Accept':'application/vnd.github+json'})));
+      run=g('actions/workflows/ci.yml/runs?event=pull_request&head_sha='+sha)['workflow_runs'][0];
+      job=[j for j in g('actions/runs/%d/jobs'%run['id'])['jobs'] if j['name']=='pr-validate'][0];
+      st={s['name']:s['conclusion'] for s in job['steps']};print('pr-validate:',job['conclusion'],'conformance:',st.get('Persona image conformance (local_container suite)'));assert job['conclusion']=='success'"
+    expected: The last line names pr-validate success and the conformance step success.
+    fix_if: Fix on the branch; never skip the step.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: It reads one PR's run; pr-validate itself is the standing gate.
+  - step: 7
+    phase: post-deploy
+    action: >-
+      [post-deploy] The first publish: the CI push run of the merge commit wakes the workflow; read its run (or, if the
+      gate failed closed on a DENIED record read, dispatch it once from main with first_publish true and read that run).
+    command: >-
+      bin/venv-python -c "import json,urllib.request as u;
+      g=lambda p:json.load(u.urlopen(u.Request('https://api.github.com/repos/otl-labs/ontheloop/'+p,headers={'Accept':'application/vnd.github+json'})));
+      run=g('actions/workflows/persona-image-publish.yml/runs?branch=main&per_page=1')['workflow_runs'][0];
+      jobs={j['name']:j['conclusion'] for j in g('actions/runs/%d/jobs'%run['id'])['jobs']};print('run',run['id'],run['event'],run['conclusion'],jobs);assert run['conclusion']=='success' and jobs.get('publish')=='success'"
+    expected: The newest run concluded success with its publish job success; record the run id and the summary's digest and source commit in the PR and the handoff.
+    fix_if: >-
+      A gate failure on the record read: the first_publish dispatch (once). A suite failure: fix forward through a new
+      PR (nothing was pushed). A push refused: operator step A3. Never push by hand.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A one-time read of the first run; the ci_rca watch on the workflow is the standing signal.
+  - step: 8
+    phase: post-deploy
+    action: >-
+      [post-deploy] The published image is the attested, labelled image of the gate sha: read the attestation and the
+      labels with the job token the publish run used, from this session through the run's own logged verification, or
+      with gh once the package is public.
+    command: >-
+      D=<digest from VP 7>; S=<source commit from VP 7>; I=$(bin/venv-python -c "from pathlib import Path;from src.persona_hosts import load_pin;print(load_pin(Path('.')).image)");
+      gh attestation verify "oci://$I@$D" --repo otl-labs/ontheloop --signer-workflow otl-labs/ontheloop/.github/workflows/persona-image-publish.yml --source-ref refs/heads/main --deny-self-hosted-runners &&
+      docker buildx imagetools inspect "$I@$D" --format '{{json .Image.Config.Labels}}' | bin/venv-python -c "import json,sys;l=json.load(sys.stdin);assert l['org.opencontainers.image.revision']=='$S' and l['org.opencontainers.image.licenses']=='BUSL-1.1';print('LABELS_OK')"
+    expected: gh reports the attestation verified for the signer workflow on refs/heads/main, and the last line is LABELS_OK. Run after VP 9's operator steps if the package is still private.
+    fix_if: An unknown gh flag means the flags differ from this plan (UNPROVEN until now); record the working invocation in the handoff for PLAN-persona-image-pin, never drop the signer-workflow check.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: PLAN-persona-image-pin's pr-validate verification is the standing check for every pinned digest.
+  - step: 9
+    phase: post-deploy
+    action: >-
+      [post-deploy] After the operator's words for A1 and A2 (and A3 only if needed), the digest is public: read it with
+      no registry login.
+    command: >-
+      D=<digest from VP 7>; I=$(bin/venv-python -c "from pathlib import Path;from src.persona_hosts import load_pin;print(load_pin(Path('.')).image)");
+      DOCKER_CONFIG=$(mktemp -d) docker manifest inspect "$I@$D" >/dev/null && echo ANONYMOUS_READ_OK
+    expected: The last line is ANONYMOUS_READ_OK (the one check that proves the operator's steps worked).
+    fix_if: DENIED means the package is still private; ask the operator for the step by name, never change visibility from a session.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A one-time proof of an irreversible operator step.
+  - step: 10
+    phase: post-deploy
+    action: '[post-deploy] rec-4477 closed by the merge commit Resolves: trailer.'
+    command: >-
+      bin/venv-python -c "from src.common import ducklake_reader_client as rc;rows,m=rc.fetch_recs_by_ids(rc.make_reader(),['rec-4477']);print(rows[0]['id'],rows[0]['status']);assert rows[0]['status']=='closed'"
+    expected: The line reads rec-4477 closed.
+    fix_if: Still open after the closure job ran; update_rec with the merge SHA as evidence.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: .github/workflows/persona-image-publish.yml
+    behavior: triggers, guard, per-job permissions, SHA pins, no credential persisted, suite before push, attest after
+    verification_step: 1
+    test_selector: tests/ci/test_persona_image_publish.py::test_workflow_shape
+    red_green_expectation: red before (workflow absent), green after
+  - source: scripts/ci/deploy_gate.py
+    behavior: closed channel map, persona_image inputs without the pin file, pre_channel_target, registry reader selection
+    verification_step: 1
+    test_selector: tests/ci/test_deploy_gate.py
+    red_green_expectation: red before (persona_image unknown), green after
+  - source: scripts/ci/registry_record.py
+    behavior: revision label read; absent only on explicit unknown answers; DENIED fails closed outside first_publish
+    verification_step: 1
+    test_selector: tests/ci/test_registry_record.py
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/ci/persona_image_publish.py
+    behavior: labels at build; token on stdin; push refused unless the pushed manifest is the tested image
+    verification_step: 1
+    test_selector: tests/ci/test_persona_image_publish.py
+    red_green_expectation: red before (module absent), green after
+  - source: src/persona_hosts/local_container/build.py
+    behavior: labels passed as sorted --label pairs
+    verification_step: 1
+    test_selector: tests/persona_hosts/local_container/test_build.py
+    red_green_expectation: red before (no labels option), green after
+  - source: tests/persona_hosts/conformance_suite.py
+    behavior: a prebuilt image id replaces the in-suite build
+    verification_step: 4
+    test_selector: tests/persona_hosts/conformance_suite.py
+    waiver_reason: The suite is itself a test module; VP 4 runs it on a prebuilt id and the publish job runs that path on every publish.
+  - source: docs/contracts/deploy-paths.yaml
+    behavior: the publish_persona_image row names the channel, its gate and its pin file
+    verification_step: 2
+    test_selector: tests/checks/contracts/test_persona_image_channel.py::test_deploy_paths_names_the_persona_image_channel
+    red_green_expectation: red before (row absent), green after
+  - source: docs/contracts/ports.yaml
+    behavior: SA-14 placed as approved and the file within its cap
+    verification_step: 3
+    command: >-
+      bin/venv-python -c "from scripts.checks.contracts.validate_ports_contract import validate_ports_contract as a;
+      from scripts.checks.ci_guards.validate_ci_rca_taxonomy import validate_ci_rca_taxonomy as b;
+      from scripts.checks.ci_guards.validate_composite_action_shell_bodies import validate_composite_action_shell_bodies as c;
+      from scripts.checks.ci_guards.validate_persona_image_digest import validate_persona_image_digest as d;
+      from scripts.checks.ci_guards.validate_persona_trigger_policy import validate_persona_trigger_policy as e;
+      from scripts.checks.contracts.validate_actions_capacity import validate_actions_capacity as g;
+      f=[];[h(f) for h in (a,b,c,d,e,g)];print(*f,sep='\n');print(f'channel checks: {len(f)} failures');assert not f"
+    red_green_expectation: red before a malformed or over-cap placement, green after
+  - source: docs/contracts/actions-capacity.yaml
+    behavior: the persona-image-publish ledger row passes the capacity contract check
+    verification_step: 3
+    command: >-
+      bin/venv-python -c "from scripts.checks.contracts.validate_ports_contract import validate_ports_contract as a;
+      from scripts.checks.ci_guards.validate_ci_rca_taxonomy import validate_ci_rca_taxonomy as b;
+      from scripts.checks.ci_guards.validate_composite_action_shell_bodies import validate_composite_action_shell_bodies as c;
+      from scripts.checks.ci_guards.validate_persona_image_digest import validate_persona_image_digest as d;
+      from scripts.checks.ci_guards.validate_persona_trigger_policy import validate_persona_trigger_policy as e;
+      from scripts.checks.contracts.validate_actions_capacity import validate_actions_capacity as g;
+      f=[];[h(f) for h in (a,b,c,d,e,g)];print(*f,sep='\n');print(f'channel checks: {len(f)} failures');assert not f"
+    red_green_expectation: red before a malformed row, green after
+  - source: config/ci_rca_taxonomy.yaml
+    behavior: the new workflow has its row, file at or under 500 effective lines
+    verification_step: 3
+    command: >-
+      bin/venv-python -c "from scripts.checks.contracts.validate_ports_contract import validate_ports_contract as a;
+      from scripts.checks.ci_guards.validate_ci_rca_taxonomy import validate_ci_rca_taxonomy as b;
+      from scripts.checks.ci_guards.validate_composite_action_shell_bodies import validate_composite_action_shell_bodies as c;
+      from scripts.checks.ci_guards.validate_persona_image_digest import validate_persona_image_digest as d;
+      from scripts.checks.ci_guards.validate_persona_trigger_policy import validate_persona_trigger_policy as e;
+      from scripts.checks.contracts.validate_actions_capacity import validate_actions_capacity as g;
+      f=[];[h(f) for h in (a,b,c,d,e,g)];print(*f,sep='\n');print(f'channel checks: {len(f)} failures');assert not f"
+    red_green_expectation: red before (workflow without a row), green after
+  - source: config/composite_action_body_baseline.yaml
+    behavior: r3 entries for the new inline run bodies
+    verification_step: 3
+    command: >-
+      bin/venv-python -c "from scripts.checks.contracts.validate_ports_contract import validate_ports_contract as a;
+      from scripts.checks.ci_guards.validate_ci_rca_taxonomy import validate_ci_rca_taxonomy as b;
+      from scripts.checks.ci_guards.validate_composite_action_shell_bodies import validate_composite_action_shell_bodies as c;
+      from scripts.checks.ci_guards.validate_persona_image_digest import validate_persona_image_digest as d;
+      from scripts.checks.ci_guards.validate_persona_trigger_policy import validate_persona_trigger_policy as e;
+      from scripts.checks.contracts.validate_actions_capacity import validate_actions_capacity as g;
+      f=[];[h(f) for h in (a,b,c,d,e,g)];print(*f,sep='\n');print(f'channel checks: {len(f)} failures');assert not f"
+    red_green_expectation: red before (bodies without entries), green after
+constraints:
+  - >-
+    Governing text only as approved: the deploy-paths, ports and actions-capacity edits are the sidecar's words
+    verbatim (approved_text verify, VP 2); any other wording need is a plan defect back to this planning thread
+    (Decision 246).
+  - >-
+    The workflow holds no secret, assumes no AWS role, runs no LLM and spells no image reference; it pushes only the
+    tag main and never deletes or retags an earlier version (a pinned digest must stay pullable).
+  - >-
+    No session pushes to the registry, changes package visibility or settings, or dispatches the workflow except VP 7's
+    one first_publish dispatch from main; package settings are operator steps A1-A3, each on the operator's own words.
+  - >-
+    config/persona_image.yaml is not edited (digest and source_commit stay null); pinning is PLAN-persona-image-pin's.
+    deploy-gate.yml and the two Lambda channel workflows are not edited.
+  - No key, account id or proxy value enters the image, a log, a summary or the repository (Decision 101).
+  - Every new module stays under 500 SLOC (Decision 128).
+  - No rescue agents or workaround loops (Decision 55); never skip, disable or quarantine a test (Decision 235).
+context:
+  - >-
+    Decision-scout r1 FLAGS_FOUND; CITE 126, 162, 205, 212, 246, 249, 254, 267. Decisions triaged: 218 of 218. Roadmap
+    items intersected: 5; CONFLICT: 0; RELATED: 5. Serves: NS.1, NS.3 4/5. Flags adopted: D48 (post-deploy VP 7-9),
+    D163 (VP 5), D205 spirit (persist-credentials false, suite before login, no token in containers; separate build and
+    push jobs rejected: containers carry no job env and moving the image adds minutes and a second identity hop).
+  - >-
+    Split and design settled on a blind Fable consult (/mnt/project-files/persona-image-channel/plan2-advisor-brief/):
+    own gate job on deploy_gate.py (deploy-gate.yml's gate needs id-token: write and an AWS role); the registry tag main
+    and its revision label are the record; the pin file is not watched (else every pin merge re-publishes); no
+    --source-digest (a workflow_run job runs at main HEAD, not the built sha), the revision label binds the commit.
+  - >-
+    Decision 254 / rec-5108 note: rec-4874's later builds move deploy_gate.py's newest-green resolution onto the
+    last-green resolver; this channel then follows it unchanged. Whichever of the two builds second rebases.
+  - >-
+    UNPROVEN until the first run (VP 7-8): GHCR's answer to the job token for a package that does not exist yet
+    (anonymous: DENIED, probed 2026-11-17; hence first_publish); the package linking to the repository through the
+    source label; the gh attestation flags; the pushed-manifest identity check under the runner's docker store.
+  - >-
+    SA-14 is at dec-205 because the wording check rehearses on main, where docker/persona/Dockerfile does not exist
+    until PLAN-persona-image-twin's build; PLAN-persona-image-pin may swap the pointer (no word, a pointer swap).
+  - >-
+    Shared files (plan_obligations 2026-11-17): unbuilt PLAN-persona-image-twin also scopes build.py, the suite,
+    test_build.py, ports.yaml, ci_rca_taxonomy.yaml and the body baseline (this plan builds after it); deploy-paths.yaml
+    is also scoped by unbuilt PLAN-agent-proxy-signed-access, PLAN-bootstrap-ci-gated-apply, PLAN-neon-key-out-of-pr-plans,
+    PLAN-sit-organization and PLAN-telemetry-content-reader-lock; ports.yaml and ci_rca_taxonomy.yaml by many more.
+    Whichever builds second rebases; NEAR_CAP files take the relief in their scope rows.
+  - >-
+    First publish: the reviewed CI channel writing a private package, under standing authorisation (deploys run by the
+    reviewed CI channel); A1-A3 are always_ask (public surface) and need the operator's words naming each.
+  - >-
+    red_overlap (2026-11-17 15:10 UTC, main 7affe7ad): blocked by rec-5247 (slo_breached; telemetry-reader smoke 504)
+    and rec-5276 (overlap; arrival-red excuse), both Feedback Loop's (operator 2026-11-17); rec-5276's shared paths are
+    transitive-residue test modules only, none in this plan's scope. Deferral: this plan touches no telemetry reader,
+    arrival config or Lambda; the build's full tier (VP 5, Decision 163) waits for their repair, and /implement re-runs
+    red_overlap first (Decision 226).
+  - "Next plan: PLAN-persona-image-pin, brief /mnt/project-files/persona-image-channel/BRIEF-plan3-pin.md."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:104da68d0512845b06c6ea0f3f0fd66168488d6492845d3e6f913a8dc945a434"}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - PLAN-persona-image-twin's build merged (docker/persona/Dockerfile, config/persona_image.yaml, src/persona_hosts/ on main)
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - >-
+    Preconditions: PLAN-persona-image-twin's build is on main; re-run scripts.ci_rca.red_overlap; measure ports.yaml,
+    deploy-paths.yaml and ci_rca_taxonomy.yaml on main (relief or STOP per their scope rows).
+  - >-
+    scripts/ci/registry_record.py and its test; scripts/ci/deploy_gate.py's persona_image channel and its tests
+    (pre: tests green on main; post: VP 1's deploy-gate and registry nodes green).
+  - >-
+    build.py labels and test_build.py; the suite's PERSONA_IMAGE_UNDER_TEST fixture; scripts/ci/persona_image_publish.py
+    and its test.
+  - >-
+    .github/workflows/persona-image-publish.yml with every uses: pinned (git ls-remote of each action's newest release
+    tag; record the tags in the PR body); the taxonomy row and the body-baseline entries; test_workflow_shape.
+  - >-
+    Place the sidecar's blocks verbatim (deploy-paths, ports, actions-capacity), with the ports relief if measured
+    necessary; test_persona_image_channel.py; approved_text verify.
+  - Execute Verification Plan pre-deploy steps 1-6 -- loop until pass; on unrecoverable failure stop and RCA (Decision 55).
+  - >-
+    Merge on code review PROCEED, green CI and validate_merge_step (standing authorisation; commit body carries
+    Resolves: rec-4477). Then VP 7 (first publish), ask the operator for A1, A2 (and A3 only if needed) one at a time,
+    each in their own words, then VP 8 and VP 9, then VP 10.
+  - >-
+    Report: the publish run id, digest, source commit and attestation result, the working gh flags, and the operator
+    approvals with their dates, in the handoff for PLAN-persona-image-pin.
+rollback: >-
+  Revert the workflow file to stop publishing; published versions stay (nothing consumes them until the pin plan). The
+  package's public visibility cannot be undone; the image holds only this public repository's code.
