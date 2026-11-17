@@ -261,3 +261,50 @@ class TestComputeEscapeMode:
     def test_rule5_precondition_still_abstains_with_undetermined_canary_vacuous_false(self):
         result = compute_escape_mode(False, "not_selected", _UNDETERMINED, False)
         assert result == _UNDETERMINED
+
+
+def _range_repo(tmp_path):
+    import subprocess
+
+    def git(*a):
+        return subprocess.run(["git", *a], cwd=tmp_path, capture_output=True, text=True, encoding="utf-8").stdout.strip()
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    git("config", "commit.gpgsign", "false")
+    shas = []
+    for name in ("a.py", "b.py", "c.py"):
+        (tmp_path / name).write_text(name, encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-q", "-m", name)
+        shas.append(git("rev-parse", "HEAD"))
+    return shas
+
+
+def test_two_commit_range_diff_lists_both(tmp_path, monkeypatch):
+    shas = _range_repo(tmp_path)
+    monkeypatch.setenv("CI_RCA_RANGE_PREV", shas[0])
+    with patch("scripts.ci_rca.vacuous_pass.ROOT", tmp_path):
+        assert sorted(merged_diff_files()) == ["b.py", "c.py"]
+
+
+def test_set_but_empty_range_is_undetermined(tmp_path, monkeypatch):
+    _range_repo(tmp_path)
+    monkeypatch.setenv("CI_RCA_RANGE_PREV", "")
+    with patch("scripts.ci_rca.vacuous_pass.ROOT", tmp_path):
+        assert merged_diff_files() == _UNDETERMINED
+        assert deleted_test_files() == _UNDETERMINED
+
+
+def test_head_caret_value_diffs_as_today(tmp_path, monkeypatch):
+    _range_repo(tmp_path)
+    monkeypatch.setenv("CI_RCA_RANGE_PREV", "HEAD^")
+    with patch("scripts.ci_rca.vacuous_pass.ROOT", tmp_path):
+        assert merged_diff_files() == ["c.py"]
+
+
+def test_unset_keeps_head_caret(tmp_path):
+    _range_repo(tmp_path)
+    with patch("scripts.ci_rca.vacuous_pass.ROOT", tmp_path):
+        assert merged_diff_files() == ["c.py"]

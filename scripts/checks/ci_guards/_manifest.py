@@ -10,6 +10,28 @@ from scripts.checks._schema import Entry
 
 ENTRIES: tuple[Entry, ...] = (
     Entry(
+        name="validate_full_tier_range",
+        module="scripts.checks.ci_guards.validate_full_tier_range",
+        attr="validate_full_tier_range",
+        pre=True,
+        pre_globs=(
+            "scripts/checks/ci_guards/validate_full_tier_range.py",
+            "docs/contracts/full-tier-range.yaml",
+            "scripts/checks/_common.py",
+            "scripts/ci/last_green.py",
+            "scripts/ci/deploy_gate.py",
+            "scripts/ci_rca/dedup.py",
+            "scripts/ci_rca/vacuous_pass.py",
+            "scripts/ci_rca/fingerprint.py",
+            "scripts/ci_rca/evidence/**",
+            "scripts/ci_rca/taxonomy.py",
+            "scripts/ci_rca/tier_map.py",
+            "scripts/checks/registry.py",
+            "config/ci_rca_taxonomy.yaml",
+        ),
+        full_segment="full_after_lint",
+    ),
+    Entry(
         name="validate_workflow_agent_safety",
         module="scripts.checks.ci_guards.validate_workflow_agent_safety",
         attr="validate_workflow_agent_safety",
