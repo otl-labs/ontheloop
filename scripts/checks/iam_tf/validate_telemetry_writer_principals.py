@@ -295,7 +295,7 @@ class _Root:
     def __init__(self, files: dict[str, str]) -> None:
         self.files = files
         self.nodes: dict[tuple[str, str], tuple[str, str]] = {}
-        self.attach: list[tuple[str, set[str], set[str]]] = []
+        self.attach: list[tuple[str, set[str], set[tuple[str, str]]]] = []
         self.others: list[tuple[str, str]] = []
         self.refs: dict[tuple[str, str], set[tuple[str, str]]] = {}
         for rel, text in files.items():
@@ -494,8 +494,10 @@ def _path_shape(cls: str, row: _Class, sid: str, body: str, stmt: dict | None) -
 
 def _closure_findings(label: str, roots: dict[str, _Root], file: str, sids: list[str], allowed: set[str]) -> list[str]:
     root = next((r for r in roots.values() if file in r.files), None)
-    out = []
-    for sid in sids if root else ():
+    out: list[str] = []
+    if root is None:
+        return out
+    for sid in sids:
         node = root.holding_node(sid)
         if node is None:
             out.append(f"{label}: Sid {sid} is held by no local, policy document or aws_iam_policy in its root")
@@ -561,7 +563,7 @@ def validate_telemetry_writer_principals(failed: list[str], root: Path | None = 
         print("  SKIP: no terraform roots")
         return
     try:
-        classes = list(load_contract(root / CONTRACT_REL).contract.governance.principal_classes)
+        classes = list(getattr(load_contract(root / CONTRACT_REL).contract.governance, "principal_classes", None) or [])
     except Exception as exc:  # noqa: BLE001 - a broken contract is a finding, never a pass
         classes = []
         failed.append(f"{key} {CONTRACT_REL} cannot be loaded: {exc}")
