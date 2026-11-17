@@ -5,15 +5,6 @@ docstring; the facade re-exports the public surface and holds no logic.
 
 from scripts.telemetry_verify.alarms import ALARM_MIN_INTERVAL_S, ALARM_SOURCE, AlarmOutcome, raise_alarms
 from scripts.telemetry_verify.compare import CompareResult, TableCounts, compare_tree
-from scripts.telemetry_verify.completeness import (
-    V4_FIRST_JUDGED_DAY,
-    CompletenessResult,
-    Listed,
-    Lists,
-    compare_sessions,
-    lists_cover,
-    load_lists,
-)
 from scripts.telemetry_verify.dedupe import (
     collapse_events,
     collapse_model_calls,
@@ -50,14 +41,10 @@ __all__ = [
     "ALARM_SOURCE",
     "JOINS_PATH",
     "ROLLUP_VERBS",
-    "V4_FIRST_JUDGED_DAY",
     "STATE_VERBS",
     "AlarmOutcome",
     "Budget",
     "CompareResult",
-    "CompletenessResult",
-    "Listed",
-    "Lists",
     "MonitorIncomplete",
     "MonitorReport",
     "ModelRefs",
@@ -73,15 +60,12 @@ __all__ = [
     "collapse_model_calls",
     "compare_orphans",
     "compare_session",
-    "compare_sessions",
     "compare_tree",
     "compare_window",
     "compute_generations",
     "conflicted_grain_keys",
     "decode_rows",
     "friction_facts",
-    "lists_cover",
-    "load_lists",
     "load_telemetry_joins",
     "model_call_cost_estimate",
     "normalise_row",
