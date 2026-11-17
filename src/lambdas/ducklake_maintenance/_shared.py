@@ -67,6 +67,10 @@ CATALOG_METRICS = frozenset(
         "MergeOpsFilesAfterTotal",
         "MergeOpsDurationMs",
         "CatalogFileColumnStatsRows",
+        "MergeOpsBacklogCommits",
+        "MergeOpsGateUnreadable",
+        "MergeOpsGateTriggered",
+        "MergeOpsFilesBeforeTotal",
     }
 )
 
