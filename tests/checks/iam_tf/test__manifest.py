@@ -60,3 +60,19 @@ class TestEnvironmentTaxonomyPromotedUngated:
 
     def test_declares_no_pre_globs(self) -> None:
         assert self._entry().pre_globs is None
+
+
+class TestTelemetryWriterPrincipalsPreGlobs:
+    """validate_telemetry_writer_principals is a fast-tier check selected by any terraform root change."""
+
+    def _entry(self):
+        return next(e for e in _manifest.ENTRIES if e.name == "validate_telemetry_writer_principals")
+
+    def test_in_pre_sequence(self) -> None:
+        assert "validate_telemetry_writer_principals" in [e.name for e in registry.pre_sequence()]
+
+    def test_pre_globs_cover_both_terraform_roots(self) -> None:
+        entry = self._entry()
+        assert entry.pre
+        assert "terraform/personal/**" in entry.pre_globs
+        assert "terraform/bootstrap/**" in entry.pre_globs
