@@ -346,7 +346,11 @@ _TEXT_REDS: list[tuple] = [
         "event alarm missing ok_actions",
         "alarm",
         "alarms",
-        "  alarm_actions       = [local.platform_security_alerts_topic_arn]\n  ok_actions          = [local.platform_security_alerts_topic_arn]\n}\n\nresource",
+        (
+            "  alarm_actions       = [local.platform_security_alerts_topic_arn]\n"
+            "  ok_actions          = [local.platform_security_alerts_topic_arn]\n"
+            "}\n\nresource"
+        ),
         "  alarm_actions       = [local.platform_security_alerts_topic_arn]\n}\n\nresource",
     ),
     ("heartbeat notBreaching", "alarm", "alarms", 'treat_missing_data  = "breaching"', 'treat_missing_data  = "notBreaching"'),
