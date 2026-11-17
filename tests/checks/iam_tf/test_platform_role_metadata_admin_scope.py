@@ -57,6 +57,8 @@ _SCANNED_BOOTSTRAP_FILES = (
     _READS_FILE,
     _SETTINGS_FILE,
     _BOOTSTRAP_DIR / "main.tf",
+    _BOOTSTRAP_DIR / "telemetry_content_deploy_role.tf",
+    _BOOTSTRAP_DIR / "telemetry_content_reader.tf",
     _BOOTSTRAP_DIR / "variables.tf",
 )
 _UNSCANNED_BOOTSTRAP_FILES = {

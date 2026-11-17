@@ -23,9 +23,10 @@ _BLOBS = f"{_BUCKET}/telemetry-blobs/*"
 _WRITER, _TWIN, _READER, _ADMIN = (
     f"{_ACCOUNT}{n}" for n in ("telemetry-writer", "telemetry-writer-smoke", "telemetry-reader", "maintenance")
 )
+_CONTENT = "arn:aws:iam::${var.account_id}:role/telemetry-content-reader"
 _IO_ACTIONS = ("s3:GetObject", "s3:GetObjectVersion", "s3:PutObject", "s3:DeleteObject")
 _SPECS = {
-    "DenyTelemetryProdPrefixIO": (_IO_ACTIONS, (_PROD, _PROD_BLOBS), (_WRITER, _READER, _ADMIN)),
+    "DenyTelemetryProdPrefixIO": (_IO_ACTIONS, (_PROD, _PROD_BLOBS), (_WRITER, _READER, _ADMIN, _CONTENT)),
     "DenyTelemetryBlobPut": (("s3:PutObject",), (_BLOBS,), (_WRITER, _TWIN)),
     "DenyTelemetryBlobDelete": (("s3:DeleteObject",), (_BLOBS,), (_ADMIN,)),
     "DenyTelemetryVersionDelete": (("s3:DeleteObjectVersion",), (_BLOBS, _PROD), ()),
