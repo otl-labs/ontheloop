@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,45 @@ FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "persona_backends" 
 PROMPT = FIXTURE.parent / "rendered" / "fixture_persona.txt"
 SHA = "a" * 40
 VALID = json.dumps({"outcome": "success", "verdict": "PROCEED", "findings": []})
+
+
+FIELD_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["outcome", "verdict", "findings"],
+    "properties": {
+        "outcome": {"const": "success"},
+        "verdict": {"type": "string", "enum": ["PROCEED", "REVISE"]},
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["severity"],
+                "properties": {"severity": {"type": "string", "enum": ["blocking", "nit"]}},
+            },
+        },
+    },
+}
+RULE: dict[str, Any] = {
+    "cases": [{"verdict": "REVISE", "any": [{"array": "findings", "field": "severity", "in": ["blocking"]}]}],
+    "otherwise": "PROCEED",
+}
+
+
+def rule_contract(tmp_path: Path, rule: Any, output_schema: dict[str, Any] | None = None) -> Path:
+    import yaml
+
+    root = tmp_path / "rule"
+    (root / "rendered").mkdir(parents=True, exist_ok=True)
+    data = yaml.safe_load(FIXTURE.read_text(encoding="utf-8"))
+    data["verdict_consistency"] = rule
+    if output_schema is not None:
+        data["output_schema"] = output_schema
+    contract = root / "fixture_persona.yaml"
+    contract.write_text(yaml.safe_dump(data), encoding="utf-8")
+    shutil.copy(PROMPT, root / "rendered" / "fixture_persona.txt")
+    return contract
 
 
 def good_input(notes: str = "line one\nline two\nline three") -> dict[str, Any]:

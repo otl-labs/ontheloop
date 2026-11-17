@@ -30,6 +30,10 @@ exclusion from the pip group is inert defensive config Dependabot could never ac
 anyway because the derived assertion reads the denylist verbatim; that is the honest price of
 deriving rather than enumerating, not evidence a ducklake pip bump is reachable.
 
+Second leg (rec-5020): the github-actions entry must carry cooldown.default-days >= 7, so auto-merged action
+bumps wait out a compromised-release window. It lives here because this is the one Dependabot-config gate; it
+runs only when `updates` is a list and cannot pass vacuously (a missing github-actions entry fails).
+
 Filesystem-only: no subprocess, no network, matching every sibling ci_guards module.
 
 Decision 170 (MANDATORY declaration obligation): calls registry.examined() on every reachable exit
@@ -102,6 +106,31 @@ def _assert_group_excludes_denylist(failed: list[str], group_name: str, group: A
     )
 
 
+_ACTIONS_ECOSYSTEM = "github-actions"
+_MIN_COOLDOWN_DAYS = 7
+
+
+def _assert_actions_cooldown(failed: list[str], config: Any) -> None:
+    """rec-5020: auto-merged action bumps wait at least 7 days, so a compromised release can be caught first."""
+    updates = config.get("updates") if isinstance(config, dict) else None
+    if not isinstance(updates, list):
+        return
+    entries = [u for u in updates if isinstance(u, dict) and u.get("package-ecosystem") == _ACTIONS_ECOSYSTEM]
+    if not entries:
+        _report(failed, "a github-actions entry carries a cooldown", False, "no github-actions entry in updates")
+        return
+    for entry in entries:
+        cooldown = entry.get("cooldown")
+        days = cooldown.get("default-days") if isinstance(cooldown, dict) else None
+        ok = isinstance(days, int) and not isinstance(days, bool) and days >= _MIN_COOLDOWN_DAYS
+        _report(
+            failed,
+            f"github-actions cooldown.default-days is at least {_MIN_COOLDOWN_DAYS}",
+            ok,
+            f"got {days!r}; set cooldown: default-days: {_MIN_COOLDOWN_DAYS}" if not ok else "",
+        )
+
+
 @registry.register("validate_dependabot_config", owner="platform")
 def validate_dependabot_config(failed: list[str]) -> None:
     """Every denylisted dependency stays excluded from every pip group. See module docstring."""
@@ -139,4 +168,5 @@ def validate_dependabot_config(failed: list[str]) -> None:
             examined_count += 1
             _assert_group_excludes_denylist(failed, str(group_name), group, denied)
 
+    _assert_actions_cooldown(failed, config)
     registry.examined(examined_count, unit="dependabot_pip_groups")

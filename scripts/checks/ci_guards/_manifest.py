@@ -184,6 +184,21 @@ ENTRIES: tuple[Entry, ...] = (
         full_segment="full_after_lint",
     ),
     Entry(
+        name="validate_actions_sha_pinned",
+        module="scripts.checks.ci_guards.validate_actions_sha_pinned",
+        attr="validate_actions_sha_pinned",
+        pre=True,
+        pre_globs=(
+            ".github/workflows/**",
+            ".github/actions/**",
+            "config/actions_sha_pin_baseline.yaml",
+            "scripts/checks/ci_guards/validate_actions_sha_pinned.py",
+            "scripts/checks/_common.py",
+            "scripts/checks/registry.py",
+        ),
+        full_segment="full_after_lint",
+    ),
+    Entry(
         name="validate_dependabot_automation",
         module="scripts.checks.ci_guards.validate_dependabot_automation",
         attr="validate_dependabot_automation",
