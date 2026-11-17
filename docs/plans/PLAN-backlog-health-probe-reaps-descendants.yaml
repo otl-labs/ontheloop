@@ -7,7 +7,8 @@ intent: >-
   Clear the backlog-health scheduled red (rec-5094; no scheduled success since 2026-10-26) by making each probe run in its
   own PID namespace, so a timed-out acceptance command leaves no descendant behind to write into the scratch dir while
   it is removed, and by retrying scratch removal so a lagging namespace teardown cannot crash the probe job (a real escape still does). Restores the backlog-health loop's
-  weekly signal without changing any verdict.
+  weekly signal. One verdict shifts: a command that backgrounds a descendant holding the output pipe now returns its own
+  exit status instead of TIMEOUT (0 of 2245 open recs carry that shape today; census follow-on rec-5336).
 plan_type: IMPLEMENTATION
 verification_tier: V2
 plan_path: docs/plans/PLAN-backlog-health-probe-reaps-descendants.yaml
@@ -49,7 +50,9 @@ scope:
       TestRunOne::test_timeout_kills_descendants, TestRunOne::test_proc_agrees_with_sandbox_pids, TestRunOne::test_inner_program_keeps_bash_as_init,
       TestRunOne::test_probed_command_is_not_namespace_init): run_one's argv starts with the shared PID-namespace prefix; isolation_available's argv starts with the
       same prefix; a scratch removal that fails once then succeeds leaves no dir and keeps the verdict (sleep patched); a removal that
-      fails on every attempt raises OSError after exactly 10 attempts (sleep injected, so the node takes no wall time); and one live node (skipped only when
+      fails on every attempt raises OSError after exactly 10 attempts (sleep injected, so the node takes no wall time); both
+      removal nodes inject the failure by patching tempfile._rmtree or TemporaryDirectory.cleanup (tempfile binds shutil.rmtree
+      at import, so patching shutil.rmtree never fires; measured) and assert the attempt count, so neither node is vacuous; and one live node (skipped only when
       the real primitive is unavailable) where a timed-out command whose descendant keeps writing into
       PYTHONPYCACHEPREFIX returns TIMEOUT with no surviving descendant and no OSError. test_uses_isolated_argv's -rmn
       membership assertion moves to the new prefix, and test_compound_command_runs_every_segment's prefix literal gains
@@ -64,7 +67,7 @@ scope:
       marker that appends a heartbeat to a file outside the bind (in tmp_path) and writes into
       PYTHONPYCACHEPREFIX; the descendant heartbeats every 0.05 s; after run_one returns TIMEOUT (timeout=2, margin for a loaded host) it waits 1 s, asserts the
       heartbeat file exists and is non-empty (so the check is not vacuous), then asserts no /proc/*/cmdline holds
-      the marker and the heartbeat file's size is unchanged across two reads 0.5 s apart; a finally pkills the marker so a red-before run leaves nothing
+      the marker (each read tolerates FileNotFoundError and ProcessLookupError from a process exiting mid-scan) and the heartbeat file's size is unchanged across two reads 0.5 s apart; a finally pkills the marker so a red-before run leaves nothing
       behind. test_proc_agrees_with_sandbox_pids (live, same skip) runs read p _ < /proc/self/stat; test "$p" = "$BASHPID" through
       run_one and expects PASS (a forward guard, not a red-before node: it also passes on today's flags; measured: exit 1 under -rpmn --fork --kill-child, whose host /proc disagrees; exit 0 with
       --mount-proc). The module docstring's "Hermetic: never depends on a real unshare" sentence is rewritten to say every node
@@ -74,7 +77,7 @@ scope:
       backlog-health probe job and ci.yml's trailer-acceptance-evaluate, with the argv-token nodes as the unit guard.
     new_imports: []
 bundled_recommendations: [rec-3691]
-followon_recs: []
+followon_recs: [rec-5336]
 infrastructure_dependencies: []
 acceptance_criteria:
   - "Every probe command and the availability probe run under unshare -rpmn --fork --kill-child --mount-proc, built from one shared prefix, and /proc inside agrees with the sandbox's own PIDs."
@@ -207,8 +210,8 @@ test_obligations:
     test_selector: tests/test_backlog_health_probe.py::TestRunOne::test_inner_program_keeps_bash_as_init
     red_green_expectation: red before (no trap segment), green after
 constraints:
-  - "No verdict semantics change: PASS/FAIL/TIMEOUT/BUDGET_EXHAUSTED/ISOLATION_UNAVAILABLE and the timeouts are untouched (Decision 235: nothing loosened)."
-  - "Local measurements ran as uid 0, which bypasses RLIMIT_NPROC, so the ulimit -u 64 interplay (one extra bash init process; zombie reaping) is exercised only on the runner, by VP 5 (and VP 9 if a pre-merge dispatch is possible)."
+  - "The verdict vocabulary and timeouts are untouched (Decision 235). One outcome shifts, measured 2026-11-17: a command that backgrounds a descendant holding the output pipe (e.g. { sleep 30 & }; true) returned TIMEOUT under -rmn and now returns its own exit status, because the namespace teardown kills the descendant; at the Decision 201 gate that moves it from unmeasurable to holds. Exposure: 0 of 2245 open recs carry a probeable lone background &; rec-5336 has census bucket that shape as unprobeable_shape."
+  - "ulimit -u 64 interplay, measured non-root via setpriv --reuid=65534 --regid=65534 --clear-groups (RLIMIT_NPROC enforced): fork headroom 63 under today's -rmn, 61 under the new prefix plus trap, a loss of 2 slots, immaterial to a pytest command (no xdist -n in addopts). The runner confirms it by VP 5 (and VP 9 if a pre-merge dispatch is possible)."
   - "Bash stays the namespace init (leading trap : EXIT && segment), so the probed command is never PID 1: default-disposition signals keep working and orphans are reaped, so zombies do not accumulate against ulimit -u 64."
   - "The sandbox only tightens: the PID namespace is added to the existing user, mount and net namespaces, read-only bind and pid cap."
   - ".github/workflows/backlog-health.yml is not edited; its header comment's unshare -rmn wording is left for the next edit of that file."
@@ -216,13 +219,13 @@ constraints:
 context:
   - "Red: backlog-health scheduled runs 41514363435 (11-02), 42691890591 (11-09), 43944688228 (11-16) all fail in the probe job with OSError Errno 39 removing a per-probe TemporaryDirectory's pyc subtree; each log ends with GitHub terminating orphan python processes. Last success 40358723891 (10-26). rec-5094 (loop_liveness_stale, High) tracks it."
   - "Cause, reproduced in this container 2026-11-17: under unshare -rmn a timed-out command's descendant survives subprocess.run's kill (1 survivor); under unshare -rpmn --fork --kill-child --mount-proc none survive (0). The bind-mount and ulimit chain works unchanged inside the PID namespace (exit 0). rec-3691 (code review, 2026-09) predicted this exact gap."
-  - "Decision-scout verdict NO_FLAGS (round 2, after critique nits moved the intent wording; round 1 FLAGS_FOUND). CITE: 201, 235, 55. CONTRADICT: none. SPIRIT: 55 WARN (a final removal failure that printed and returned would hide a real escape): fixed, the helper re-raises after its bounded retries. 201 gap (the closure gate shares this sandbox): fixed by VP 8. RELATED: 103, 62, 244, 132, 176, 189, 148, 163, 226, 250, 267, 234, 221. Decisions triaged: 219 of 219. Roadmap items intersected: 1; CONFLICT: 0; RELATED: 1. Serves: NS.6 3/5 -- restores the sandbox both the backlog-health sensor and the Decision 201 closure verdict depend on."
+  - "Decision-scout verdict NO_FLAGS (round 3, after the intent named the one verdict shift; round 2 NO_FLAGS; round 1 FLAGS_FOUND). 235: the named shift is a sandbox-fidelity fix (Decision 201 reversal c), not a weakening; no CONTENT surface is loosened. CITE: 201, 235, 55. CONTRADICT: none. SPIRIT: 55 WARN (a final removal failure that printed and returned would hide a real escape): fixed, the helper re-raises after its bounded retries. 201 gap (the closure gate shares this sandbox): fixed by VP 8. RELATED: 103, 62, 244, 132, 176, 189, 148, 163, 226, 250, 267, 234, 221. Decisions triaged: 219 of 219. Roadmap items intersected: 1; CONFLICT: 0; RELATED: 1. Serves: NS.6 3/5 -- restores the sandbox both the backlog-health sensor and the Decision 201 closure verdict depend on."
   - "Approval: the operator wrote write the plan in this plan's thread 2026-11-17T19:13:45Z after the alignment presentation. No always-ask wording and no new Decision, so no approved-text sidecar."
   - "Red overlap (scripts.ci_rca.red_overlap, 2026-11-17T19:15Z): verdict blocked by rec-5247 (telemetry-reader smoke 504; slo_breached, product_regression, shared paths none). Deferral rationale: Feedback Loop owns it (coordinator log 2026-11-17 12:58Z), this plan edits none of its files and does not repair it; Decision 254 cl.6 makes the past-SLO case an operator alarm, and red_overlap's slo_breached rule predates it (rec-5108). The build re-runs red_overlap at its start."
   - "Ownership: the operator handed this red to CI Reform 2026-11-17; claimed on the coordinator log (issue #1963, CI Reform 19:08Z entry)."
   - "rec-5094 is excluded from bundled_recommendations by design (12k exception): its liveness acceptance is undecidable by the trailer gate and its source says a human closes it, so VP 6 closes it by hand with the operator's word. rec-3691's grep acceptance is replaced at plan write by the VP 1 node TestRunOne::test_argv_uses_pid_namespace_prefix."
   - "A third run_all caller, scripts/session/merge_step.py premerge (line 138) and recover (line 338), goes through acceptance.evaluate; if the primitive failed there the verdict is unmeasurable, which is not fatal in premerge and refuses closure in recover (safe-failing)."
-  - "Decision 201 cl.4: ci.yml's trailer-acceptance evaluator runs rec-authored commands through this same probe.run_all sandbox, so the change reaches the closure gate too (VP 8). Its job already runs the same AppArmor sysctl as the probe job. ci.yml's comments saying unshare -rmn (lines 266, 296) are left stale, as are backlog-health.yml's header, scripts/rec_trailer_acceptance.py line 14, scripts/checks/ci_guards/validate_sandbox_runner_test_deps.py lines 11 and 24, tests/test_backlog_health_workflow.py line 27 and docs/contracts/git-ops.yaml line 437 (all comment or docstring only; kept out of scope so the plan touches no workflow or guard)."
+  - "Decision 201 cl.4: ci.yml's trailer-acceptance evaluator runs rec-authored commands through this same probe.run_all sandbox, so the change reaches the closure gate too (VP 8). Its job already runs the same AppArmor sysctl as the probe job. ci.yml's comments saying unshare -rmn (lines 266, 296) are left stale, as are backlog-health.yml's header, scripts/rec_trailer_acceptance.py line 14, scripts/checks/ci_guards/validate_sandbox_runner_test_deps.py lines 11 and 24, tests/test_backlog_health_workflow.py line 27 and docs/contracts/git-ops.yaml line 437 (comments or docstrings, except ci.yml line 296 and backlog-health.yml line 122, which are step name: display strings; no test keys on the -rmn substring; kept out of scope so the plan touches no workflow or guard)."
   - "Not reused: scripts/checks/_process_group.py kill_and_reap kills a process group, which a setsid'd descendant escapes (its own header says so), and it needs a Popen where probe injects a subprocess.run seam; a PID namespace reaps every descendant."
   - "Adjacent, not bundled: rec-4079 (COVERAGE_FILE in the probe env plus an acceptance-lint change) edits the same function; it needs its own plan."
   - "Graduated shards kept unchanged: backlog-probe-never-false-pass, backlog-probe-sole-rec-authored-executor, backlog-health-probe-runs-compound-commands, backlog-health-package-suite."
@@ -237,6 +240,8 @@ gate_rounds:
   - {gate: plan-critique, round: 6, verdict: PROCEED, blocking: 0, nits: 8}
   - {gate: plan-critique, round: 7, verdict: REVISE, blocking: 1, nits: 4}
   - {gate: plan-critique, round: 8, verdict: REVISE, blocking: 1, nits: 5}
+  - {gate: plan-critique, round: 9, verdict: PROCEED, blocking: 0, nits: 6}
+  - {gate: decision-scout, round: 3, verdict: NO_FLAGS, scout_input_fingerprint: "v1:2fccb8b54e78c4b229742b14c8df3e5389454ce3bbbf11c7cb81fc910cec062d"}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
