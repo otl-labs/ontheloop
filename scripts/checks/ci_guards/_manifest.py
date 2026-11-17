@@ -118,6 +118,8 @@ ENTRIES: tuple[Entry, ...] = (
             "scripts/llm/**",
             "scripts/__init__.py",
             "src/__init__.py",
+            "src/turn_capture/__init__.py",
+            "src/turn_capture/litellm_usage.py",
             "src/persona_hosts/**",
             "scripts/checks/ci_guards/validate_persona_github_agnosticism.py",
             "scripts/checks/_common.py",

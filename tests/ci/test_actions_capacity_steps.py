@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +45,7 @@ def test_capacity_steps_are_last_and_run_unless_cancelled() -> None:
     assert all(s["if"] == GATE for s in steps[-2:])
     assert "scripts.ci.actions_capacity_gauge --reading-out actions-capacity-reading.json" in steps[-2]["run"]
     assert steps[-2]["run"].splitlines()[0] == "set -euo pipefail"
-    assert steps[-1]["uses"] == "actions/upload-artifact@v7"
+    assert re.fullmatch(r"actions/upload-artifact@[0-9a-f]{40}", steps[-1]["uses"])
     assert steps[-1]["with"]["if-no-files-found"] == "warn"
 
 

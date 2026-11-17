@@ -408,3 +408,36 @@ def test_unlisted_tool_name_with_bridge_open_gets_error_text(tmp_path):
     t = T([tool({}, name="fake_by_ids"), final()])
     _warehouse(tmp_path, t)
     assert t.calls[1]["messages"][-1]["content"] == "error: unknown tool"
+
+
+def test_fail_over_turn_carries_probe_record():
+    probe = fakes.record(FB)
+    failed = dataclasses.replace(
+        final(),
+        attempts=(attempt(outcome="outage"), attempt(outcome="outage", n=2), attempt(FB)),
+        failed_over=True,
+        probe_record=probe,
+    )
+    _, events = drive(T([failed]))
+    assert events[1]["probe_record"] == dataclasses.asdict(probe) and events[1]["failed_over"] is True
+    _, events = drive(T([error("empty_output", (attempt(FB, "empty_output"),), probe), final()]))
+    assert events[1]["probe_record"] == dataclasses.asdict(probe)
+
+
+def test_header_tools_sha256_matches_tools_sent():
+    from src.persona_backends import events as ev
+
+    t = T([final()])
+    _, events = drive(t)
+    assert events[0]["tools_sha256"] == ev.tools_sha256(t.calls[0]["tools"])
+
+
+def test_header_tools_sha256_covers_bridge_specs(tmp_path):
+    from src.persona_backends import events as ev
+
+    seen = []
+    t = T([final()])
+    _, events = _warehouse(tmp_path, t, on_event=seen.append)
+    assert events[0]["tools_sha256"] == ev.tools_sha256(t.calls[0]["tools"])
+    heads = [e for e in seen if "schema" in e]
+    assert len(heads) == 2 and heads[-1]["tools_sha256"] == events[0]["tools_sha256"]

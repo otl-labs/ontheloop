@@ -74,6 +74,7 @@ class _Run:
         clock: Callable[[], float],
         wall: Callable[[], float],
         head: dict[str, Any],
+        tools: list[dict[str, Any]],
     ) -> None:
         self.loaded = loaded
         self.blobs = {name: materialised_input[name] for name in loaded.blob_names if name in materialised_input}
@@ -91,7 +92,7 @@ class _Run:
             {"role": "system", "content": loaded.prompt},
             {"role": "user", "content": _opening(loaded, materialised_input)},
         ]
-        self.tools: list[dict[str, Any]] = [read_input.tool_spec(loaded.blob_names)] if loaded.blob_names else []
+        self.tools = tools
         self.bridge: Any = None
         self.bridge_errors: tuple[type[BaseException], ...] = ()
         self.deadline = 0.0
@@ -145,6 +146,9 @@ class _Run:
                 self.bridge = bridge
                 self.bridge_errors = (mcp_bridge.BridgeFailed,)
                 self.tools = [*self.tools, *bridge.tool_specs()]
+                self.events[0]["tools_sha256"] = ev.tools_sha256(self.tools)
+                if self.on_event is not None:
+                    self.on_event(self.events[0])
                 return await self.go()
         except mcp_bridge.BridgeTimeout:
             return self.budget_failure("max_wall_clock_seconds reached while the MCP server started")
@@ -201,7 +205,14 @@ class _Run:
         return await self.on_result(result, started)
 
     def transport_turn(
-        self, attempts: tuple[Any, ...], known: bool, probe: int, started: int, kind: str, **extra: Any
+        self,
+        attempts: tuple[Any, ...],
+        known: bool,
+        probe: int,
+        started: int,
+        kind: str,
+        source: Any = None,
+        **extra: Any,
     ) -> dict[str, Any]:
         fields: dict[str, Any] = {
             "turn": len([e for e in self.events if "turn" in e]) + 1,
@@ -217,6 +228,7 @@ class _Run:
             "started_at_ms": started,
             "ended_at_ms": self.now_ms(),
             "kind": kind,
+            "probe_record": _probe(getattr(source, "probe_record", None)),
         }
         fields.update(extra)
         return self.turn(**fields)
@@ -233,9 +245,9 @@ class _Run:
         if failed_over:
             self.role = _FALLBACK
         if kind not in _REPAIRABLE:
-            self.transport_turn(attempts, known, probe, started, "transport_error")
+            self.transport_turn(attempts, known, probe, started, "transport_error", exc)
             raise self.abort(kind, str(exc))
-        self.transport_turn(attempts, known, probe, started, "terminal_invalid", failed_over=failed_over)
+        self.transport_turn(attempts, known, probe, started, "terminal_invalid", exc, failed_over=failed_over)
         return self.invalid([f"$: the transport returned {kind}"], None)
 
     def invalid(self, errors: list[str], message: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -263,7 +275,7 @@ class _Run:
             return await self.on_tools(result, probe, started, returned, common)
         checked = output.check(result.content, result.finish_reason, self.loaded)
         kind = "terminal_valid" if checked.value is not None else "terminal_invalid"
-        self.transport_turn(result.attempts, True, probe, started, kind, **common)
+        self.transport_turn(result.attempts, True, probe, started, kind, result, **common)
         if checked.value is not None:
             return self.end(checked.value)
         return self.invalid(checked.errors, result.message)
@@ -285,6 +297,7 @@ class _Run:
             probe,
             started,
             "tool",
+            result,
             tool_calls=[str(call["function"]["name"]) for call in result.tool_calls],
             tool_result_bytes=[len(text.encode("utf-8")) for text in texts],
             ended_at_ms=returned,
@@ -309,6 +322,10 @@ class _Run:
         return "error: unknown tool"
 
 
+def _probe(record: Any) -> dict[str, Any] | None:
+    return None if record is None else dataclasses.asdict(record)
+
+
 async def run_persona(
     contract_path: Path,
     materialised_input: dict[str, Any],
@@ -328,6 +345,7 @@ async def run_persona(
     if workspace is not None:
         raise RunRefused("no workspace capability is built (T4.15:c3)")
     loaded = load(Path(contract_path))
+    tools = [read_input.tool_spec(loaded.blob_names)] if loaded.blob_names else []
     head = ev.header(
         str(contract_path),
         loaded.persona,
@@ -335,8 +353,9 @@ async def run_persona(
         loaded.prompt_sha256,
         ev.input_sha256(materialised_input),
         int(wall() * 1000),
+        ev.tools_sha256(tools),
     )
-    run = _Run(loaded, materialised_input, transport, on_event, max_tokens, clock, wall, head)
+    run = _Run(loaded, materialised_input, transport, on_event, max_tokens, clock, wall, head, tools)
     refusal = _input_check(loaded, materialised_input)
     if refusal is not None:
         return run.end(refusal), run.events
