@@ -17,7 +17,8 @@ verification_tier: V3
 plan_path: docs/plans/PLAN-persona-image-channel.yaml
 phase: >-
   T4.32 c2 (channel legs; c2 stays open: "the pushed digest is recorded in one repository file" needs
-  PLAN-persona-image-pin's first pin). T4.32 is in_progress. Builds after PLAN-persona-image-twin's build merges (it
+  PLAN-persona-image-pin's first pin, so closes_criteria is empty, as PLAN-persona-image-twin's; the operator's
+  2026-11-17 sign-off took c2's closure to the pin plan, where its timing is put to them). T4.32 is in_progress. Builds after PLAN-persona-image-twin's build merges (it
   publishes that plan's image with that plan's suite). Post-merge: the first publish run, the operator's admin steps
   (organisation package setting, package visibility Public), then the anonymous read proof (V3).
 closes_criteria: []
@@ -34,14 +35,16 @@ scope:
       same-repository push CI run), copied from deploy-ducklake-lambdas.yml's gate; permissions contents: read, actions:
       read, packages: read; timeout 10; checkout (fetch-depth 0, persist-credentials false), setup-python 3.12, pip
       install pyyaml, then python -m scripts.ci.deploy_gate resolve --channel persona_image with --force/--first-publish
-      from the inputs and GITHUB_TOKEN in env; outputs sha, deploy, reason. Job publish: needs gate, if
-      needs.gate.outputs.deploy == 'true'; permissions exactly contents: read, packages: write, id-token: write,
-      attestations: write; timeout 30; checkout the gate sha (persist-credentials false), setup-python 3.12, pip install
+      from the inputs, --manifest persona-image-gate.json and GITHUB_TOKEN in env; outputs sha, deploy, reason. Job
+      publish: needs gate, if needs.gate.outputs.deploy == 'true'; permissions exactly contents: read, packages: write
+      (no id-token: its unhashed pip installs and the suite never hold a signing token); timeout 30; checkout the gate sha (persist-credentials false), setup-python 3.12, pip install
       -r requirements-dev.txt; python -m scripts.ci.persona_image_publish build --sha <gate sha> (id build); python -m
       pytest tests/persona_hosts/conformance_suite.py -q with PERSONA_IMAGE_UNDER_TEST set to the build's image_id (no
       other env, no token); python -m scripts.ci.persona_image_publish push --image-id <id> --sha <gate sha> with
-      GITHUB_TOKEN in env (id push; outputs image, digest); actions/attest-build-provenance with subject-name
-      steps.push.outputs.image, subject-digest steps.push.outputs.digest, push-to-registry true. Every uses: pinned to a
+      GITHUB_TOKEN in env (id push; job outputs image, digest). Job attest: needs publish; permissions exactly id-token:
+      write, attestations: write; timeout 10; no checkout, no pip, no run step: only actions/attest-build-provenance with
+      subject-name needs.publish.outputs.image, subject-digest needs.publish.outputs.digest and push-to-registry false
+      (the bundle is stored through the GitHub attestations API, so no registry login is needed). Every uses: pinned to a
       full 40-hex commit SHA with a "# vX.Y.Z" comment, read at build time with git ls-remote of the action's newest
       release tag. No secrets, no AWS, no LLM step (no run_persona, persona_compute_host or run_persona secret variable
       in any step), no image reference literal (validate_persona_image_digest).
@@ -53,10 +56,11 @@ scope:
       lists). persona_image returns (["image"], the pin's inputs(): build.files plus build.copy, read through
       importlib of src.persona_hosts.image_pin), so config/persona_image.yaml is never a watched path and a pin merge
       never re-publishes. decide gains a required-path set per channel (default (GATE_MODULE,)); persona_image adds
-      config/persona_image.yaml and the pin's build.dockerfile, so a green target older than the channel skips as
-      pre_channel_target. resolve's CLI: --channel choices ducklake, prod, persona_image; main passes
+      config/persona_image.yaml, the pin's build.dockerfile and scripts/ci/persona_image_publish.py, so a green target
+      older than the channel skips as pre_channel_target. resolve's CLI: --channel choices ducklake, prod, persona_image; main passes
       registry_record.read_record (bound to the pin's image and first_publish) as the reader for persona_image and
-      read_record_sha otherwise; --first-publish is refused for any other channel. freshness and its choices unchanged.
+      read_record_sha otherwise, converting registry_record.RecordError to GateError (the module runs as __main__, so
+      registry_record never imports deploy_gate's GateError); --first-publish is refused for any other channel. freshness and its choices unchanged.
       The module stays stdlib at import (test_module_imports_only_stdlib).
   - file: scripts/ci/registry_record.py
     action: Create
@@ -67,7 +71,8 @@ scope:
       then the manifest of tag main (Accept the OCI and Docker v2 manifest types; an index is refused), then its config
       blob; returns Labels["org.opencontainers.image.revision"] (None when the label is absent). Returns None only on an
       explicit NAME_UNKNOWN or MANIFEST_UNKNOWN registry error, or a DENIED one when first_publish is set; every other
-      HTTP, JSON or shape failure raises deploy_gate.GateError (fail closed, never a fall back to main HEAD). The image
+      HTTP, JSON or shape failure raises its own RecordError (fail closed, never a fall back to main HEAD). An index
+      is refused because build.py builds a single manifest (no provenance or SBOM attachments). The image
       name arrives as an argument (from load_pin), never a literal.
   - file: scripts/ci/persona_image_publish.py
     action: Create
@@ -81,12 +86,13 @@ scope:
       digest equals I (containerd store), else exits 1 before anything is attested; asserts the pushed config's revision
       label equals S; writes image and digest to GITHUB_OUTPUT and a job summary naming the digest, the source commit S
       and the two pin lines to paste (digest, source_commit) for PLAN-persona-image-pin's pin PR; docker logout in a
-      finally.
+      finally (the attest job needs no registry login).
   - file: src/persona_hosts/local_container/build.py
     action: Modify
     purpose: >-
-      BuildOptions gains labels: dict[str, str] (default empty), each passed as --label k=v in sorted order; plan 1's
-      CA-secret and proxy handling unchanged.
+      BuildOptions gains labels: dict[str, str] (default empty), each passed as --label k=v in sorted order, and every
+      build passes --provenance=false --sbom=false, so the containerd image store never pushes an image index the
+      channel record reader refuses; plan 1's CA-secret and proxy handling unchanged.
   - file: tests/persona_hosts/conformance_suite.py
     action: Modify
     purpose: >-
@@ -125,6 +131,13 @@ scope:
       rationale: a governed CD channel whose failure is otherwise invisible, as the Lambda channels}. 492 of 500 on
       2026-11-17 with twelve unbuilt plans adding rows: measured on main at build time, compact block-style rows to flow
       style with their words unchanged until the row fits; if no relief remains, STOP to this planning thread.
+  - file: .github/CODEOWNERS
+    action: Modify
+    purpose: >-
+      One commented block naming the operator as owner of /.github/workflows/persona-image-publish.yml,
+      /scripts/ci/persona_image_publish.py and /scripts/ci/registry_record.py, as publish-ontheloop.yml is: the channel
+      writes a public package and signs under its workflow identity, so a change to it takes the operator's final-diff
+      word (coordinator.yaml standing_authorisation; scout r2's Decision 143 cl.1 residual). Procedural until rec-2827.
   - file: config/composite_action_body_baseline.yaml
     action: Modify
     purpose: >-
@@ -138,13 +151,14 @@ scope:
       unknown channel; persona_image's inputs equal load_pin(root).inputs() and exclude config/persona_image.yaml; a
       target lacking the pin file skips pre_channel_target; resolve with an injected registry reader deploys on None
       (baseline_unknown) and skips when the record equals the target; --first-publish with --channel prod exits 2;
-      the parametrized channel_inputs test gains persona_image.
+      the parametrized channel_inputs test gains persona_image; the bound persona_image reader turns a RecordError into
+      GateError (resolve exits 2 with ::error::DEPLOY-GATE), and registry_record imports nothing from deploy_gate.
   - file: tests/ci/test_registry_record.py
     action: Create
     purpose: >-
       Mirror test over a fake opener: label returned; label absent -> None; NAME_UNKNOWN and MANIFEST_UNKNOWN -> None;
-      DENIED -> GateError, and None under first_publish; a 500, a non-JSON body and an image index -> GateError; the
-      token request carries Basic auth only when a token is given; the scope names the image passed in.
+      DENIED -> RecordError, and None under first_publish; a 500, a non-JSON body and an image index -> RecordError;
+      the token request carries Basic auth only when a token is given; the scope names the image passed in.
   - file: tests/ci/test_persona_image_publish.py
     action: Create
     purpose: >-
@@ -152,20 +166,22 @@ scope:
       never in argv, refuses when the pushed manifest is not the tested image or the revision label differs, writes
       image and digest outputs and the summary, and logs out on failure. test_workflow_shape over the workflow file:
       the two triggers and their filters, the guard on gate (tests/verify_ci_workflow/test_dispatch_bot_guard.py's
-      guard_problems is empty), publish needs gate and reads its deploy output, per-job permissions exactly as above and
-      contents: read at workflow level, every uses: a 40-hex SHA with a version comment, persist-credentials false on
-      every checkout, the suite step before the push step and the attest step after it, no secrets or AWS action, no
-      step _persona_llm_signatures classifies as an LLM step.
+      guard_problems is empty), publish needs gate and reads its deploy output, attest needs publish and holds only
+      its one uses: step with push-to-registry false, per-job permissions exactly as above (id-token only on attest)
+      and contents: read at workflow level, every uses: a 40-hex SHA with a version comment, persist-credentials false
+      on every checkout, the suite step before the push step, no secrets or AWS action, no step
+      _persona_llm_signatures classifies as an LLM step.
   - file: tests/persona_hosts/local_container/test_build.py
     action: Modify
-    purpose: labels appear as sorted --label k=v pairs in the build argv; none by default.
+    purpose: labels appear as sorted --label k=v pairs in the build argv, none by default; --provenance=false and --sbom=false always.
   - file: tests/checks/contracts/test_persona_image_channel.py
     action: Create
     purpose: >-
       rec-4477's acceptance: test_deploy_paths_names_the_persona_image_channel asserts deploy-paths.yaml has a
       publish_persona_image key whose trigger names .github/workflows/persona-image-publish.yml and Decision 249's gate
       module, whose blocks_ref names config/persona_image.yaml, and whose actor_role is agent; and that the workflow file
-      exists and calls scripts.ci.deploy_gate resolve --channel persona_image.
+      exists and calls scripts.ci.deploy_gate resolve --channel persona_image;
+      test_codeowners_names_the_persona_image_channel asserts .github/CODEOWNERS owns the workflow and its two scripts.
 bundled_recommendations: [rec-4477]
 followon_recs: [rec-5294]
 infrastructure_dependencies:
@@ -247,7 +263,7 @@ verification_plan:
       g=lambda p:json.load(u.urlopen(u.Request('https://api.github.com/repos/otl-labs/ontheloop/'+p,headers={'Accept':'application/vnd.github+json'})));
       run=g('actions/workflows/ci.yml/runs?event=pull_request&head_sha='+sha)['workflow_runs'][0];
       job=[j for j in g('actions/runs/%d/jobs'%run['id'])['jobs'] if j['name']=='pr-validate'][0];
-      st={s['name']:s['conclusion'] for s in job['steps']};print('pr-validate:',job['conclusion'],'conformance:',st.get('Persona image conformance (local_container suite)'));assert job['conclusion']=='success'"
+      st={s['name']:s['conclusion'] for s in job['steps']};c=st.get('Persona image conformance (local_container suite)');print('pr-validate:',job['conclusion'],'conformance:',c);assert job['conclusion']=='success' and c=='success'"
     expected: The last line names pr-validate success and the conformance step success.
     fix_if: Fix on the branch; never skip the step.
     hermetic: false
@@ -261,9 +277,11 @@ verification_plan:
     command: >-
       bin/venv-python -c "import json,urllib.request as u;
       g=lambda p:json.load(u.urlopen(u.Request('https://api.github.com/repos/otl-labs/ontheloop/'+p,headers={'Accept':'application/vnd.github+json'})));
-      run=g('actions/workflows/persona-image-publish.yml/runs?branch=main&per_page=1')['workflow_runs'][0];
-      jobs={j['name']:j['conclusion'] for j in g('actions/runs/%d/jobs'%run['id'])['jobs']};print('run',run['id'],run['event'],run['conclusion'],jobs);assert run['conclusion']=='success' and jobs.get('publish')=='success'"
-    expected: The newest run concluded success with its publish job success; record the run id and the summary's digest and source commit in the PR and the handoff.
+      runs=g('actions/workflows/persona-image-publish.yml/runs?branch=main&per_page=20')['workflow_runs'];
+      J=lambda r:{j['name']:j['conclusion'] for j in g('actions/runs/%d/jobs'%r['id'])['jobs']};
+      hit=[(r,J(r)) for r in runs if r['conclusion']=='success'];hit=[(r,j) for r,j in hit if j.get('publish')=='success'][:1];
+      assert hit,'no run published yet';r,j=hit[0];print('run',r['id'],r['event'],j);assert j.get('attest')=='success'"
+    expected: The newest run whose publish job succeeded also has attest success; record its run id and the summary's digest and source commit in the PR and the handoff.
     fix_if: >-
       A gate failure on the record read: the first_publish dispatch (once). A suite failure: fix forward through a new
       PR (nothing was pushed). A push refused: operator step A3. Never push by hand.
@@ -273,14 +291,14 @@ verification_plan:
   - step: 8
     phase: post-deploy
     action: >-
-      [post-deploy] The published image is the attested, labelled image of the gate sha: read the attestation and the
-      labels with the job token the publish run used, from this session through the run's own logged verification, or
-      with gh once the package is public.
+      [post-deploy] Once VP 9 passes (package public): the published image is the attested, labelled image of the gate
+      sha. gh's session auth is unproven (critique r1 found GH_TOKEN invalid for gh auth status); if gh cannot verify,
+      record UNPROVEN and leave the proof to PLAN-persona-image-pin's pr-validate verification.
     command: >-
       D=<digest from VP 7>; S=<source commit from VP 7>; I=$(bin/venv-python -c "from pathlib import Path;from src.persona_hosts import load_pin;print(load_pin(Path('.')).image)");
       gh attestation verify "oci://$I@$D" --repo otl-labs/ontheloop --signer-workflow otl-labs/ontheloop/.github/workflows/persona-image-publish.yml --source-ref refs/heads/main --deny-self-hosted-runners &&
       docker buildx imagetools inspect "$I@$D" --format '{{json .Image.Config.Labels}}' | bin/venv-python -c "import json,sys;l=json.load(sys.stdin);assert l['org.opencontainers.image.revision']=='$S' and l['org.opencontainers.image.licenses']=='BUSL-1.1';print('LABELS_OK')"
-    expected: gh reports the attestation verified for the signer workflow on refs/heads/main, and the last line is LABELS_OK. Run after VP 9's operator steps if the package is still private.
+    expected: gh reports the attestation verified for the signer workflow on refs/heads/main, and the last line is LABELS_OK.
     fix_if: An unknown gh flag means the flags differ from this plan (UNPROVEN until now); record the working invocation in the handoff for PLAN-persona-image-pin, never drop the signer-workflow check.
     hermetic: false
     graduation: waive
@@ -292,8 +310,11 @@ verification_plan:
       no registry login.
     command: >-
       D=<digest from VP 7>; I=$(bin/venv-python -c "from pathlib import Path;from src.persona_hosts import load_pin;print(load_pin(Path('.')).image)");
-      DOCKER_CONFIG=$(mktemp -d) docker manifest inspect "$I@$D" >/dev/null && echo ANONYMOUS_READ_OK
-    expected: The last line is ANONYMOUS_READ_OK (the one check that proves the operator's steps worked).
+      S=<source commit from VP 7>; bin/venv-python -c "from scripts.ci.registry_record import read_record as r;v=r('$I',token=None);print('record',v);assert v=='$S'" &&
+      (DOCKER_CONFIG=$(mktemp -d) docker manifest inspect "$I@$D" >/dev/null || echo 'docker read UNPROVEN through the proxy') && echo ANONYMOUS_READ_OK
+    expected: >-
+      The record line names the source commit (the channel's own reader, anonymous, reads the main tag back as a single
+      manifest) and the last line is ANONYMOUS_READ_OK: the one check that proves the operator's steps worked.
     fix_if: DENIED means the package is still private; ask the operator for the step by name, never change visibility from a session.
     hermetic: false
     graduation: waive
@@ -338,6 +359,11 @@ test_obligations:
     verification_step: 4
     test_selector: tests/persona_hosts/conformance_suite.py
     waiver_reason: The suite is itself a test module; VP 4 runs it on a prebuilt id and the publish job runs that path on every publish.
+  - source: .github/CODEOWNERS
+    behavior: the operator owns the channel's workflow and its two scripts
+    verification_step: 2
+    test_selector: tests/checks/contracts/test_persona_image_channel.py::test_codeowners_names_the_persona_image_channel
+    red_green_expectation: red before (no lines), green after
   - source: docs/contracts/deploy-paths.yaml
     behavior: the publish_persona_image row names the channel, its gate and its pin file
     verification_step: 2
@@ -423,8 +449,9 @@ context:
     SA-14 is at dec-205: the wording check rehearses on main, where docker/persona/Dockerfile is absent until
     PLAN-persona-image-twin's build; PLAN-persona-image-pin may swap the pointer.
   - >-
-    First publish is the reviewed CI channel writing a private package (standing authorisation); A1-A3 are always_ask
-    (public surface) and need the operator's words naming each.
+    The build merges on the operator's final-diff word (the channel's files are code-owned); the first publish is then
+    the reviewed CI channel writing a private package; A1-A3 are always_ask (public surface), each on the operator's
+    words naming it.
   - >-
     red_overlap (2026-11-17 15:10 UTC): rec-5247 (slo_breached) and rec-5276 (transitive test residue only), Feedback
     Loop's (operator 2026-11-17). Deferral: no telemetry reader, arrival config or Lambda here; the build's full tier
@@ -438,17 +465,20 @@ gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:104da68d0512845b06c6ea0f3f0fd66168488d6492845d3e6f913a8dc945a434"}
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:81d75d8df856bb6ae71a0e9440e947242d54c445d82b487d13975e02f865deb0"}
   - {gate: wording-check, round: 1, verdict: FAIL, digest: 12deeeebb013324e8c2955e54c12e07e6873d218cfdacf3fda6aeef3cabc54e0, base: d98906cb276ed169bc961da1ae8b9d0ce3a8c9a8, selection: complete}  # pragma: allowlist secret
+  - {gate: wording-check, round: 2, verdict: PASS, digest: 11659336334a406af399a9d8a668d1c5f14b78057f1e2712428d58a835919528, base: d98906cb276ed169bc961da1ae8b9d0ce3a8c9a8, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
   - only the plan-cited decision sections
-  - PLAN-persona-image-twin's build merged (docker/persona/Dockerfile, config/persona_image.yaml, src/persona_hosts/ on main)
+  - PLAN-run-persona-litellm-backend's and PLAN-persona-image-twin's builds merged (docker/persona/Dockerfile, config/persona_image.yaml, src/persona_hosts/ on main)
   - All files in scope located and readable
   - Acceptance criteria understood and verifiable
 execution_steps:
   - >-
-    Preconditions: PLAN-persona-image-twin's build is on main; re-run scripts.ci_rca.red_overlap; measure ports.yaml,
-    deploy-paths.yaml and ci_rca_taxonomy.yaml on main (relief or STOP per their scope rows).
+    Preconditions: PLAN-run-persona-litellm-backend's and PLAN-persona-image-twin's builds are on main; re-run
+    scripts.ci_rca.red_overlap; compute_affected_artifacts over the scope returns no artifact (the twin's data-pipeline
+    exclude), else STOP to this planning thread; measure ports.yaml, deploy-paths.yaml and ci_rca_taxonomy.yaml on main
+    (relief or STOP per their scope rows).
   - >-
     scripts/ci/registry_record.py and its test; scripts/ci/deploy_gate.py's persona_image channel and its tests
     (pre: tests green on main; post: VP 1's deploy-gate and registry nodes green).
@@ -463,8 +493,8 @@ execution_steps:
     test_persona_image_channel.py; approved_text verify.
   - Execute Verification Plan pre-deploy steps 1-6 -- loop until pass; on unrecoverable failure stop and RCA (Decision 55).
   - >-
-    Merge on code review PROCEED, green CI and validate_merge_step (standing authorisation; commit body carries
-    Resolves: rec-4477). Then VP 7 (first publish), ask the operator for A1, A2 (and A3 only if needed) one at a time,
+    Merge on code review PROCEED, green CI, validate_merge_step and the operator's word on the final diff (CODEOWNERS
+    paths; commit body carries Resolves: rec-4477). Then VP 7 (first publish), ask the operator for A1, A2 (and A3 only if needed) one at a time,
     each in their own words, then VP 8 and VP 9, then VP 10.
   - >-
     Report: the publish run id, digest, source commit and attestation result, the working gh flags, and the operator
