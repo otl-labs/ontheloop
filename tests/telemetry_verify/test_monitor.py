@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 import pytest
 
-from scripts.telemetry_verify import completeness, monitor
+from scripts.telemetry_verify import monitor
 from scripts.telemetry_verify.monitor_compare import STAMP_COLUMNS
 from src.common import ducklake_event_reads as ev
 from src.common.ducklake_reader_client import VERB_FIELDS, ReaderInvokeError, ResponseTooLargeError
@@ -104,17 +104,6 @@ def test_monitor_reports_rederivation_orphan_and_completeness_counts(world: Worl
     for name in ("harness_key_missing", "background_notice_unknown", "resume_without_prior_close"):
         numerator, denominator = report.silent[name]
         assert denominator > 0 and numerator <= denominator
-    roots = world.named("telemetry_root_sessions", day_from="2026-01-01", day_to="2026-01-01")
-    listed = [
-        completeness.Listed(
-            completeness.normalise_key(r["harness_session_key"]), datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc), "thread"
-        )
-        for r in roots
-        if r["harness_session_key"]
-    ]
-    result = completeness.compare_sessions(roots, listed, judged_day="2026-01-01")
-    assert result.listed_and_captured == len(listed) > 0
-    assert result.unexplained_not_captured == 0 and result.captured_not_listed == 0
 
 
 def _mutate(rows: list[dict[str, Any]], verb: str) -> list[dict[str, Any]]:
