@@ -22,6 +22,7 @@ VERBS = {
     "execute": "execute",
     "post": "post_verdict",
     "override-render": "override",
+    "wake": "wake",
 }
 EXIT_SNAPSHOT_ON_PATH = 3
 

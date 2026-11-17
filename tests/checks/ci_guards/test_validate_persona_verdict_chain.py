@@ -343,6 +343,57 @@ RED = [
     ),
     _red("missing-prepare-job", "jobs are not exactly", lambda d: _jobs(d).pop("prepare")),
     _red("extra-job", "jobs are not exactly", lambda d: _jobs(d).update({"extra": {"permissions": {}, "steps": []}})),
+    _red("wake-missing", "jobs are not exactly", lambda d: _jobs(d).pop("wake")),
+    _red("fifth-job", "jobs are not exactly", lambda d: _jobs(d).update({"fifth": {"permissions": {}, "steps": []}})),
+    _red(
+        "wake-permissions-widened", "permissions differ", lambda d: _jobs(d)["wake"]["permissions"].update({"issues": "write"})
+    ),
+    _red("wake-permissions-narrowed", "permissions differ", lambda d: _jobs(d)["wake"]["permissions"].pop("checks")),
+    _red(
+        "pull-requests-write-on-post",
+        "holds pull-requests: write",
+        lambda d: _jobs(d)["post"]["permissions"].update({"pull-requests": "write"}),
+    ),
+    _red(
+        "pull-requests-write-at-workflow-level",
+        "top-level permissions",
+        lambda d: d[1].update({"permissions": {"pull-requests": "write"}}),
+    ),
+    _red("wake-needs-changed", "wake job needs", lambda d: _jobs(d)["wake"].update({"needs": ["prepare", "run"]})),
+    _red("wake-condition-changed", "wake job condition", lambda d: _jobs(d)["wake"].update({"if": "always()"})),
+    _red("wake-extra-env-key", "wake step env", lambda d: _step(_jobs(d)["wake"], "wake")["env"].update({"X": "1"})),
+    _red(
+        "wake-continue-on-error",
+        "has continue-on-error",
+        lambda d: _step(_jobs(d)["wake"], "wake").update({"continue-on-error": True}),
+    ),
+    _red(
+        "wake-download-without-continue-on-error",
+        "lacks continue-on-error",
+        lambda d: _named(_jobs(d)["wake"], "Download prepared inputs").pop("continue-on-error"),
+    ),
+    _red(
+        "wake-download-other-path",
+        "path is not its upload directory",
+        lambda d: _named(_jobs(d)["wake"], "Download prepared inputs")["with"].update({"path": "elsewhere"}),
+    ),
+    _red(
+        "wake-download-other-artifact",
+        "wake job downloads",
+        lambda d: _named(_jobs(d)["wake"], "Download prepared inputs")["with"].update({"name": "persona-verdict-results"}),
+    ),
+    _red(
+        "wake-verb-in-post",
+        "wake verb runs in job post",
+        lambda d: _set_run(_step(_jobs(d)["post"], "post"), v.RUN_PREFIX + "wake"),
+    ),
+    _red(
+        "execute-verb-in-wake",
+        "not only the wake verb",
+        lambda d: _set_run(_step(_jobs(d)["wake"], "wake"), v.RUN_PREFIX + "execute"),
+    ),
+    _red("wake-id-token", "holds id-token: write", lambda d: _jobs(d)["wake"]["permissions"].update({"id-token": "write"})),
+    _red("wake-environment", "names an Environment", lambda d: _jobs(d)["wake"].update({"environment": "prod"})),
 ]
 
 
