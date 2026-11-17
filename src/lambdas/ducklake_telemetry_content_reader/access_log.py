@@ -42,9 +42,9 @@ def caller_fields(lambda_event: Any) -> tuple[str, str] | None:
             return None
         rest = _rest_caller(context) if lambda_event.get("httpMethod") else None
         url = _url_caller(context)
-        if (rest is None) == (url is None):
-            return None
         fields = rest if rest is not None else url
+        if (rest is None) == (url is None) or fields is None:
+            return None
         account, arn = fields.get("accountId"), fields.get("userArn")
     except (KeyError, TypeError, AttributeError):
         return None
