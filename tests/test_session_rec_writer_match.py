@@ -13,10 +13,7 @@ PORTAL_HEREDOC = (
     "bin/venv-python -m scripts.ops_data_portal --file-rec --context-v2-json - <<'EOF'\n"
     '{"problem": "_ducklake_write( retried 3x on ops/writer"}\nEOF'
 )
-SSM = (
-    "aws ssm get-parameter --name /agent-platform/ducklake/api_url/ops/writer "
-    "--query Parameter.Value --output text"
-)
+SSM = "aws ssm get-parameter --name /agent-platform/ducklake/api_url/ops/writer --query Parameter.Value --output text"
 B_CALL = "_ducklake_write('ops_recommendations', {}, action='file_ops')"
 
 DENY = [
@@ -35,7 +32,11 @@ DENY = [
     ("B3", "python3 -c \"import requests; requests.post(BASE + '/ops/writer', data='{}')\"", "inline_code"),
     ("A7", f"for u in a; do curl -sS {U}; done", "http_client"),
     ("A8", f"while true; do timeout 5 curl -sS {U}; sleep 30; done", "http_client"),
-    ("C1", "aws lambda invoke --function-name agent-platform-ducklake-writer --payload file://p.json out.json", "lambda_invoke"),
+    (
+        "C1",
+        "aws lambda invoke --function-name agent-platform-ducklake-writer --payload file://p.json out.json",
+        "lambda_invoke",
+    ),
     ("C2", "aws lambda invoke --function-name agent-platform-ducklake-writer:live out.json", "lambda_invoke"),
 ]
 
@@ -46,11 +47,14 @@ ALLOW = [
     f'bin/venv-python -m scripts.ops_data_portal --file-rec --title "curl {U} fails in _ducklake_write("',
     f"bin/venv-python -m scripts.ops_data_portal --file-rec --context \"repro: bash -c 'curl {U}'\"",
     PORTAL_HEREDOC,
-    "bin/venv-python -c \"from scripts.ops_data_portal import file_rec; file_rec(title='_ducklake_write( times out on ops/writer')\"",
+    (
+        'bin/venv-python -c "from scripts.ops_data_portal import file_rec; '
+        "file_rec(title='_ducklake_write( times out on ops/writer')\""
+    ),
     SSM,
     "aws lambda get-function-url-config --function-name agent-platform-ducklake-writer",
     "curl -sS https://example.invalid/prod/ops/reader",
-    'URL=$(aws ssm get-parameter --name /agent-platform/ducklake/telemetry_writer_url --query Parameter.Value '
+    "URL=$(aws ssm get-parameter --name /agent-platform/ducklake/telemetry_writer_url --query Parameter.Value "
     '--output text); curl -X POST "$URL" -d @e.json',
     "git log -S _ducklake_write --oneline",
 ]
