@@ -48,6 +48,7 @@ def _violations(wfs, tree, declared) -> list[str]:
 
 _GATED_FLOOR = (
     ("approved-text-approval.yml", "approve"),
+    ("persona-verdict-override.yml", "approve"),
     ("publish-ontheloop.yml", "publish"),
     ("reconcile.yml", "gated-apply-reconcile"),
     ("terraform-apply-sandbox.yml", "gated-apply"),
@@ -284,3 +285,21 @@ def test_c_gated_job_with_a_ref_checkout_needs_the_side_checkout(wfs, declared) 
     job = _gated(wfs, "reconcile.yml", "gated-apply-reconcile")
     job["steps"] = [s for s in job["steps"] if (s.get("with") or {}).get("path") != v.SIDE_CHECKOUT]
     assert any("needs a .dispatch-tooling side checkout" in x for x in v.check_gated_jobs(wfs, declared)[0])
+
+
+def test_override_workflow_and_environment_are_covered(tree, declared) -> None:
+    assert "persona-verdict-override" in v.reviewer_envs(declared)
+    assert v.UPSTREAM["persona-verdict-override.yml"] == ("render", "approve")
+    assert v.run_all(*tree)[0] == []
+
+
+def test_override_approve_step_before_the_approvals_check_is_refused(wfs, declared) -> None:
+    job = _gated(wfs, "persona-verdict-override.yml", "approve")
+    job["steps"].insert(1, {"run": "echo early"})
+    assert any(x.startswith("c:") and "persona-verdict-override.yml" in x for x in v.check_gated_jobs(wfs, declared)[0])
+
+
+def test_override_render_without_the_reviewers_check_is_refused(wfs, declared) -> None:
+    job = _gated(wfs, "persona-verdict-override.yml", "render")
+    job["steps"] = [s for s in job["steps"] if "environment_reviewer_preflight.py environment" not in str(s.get("run", ""))]
+    assert any("render must run" in x for x in v.check_upstream(wfs, declared))

@@ -98,6 +98,19 @@ class FieldSpec(BaseModel):
     joins: list[str] | None = None
     amendment_log: list[AmendmentLogEntry] = Field(default_factory=list)
     derivation: dict[str, Any] | None = None
+    per_write: bool | None = Field(
+        default=None,
+        description=(
+            "never carried forward from the prior row by a portal update path (update_rec, update_decision); "
+            "the writer stores what it is sent"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _per_write_is_a_nullable_caller_column(self) -> FieldSpec:
+        if self.per_write is True and (self.nullable is not True or (self.derivation or {}).get("realized") is True):
+            raise ValueError("per_write needs a nullable, non-derived column (an update that omits it stores NULL)")
+        return self
 
 
 class VerbSpec(BaseModel):

@@ -102,6 +102,73 @@ def test_main_writes_resolution_log_line_and_output(
     monkeypatch.setenv("GITHUB_OUTPUT", str(out_file))
     monkeypatch.setattr(resolve_pr, "request", _fake([_row()]))
     assert resolve_pr.main([]) == 0
-    assert capsys.readouterr().out.strip() == f"PERSONA-VERDICT head_sha={SHA} change_id={REPO}#7 allowlisted=true"
+    assert (
+        capsys.readouterr().out.strip() == f"PERSONA-VERDICT head_sha={SHA} change_id={REPO}#7 allowlisted=true override=none"
+    )
     assert out_file.read_text() == "allowlisted=true\n"
     assert json.loads((tmp_path / "prepared" / "resolution.json").read_text())["number"] == 7
+
+
+OVERRIDE_RUN = {
+    "id": 70,
+    "event": "workflow_dispatch",
+    "path": resolve_pr.OVERRIDE_WORKFLOW,
+    "head_sha": "d" * 40,
+    "head_branch": "main",
+    "head_repository": {"full_name": REPO},
+}
+PROVEN = {
+    "run_id": 70,
+    "pr": 7,
+    "head_sha": SHA,
+    "route": "verdict_probe.block",
+    "check_run_id": 55,
+    "ids_digest": "f" * 64,
+    "approver": "op",
+    "approved_at": "t",
+    "url": "u",
+}
+
+
+def _override(monkeypatch: pytest.MonkeyPatch, proven: Any, pull: dict[str, Any] | None = None) -> dict[str, Any]:
+    from scripts.personas import override
+
+    monkeypatch.setattr(override, "approval", lambda repo, token, run_id: proven)
+    row = {"state": "open", "head": {"sha": SHA, "repo": {"full_name": REPO}}, "base": {"sha": "c" * 40, "ref": "main"}}
+    row.update(pull or {})
+    monkeypatch.setattr(resolve_pr, "get_json", lambda path, token: row)
+    return resolve_pr.resolve({"workflow_run": OVERRIDE_RUN}, REPO, "t")
+
+
+def test_override_path_resolves_an_approved_run_with_no_author_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    got = _override(monkeypatch, PROVEN)
+    assert got["resolved"] and got["number"] == 7 and got["head_sha"] == SHA and not got["allowlisted"]
+    assert got["override"]["run_id"] == 70 and got["override"]["approver"] == "op"
+
+
+@pytest.mark.parametrize(
+    "pull",
+    [
+        {"state": "closed"},
+        {"head": {"sha": "9" * 40, "repo": {"full_name": REPO}}},
+        {"head": {"sha": SHA, "repo": {"full_name": "x/y"}}},
+    ],
+)
+def test_override_path_closed_moved_or_foreign_is_unresolved(monkeypatch: pytest.MonkeyPatch, pull: dict[str, Any]) -> None:
+    assert not _override(monkeypatch, PROVEN, pull)["resolved"]
+
+
+def test_override_path_unproven_run_is_unresolved(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert not _override(monkeypatch, None)["resolved"]
+    from scripts.personas import override
+
+    def boom(*a: Any) -> Any:
+        raise override.Refused("api")
+
+    monkeypatch.setattr(override, "approval", boom)
+    assert not resolve_pr.resolve({"workflow_run": OVERRIDE_RUN}, REPO, "t")["resolved"]
+
+
+def test_a_dispatch_run_of_another_path_keeps_the_no_routes_rule() -> None:
+    other = {**OVERRIDE_RUN, "path": ".github/workflows/other.yml"}
+    assert not resolve_pr.resolve({"workflow_run": other}, REPO, "t")["resolved"]

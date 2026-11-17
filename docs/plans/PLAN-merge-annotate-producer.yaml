@@ -1,0 +1,425 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: merge-annotate-producer
+intent: >-
+  Start the ci_annotate producer (rec-5270): twice a day, and on a dispatch that backfills, post-merge CI writes one
+  telemetry_sessions annotate row per (captured root session, squash merge on main) from the squash commit's Claude-Session
+  and Resolves trailers, carrying the merge sha (in external_ref), pr_url, rec_ids, the merge's diff stats and the
+  attempt-1 conclusion of main's CI push run for that commit. It runs in its own workflow, so a link-writer failure
+  never reads as an arrival red. A merge whose session has not arrived yet, or whose CI has not concluded, is picked up
+  by a later run; an identical re-send inserts nothing at the writer. Closes rec-5270.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-merge-annotate-producer.yaml
+phase: >-
+  T3.4 prerequisite capture (c1, "telemetry delta proves fix"): the baseline that keys a fix's merge to the sessions that
+  produced it. Closes no exit criterion, so closes_criteria is empty.
+closes_criteria: []
+cites: [dec:81, dec:88, dec:101, dec:162, dec:163, dec:199, dec:207, dec:210, dec:212, dec:213, dec:234, dec:236, dec:246, dec:250, dec:254, dec:267]
+scope:
+  - file: scripts/telemetry_capture/merge_annotate.py
+    action: Create
+    purpose: >-
+      Pure build_links(commits, roots, ci_conclusions, diffstats) -> rows, plus a CLI (python -m
+      scripts.telemetry_capture.merge_annotate [--days N] [--as-of SHA] [--dry-run] [--junit-xml PATH]; an empty --days
+      value means 7 and an empty --as-of means origin/main, because a scheduled run passes the dispatch inputs empty;
+      --junit-xml is pre-scanned with parse_known_args, then the full parse runs inside the junit try/finally, so even a
+      usage error writes the testcase, and the CLI creates the junit file's parent directory; --as-of must be a 7-40
+      character hex sha and --days an integer 1-120, else a usage error). Merges: the
+      first-parent commits of origin/main (or of --as-of) committed within N days before that ref's own committer time
+      (default 7, at most 120; relative to the ref, not the wall clock, so paired runs pinned to one --as-of select the
+      same merges), read with session_presence.git_commits; keys from the commit body by session_presence._keys_in (the
+      Claude-Session trailer, so the arrival check and this producer cannot diverge); pr_number from the subject by
+      session_presence._PR, parsed in the CLI and passed into the builder; rec_ids by scripts.rec_trailer.parse_resolves_trailer
+      (the parser the closure job uses; a merge whose trailers name no rec gives rec_ids null, never []). For each merge and each distinct key, every root row whose harness_session_key
+      equals the key when both are passed through session_presence.normalise_key (stored keys keep their session_ or cse_
+      prefix; the trailer key is already normalised) and whose session_started_at (decoded from the root session_id with identity.decode_time_prefix, the
+      envelope's held-root-key handoff; a decode failure skips that root) is at or before the squash committer time gives
+      one row; a root started after the merge cannot have produced it and gives none (the writer's event_timestamp
+      not_before session_started_at rule). The two times come from different clocks (GitHub's committer time and the
+      root id's time prefix), and the producer declares a zero skew allowance in merge_annotate.py's module docstring (telemetry-event-envelope.yaml's
+      event_timestamp rule): rows are dropped before send by the very comparison the writer enforces, so the writer's
+      exact rule never refuses one, and
+      a root a few seconds after its merge is dropped, which loses no link a session could have produced. Each row carries exactly: event_kind annotate, event_timestamp the squash
+      committer time, session_started_at and entity_ref the root's, source_ordinal 0, external_ref
+      "<root entity_ref>:merge:<squash sha>#0/annotate", producer ci_annotate, producer_version the module's
+      PRODUCER_VERSION "1", parser_version PARSER_VERSION 1, rec_ids, pr_url
+      https://github.com/<repo>/pull/<N>, <repo> the fixed slug session_presence.DEFAULT_REPO, never GITHUB_REPOSITORY, so a
+      slug change cannot alter a re-sent row; the Actions reads below target the same slug (a merge with no "(#N)" gives no row: pr_url is required on annotate),
+      files_changed / lines_added / lines_removed from `git diff --numstat --no-renames --diff-algorithm=myers <sha>^1 <sha>` (a binary file
+      counts as a file with zero lines; both flags pinned so git config cannot change the counts), and ci_outcome. ci_outcome
+      is read only for a merge that has at least one eligible root (bounding the backfill's GitHub reads to merges since
+      production capture began, a few hundred): one GET of
+      actions/workflows/ci.yml/runs?event=push&branch=main&head_sha=<sha> with GITHUB_TOKEN, one retry on a 5xx or network
+      error, after which the merge counts under skipped_no_ci; a 429, or a 403 whose x-ratelimit-remaining is 0, that carries retry-after, or whose message contains "rate limit"
+      (the secondary limit; the repository's precedent at scripts/ci/terraform_github_apply_gate.py), stops all
+      further GitHub reads for the run and counts the rest under skipped_no_ci (a later run picks them up); any other 403,
+      or a 404, is an unreadable source and fails the run (a missing actions: read permission never reads green); the lowest run id in that list is the commit's run (a sha can have more than one push run); a run with run_attempt 1
+      gives its conclusion; a re-run (run_attempt > 1) gives the conclusion of runs/{id}/attempts/1 (attempt 1, so a re-run never changes a re-sent row; the commit's own
+      run, not Decision 254's batch range verdict, deferred to rec-5295); cancelled included; no concluded attempt 1, or
+      no ci.yml push run for the sha, gives no row this run and counts the merge under pending_ci, never skipped_no_ci
+      (skipped_no_ci counts only reads deferred by a 5xx, a network error or a rate limit). Roots: the telemetry_root_sessions named verb
+      through read_route's telemetry reader client (URL from DUCKLAKE_TELEMETRY_READER_URL or its SSM parameter), in
+      config/telemetry/arrival.yaml's window_days (7), every window from the ref's date down to the floor with no early
+      stop (a key can have several roots, and the newest may be post-merge): the floor is N + max_lookback_days (56) days
+      before the ref, walked as session_presence._walk does (while the window's end date is at or after the floor), so a
+      steady-state run reads 10 windows and the backfill 26. This is the producer's own walk (session_presence._walk
+      returns no rows); if rec-5248's fix changes the window size or call shape session_presence.run uses, this walk
+      adopts the same change (a shared helper if the fix adds one, otherwise the same arguments), and the window counts in
+      the tests follow. The CLI never imports
+      src.telemetry.append (the scripts-never-import-telemetry-append import contract, Decision 81): when the writer
+      answers 422 with error_type schema_gate or row_rule (the writer's contract row rules, such as event_timestamp
+      not_before session_started_at, answer row_rule; handler._KERNEL_ERRORS) and an integer row (the 0-based index within
+      the chunk, which is one telemetry_sessions batch), the CLI prints one value-free line "merge_annotate rejected
+      error_type=.. rule=.. column=.. reason=.." (Decision 101), drops that row, counts it under rejected=, and resends the
+      chunk once, so the valid rows still land; a 422 without an integer row, or a second refusal, fails the run, and a run with rejected > 0 exits
+      non-zero after its surviving rows are written (a rule-violating row is a producer bug, so the junit testcase fails and
+      ci-rca attributes it to this module, Decision 210). Rows go through transport.WriterClient (writer URL from DUCKLAKE_TELEMETRY_WRITER_URL or its SSM parameter,
+      resolved in the CLI, no inline shell resolver) with transport.Limits whose row and byte caps are transport's
+      MAX_ROWS_PER_TABLE, MAX_ROWS_PER_REQUEST and MAX_INVOKE_BODY_BYTES and whose blob_items, threshold and cap are
+      inert placeholders (link rows are never blob rows), so no describe call, chunked by transport.chunk: one append call per run while rows fit 2000 (a
+      steady-state week is about 200 merges). The body is transport.append_body with its component key overwritten to merge_annotate (the writer accepts
+      ^[a-z][a-z0-9_-]{0,63}$).
+      project_ref from ci_pass.project_ref_home (Decision 224). --dry-run builds and prints counts, sends nothing. Prints
+      one line "merge_annotate summary: merges=.. keys=.. windows_read=.. submitted=.. inserted=.. rejected=..
+      skipped_no_root=.. skipped_no_ci=.. pending_ci=.. skipped_no_pr=.." and shas only (Decision 101). --junit-xml writes, in a finally
+      block on every exit, one testcase merge_links (file=scripts/telemetry_capture/merge_annotate.py) that fails, with the
+      exception class as its type (the fixed type RowsRejected for the rejected > 0 exit, which raises nothing), on any non-zero exit (an unreadable source, a writer refusal, anything else), so ci-rca
+      attributes a red to this module and never falls back to the log tail (Decision 250 cl.4).
+    new_imports: []
+  - file: tests/telemetry_capture/test_merge_annotate.py
+    action: Create
+    purpose: >-
+      rec-5270's acceptance (node test_golden_cases_replay_through_build_links). Replays every golden case, each named by
+      its basename literally in the test so --pre's data-edge channel selects it, through build_links and compares
+      expected_rows after a wire-string normaliser for timestamps; checks the
+      registry: ci_annotate's current equals PARSER_VERSION and its last history golden_digest equals
+      tests/fixtures/turn_capture_corpus.golden_digest over the corpus. Builder cases: one row per (root, merge); two roots
+      sharing a key give two rows with distinct external_refs; a prefixed stored key (session_...) matches its bare
+      trailer key; a key whose newest root is post-merge still links its older pre-merge root; an unarrived key, an unconcluded CI run, a missing "(#N)",
+      a root started after the merge and a root whose id fails to decode give none; Resolves parse; numstat with a binary
+      file; a cancelled attempt 1 is written as cancelled; building twice yields identical rows; every row passes
+      prepare_batch (imported in the test only; tests may import src.telemetry.append). CLI cases with fakes (git, GitHub,
+      reader, WriterClient): a re-run commit reads attempts/1; a merge with no eligible root makes no GitHub call; a 5xx is
+      retried once then counted skipped_no_ci; a 429, an exhausted-quota 403 or a 403 whose message contains "Rate Limit" in any case stops further GitHub reads;
+      another 403 or a 404 fails the run; an in-progress attempt 1 and a sha with no push run count under pending_ci and
+      leave skipped_no_ci 0; a sha listing two push runs uses the lower run id; --as-of outside 7-40 hex characters and
+      --days 0 or 121 each give a usage error with a junit testcase; a 422 schema_gate
+      naming a row and a 422 row_rule naming a row each drop it, print the rejected line, count it rejected, resend once
+      and exit non-zero after the resend (junit type RowsRejected); a 422 with no row fails the run without a resend; a
+      merge with no Resolves trailer gives rec_ids null; pr_url uses DEFAULT_REPO with GITHUB_REPOSITORY set otherwise; a scheduled invocation (--days "" --as-of "") runs with 7 days on origin/main; the summary line matches the template above exactly (field order, single spaces), which VP 3 and VP 4 grep; a usage error still writes the junit
+      testcase; a 403 with retry-after defers like a 429; a run whose rows fit one chunk makes exactly one WriterClient invoke and no
+      describe; no rows makes none; a steady-state run reads exactly 10 windows and its oldest window's end date is at or after ref - 63 days; --dry-run sends nothing; the junit
+      testcase names the module file and fails on any non-zero exit. Workflow structure test of telemetry-merge-links.yml: schedule and workflow_dispatch
+      triggers only, the dispatcher-bot and fork-safe job guard, cron_period_seconds classifies its cron, checkout
+      fetch-depth 0, the concurrency group, GITHUB_TOKEN on the CLI step, the pytest-junit upload, the CLI invocation, and
+      no ${{ }} expression inside any run body. scripts.checks.contracts._manifest's validate_telemetry_field_realization
+      entry lists tests/fixtures/merge_annotate/golden/** in pre_globs.
+    new_imports: []
+  - file: tests/fixtures/merge_annotate/golden/index.json
+    action: Create
+    purpose: >-
+      The ci_annotate golden corpus index (purpose, normalised_out, cases [link_rows.json, no_rows.json]), read by
+      validate_telemetry_field_realization R4-R6 and replayed by test_merge_annotate. Every expected_rows row carries
+      "table": "telemetry_sessions" (load_inputs reads row["table"]) and wire-string timestamps.
+    new_imports: []
+  - file: tests/fixtures/merge_annotate/golden/link_rows.json
+    action: Create
+    purpose: >-
+      Synthetic commits, roots (harness_session_key stored with its session_ prefix), numstat and CI conclusions whose expected_rows carry every credited column non-null at
+      least once: two roots sharing a key, a Resolves trailer, a binary file, a cancelled attempt 1 and a re-run commit.
+    new_imports: []
+  - file: tests/fixtures/merge_annotate/golden/no_rows.json
+    action: Create
+    purpose: >-
+      Synthetic inputs that give expected_rows []: an unarrived key, an unconcluded CI run, a subject with no "(#N)", a
+      root started after the merge, a root id that fails to decode and a key whose only root is post-merge.
+    new_imports: []
+  - file: .github/workflows/telemetry-merge-links.yml
+    action: Create
+    purpose: >-
+      Its own workflow (Decision 250 cl.4: the arrival check's red stays attributed to session_presence.py): a 12-hourly
+      cron pinned to '47 */12 * * *' (a shape the sensor-liveness sweep's cron_period_seconds accepts, Decision 250 cl.3,
+      minute apart from telemetry-arrival's 17), plus workflow_dispatch (inputs link_days, default 7, at most 120; as_of,
+      optional sha), passed to the CLI only through env (LINK_DAYS, AS_OF), never as a ${{ }} expression inside the run
+      body, as --days "$LINK_DAYS" --as-of "$AS_OF" (both empty on the schedule, which the CLI reads as the defaults); concurrency group telemetry-merge-links, cancel-in-progress false; timeout-minutes 30. The same
+      job-level guard as telemetry-arrival (refuses the dispatcher bot, fork-safe), OIDC
+      github_ci_branch role (its ci_ssm_refresh_read covers both URL parameters; it already invokes the telemetry reader
+      and writer), permissions contents read, actions read, id-token write; checkout fetch-depth 0; the venv install as
+      telemetry-arrival's; one run body invoking the CLI with --junit-xml reports/pytest-junit.xml and env GITHUB_TOKEN: github.token; and the "Upload pytest
+      junit report (v2 fingerprint substrate)" step (if always(), artifact pytest-junit, retention 14 days). Its failure
+      fails the run (an alarm, never a gate). At most one writer call per chunk per run, plus one resend after a row
+      refusal.
+    new_imports: []
+  - file: config/ci_rca_taxonomy.yaml
+    action: Modify
+    purpose: >-
+      Row telemetry-merge-links: {tier: not_a_gate, ci_rca: watched, owner: platform, rationale: "ci_annotate merge link
+      producer (rec-5270); junit names merge_annotate.py; files no rec itself."}. 8 lines of headroom at planning; if a
+      plan landing first leaves none, compact existing rows (the config-class relief, Decision 166), never a raise.
+    new_imports: []
+  - file: .github/workflows/ci-rca.yml
+    action: Modify
+    purpose: >-
+      The workflow_run filter gains "telemetry-merge-links" after "telemetry-arrival" (validate_ci_rca_adjudication
+      requires every watched row in the filter).
+    new_imports: []
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: The new workflow's run bodies at their measured sizes (R3 workflow leg, Decision 162), the venv install and the CLI step.
+    new_imports: []
+  - file: docs/contracts/github-actions-evidence.yaml
+    action: Modify
+    purpose: >-
+      One artifact_uploads row for the new pytest-junit upload (workflow .github/workflows/telemetry-merge-links.yml, its
+      job, the upload step's name, artifact pytest-junit, retention_class ordinary_ci), the shape telemetry-arrival's row
+      has, plus one new amendment_log entry (field_add, semantic_break false, naming the upload row; Class D contract);
+      each written flow-style on one line (492 of 500 effective lines becomes 494; if a plan landing first leaves under
+      two lines, compact the amendment_log per the contracts-class relief valve, Decision 166, never a raise).
+    new_imports: []
+  - file: tests/checks/contracts/test_validate_telemetry_field_realization.py
+    action: Modify
+    purpose: >-
+      _copy_inputs also copies tests/fixtures/merge_annotate/golden, so the tmp-tree tests (for example
+      test_producer_without_golden_index_loads_without_a_corpus) still load once ci_annotate has a golden_index.
+    new_imports: []
+  - file: docs/contracts/ports.yaml
+    action: Modify
+    purpose: >-
+      structural_assumptions SA-07 (the arrival check's history, trailer and "(#N)" assumptions) extends to the producer,
+      which imports those parsers, and to its Actions runs read for ci_outcome and its fixed default slug; one amendment_log row. PC-09 already
+      records telemetry_sessions.pr_url as a GitHub pull-request pointer, so it is not edited. The placed file is 500 of
+      500 effective lines; no compaction is bound, so a ports.yaml edit landing first means re-placing and re-approving.
+    new_imports: []
+  - file: scripts/checks/contracts/_manifest.py
+    action: Modify
+    purpose: >-
+      The validate_telemetry_field_realization entry's pre_globs gains "tests/fixtures/merge_annotate/golden/**" beside
+      the turn_capture corpus glob, so a PR touching only the ci_annotate corpus still runs R4-R6 in --pre (one line
+      added). test_merge_annotate asserts the glob is listed.
+    new_imports: []
+  - file: config/telemetry/parser_versions.yaml
+    action: Modify
+    purpose: >-
+      Register producer ci_annotate: golden_index tests/fixtures/merge_annotate/golden/index.json, current 1, history
+      version 1 with its golden_digest (tests/fixtures/turn_capture_corpus.golden_digest over the corpus) per the header rule.
+    new_imports: []
+  - file: docs/contracts/telemetry_sessions.yaml
+    action: Modify
+    purpose: >-
+      Bookkeeping only (the link columns' meaning, already bound by PLAN-merge-annotate-contract-reader's sidecar, is not
+      touched). The populated_by of rec_ids, pr_url, ci_outcome, files_changed, lines_added and lines_removed becomes
+      exactly "the ci_annotate producer, on annotate (merge link) rows." (the R8 prefix and no other prose).
+      realization.produced gains ci_annotate: [event_kind, event_timestamp,
+      session_started_at, source_ordinal, external_ref, entity_ref, producer, producer_version, parser_version, rec_ids,
+      pr_url, ci_outcome, files_changed, lines_added, lines_removed]; unproduced held:feedback-loop-gate keeps plan_slug
+      and scope_drift_files (the operator's 2026-11-17 14:34Z choice in this plan's thread, "Plan now, build after the read
+      fix", starts this producer and so releases the six). No amendment_log row: populated_by and realization are not
+      description or semantics, so contract-drift category 6 does not apply and no free prose is added; the file stays at
+      the sibling plan's 499 of 500.
+    new_imports: []
+bundled_recommendations: [rec-5270]
+followon_recs: [rec-5295]
+infrastructure_dependencies:
+  - "None expected: github_ci_branch already invokes the telemetry writer and reader and reads /agent-platform/* parameters (oidc_ci_roles.tf, oidc.tf ci_ssm_refresh_read), and it is already an admitted writer principal. The build re-checks the writer invoke grant before relying on it; a missing grant stops for a Terraform PR, never a local apply."
+acceptance_criteria:
+  - "bin/venv-python -m pytest tests/telemetry_capture/test_merge_annotate.py -q passes (rec-5270's acceptance)."
+  - "After the backfill dispatch, a second dispatch with the same link_days and as_of inserts no row the first sent: its inserted is at most its submitted minus the first run's submitted (every row the first run sent is stored after it, whether that run or an earlier scheduled one inserted it), with rejected 0 and skipped_no_ci 0 on both runs (no deferred CI read, so the second run submits every row the first did)."
+  - "Link writes happen only on the schedule and dispatch: at most one WriterClient.invoke call per chunk per run (its own internal 429/503 retries are not counted), plus one resend after a row refusal, and no describe call."
+  - "Declared residual: a root started more than 56 days before its merge is not linked in steady state (the 10-window walk reaches 63 days before the ref, so a merge up to 7 days old still sees 56 days of roots); a backfill dispatch with a larger link_days links it."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The pure builder, the CLI with fakes, the golden corpus, the registry entry and the workflow structure.
+    command: bin/venv-python -m pytest tests/telemetry_capture/test_merge_annotate.py -q
+    expected: exit 0
+    fix_if: a row fails prepare_batch, a re-build differs, or the CLI makes more than one writer call for one chunk
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: merge-annotate-link-rows
+  - step: 2
+    phase: pre-deploy
+    action: Full tier, then HEAD attestation, after the build commit and rebase and before the push (handoff_policy); start it from the top-level session, backgrounded with a 2 h limit, and read only the attestation.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: the full tier exits 0 and the validation result attests the current HEAD's tree
+    fix_if: any failure; fix and rerun the full tier from the start
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion), and the earlier steps carry the durable regressions.
+  - step: 3
+    phase: post-deploy
+    action: >-
+      The backfill dispatch (link_days 120, as_of pinned to origin/main), run once the build is merged, the sibling plan
+      is deployed and the telemetry hold allows. Run it backgrounded; it waits for its own run (the newest dispatch run id
+      before the dispatch is recorded, and only a different id is read).
+    command: >-
+      git fetch -q origin main && A="$(cat /tmp/ma_asof 2>/dev/null || git rev-parse origin/main)" && [ -n "$A" ] && echo "as_of=$A" && echo "$A" > /tmp/ma_asof &&
+      P="$(gh api 'repos/otl-labs/ontheloop/actions/workflows/telemetry-merge-links.yml/runs?event=workflow_dispatch&per_page=1' --jq '.workflow_runs[0].id // 0')" &&
+      gh api -X POST repos/otl-labs/ontheloop/actions/workflows/telemetry-merge-links.yml/dispatches -f ref=main -f "inputs[link_days]=120" -f "inputs[as_of]=$A" &&
+      R="$P" && for i in $(seq 90); do sleep 10; R="$(gh api 'repos/otl-labs/ontheloop/actions/workflows/telemetry-merge-links.yml/runs?event=workflow_dispatch&per_page=1' --jq '.workflow_runs[0].id // 0')"; [ -n "$R" ] && [ "$R" != "$P" ] && break; done &&
+      [ -n "$R" ] && [ "$R" != "$P" ] && S="" && for i in $(seq 120); do S="$(gh api "repos/otl-labs/ontheloop/actions/runs/$R" --jq .status)"; [ "$S" = completed ] && break; sleep 30; done &&
+      [ "$S" = completed ] &&
+      [ "$(gh api "repos/otl-labs/ontheloop/actions/runs/$R" --jq .conclusion)" = success ] &&
+      gh run view "$R" --repo otl-labs/ontheloop --log | grep -o 'merge_annotate summary: .*' | head -1 > /tmp/ma_run1 &&
+      grep -q ' rejected=0 ' /tmp/ma_run1 && grep -q ' skipped_no_ci=0 ' /tmp/ma_run1 &&
+      [ "$(grep -o 'submitted=[0-9]*' /tmp/ma_run1 | cut -d= -f2)" -gt 0 ] && echo BACKFILL_OK
+    expected: >-
+      BACKFILL_OK (the run concluded success, rejected=0, skipped_no_ci=0 so no CI read was deferred, submitted > 0;
+      submitted counts re-sent rows too, so a re-run after a deferral still passes). Start the first run with no
+      /tmp/ma_asof; a re-run reuses it.
+    fix_if: >-
+      skipped_no_ci > 0 (GitHub's hourly token budget ran out, or a 5xx or network error outlived its retry): wait an hour and run this step again, which reuses
+      /tmp/ma_asof (the scheduled 7-day run never revisits older merges); if it still defers after two waits, the backfill
+      has outgrown one hour's budget: stop and file a rec through the portal for a paged ci.yml runs read (one request
+      per 100 runs; it changes SA-07's approved words, so it needs its own plan and approval run);
+      pending_ci > 0 is not a failure for merges inside the last 7 days (a later scheduled run links them once their CI
+      concludes); an older pending merge (no push run, such as a skip-ci squash) stays unlinked, a declared residual; a cancelled conclusion (a queued run was
+      replaced in the concurrency group): run it again; a GrainConflict or writer refusal (the junit testcase names it); rejected > 0 (the run log's "merge_annotate rejected" lines name the rule and column)
+    hermetic: false
+  - step: 4
+    phase: post-deploy
+    action: >-
+      A replay with the same link_days and as_of inserts nothing the first run sent. Start it at least 60 minutes after
+      step 3 completed, so the backfill's GitHub reads have left the hourly token budget.
+    command: >-
+      [ $(( $(date +%s) - $(stat -c %Y /tmp/ma_run1) )) -ge 3600 ] && A="$(cat /tmp/ma_asof)" &&
+      P="$(gh api 'repos/otl-labs/ontheloop/actions/workflows/telemetry-merge-links.yml/runs?event=workflow_dispatch&per_page=1' --jq '.workflow_runs[0].id // 0')" &&
+      gh api -X POST repos/otl-labs/ontheloop/actions/workflows/telemetry-merge-links.yml/dispatches -f ref=main -f "inputs[link_days]=120" -f "inputs[as_of]=$A" &&
+      R="$P" && for i in $(seq 90); do sleep 10; R="$(gh api 'repos/otl-labs/ontheloop/actions/workflows/telemetry-merge-links.yml/runs?event=workflow_dispatch&per_page=1' --jq '.workflow_runs[0].id // 0')"; [ -n "$R" ] && [ "$R" != "$P" ] && break; done &&
+      [ -n "$R" ] && [ "$R" != "$P" ] && S="" && for i in $(seq 120); do S="$(gh api "repos/otl-labs/ontheloop/actions/runs/$R" --jq .status)"; [ "$S" = completed ] && break; sleep 30; done &&
+      [ "$S" = completed ] &&
+      [ "$(gh api "repos/otl-labs/ontheloop/actions/runs/$R" --jq .conclusion)" = success ] &&
+      gh run view "$R" --repo otl-labs/ontheloop --log | grep -o 'merge_annotate summary: .*' | head -1 > /tmp/ma_run2 &&
+      grep -q ' rejected=0 ' /tmp/ma_run2 && grep -q ' skipped_no_ci=0 ' /tmp/ma_run2 &&
+      S1="$(grep -o 'submitted=[0-9]*' /tmp/ma_run1 | cut -d= -f2)" && S2="$(grep -o 'submitted=[0-9]*' /tmp/ma_run2 | cut -d= -f2)" &&
+      I2="$(grep -o 'inserted=[0-9]*' /tmp/ma_run2 | cut -d= -f2)" && [ "$I2" -le "$((S2 - S1))" ] && echo REPLAY_STABLE
+    expected: REPLAY_STABLE (rows that arrived or concluded between the runs may insert; nothing the first run sent does).
+    fix_if: >-
+      started under an hour after step 3 wrote /tmp/ma_run1 (the first clause exits non-zero silently): wait and run it
+      again; skipped_no_ci > 0 or a cancelled conclusion: wait an hour and run this step again (the bound needs run 2 to submit
+      every row run 1 did); a GrainConflict (a row field is not stable across runs) or the inequality fails
+    hermetic: false
+  - step: 5
+    phase: post-deploy
+    action: rec-5270 is closed by the merge's Resolves trailer (its acceptance is the node-id form, so the closure job can decide it).
+    command: >-
+      AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import
+      fetch_recs_by_ids,make_reader;r,m=fetch_recs_by_ids(make_reader(profile='agent_platform'),['rec-5270']);
+      st=r[0]['status'] if r else None;assert not m and st=='closed', (m, st);print('REC_CLOSED')"
+    expected: REC_CLOSED.
+    fix_if: >-
+      Still open: read the ci.yml closure job's log for this merge (a missing Resolves trailer, or an acceptance verdict
+      other than pass); fix the cause and close through the portal with the merge sha as evidence.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: scripts/telemetry_capture/merge_annotate.py
+    behavior: one stable, rule-valid link row per (root, merge); nothing for unarrived, unconcluded, PR-less or later-root merges; one writer call per chunk
+    verification_step: 1
+    test_selector: tests/telemetry_capture/test_merge_annotate.py
+    red_green_expectation: red before (module absent), green after
+  - source: .github/workflows/telemetry-merge-links.yml
+    behavior: schedule and dispatch triggers only, the dispatcher-bot guard, fetch-depth 0, the junit upload, the CLI invocation
+    verification_step: 1
+    test_selector: tests/telemetry_capture/test_merge_annotate.py
+    red_green_expectation: red before (workflow absent), green after; a structure test parses the workflow
+  - source: scripts/checks/contracts/_manifest.py
+    behavior: the field realization check's pre_globs name the ci_annotate golden corpus
+    verification_step: 1
+    test_selector: tests/telemetry_capture/test_merge_annotate.py
+    red_green_expectation: red before (glob absent), green after
+  - source: config/ci_rca_taxonomy.yaml
+    behavior: the new workflow has its taxonomy row
+    verification_step: 2
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: One mapping row; validate_ci_rca_taxonomy and validate_ci_rca_adjudication in the pre tier fail a workflow with no row or a watched row outside ci-rca.yml's filter.
+  - source: .github/workflows/ci-rca.yml
+    behavior: the workflow_run filter names telemetry-merge-links
+    verification_step: 2
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: One filter entry; validate_ci_rca_adjudication fails --pre when a watched taxonomy row is absent from the filter.
+  - source: config/composite_action_body_baseline.yaml
+    behavior: the new workflow's run bodies are measured
+    verification_step: 2
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: One baseline row per body; validate_composite_action_shell_bodies fails --pre for an inline workflow body with no row.
+  - source: docs/contracts/github-actions-evidence.yaml
+    behavior: the new pytest-junit upload is registered
+    verification_step: 2
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: One registry row; validate_actions_evidence fails a workflow artifact upload with no artifact_uploads row.
+  - source: tests/checks/contracts/test_validate_telemetry_field_realization.py
+    behavior: the tmp-tree inputs copy include the ci_annotate corpus
+    verification_step: 2
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: A test-helper fixture copy; the file's own tests fail with FileNotFoundError without it once ci_annotate is registered.
+  - source: docs/contracts/ports.yaml
+    behavior: SA-07 names the producer's assumptions
+    verification_step: 2
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: Prose registration bound word for word by the approved-text sidecar; no runtime behavior reads it.
+  - source: config/telemetry/parser_versions.yaml
+    behavior: ci_annotate is a registered producer with its golden corpus
+    verification_step: 1
+    test_selector: tests/telemetry_capture/test_merge_annotate.py
+    red_green_expectation: red before (no ci_annotate entry), green after; the registry test checks current and golden_digest
+  - source: docs/contracts/telemetry_sessions.yaml
+    behavior: populated_by and realization credit ci_annotate for the six link columns
+    verification_step: 2
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: validate_telemetry_field_realization R1 and R8 fail --pre when populated_by and realization.produced disagree with the registry.
+constraints:
+  - "Build after PLAN-merge-annotate-contract-reader is deployed (an annotate row must not count as activity, and coverage_after must be waived), after rec-5248's read-timeout fix (it has no plan yet; the read-timeouts thread owns it), and after the telemetry deploy hold lifts."
+  - "No new read shape: the telemetry_root_sessions named verb at the arrival check's 7-day window size, walked to a 63-day floor (10 windows a run, twice a day, with no early stop, one window more than the arrival check's 56-day bound); the backfill dispatch is the one run that walks further (26 windows)."
+  - "ports.yaml's edit is bound word for word by docs/plans/approved/merge-annotate-producer.yaml (Decision 246); telemetry_sessions.yaml's edits here are the exact populated_by string and realization list above, the forms validate_telemetry_field_realization R1 and R8 fix, with no other prose."
+  - "Public repository (Decision 101): logs print counts and shas only; fixtures synthetic."
+  - "The trailer join in session_presence.py stays the arrival check; this producer imports its parsers and never changes its verdict or edits that file."
+context:
+  - >-
+    Decision-scout r7: NO_FLAGS after the rebase onto main (Decision 270 RELATED: content reader only; 219 of 219 triaged). Decision-scout r6: NO_FLAGS (after critique r3 added the _manifest.py row). Decision-scout r5: FLAGS_FOUND. CITE 81, 88, 101, 162, 163, 199, 207, 210, 212, 213, 234, 236, 246, 250, 254, 267.
+    SPIRIT NOTE 210 (drop-and-resend could finish green; answered: rejected > 0 exits non-zero after the surviving rows
+    are written); cite 81 added. Earlier flags answered: WARN 250 (own workflow, taxonomy row, junit names
+    merge_annotate.py), NOTE 250 cl.3 (cron pinned), NOTE 254 (range verdict deferred to rec-5295), NOTE 212 (SA-07),
+    NOTE 162 (URL resolvers in the CLI). RELATED 55, 168, 84, 228, 200, 224, 221, 226, 142, 201, 186, 132, 189, 244, 166,
+    205, 237, 249, 255, 256, 96, 97, 184, 215, 231. Decisions triaged: 218 of 218. Roadmap items intersected: 8;
+    CONFLICT: 0; RELATED: 8. Serves: NS.6 4/5.
+  - "Open at build: whether a zero-insert MERGE still commits an empty catalog snapshot (inferred no); if it does, two a day is still negligible."
+  - "Relevance gate 2026-11-17 on rec-5270: stale_target only because its target file is this plan's Create row (rec field guidance: a rec may target a file to be created); bundled."
+  - "Kept graduated shards (assertions additive only): telemetry-field-realization."
+  - "Critique r2 (REVISE) folded: no scripts import of src.telemetry.append (B1), evidence amendment row (B2), rec-5270 and rec-5295 acceptance made node-id decidable via update_rec 2026-11-17 (B3), realization test copy (B4), full-floor walk (B5), normalised key join (B6), CI reads only for linkable merges with rate-limit handling (B7), run-id-pinned VPs (B8), nits N1-N13."
+  - "Critique r3 (REVISE) folded: 422 row_rule handled with schema_gate, a 422 without a row fails (B1); 10 steady-state windows to the ref - 63 floor (B2); value-free rejected lines, RowsRejected junit type, non-rate-limit 403/404 fail, bounded VP waits, env-only dispatch inputs, rec_ids null and fixed pr_url slug, the manifest pre_globs row, rec-5248 adoption rule, AC3 reworded (N1-N9)."
+  - "Critique r4 (REVISE) folded: an empty --days/--as-of (the schedule) means the defaults, arguments parsed inside the junit try (B1); replay bound S2 - S1, constraint wording, SA-07 names the fixed slug, secondary-limit 403, zero skew allowance declared, empty-run-id guard, junit directory, headroom fallbacks (N1-N8)."
+  - "Critique r5 (REVISE) folded: the backfill and replay require skipped_no_ci=0, the replay starts an hour after the backfill, and a deferred run is re-run (B1); argv pre-scan for --junit-xml, rate-limit message 403, docstring skew declaration, input validation, lowest run id, re-dispatch on cancel, invoke-count wording (N1-N4, N6-N9). N5 (test file size): the build keeps the one test file under 500 lines with parametrised case tables."
+  - "Critique r6 (REVISE) folded: an unconcluded or missing CI run counts under a separate pending_ci, so skipped_no_ci means only deferred reads, and VP 3 re-runs reuse the pinned as_of (B1); tests for the round-5 behaviours, an enforced hour between VP 3 and VP 4, a stop-and-file fallback if the backfill outgrows the hourly budget (N1, N2, N4)."
+  - "Critique r7 PROCEED; its nits folded: older pending merges declared, both skipped_no_ci causes named, pinned as_of checked non-empty, VP 3 gates on submitted, the replay hour gate in fix_if, the attempt-1 note placed, the summary-line format tested (N1-N7)."
+  - "Critique r1 (REVISE) folded: ci-rca filter (B1), golden case files (B2), rec-5270 bundled (B3), replay VP (B4), bounded walk and residual (B5), later-root drop and per-row prepare (B6), SA-07 instead of PC-09 (B7, B8), junit attribution (B9), nits N1-N11."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:dc78229ac43a2a44447ed77ebfb0b322842dd52ba18e4528148ea8ec0595c07f"}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:4e03670ddd7d5b0b97a1a1be3900da6f38b30d3e5e9393a18a97d265e7304b3b"}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:5d86c37fa1e3dba4fd710d26da4d4d5413304a8ac0eedc08c681f34193122d87"}  # pragma: allowlist secret
+  - {gate: wording-check, round: 1, verdict: PASS, digest: 78148fe3166cff21d112f259ea9bb44b2f61fc924298f3305788d60194531b31, base: ba444e834563d8d98ceb74305cd6a3a156ad4582, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 9, nits: 11}
+  - {gate: decision-scout, round: 4, verdict: NO_FLAGS, scout_input_fingerprint: "v1:3aac5aba789a7d2d6fc8b0f45471f174ddbc53fa208005dce9fe27c213ff34e4"}  # pragma: allowlist secret
+  - {gate: wording-check, round: 2, verdict: PASS, digest: 9b3eb5eda48bc5042d995db50f8828ec610f6dcf264ea827d62ae7bf6d3d3d3f, base: eed2f6e47ca5a81c4098731ba4545c5d3c49293b, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 8, nits: 13}
+  - {gate: decision-scout, round: 5, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:0ac05260f6df0b448fd1443fb27e1ac3307e08904754dff64743d9d1c5fdeb7f"}  # pragma: allowlist secret
+  - {gate: wording-check, round: 3, verdict: PASS, digest: 4cca40ab02a6deca31a92b8625cce641370d96f837e01f3e17d2bed289a81540, base: eed2f6e47ca5a81c4098731ba4545c5d3c49293b, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 2, nits: 9}
+  - {gate: decision-scout, round: 6, verdict: NO_FLAGS, scout_input_fingerprint: "v1:9548f4a493ec0b294be6490c9371fe52fb459e1b8a3218cde7cbeba89cb58ce6"}  # pragma: allowlist secret
+  - {gate: wording-check, round: 4, verdict: PASS, digest: 4cca40ab02a6deca31a92b8625cce641370d96f837e01f3e17d2bed289a81540, base: eed2f6e47ca5a81c4098731ba4545c5d3c49293b, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 9}
+  - {gate: wording-check, round: 5, verdict: PASS, digest: a994c8879aff3dce9de152ab6b873828c7cab1b392546e5bfe213b2fe75e8dd5, base: eed2f6e47ca5a81c4098731ba4545c5d3c49293b, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 9}
+  - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 1, nits: 4}
+  - {gate: plan-critique, round: 7, verdict: PROCEED, blocking: 0, nits: 7}
+  - {gate: decision-scout, round: 7, verdict: NO_FLAGS, scout_input_fingerprint: "v1:4afab977d7254105c857125f0991ef420c647e9e77796aa4d5be789be83d5910"}  # pragma: allowlist secret
+  - {gate: wording-check, round: 6, verdict: PASS, digest: a994c8879aff3dce9de152ab6b873828c7cab1b392546e5bfe213b2fe75e8dd5, base: f5833a4fa3a0e06d803ac4fdeba5f523167f7210, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 8, verdict: PROCEED, blocking: 0, nits: 4}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+execution_steps:
+  - "Builder and CLI, golden corpus, tests, registry entry, contract bookkeeping, ports row, new workflow with its taxonomy row, ci-rca filter entry, evidence row and baseline rows; VP 1, then the full tier (VP 2); after the sibling plan's deploy and the hold lifts, VP 3 and VP 4; VP 5 after merge."
+rollback: Delete telemetry-merge-links.yml with its taxonomy row, ci-rca filter entry, evidence row and baseline rows; written link rows stay (append-only) and are inert to state reads once the contract-reader plan is live.

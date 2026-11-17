@@ -125,3 +125,14 @@ def test_writer_lookup_leg_reported_not_compiled(monkeypatch: pytest.MonkeyPatch
     code, lines, _ = census.census(("ops_recommendations",), dry_run=True)
     assert code == census.EXIT_OK
     assert sum(line.startswith("WRITER-LOOKUP  ops_recommendations.d") for line in lines) == 1
+
+
+def test_writer_shape_leg_reported_not_compiled(monkeypatch: pytest.MonkeyPatch) -> None:
+    rules = (_rule("not_null"), _rule("json_object", column="j"))
+    monkeypatch.setattr(census, "declared_rules", lambda table: rules)
+    plan = census.build_plan("ops_recommendations")
+    assert [r.kind for r in plan.writer_shape] == ["json_object"]
+    assert [c.test_type for c in plan.checks] == ["not_null"] and plan.declared_non_exempt == 1
+    code, lines, _ = census.census(("ops_recommendations",), dry_run=True)
+    assert code == census.EXIT_OK
+    assert sum(line.startswith("WRITER-SHAPE ops_recommendations.j json_object") for line in lines) == 1
