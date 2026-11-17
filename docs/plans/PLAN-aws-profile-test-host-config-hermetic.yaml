@@ -1,0 +1,206 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: aws-profile-test-host-config-hermetic
+intent: >-
+  Make the local full tier trustworthy again in agent containers: tests/test_aws_profile.py stops reading the host's
+  ~/.aws/config, so test_returns_none_when_oidc_env_credentials_present passes on any machine and a new regression test
+  that plants a self-sufficient profile under a fake HOME keeps it that way. The resolver itself is correct and stays
+  byte-identical; no test is skipped or deleted.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-aws-profile-test-host-config-hermetic.yaml
+phase: >-
+  ad_hoc_rec (soft-warn category; no tier_item claimed, so the Tier Item Freshness Gate is skipped). Operator request
+  2026-11-17 (rec-5196) to remove the one standing local full-tier failure every agent build reports.
+cites: [dec:163, dec:181, dec:189, dec:201]
+scope:
+  - file: tests/test_aws_profile.py
+    action: Modify
+    purpose: >-
+      Test-only; scripts/aws_profile.py and tests/conftest.py stay byte-identical. (a) _env() keeps clearing the
+      credential-signal keys and then runs exactly the line base["AWS_CONFIG_FILE"] = os.devnull (VP step 3's mutant
+      deletes that literal line; an empty, readable shared config, the precedent scripts/checks/deps/fast_tier_env.py:164
+      already uses) before applying overrides. os.devnull is chosen over dropping AWS_CONFIG_FILE from
+      _CREDENTIAL_ENV_KEYS (which would reuse the conftest redirect) so the helper stays hermetic on its own, even for a
+      test that opts out of the conftest fixture, so no test that
+      builds its environment through _env can fall back to the host's $HOME/.aws/config; its docstring says so in one
+      line. Callers that pass AWS_CONFIG_FILE (the _with_config helper) still override it. (b)
+      test_config_defaults_to_the_home_file_and_an_unreadable_path_counts_as_absent is the one test that must exercise
+      the $HOME default: its first block builds the env through _env(HOME=str(tmp_path), AWS_ACCESS_KEY_ID=...) and then
+      removes AWS_CONFIG_FILE with .pop("AWS_CONFIG_FILE", None) before patching, so it still proves the HOME fallback
+      against its own tmp_path HOME, never the host's. (c) New test
+      test_returns_none_when_oidc_env_credentials_present_with_host_config(tmp_path) placed after _with_config: writes
+      _SELF_SUFFICIENT to tmp_path/.aws/config, patches os.environ with _env(HOME=str(tmp_path),
+      AWS_ACCESS_KEY_ID="AKIAEXAMPLE") under clear=True, and asserts resolve_aws_profile(default="agent_platform") is
+      None. A one-line docstring says it proves _env shields the host's shared config (it plants the same HOME config as
+      the HOME-default test but keeps AWS_CONFIG_FILE, so it guards the helper's isolation, not resolver policy). It simulates the agent container on every machine, so it is red before (a) on CI too. The node name is
+      rec-5222's acceptance node. Every existing test name is kept verbatim (rec-5196, rec-5199 and rec-5236 name
+      test_returns_none_when_oidc_env_credentials_present). About 12 lines added; the file stays far under 500 SLOC.
+bundled_recommendations:
+  - rec-5196
+  - rec-5199
+  - rec-5222
+  - rec-5236
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - test_returns_none_when_oidc_env_credentials_present passes in an agent container whose ~/.aws/config carries a credential_process (VP step 2).
+  - The new host-config regression test passes (VP step 1) and fails against a mutant _env without the os.devnull line, whatever the outer HOME, since the test sets its own (VP step 3).
+  - The whole of tests/test_aws_profile.py passes with the real HOME, an empty HOME and HOME=tests, and is ruff-clean (VP steps 2, 4).
+  - scripts/aws_profile.py and tests/conftest.py are byte-identical (VP step 5).
+  - Every bundled rec's own acceptance command passes (VP step 6) and all four close through the squash-merge Resolves trailer (VP step 9).
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The new regression test proves a planted self-sufficient HOME config cannot leak into the OIDC case.
+    command: bin/venv-python -m pytest tests/test_aws_profile.py::test_returns_none_when_oidc_env_credentials_present_with_host_config -q
+    expected: One test passes. Red before (node absent; and against the pre-change _env with the node added, it fails with assert 'agent_platform' is None even with HOME an empty directory).
+    fix_if: The assertion fails -- _env still lets the HOME fallback through; fix _env, never the assertion.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: aws-profile-test-ignores-host-shared-config
+    expected_literals:
+      - 1 passed
+  - step: 2
+    phase: pre-deploy
+    action: The original failing test passes in this agent container, whose real ~/.aws/config defines agent_platform with a credential_process.
+    command: grep -q credential_process "$HOME/.aws/config" && bin/venv-python -m pytest tests/test_aws_profile.py -q
+    expected: Every test in the file passes (12 tests), including test_returns_none_when_oidc_env_credentials_present.
+    fix_if: >-
+      test_returns_none_when_oidc_env_credentials_present fails with assert 'agent_platform' is None -- the host config
+      still leaks. A non-zero exit with no pytest output means the grep precondition missed: the host has no
+      credential_process config, so the step is out of scope there (step 1 covers it hermetically).
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      Depends on the host carrying a real ~/.aws/config, which CI runners do not have; step 1 graduates the same
+      guarantee hermetically by planting the config under a fake HOME.
+  - step: 3
+    phase: pre-deploy
+    action: Mutation witness -- with the os.devnull line removed from _env in a scratch copy, the new test fails (it sets its own HOME, so the outer HOME does not matter).
+    command: >-
+      d=$(mktemp -d) && mkdir "$d/home" && sed '/base\["AWS_CONFIG_FILE"\] = os\.devnull/d' tests/test_aws_profile.py > "$d/test_mutant_aws_profile.py" && ! grep -q 'os.devnull' "$d/test_mutant_aws_profile.py" || { echo MUTANT_SETUP_FAILED; rm -rf "$d"; exit 2; }; HOME="$d/home" bin/venv-python -m pytest "$d/test_mutant_aws_profile.py::test_returns_none_when_oidc_env_credentials_present_with_host_config" -q -p no:cacheprovider -p no:randomly; rc=$?; rm -rf "$d"; echo "mutant_rc=$rc"; test $rc -eq 1
+    expected: Prints the mutant's pytest exit code as 1 (one test failed on the mutant) and exits 0.
+    fix_if: >-
+      mutant_rc=0 -- the regression test does not depend on the fix and guards nothing; re-anchor it on the planted HOME
+      config. mutant_rc of 2, 4 or 5 (collection or usage error, or no test ran) is unmeasurable, neither a pass nor a guard
+      failure: fix the command (it runs out of tree on purpose, so pyproject's addopts and -p no:randomly do not clash).
+      MUTANT_SETUP_FAILED means the mutant could not be built or still holds os.devnull: the fix's line differs from the
+      pinned literal in scope (a); align the line, never the sed.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      A one-off mutation witness of step 1's discriminating power; step 1 graduates the guard itself and a sed-based
+      mutant is brittle as a standing registry row. It is hermetic: false as a one-off out-of-tree witness whose
+      replay would re-run a mutant rather than the change.
+  - step: 4
+    phase: pre-deploy
+    action: The file passes under an empty HOME and HOME=tests (CI-like and rec-5236's shape) and is lint- and format-clean.
+    command: >-
+      d=$(mktemp -d) && HOME="$d" bin/venv-python -m pytest tests/test_aws_profile.py -q && HOME=tests bin/venv-python -m pytest tests/test_aws_profile.py -q && bin/venv-python -m ruff check tests/test_aws_profile.py && bin/venv-python -m ruff format --check tests/test_aws_profile.py; rc=$?; rm -rf "$d"; exit $rc
+    expected: Both pytest runs pass every test, ruff reports no findings and format --check reports the file already formatted.
+    fix_if: A pre-existing test fails -- most likely the HOME-default test lost its pop of AWS_CONFIG_FILE.
+    hermetic: true
+    graduation: not-applicable
+    expected_literals:
+      - 1 file already formatted
+  - step: 5
+    phase: pre-deploy
+    action: The resolver and the shared conftest are untouched.
+    command: git diff --quiet origin/main -- scripts/aws_profile.py tests/conftest.py && echo UNCHANGED
+    expected: Prints UNCHANGED.
+    fix_if: Either file differs -- out of scope; revert it (the resolver's behaviour is correct, the defect is the test's environment).
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Branch-relative evidence of what this plan leaves alone; validate_scope_boundary already enforces the scope table on every PR.
+  - step: 6
+    phase: pre-deploy
+    action: Each bundled rec's own acceptance command passes.
+    command: >-
+      bin/venv-python -m pytest tests/test_aws_profile.py::test_returns_none_when_oidc_env_credentials_present -q && grep -q 'AWS_CONFIG_FILE=' tests/test_aws_profile.py && bin/venv-python -m pytest -q tests/test_aws_profile.py::test_returns_none_when_oidc_env_credentials_present && bin/venv-python -m pytest tests/test_aws_profile.py::test_returns_none_when_oidc_env_credentials_present_with_host_config -x && HOME=tests bin/venv-python -m pytest tests/test_aws_profile.py::test_returns_none_when_oidc_env_credentials_present -q && grep -q tmp_path tests/test_aws_profile.py && echo ACCEPTANCE_OK
+    expected: Prints ACCEPTANCE_OK (rec-5196, rec-5199, rec-5222 and rec-5236 acceptance commands in order).
+    fix_if: A node id is not found -- a test was renamed, which leaves its rec open at closure.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: The closure job re-runs each rec's acceptance at merge (Decision 201); step 1 graduates the behaviour.
+  - step: 7
+    phase: pre-deploy
+    action: Run the fast presubmit tier.
+    command: bin/venv-python -m scripts.validate --pre
+    expected: Zero failed checks, including validate_plan_documents and validate_scope_boundary.
+    fix_if: Any failure -- diagnose and fix on the branch; never weaken a check to obtain green (Decision 181).
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Invokes scripts.validate, which the vp-red-before recursion refusal forbids graduating.
+  - step: 8
+    phase: pre-deploy
+    action: Run the full presubmit tier locally before handoff, as handoff_policy declares (backgrounded, 2 h limit).
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: Zero failed checks; with this fix the full tier no longer reports test_aws_profile in an agent container.
+    fix_if: A timeout is BLOCKED per handoff_policy -- rerun from the start; any failure outside this plan's scope is reported, not fixed inline.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Same recursion refusal as step 7 at the full tier.
+  - step: 9
+    phase: post-deploy
+    action: Confirm all four bundled recs closed through the squash-merge Resolves trailer.
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader; rows, _ = fetch_recs_by_ids(make_reader(), ['rec-5196', 'rec-5199', 'rec-5222', 'rec-5236']); s = sorted((r['id'], r['status']) for r in rows); print(s); assert len(s) == 4 and all(v == 'closed' for _, v in s)"
+    expected: Prints four (id, closed) pairs and exits 0.
+    fix_if: A rec is still open -- check the squash commit body carries Resolves for all four ids and the closure job's acceptance verdict.
+    hermetic: false
+test_obligations:
+  - source: tests/test_aws_profile.py
+    behavior: No test that builds its environment through _env reads the host's ~/.aws/config; the OIDC case returns None even with a self-sufficient profile under HOME.
+    verification_step: 1
+    test_selector: tests/test_aws_profile.py::test_returns_none_when_oidc_env_credentials_present_with_host_config
+    red_green_expectation: red before (fails against the old _env under any HOME), green after.
+constraints:
+  - Test-only change; scripts/aws_profile.py and tests/conftest.py are byte-identical.
+  - Never skip, xfail, delete or rename an existing test; never edit hooks or flags to get past a guard.
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - rec-5196 (and duplicates rec-5199, rec-5222, rec-5236) -- root cause verified 2026-11-17 in this session; the resolver behaviour since #2038 (c4c41b7f) is correct.
+  - Cause -- tests/test_aws_profile.py _env pops AWS_CONFIG_FILE, undoing tests/conftest.py _hermetic_aws_profile's redirect, so scripts/aws_profile.py _self_sufficient_profile reads $HOME/.aws/config.
+  - Measured in a scratch worktree -- with the change, 12 passed under real HOME, empty HOME and HOME=tests; the new node fails against the old _env under an empty HOME.
+  - "Decision-scout verdict NO_FLAGS; CITE: Decision 163, Decision 181, Decision 189, Decision 201. Decisions triaged: 218 of 218. Roadmap items intersected: 1 (T4.23, RELATED via the tests/ prefix only, deferred_post_mvp); CONFLICT: 0; RELATED: 1. Serves: NS.8 2/5."
+  - "Red overlap (scripts.ci_rca.red_overlap, 2026-11-17, main 163d90b1): verdict blocked by SLO only; red rec-5247 (telemetry reader smoke 504 on sessions_window; slo_breached, product_regression, shared paths none). Deferral rationale: this plan edits none of its files and does not repair it; rec-5247 is owned by this workspace and a separate thread plans its fix. The build re-runs red_overlap at its start."
+  - Decision 181 -- the change makes the test environment hermetic; no assertion is loosened (the is None assertion and the HOME-default proof both stay).
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: NO_FLAGS, scout_input_fingerprint: "v1:3bf65a90ef5cb4e021f51f04118bfc7ef4cb781df4d7c156433d9adfd2cd40be"}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 1, nits: 7}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 3}
+  - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 4}
+  - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 3}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - >-
+    Edit tests/test_aws_profile.py -- edits (a), (b) and (c) from the scope row, nothing else. Then run VP steps 1-7
+    on the working tree; loop until pass; on an unrecoverable failure stop and RCA (Decision 55). Step 1's graduate
+    disposition writes the registry shard config/agent/verification_registry/entries/aws-profile-test-ignores-host-shared-config.yaml
+    (sanction-row covered, no scope row).
+  - >-
+    CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true in this plan
+    after the step 1 shard is written; commit; git fetch origin main && git rebase origin/main (stop on conflict);
+    re-run bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-aws-profile-test-host-config-hermetic.yaml
+    (deferral as in context); re-run VP 1-7 if the rebase moved a file they read; VP 8 on the committed, rebased,
+    clean tree (the full tier backgrounded with a 2 h limit from the top-level session, then
+    bin/venv-python -m scripts.checks.validation_result --verify-head; a timeout is BLOCKED and nothing is pushed);
+    bin/venv-python -m scripts.session.github_readiness; push; open the PR and cite its number; subscribe to its
+    activity; code review in a fresh context (a finding is fixed on the branch and the closure repeats for the new
+    HEAD); squash-merge on code review PROCEED and green CI with the body line "Resolves: rec-5196, rec-5199,
+    rec-5222, rec-5236"; then VP 9; then write /tmp/implementation-retrospective.json with the
+    scripts.session.postflight_evidence.CATEGORIES keys and run
+    bin/venv-python -m scripts.session.postflight --evidence /tmp/implementation-retrospective.json.
+  - >-
+    Report the closure evidence as four SEPARATE facts (implement skill Commit Flows): GitHub readiness state
+    (scripts.session.github_readiness); parent validator evidence (VP 8 plus --verify-head for the pushed HEAD);
+    structured postflight evidence (scripts.session.postflight --evidence); the real outcome (push, PR number, CI green
+    by event-driven wake, read-back merge SHA, VP 9 rec closure).
