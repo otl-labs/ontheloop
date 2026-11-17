@@ -106,6 +106,20 @@ ENTRIES: tuple[Entry, ...] = (
         full_segment="full_after_lint",
     ),
     Entry(
+        name="validate_persona_verdict_chain",
+        module="scripts.checks.ci_guards.validate_persona_verdict_chain",
+        attr="validate_persona_verdict_chain",
+        pre=True,
+        pre_globs=(
+            ".github/workflows/persona-verdict*.yml",
+            "docs/contracts/github-actions-evidence.yaml",
+            "scripts/checks/ci_guards/validate_persona_verdict_chain.py",
+            "scripts/checks/_common.py",
+            "scripts/checks/registry.py",
+        ),
+        full_segment="full_after_lint",
+    ),
+    Entry(
         name="validate_ci_rca_taxonomy",
         module="scripts.checks.ci_guards.validate_ci_rca_taxonomy",
         attr="validate_ci_rca_taxonomy",

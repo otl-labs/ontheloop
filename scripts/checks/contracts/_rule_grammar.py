@@ -41,8 +41,8 @@ _SUBKEYS: dict[str, frozenset[str]] = {
     "pattern": frozenset({"value", "exclude_before"}),
     "array_element_format": frozenset({"pattern", "exclude_before"}),
     "array_element_reference": frozenset({"exclude_before"}),
-    "acceptance_lint": frozenset({"require_discrimination", "exclude_before"}),
-    "glossary_lint": frozenset({"exclude_before"}),
+    "acceptance_lint": frozenset({"require_discrimination", "advisory", "exclude_before"}),
+    "glossary_lint": frozenset({"advisory", "exclude_before"}),
 }
 PRODUCER_CLASS = {
     "array_element_reference": "cross_row",
@@ -129,6 +129,15 @@ def _not_null_errors(where: str, value: Any, floor: str | None) -> list[str]:
     return errors
 
 
+def _advisory_errors(where: str, kind: str, value: Any, exemptions: dict[str, Any]) -> list[str]:
+    if value is not True:
+        return [f"{where}: {kind} advisory must be true, got {value!r}"]
+    exemption = exemptions.get(kind)
+    if not (isinstance(exemption, dict) and exemption.get("class") == "repository_state"):
+        return [f"{where}: {kind} advisory is only legal on a leg whose exemption class is repository_state"]
+    return []
+
+
 def _leg_errors(floor: str | None, where: str, kind: str, value: Any, exemptions: dict[str, Any]) -> list[str]:
     if kind == "not_null":
         return _not_null_errors(where, value, floor)
@@ -145,6 +154,8 @@ def _leg_errors(floor: str | None, where: str, kind: str, value: Any, exemptions
             err = iso_date_error("exclude_before", value["exclude_before"], floor)
             if err:
                 errors.append(f"{where}: {kind} {err}")
+        if "advisory" in value:
+            errors.extend(_advisory_errors(where, kind, value["advisory"], exemptions))
     for pat in _patterns_of(kind, value):
         err = regex_subset_error(pat)
         if err:

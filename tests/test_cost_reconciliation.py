@@ -314,6 +314,15 @@ class TestReconcileDedupe:
         with pytest.raises(ValueError, match=r"ops_recommendations\.file: must match"):
             _validate_rec_payload({**fields, "file": "/abs/ROADMAP.yaml"})
 
+    def test_validate_rec_payload_raises_on_glossary_finding(self) -> None:
+        fields = build_rec_fields(
+            TriggerResult(key="s3_share_of_bill", label="S3 share", tripped=True, measured=60.0, threshold=50.0, unit="%"),
+            "2026-06",
+            str(TRIPPED),
+        )
+        with pytest.raises(ValueError, match="cost-rec template has advisory lint results: title glossary_lint finding"):
+            _validate_rec_payload({**fields, "title": "Fix the platform runner for retries"})
+
 
 # ---------------------------------------------------------------------------
 # TestPublicBoundary

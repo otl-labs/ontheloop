@@ -382,7 +382,10 @@ def _validate_rec_payload(fields: dict[str, Any]) -> None:
     validate_source(fields["source"])
     derived = dict(fields)
     _derive_computed_fields(derived)
-    gate_write("ops_recommendations", derived, insert=True)
+    unclean = [r for r in gate_write("ops_recommendations", derived, insert=True) if r.outcome in ("finding", "error")]
+    if unclean:
+        listed = ", ".join(f"{r.column} {r.kind} {r.outcome}" for r in unclean)
+        raise ValueError(f"cost-rec template has advisory lint results: {listed}")
     Recommendation.model_validate({**derived, "id": "rec-0"})
 
 

@@ -26,6 +26,7 @@ REFUSE = "REFUSE"
 UNAVAILABLE = "UNAVAILABLE"
 APP = "github-actions"
 PERSONA_CLASSES = {"code_reviewer": "code", "decision_scout": "plan", "plan_critic": "plan"}
+READY_HEAD_PERSONAS = frozenset({"plan_critic"})
 SOURCES = ("in_session", "actions")
 _ROW_ID = re.compile(r"^gates\.([A-Za-z0-9_]+)\.verdict_source$")
 
