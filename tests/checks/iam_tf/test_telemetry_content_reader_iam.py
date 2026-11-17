@@ -1,4 +1,4 @@
-"""rec-4696 acceptance: the telemetry content reader's lock, roles, route and placeholder (Decision 269).
+"""rec-4696 acceptance: the telemetry content reader's lock, roles, route and placeholder (Decision 270).
 
 Credit-free text tests over terraform/bootstrap, terraform/github and the committed placeholder zip. The HCL policy
 documents are read by a small literal-object parser (comments, strings with ${...} interpolation, lists and objects), so

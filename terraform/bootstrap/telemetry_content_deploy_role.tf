@@ -1,7 +1,7 @@
-# Telemetry content deploy role (Decision 239 cl.5 as amended by Decision 269; rec-4696).
+# Telemetry content deploy role (Decision 239 cl.5 as amended by Decision 270; rec-4696).
 #
 # The only identity that may change the content reader. Boundary-free by explicit exclusion (Decision 144 cl.3 as
-# amended by Decision 269): the CI apply boundary's DenyTelemetryContentChange refuses every role it bounds, so this
+# amended by Decision 270): the CI apply boundary's DenyTelemetryContentChange refuses every role it bounds, so this
 # role must not carry it; its ceiling is this one policy, which only a CloudShell bootstrap apply changes (Decision 257
 # cl.3's protected set). Trust is ONE statement: StringEquals on aud, the telemetry-content-deploy Environment sub
 # (required reviewers, admin bypass off, main-only deployment policy; terraform/github/environments.tf) and

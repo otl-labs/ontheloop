@@ -169,7 +169,7 @@ locals {
         # only while every non-URL path to it is closed, so the three statements here and below close those
         # paths for the DuckLake writer, reader and every telemetry function, the content reader included. Each
         # prefix (writer*, reader*, telemetry-*) covers its function and every qualifier and widens a Deny only to a
-        # future function of that prefix; the account segment is * and the region is kept (Decision 269 cl.4).
+        # future function of that prefix; the account segment is * and the region is kept (Decision 270 cl.4).
         # lambda:InvokedViaFunctionUrl is false on a direct call and
         # true through the Function URL (live-verified 2026-10-06); BoolIfExists also denies a call that
         # carries no such key at all.
@@ -349,7 +349,7 @@ locals {
         Resource = ["arn:aws:iam::*:role/Platform*", "arn:aws:iam::*:role/bootstrap-*", "arn:aws:iam::*:role/github-settings-*", "arn:aws:iam::*:role/platform-security-*", "arn:aws:iam::*:role/ducklake-api-*", "arn:aws:iam::*:role/telemetry-content-*"]
       },
       {
-        # Decision 239 cl.5 as amended by Decision 269 cl.3: no boundary carrier creates, deletes, publishes, puts,
+        # Decision 239 cl.5 as amended by Decision 270 cl.3: no boundary carrier creates, deletes, publishes, puts,
         # tags or updates anything on the content reader or its qualifiers; the deploy role (telemetry-content-deploy) is
         # boundary-free, so this never refuses it. A and R (permissions) are in DenyDuckLakeResourcePolicyEdit; reads and
         # invokes match none of the five families.

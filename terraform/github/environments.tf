@@ -145,7 +145,7 @@ resource "github_repository_environment_deployment_policy" "approved_text_main" 
   branch_pattern = "main"
 }
 
-# GitHub Environment: telemetry-content-deploy (Decision 239 cl.5 as amended by Decision 269; rec-4696).
+# GitHub Environment: telemetry-content-deploy (Decision 239 cl.5 as amended by Decision 270; rec-4696).
 #
 # The change lock's approval gate: a deploy-telemetry-content.yml deploy job waits here for a required reviewer, and
 # only a job in this Environment at main may assume telemetry-content-deploy (terraform/bootstrap). Required

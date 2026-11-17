@@ -1,4 +1,4 @@
-# Telemetry content reader (Decision 239 as amended by Decision 269; rec-4696).
+# Telemetry content reader (Decision 239 as amended by Decision 270; rec-4696).
 #
 # The masked transcript content reader lives in this admin-only root so that no CI identity can change it: the CI
 # apply boundary's DenyTelemetryContentChange refuses every boundary carrier any Lambda write on the function, and its
@@ -13,7 +13,7 @@
 # build artifact, and the zip sits outside this root because the bootstrap screen admits only .tf text.
 #
 # The access log group, its metric filter and both alarms are platform-security-* resources (Decision 202 cl.3 as
-# amended by Decision 269 cl.3), so the detector-tamper alarm pages on changes to them. SIT declares none of this
+# amended by Decision 270 cl.3), so the detector-tamper alarm pages on changes to them. SIT declares none of this
 # (Decision 252 cl.5 keeps SIT's transcripts behind the same lock when its twin is planned).
 locals {
   telemetry_content_count             = { sandbox = 1, sit = 0 }[var.environment]
@@ -164,7 +164,7 @@ resource "aws_lambda_function" "telemetry_content" {
 resource "aws_cloudwatch_log_metric_filter" "telemetry_content_unexpected_caller" {
   count = local.telemetry_content_count
 
-  # Any reader but the agent session user (Decision 269 cl.1); role "unknown", the access log's fallback line,
+  # Any reader but the agent session user (Decision 270 cl.1); role "unknown", the access log's fallback line,
   # matches on purpose.
   name           = "platform-security-telemetry-content-unexpected-caller"
   log_group_name = aws_cloudwatch_log_group.telemetry_content[0].name

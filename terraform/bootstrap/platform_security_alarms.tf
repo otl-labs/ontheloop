@@ -53,7 +53,7 @@ locals {
     "platform-security-agent-session-iam-change" = "{ ($.eventSource = \"iam.amazonaws.com\") && ($.readOnly IS FALSE) && (($.requestParameters.userName = %^[Aa][Gg][Ee][Nn][Tt]-[Pp][Ll][Aa][Tt][Ff][Oo][Rr][Mm]-[Ss][Ee][Ss][Ss][Ii][Oo][Nn]$%) || ($.errorMessage = %user.[Aa][Gg][Ee][Nn][Tt]-[Pp][Ll][Aa][Tt][Ff][Oo][Rr][Mm]-[Ss][Ee][Ss][Ss][Ii][Oo][Nn]\\s|policy.agent-platform-session-%) || ($.requestParameters.policyArn = \"*:policy/agent-platform-session-*\")) }"
 
     # Any IAM write naming a telemetry-content-* role in any case, or any Lambda write on the content reader by anyone,
-    # the gated deploy included (Decision 269 cl.3; never filtered by actor, Decision 202 cl.6). A denied call carries
+    # the gated deploy included (Decision 270 cl.3; never filtered by actor, Decision 202 cl.6). A denied call carries
     # requestParameters null, so both halves also match the name CloudTrail puts in errorMessage. Invoke data events
     # are excluded: every agent read is one.
     "platform-security-telemetry-content-change" = "{ (($.eventSource = \"iam.amazonaws.com\") && ($.readOnly IS FALSE) && (($.requestParameters.roleName = %^[Tt][Ee][Ll][Ee][Mm][Ee][Tt][Rr][Yy]-[Cc][Oo][Nn][Tt][Ee][Nn][Tt]-%) || ($.errorMessage = %role.[Tt][Ee][Ll][Ee][Mm][Ee][Tt][Rr][Yy]-[Cc][Oo][Nn][Tt][Ee][Nn][Tt]-%))) || (($.eventSource = \"lambda.amazonaws.com\") && ($.readOnly IS FALSE) && ($.eventName != \"Invoke\") && (($.requestParameters.functionName = \"*agent-platform-ducklake-telemetry-content*\") || ($.errorMessage = \"*agent-platform-ducklake-telemetry-content*\"))) }"
@@ -179,7 +179,7 @@ resource "aws_cloudwatch_metric_alarm" "platform_security_agent_session_iam_chan
 
 resource "aws_cloudwatch_metric_alarm" "platform_security_telemetry_content_change" {
   alarm_name          = "platform-security-telemetry-content-change"
-  alarm_description   = "An IAM write named a telemetry-content-* role, or any identity (the approved telemetry-content-deploy job included) wrote the content reader function, or either was denied (Decision 269 cl.3). ${local.platform_security_alarm_triage}"
+  alarm_description   = "An IAM write named a telemetry-content-* role, or any identity (the approved telemetry-content-deploy job included) wrote the content reader function, or either was denied (Decision 270 cl.3). ${local.platform_security_alarm_triage}"
   namespace           = "PlatformSecurity"
   metric_name         = aws_cloudwatch_log_metric_filter.platform_security["platform-security-telemetry-content-change"].metric_transformation[0].name
   statistic           = "Sum"

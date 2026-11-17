@@ -89,7 +89,7 @@ _CONTENT = "platform-security-telemetry-content-change"
 
 
 def _content_regex_problems(pattern: str) -> list[str]:
-    """Decision 269 cl.3: the content filter names the telemetry-content-* roles in any case, allowed or denied."""
+    """Decision 270 cl.3: the content filter names the telemetry-content-* roles in any case, allowed or denied."""
     role = re.search(r"\$\.requestParameters\.roleName\s*=\s*%([^%]*)%", pattern)
     denied = re.search(r"\$\.errorMessage\s*=\s*%([^%]*)%", pattern)
     if role is None or denied is None:

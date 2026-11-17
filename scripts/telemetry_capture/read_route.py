@@ -6,7 +6,7 @@ reader URL): ducklake_telemetry's events are served by the telemetry reader's ow
 event reader since slice 2c's cleanup (the shared reader serves no event verb), so an event read on that route raises
 NoEventReaderOnSmoke before any call. Ops reads always use the shared reader. Nothing resolves at construction, so a
 failure raises at the first use, inside the caller's own handler. Errors name a source, never a value, a URL or an AWS
-error text (Decision 101). The content route (Decision 239, amended by Decision 269) is a further client for the
+error text (Decision 101). The content route (Decision 239, amended by Decision 270) is a further client for the
 telemetry content reader, reached only through its DuckLake API route: a content verb on the event route, or an event
 verb on the content route, raises WrongRoute before any call.
 
