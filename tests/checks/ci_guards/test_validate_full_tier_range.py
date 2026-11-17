@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 import scripts.checks._common as _common
 from scripts.checks import registry
 from scripts.checks.ci_guards import validate_full_tier_range as v
@@ -12,7 +14,6 @@ from scripts.checks.ci_guards import validate_full_tier_range as v
 REAL_ROOT = Path(__file__).resolve().parents[3]
 CONTRACT = Path("docs/contracts/full-tier-range.yaml")
 TAXONOMY = Path("config/ci_rca_taxonomy.yaml")
-DEDUP = Path("scripts/ci_rca/dedup.py")
 LABEL = "Full-tier range contract"
 
 
@@ -20,9 +21,8 @@ def _tree(
     tmp_path: Path,
     contract_edit: tuple[str, str] | None = None,
     taxonomy_edit: tuple[str, str] | None = None,
-    dedup_edit: tuple[str, str] | None = None,
 ) -> Path:
-    for rel, edit in ((CONTRACT, contract_edit), (TAXONOMY, taxonomy_edit), (DEDUP, dedup_edit)):
+    for rel, edit in ((CONTRACT, contract_edit), (TAXONOMY, taxonomy_edit)):
         text = (REAL_ROOT / rel).read_text(encoding="utf-8")
         if edit:
             assert edit[0] in text
@@ -53,15 +53,12 @@ def test_renamed_variable_is_red(tmp_path: Path) -> None:
     assert _run(_tree(tmp_path, ("FULL_TIER_PREV:", "FULL_TIER_PREVIOUS:"))) == [LABEL]
 
 
-def test_dedup_sibling_tuple_drift_is_red(tmp_path: Path) -> None:
-    assert _run(_tree(tmp_path, dedup_edit=('("ci", "main_canary")', '("ci",)'))) == [LABEL]
+def test_fingerprint_sibling_tuple_drift_is_red(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(v.fingerprint, "FULL_TIER_SIBLING_SLUGS", ("ci",))
+    assert _run(_tree(tmp_path)) == [LABEL]
 
 
-def test_dedup_without_sibling_constant_is_red(tmp_path: Path) -> None:
-    assert _run(_tree(tmp_path, dedup_edit=("FULL_TIER_SIBLING_SLUGS =", "OTHER_NAME ="))) == [LABEL]
-
-
-def test_sibling_slug_missing_from_dedup_is_red(tmp_path: Path) -> None:
+def test_extra_contract_sibling_slug_is_red(tmp_path: Path) -> None:
     assert _run(_tree(tmp_path, ("slugs: [ci, main_canary]", "slugs: [ci, main_canary, rec_autoclose]"))) == [LABEL]
 
 

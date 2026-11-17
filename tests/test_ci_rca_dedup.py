@@ -333,3 +333,9 @@ class TestDefaultsAndSiblings:
             assert main(["--bundles-dir", str(tmp_path)]) == 0
         assert "closed head" in capsys.readouterr().out
         assert (tmp_path / "sibling-fingerprints.txt").read_text(encoding="utf-8") == "fp-a\n"
+
+    def test_list_entry_open_match_on_any_member_is_bumped_once(self):
+        bumper = MagicMock()
+        result = decide([["fp-a", "fp-b"]], finder=lambda fp: "rec-7" if fp == "fp-b" else None, bumper=bumper)
+        assert result.deduped is True
+        bumper.assert_called_once_with("rec-7")

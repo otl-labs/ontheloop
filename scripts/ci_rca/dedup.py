@@ -39,9 +39,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional, Union
 
+from scripts.ci_rca.fingerprint import FULL_TIER_SIBLING_SLUGS, compute_fingerprint_v2
+
 logger = logging.getLogger(__name__)
 
-FULL_TIER_SIBLING_SLUGS = ("ci", "main_canary")
 SIBLING_FILE = "sibling-fingerprints.txt"
 Entry = Union[str, list[str]]
 
@@ -108,7 +109,6 @@ def sibling_fingerprints(bundle: dict) -> list[str]:
     if not (name and category and signature):
         return [own]
     from scripts.ci_rca.evidence._bundle_core import _slugify_workflow  # noqa: PLC0415
-    from scripts.ci_rca.fingerprint import compute_fingerprint_v2  # noqa: PLC0415
 
     slug = _slugify_workflow(name)
     if slug not in FULL_TIER_SIBLING_SLUGS:
