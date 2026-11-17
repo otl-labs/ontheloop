@@ -32,6 +32,8 @@ updates:
 
   - package-ecosystem: "github-actions"
     directory: "/"
+    cooldown:
+      default-days: 7
     groups:
       minor-and-patch:
         update-types:
@@ -114,8 +116,35 @@ updates:
   - package-ecosystem: "pip"
     directory: "/"
     open-pull-requests-limit: 5
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    cooldown:
+      default-days: 7
 """
         _write(tmp_path, config=config)
+        assert _run(tmp_path) == []
+
+
+class TestCooldownLeg:
+    def test_github_actions_without_cooldown_fails(self, tmp_path: Path) -> None:
+        _write(tmp_path, config=_VALID_CONFIG.replace("    cooldown:\n      default-days: 7\n", ""))
+        assert any("cooldown" in f for f in _run(tmp_path))
+
+    def test_github_actions_cooldown_below_seven_days_fails(self, tmp_path: Path) -> None:
+        _write(tmp_path, config=_VALID_CONFIG.replace("default-days: 7", "default-days: 6"))
+        assert any("cooldown" in f for f in _run(tmp_path))
+
+    def test_github_actions_cooldown_not_an_int_fails(self, tmp_path: Path) -> None:
+        _write(tmp_path, config=_VALID_CONFIG.replace("default-days: 7", 'default-days: "7"'))
+        assert any("cooldown" in f for f in _run(tmp_path))
+
+    def test_config_without_github_actions_entry_fails(self, tmp_path: Path) -> None:
+        config = _VALID_CONFIG.split('  - package-ecosystem: "github-actions"')[0]
+        _write(tmp_path, config=config)
+        assert any("cooldown" in f for f in _run(tmp_path))
+
+    def test_github_actions_cooldown_seven_days_passes(self, tmp_path: Path) -> None:
+        _write(tmp_path)
         assert _run(tmp_path) == []
 
 
