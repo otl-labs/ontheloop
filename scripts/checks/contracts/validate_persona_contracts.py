@@ -2,8 +2,9 @@
 
 Registered check and the evaluator of docs/contracts/executor-personas.yaml: the closed capability vocabulary, the
 refused targets and verbs, every personas row's contract shape, budget, schema dialect, rendered prompt and skill
-tether, a verdict_consistency rule (required of a verdict persona by the index's required_for_verdict; ordered cases "verdict V when any element of array A [with field F in S]",
-then otherwise; checked against output_schema and the prose verdict_rule), a row's required registry_key (a
+tether, a verdict_consistency rule (required of a verdict persona by the index's required_for_verdict; ordered cases
+"verdict V when any element of array A [with field F in S]", then otherwise; checked against output_schema and the
+prose verdict_rule), a row's required registry_key (a
 registered, unique source_registry.yaml canonical_id equal to the contract's skill_tether.skill; the registry is read
 whenever the index has a row), and the leash's own paths being executor boundary paths. Never imports jsonschema (fast
 tier).
