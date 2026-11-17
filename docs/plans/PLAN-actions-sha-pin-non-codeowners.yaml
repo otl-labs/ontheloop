@@ -111,8 +111,8 @@ scope:
     action: Modify
     purpose: >-
       test_capacity_steps_are_last_and_run_unless_cancelled asserts the upload step is `actions/upload-artifact@v7`
-      (backlog-health.yml), which the pin changes. The assertion becomes re.fullmatch(r"actions/upload-artifact@[0-9a-f]{40}",
-      steps[-1]["uses"]): the same action, now required to be SHA-pinned, and immune to Dependabot bumps. No other line changes.
+      (convergence-health.yml), which the pin changes. The assertion becomes re.fullmatch(r"actions/upload-artifact@[0-9a-f]{40}",
+      steps[-1]["uses"]) with `import re` added: the same action, now required to be SHA-pinned, and immune to Dependabot bumps. No other line changes.
   - file: tests/checks/ci_guards/test_validate_rec_autoclose_trailer_gate.py
     action: Modify
     purpose: >-
@@ -170,19 +170,21 @@ verification_plan:
       or the baseline, plus a one-time render equality that plan 3 changes by design.
   - step: 4
     phase: pre-deploy
-    action: Online pin audit (network, through the session proxy) -- every pinned line in the 25 files names a commit that its comment's release tag resolves to in the canonical repository.
+    action: "Online pin audit (network, through the session proxy) -- for every converted uses: line in the PR diff, the pinned SHA equals the commit the replaced floating tag (v<major>) resolves to now, equals the commit its comment's exact tag resolves to, and the comment is the newest exact vX.Y.Z tag at that commit."
     command: >-
-      bin/venv-python -c "import re,subprocess,yaml; fs=sorted({k.split('::')[0] for k in yaml.safe_load(subprocess.run(['git','show','origin/main:config/actions_sha_pin_baseline.yaml'],capture_output=True,text=True,check=True).stdout)['drains']['rec-5288']});
-      P=re.compile(r'^\s*(?:-\s+)?uses:\s*([\w.-]+/[\w.-]+)[\w./-]*@([0-9a-f]{40}) # (v\d+\.\d+\.\d+)$'); hits=[m.groups() for f in fs for l in open(f) for m in [P.match(l.rstrip())] if m]; R={};
-      ls=lambda r: R.setdefault(r, dict(reversed(x.split('\t')) for x in subprocess.run(['git','ls-remote','--tags','https://github.com/'+r],capture_output=True,text=True,check=True).stdout.splitlines()));
-      bad=[h for h in hits if (ls(h[0]).get('refs/tags/'+h[2]+'^{}') or ls(h[0]).get('refs/tags/'+h[2]))!=h[1]]; assert not bad, bad; assert len(hits)>=149, len(hits); print('PIN_AUDIT_OK', len(hits), len(R))"
-    expected: Prints PIN_AUDIT_OK with at least 149 lines across 10 repositories (150 and 10 on the 2026-11-17 probe; 149 converted plus one already pinned).
-    fix_if: A mismatch names the line; re-resolve that tag with git ls-remote and re-pin. Run on the PR branch before origin/main absorbs the baseline change (it reads the rec-5288 file list from origin/main).
+      bin/venv-python -c "import re,subprocess; d=subprocess.run(['git','diff','-U0','origin/main...HEAD','--','.github/workflows'],capture_output=True,text=True,check=True).stdout;
+      m=re.findall(r'^-\s*(?:-\s+)?uses:\s*([\w.-]+/[\w.-]+)[\w./-]*@v(\d+)\s*$\n^\+\s*(?:-\s+)?uses:\s*\1[\w./-]*@([0-9a-f]{40}) # (v\d+\.\d+\.\d+)$',d,re.M); R={};
+      ls=lambda r: R[r] if r in R else R.setdefault(r, dict(reversed(x.split('\t')) for x in subprocess.run(['git','ls-remote','--tags','https://github.com/'+r],capture_output=True,text=True,check=True).stdout.splitlines()));
+      at=lambda r,t: ls(r).get('refs/tags/'+t+'^{}') or ls(r).get('refs/tags/'+t); V=lambda t: tuple(map(int,t[1:].split('.')));
+      top=lambda r,s: max((n[10:].removesuffix('^{}') for n in ls(r) if re.fullmatch(r'refs/tags/v\d+\.\d+\.\d+(\^\{\})?',n) and at(r,n[10:].removesuffix('^{}'))==s), key=V);
+      bad=[x for x in m if not (at(x[0],'v'+x[1])==x[2]==at(x[0],x[3]) and top(x[0],x[2])==x[3])]; assert not bad, bad; assert m, 'no converted lines'; print('PIN_AUDIT_OK', len(m), len(R))"
+    expected: Prints PIN_AUDIT_OK with the converted-line count (149 across 10 repositories on the 2026-11-17 probe; it must equal the base's rec-5288 total).
+    fix_if: "A mismatch names (action, major, sha, tag): the floating tag moved since pinning or the wrong commit or comment was written; re-resolve with git ls-remote and re-pin. Run on the PR branch before merge (it pairs lines from the origin/main...HEAD diff). A negative probe (one setup-python pin set to v7.0.0's commit) failed as expected on 2026-11-17."
     hermetic: false
     graduation: waive
     graduation_waiver_reason: >-
-      Network moment claim (Decision 244 cl.4): tags move and the file list is read from the pre-merge base; the
-      standing offline check proves form only by design (imposter commits need an online audit, PLAN-actions-sha-pinned).
+      Network moment claim (Decision 244 cl.4): tags move and the pairs come from this PR's diff; the standing offline
+      check proves form only by design (imposter commits and stale pins need an online audit, PLAN-actions-sha-pinned).
   - step: 5
     phase: pre-deploy
     action: "Diff shape -- every changed line in .github/workflows is a uses: line whose floating @vN becomes @<40-hex> # vN.x.y with the same action and major, and the touched workflow set equals the rec-5288 file list."
@@ -228,127 +230,127 @@ test_obligations:
     test_selector: tests/checks/ci_guards/test_actions_sha_pin_drain.py::test_no_baseline_entry_outside_codeowners_paths
     red_green_expectation: red before (the base bucket lists 74 keys), green after
   - source: .github/workflows/backlog-health.yml
-    behavior: "no floating uses: reference remains; every pin is the commit its comment release tag names"
+    behavior: "no floating uses: reference remains in the file (pin correctness is VP 4's network moment claim)"
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_actions_sha_pin_drain.py::test_no_baseline_entry_outside_codeowners_paths
     red_green_expectation: red before (floating references live in the file), green after
   - source: .github/workflows/branch-cleanup.yml
-    behavior: "no floating uses: reference remains; every pin is the commit its comment release tag names"
+    behavior: "no floating uses: reference remains in the file (pin correctness is VP 4's network moment claim)"
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_actions_sha_pin_drain.py::test_no_baseline_entry_outside_codeowners_paths
     red_green_expectation: red before (floating references live in the file), green after
   - source: .github/workflows/ci-rca-inactivity-sweep.yml
-    behavior: "no floating uses: reference remains; every pin is the commit its comment release tag names"
+    behavior: "no floating uses: reference remains in the file (pin correctness is VP 4's network moment claim)"
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_actions_sha_pin_drain.py::test_no_baseline_entry_outside_codeowners_paths
     red_green_expectation: red before (floating references live in the file), green after
   - source: .github/workflows/ci-rca.yml
-    behavior: "no floating uses: reference remains; every pin is the commit its comment release tag names"
+    behavior: "no floating uses: reference remains in the file (pin correctness is VP 4's network moment claim)"
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_actions_sha_pin_drain.py::test_no_baseline_entry_outside_codeowners_paths
     red_green_expectation: red before (floating references live in the file), green after
   - source: .github/workflows/ci.yml
-    behavior: "no floating uses: reference remains; every pin is the commit its comment release tag names"
+    behavior: "no floating uses: reference remains in the file (pin correctness is VP 4's network moment claim)"
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_actions_sha_pin_drain.py::test_no_baseline_entry_outside_codeowners_paths
     red_green_expectation: red before (floating references live in the file), green after
   - source: .github/workflows/claude.yml
-    behavior: "no floating uses: reference remains; every pin is the commit its comment release tag names"
+    behavior: "no floating uses: reference remains in the file (pin correctness is VP 4's network moment claim)"
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_actions_sha_pin_drain.py::test_no_baseline_entry_outside_codeowners_paths
     red_green_expectation: red before (floating references live in the file), green after
   - source: .github/workflows/codeql.yml
-    behavior: "no floating uses: reference remains; every pin is the commit its comment release tag names"
+    behavior: "no floating uses: reference remains in the file (pin correctness is VP 4's network moment claim)"
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_actions_sha_pin_drain.py::test_no_baseline_entry_outside_codeowners_paths
     red_green_expectation: red before (floating references live in the file), green after
   - source: .github/workflows/convergence-health.yml
-    behavior: "no floating uses: reference remains; every pin is the commit its comment release tag names"
+    behavior: "no floating uses: reference remains in the file (pin correctness is VP 4's network moment claim)"
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_actions_sha_pin_drain.py::test_no_baseline_entry_outside_codeowners_paths
     red_green_expectation: red before (floating references live in the file), green after
   - source: .github/workflows/cost-reconciliation.yml
-    behavior: "no floating uses: reference remains; every pin is the commit its comment release tag names"
+    behavior: "no floating uses: reference remains in the file (pin correctness is VP 4's network moment claim)"
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_actions_sha_pin_drain.py::test_no_baseline_entry_outside_codeowners_paths
     red_green_expectation: red before (floating references live in the file), green after
   - source: .github/workflows/dedup-probe.yml
-    behavior: "no floating uses: reference remains; every pin is the commit its comment release tag names"
+    behavior: "no floating uses: reference remains in the file (pin correctness is VP 4's network moment claim)"
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_actions_sha_pin_drain.py::test_no_baseline_entry_outside_codeowners_paths
     red_green_expectation: red before (floating references live in the file), green after
   - source: .github/workflows/dependabot-auto-merge.yml
-    behavior: "no floating uses: reference remains; every pin is the commit its comment release tag names"
+    behavior: "no floating uses: reference remains in the file (pin correctness is VP 4's network moment claim)"
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_actions_sha_pin_drain.py::test_no_baseline_entry_outside_codeowners_paths
     red_green_expectation: red before (floating references live in the file), green after
   - source: .github/workflows/dependabot-stranded.yml
-    behavior: "no floating uses: reference remains; every pin is the commit its comment release tag names"
+    behavior: "no floating uses: reference remains in the file (pin correctness is VP 4's network moment claim)"
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_actions_sha_pin_drain.py::test_no_baseline_entry_outside_codeowners_paths
     red_green_expectation: red before (floating references live in the file), green after
   - source: .github/workflows/deploy-ducklake-lambdas.yml
-    behavior: "no floating uses: reference remains; every pin is the commit its comment release tag names"
+    behavior: "no floating uses: reference remains in the file (pin correctness is VP 4's network moment claim)"
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_actions_sha_pin_drain.py::test_no_baseline_entry_outside_codeowners_paths
     red_green_expectation: red before (floating references live in the file), green after
   - source: .github/workflows/deploy-gate.yml
-    behavior: "no floating uses: reference remains; every pin is the commit its comment release tag names"
+    behavior: "no floating uses: reference remains in the file (pin correctness is VP 4's network moment claim)"
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_actions_sha_pin_drain.py::test_no_baseline_entry_outside_codeowners_paths
     red_green_expectation: red before (floating references live in the file), green after
   - source: .github/workflows/deploy-prod-lambdas.yml
-    behavior: "no floating uses: reference remains; every pin is the commit its comment release tag names"
+    behavior: "no floating uses: reference remains in the file (pin correctness is VP 4's network moment claim)"
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_actions_sha_pin_drain.py::test_no_baseline_entry_outside_codeowners_paths
     red_green_expectation: red before (floating references live in the file), green after
   - source: .github/workflows/deployment-approval-probe.yml
-    behavior: "no floating uses: reference remains; every pin is the commit its comment release tag names"
+    behavior: "no floating uses: reference remains in the file (pin correctness is VP 4's network moment claim)"
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_actions_sha_pin_drain.py::test_no_baseline_entry_outside_codeowners_paths
     red_green_expectation: red before (floating references live in the file), green after
   - source: .github/workflows/main-canary.yml
-    behavior: "no floating uses: reference remains; every pin is the commit its comment release tag names"
+    behavior: "no floating uses: reference remains in the file (pin correctness is VP 4's network moment claim)"
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_actions_sha_pin_drain.py::test_no_baseline_entry_outside_codeowners_paths
     red_green_expectation: red before (floating references live in the file), green after
   - source: .github/workflows/pr-conflict-signal.yml
-    behavior: "no floating uses: reference remains; every pin is the commit its comment release tag names"
+    behavior: "no floating uses: reference remains in the file (pin correctness is VP 4's network moment claim)"
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_actions_sha_pin_drain.py::test_no_baseline_entry_outside_codeowners_paths
     red_green_expectation: red before (floating references live in the file), green after
   - source: .github/workflows/rec-autoclose.yml
-    behavior: "no floating uses: reference remains; every pin is the commit its comment release tag names"
+    behavior: "no floating uses: reference remains in the file (pin correctness is VP 4's network moment claim)"
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_actions_sha_pin_drain.py::test_no_baseline_entry_outside_codeowners_paths
     red_green_expectation: red before (floating references live in the file), green after
   - source: .github/workflows/security-detector-liveness.yml
-    behavior: "no floating uses: reference remains; every pin is the commit its comment release tag names"
+    behavior: "no floating uses: reference remains in the file (pin correctness is VP 4's network moment claim)"
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_actions_sha_pin_drain.py::test_no_baseline_entry_outside_codeowners_paths
     red_green_expectation: red before (floating references live in the file), green after
   - source: .github/workflows/subagent-review-smoke.yml
-    behavior: "no floating uses: reference remains; every pin is the commit its comment release tag names"
+    behavior: "no floating uses: reference remains in the file (pin correctness is VP 4's network moment claim)"
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_actions_sha_pin_drain.py::test_no_baseline_entry_outside_codeowners_paths
     red_green_expectation: red before (floating references live in the file), green after
   - source: .github/workflows/telemetry-arrival.yml
-    behavior: "no floating uses: reference remains; every pin is the commit its comment release tag names"
+    behavior: "no floating uses: reference remains in the file (pin correctness is VP 4's network moment claim)"
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_actions_sha_pin_drain.py::test_no_baseline_entry_outside_codeowners_paths
     red_green_expectation: red before (floating references live in the file), green after
   - source: .github/workflows/telemetry-causal-chain.yml
-    behavior: "no floating uses: reference remains; every pin is the commit its comment release tag names"
+    behavior: "no floating uses: reference remains in the file (pin correctness is VP 4's network moment claim)"
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_actions_sha_pin_drain.py::test_no_baseline_entry_outside_codeowners_paths
     red_green_expectation: red before (floating references live in the file), green after
   - source: .github/workflows/telemetry-golden-replay.yml
-    behavior: "no floating uses: reference remains; every pin is the commit its comment release tag names"
+    behavior: "no floating uses: reference remains in the file (pin correctness is VP 4's network moment claim)"
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_actions_sha_pin_drain.py::test_no_baseline_entry_outside_codeowners_paths
     red_green_expectation: red before (floating references live in the file), green after
   - source: .github/workflows/telemetry-verification.yml
-    behavior: "no floating uses: reference remains; every pin is the commit its comment release tag names"
+    behavior: "no floating uses: reference remains in the file (pin correctness is VP 4's network moment claim)"
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_actions_sha_pin_drain.py::test_no_baseline_entry_outside_codeowners_paths
     red_green_expectation: red before (floating references live in the file), green after
@@ -377,10 +379,12 @@ context:
   - "Registry shards kept, not edited: actions-capacity-evaluator-and-steps, rec-autoclose-merge-leg-refusal-end-to-end, rec-autoclose-trailer-gate-read-oserror, trailer-acceptance-evaluator-job-is-credential-free and trailer-junit-job-credential-free-and-same-run (every test node they name keeps its name; one assertion and one mutation anchor change inside two of them)."
   - "Related-work check (scripts.ci_rca.red_overlap, 2026-11-17 20:30 UTC): blocked by rec-5247 (slo_breached; telemetry-reader smoke 504), shared files none. Deferral rationale: Feedback Loop owns it (coordinator log 2026-11-17), it touches no scope file and this plan is not its repair. The build still needs a green full tier at handoff (Decision 163), so it waits for that repair rather than working around it."
   - "Approvals: operator 'write the plan' 2026-11-17 20:34 UTC; merge on green chosen 20:32 UTC (constraints). The 25 files belong to several projects (CI Reform, Feedback Loop, this one); the operator's OK for editing their uses: lines and the two tests was asked at sign-off and is PENDING: the build does not start editing until the coordinator relays it. File list posted on coordinator log issue #1963 (2026-11-17 20:35Z)."
+  - "The graduated record actions-sha-pin-non-codeowners-drained reads config/actions_sha_pin_baseline.yaml; a later plan that deletes the baseline file (the plans 2-4 brief lets rec-5289 consider it) must repair or retire this record (Decision 244) or keep the file."
   - "Plan owner: the rec-5288 planning thread in the Agents in GitHub project; plan defects go back to it through the coordinator."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:2d9f67e60d7664e2da26c0fc7a65aae0baf35490548f4c0612944a38053bc1e5"}
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:00d1d279e3f6be5f5c21f523760394c09cf39cfb87880bc84fec68f5fc479569"}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 4}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -388,7 +392,7 @@ pre_implementation_checklist:
   - All files in scope located and readable
   - Acceptance criteria understood and verifiable
 execution_steps:
-  - "Pre: rebase on origin/main; re-derive the rec-5288 file list from the rebased baseline (it must still be the 25 scope files; a new key or file is a plan defect to report, not to absorb); no open PR edits a scope file."
+  - "Pre: the coordinator has relayed the operator's OK for editing other projects' uses: lines and the two tests (asked at sign-off; see context); without it, stop. Rebase on origin/main; re-derive the rec-5288 file list from the rebased baseline (it must still be the 25 scope files; a new key or file is a plan defect to report, not to absorb); no open PR edits a scope file."
   - "Pin: for each rec-5288 key, resolve the floating tag with git ls-remote (peeled ^{} line when present), find the newest exact vX.Y.Z tag at that commit, and rewrite exactly the counted uses: lines to <action>@<sha> # <tag>, preserving indentation and any list dash; post: line counts per key equal the baseline counts."
   - "Rewrite config/actions_sha_pin_baseline.yaml with render_baseline(ROOT); post: VP 3."
   - "Create tests/checks/ci_guards/test_actions_sha_pin_drain.py and the graduated shard config/agent/verification_registry/entries/actions-sha-pin-non-codeowners-drained.yaml for VP 1 (sanction-row covered); post: VP 1 red on the base, green on the branch."
