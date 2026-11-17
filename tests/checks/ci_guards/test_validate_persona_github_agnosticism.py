@@ -100,3 +100,15 @@ def test_live_repository_is_green() -> None:
     failed: list[str] = []
     validate_persona_github_agnosticism(failed)
     assert failed == []
+
+
+def test_syntax_error_in_persona_code_is_red(tmp_path: Path) -> None:
+    root = _tree(tmp_path, backend="def run(:\n")
+    (root / "scripts/run_persona.py").write_text("def main(:\n", encoding="utf-8")
+    assert any("unreadable" in line for line in _run(root))
+
+
+def test_missing_lock_is_tolerated(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    (root / "docker/persona/requirements-persona.txt").unlink()
+    assert _run(root) == []

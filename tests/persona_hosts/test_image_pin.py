@@ -69,3 +69,31 @@ def test_schema_breach_raises(tmp_path: Path, mutate) -> None:
     mutate(data)
     with pytest.raises(ValueError):
         load_pin(_write(tmp_path, data))
+
+
+def test_missing_pin_file_raises(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="cannot read"):
+        load_pin(tmp_path)
+
+
+def test_non_mapping_pin_raises(tmp_path: Path) -> None:
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "persona_image.yaml").write_text("- a\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="must be a mapping"):
+        load_pin(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda d: d.pop("digest"),
+        lambda d: d.update(consumers={}),
+        lambda d: d["build"].update(dockerfile=""),
+        lambda d: d.update(build="not-a-mapping"),
+    ],
+)
+def test_more_schema_breaches_raise(tmp_path: Path, mutate) -> None:
+    data = _base()
+    mutate(data)
+    with pytest.raises(ValueError):
+        load_pin(_write(tmp_path, data))

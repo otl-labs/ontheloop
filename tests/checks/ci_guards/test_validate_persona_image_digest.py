@@ -54,7 +54,7 @@ def _ignore(entries: list[str]) -> str:
     return "\n".join(["*", *(f"!{e}" for e in entries), "**/*.pyc"]) + "\n"
 
 
-def _tree(tmp_path: Path, **override: str) -> Path:
+def _tree(tmp_path: Path, git: bool = True, **override: str) -> Path:
     name = load_pin(_REPO).image
     pin = {**_PIN, "image": name}
     copies = list(pin["build"]["copy"])
@@ -73,8 +73,9 @@ def _tree(tmp_path: Path, **override: str) -> Path:
         path = tmp_path / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    if git:
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
     return tmp_path
 
 
@@ -128,3 +129,33 @@ def test_live_repository_is_green() -> None:
     failed: list[str] = []
     validate_persona_image_digest(failed)
     assert failed == []
+
+
+def test_not_a_git_tree_is_red(tmp_path: Path) -> None:
+    assert any("git grep" in line for line in _run(_tree(tmp_path, git=False)))
+
+
+def test_syntax_error_in_consumer_is_red(tmp_path: Path) -> None:
+    root = _tree(tmp_path, **{"src/persona_hosts/local_container/build.py": "def x(:\n"})
+    assert any("load_pin" in line for line in _run(root))
+
+
+@pytest.mark.parametrize(
+    ("rel", "needle"),
+    [
+        ("docs/ROADMAP-PLATFORM.yaml", "open roadmap criterion"),
+        ("docker/persona/Dockerfile", "unreadable"),
+        ("docker/persona/Dockerfile.dockerignore", "unreadable"),
+        (".github/dependabot.yml", "unreadable"),
+    ],
+)
+def test_missing_file_is_red(tmp_path: Path, rel: str, needle: str) -> None:
+    root = _tree(tmp_path)
+    (root / rel).unlink()
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    assert any(needle in line for line in _run(root))
+
+
+def test_invalid_pin_is_red(tmp_path: Path) -> None:
+    root = _tree(tmp_path, **{"config/persona_image.yaml": "image: x\n"})
+    assert any("missing key" in line for line in _run(root))

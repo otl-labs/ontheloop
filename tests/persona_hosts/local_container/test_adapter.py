@@ -99,3 +99,21 @@ def test_unreachable_daemon_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(adapter.subprocess, "run", boom)
     with pytest.raises(RuntimeError, match="docker unreachable"):
         run_image(REF, "plan_critic", {}, key_variable=None)
+
+
+def test_non_mapping_contract_file_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "docs/contracts").mkdir(parents=True)
+    (tmp_path / "docs/contracts/project-configuration.yaml").write_text("- a\n", encoding="utf-8")
+    monkeypatch.setattr(adapter, "_ROOT", tmp_path)
+    with pytest.raises(ValueError, match="not a YAML mapping"):
+        adapter._key_variables()
+
+
+def test_daemon_error_from_docker_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        adapter.subprocess,
+        "run",
+        lambda argv, **kw: subprocess.CompletedProcess(argv, 125, stdout="", stderr="Cannot connect to the Docker daemon"),
+    )
+    with pytest.raises(RuntimeError, match="docker unreachable"):
+        run_image(REF, "plan_critic", {}, key_variable=None)
