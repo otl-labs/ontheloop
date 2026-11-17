@@ -1,0 +1,320 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "persona-verdict-wake"
+intent: >-
+  Add the verdict-landed wake to the persona verdict chain, plan 2 of the six PLAN-persona-verdict-* plans (T4.32 c1's
+  WAKE leg): after the post job, a separate wake job posts one value-free comment per verdict run on an agent-branch PR,
+  carrying one marker per (head SHA, persona) pair not yet marked, so a session subscribed to the PR wakes when its
+  persona check runs land and never polls; a run that ends without posting every check run posts a value-free fault
+  wake instead of leaving the PR silent. docs/contracts/git-ops.yaml wake_signals names it. This serves the North
+  Star's verdict plane (NS.3): a verdict reaches a waiting session by a forge event, never by polling.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-persona-verdict-wake.yaml
+phase: >-
+  T4.32 (persona foundation), c1's WAKE leg. c1 stays open (backend, image and credential-use legs), and its "event
+  class rec-3335 proves delivers" stays unproven until T4.32 c3's fixture run (PLAN-persona-verdict-fixture-run).
+cites: [dec:76, dec:205, dec:229, dec:246]
+fallback_reevaluation:
+  reevaluated_on: "2026-11-17"
+  substrate_status: CD.27 pending; executor substrate unratified; T4.2 not built; the T4.15 spike has not run.
+  verdict: continue_on_current_substrate
+  basis: >-
+    The wake is a GitHub Actions job and a shell script that comments on a PR; it reads the same under every candidate
+    layer-2 substrate and touches no CD.27, fallback_spec or T4.15 ruling (the PLAN-persona-verdict-chain disposition).
+scope:
+  - file: .github/workflows/persona-verdict.yml
+    action: Modify
+    purpose: >-
+      Adds a fourth job, wake, after the three plan 1 builds; prepare, run and post are unchanged. wake: needs [prepare,
+      post]; `if: ${{ !cancelled() }}` (a run cancelled by a newer push wakes nothing; the newer run wakes);
+      runs-on ubuntu-latest; timeout-minutes 5; permissions exactly contents: read, actions: read, checks: read,
+      pull-requests: write; no environment, no id-token, no secret but its GITHUB_TOKEN. Steps, in order and in plan 1's
+      forms (the same SHA-pinned checkout, setup-python and download-artifact uses: as post, with their version
+      comments): checkout main at github.sha into main/ (persist-credentials false); set up Python 3.12; `mkdir -p
+      "$RUNNER_TEMP/work"`; `pip install pyyaml -c "$GITHUB_WORKSPACE/main/requirements.txt"`; download
+      persona-verdict-prepared into `${{ runner.temp }}/work/prepared` with continue-on-error: true (an absent artifact
+      means no resolution, so the verb logs and exits 0); then the step named "Post wake": `python3 -I
+      "$GITHUB_WORKSPACE/main/scripts/personas/run.py" wake` with `working-directory: ${{ runner.temp }}/work` and env
+      exactly GH_TOKEN `${{ github.token }}`, PERSONA_SNAPSHOT `${{ runner.temp }}/snapshot` and POST_RESULT `${{
+      needs.post.result }}`. No continue-on-error on that step: a wake exception or a comment POST that fails after its
+      retries reds the run (a shell fault, plan 1's rule), while every verdict outcome exits 0. pull-requests: write is
+      held by this job alone; post keeps checks: write alone.
+  - file: scripts/personas/wake.py
+    action: Create
+    purpose: >-
+      The wake verb, main(argv), stdlib plus yaml, no persona id literal (plan 1's landing_dirs rule). (1) Reads the
+      resolution and routes from work/prepared through the file names resolve_pr and route write (imported constants,
+      never retyped); missing, unresolved or no routes -> logs `PERSONA-VERDICT wake skipped reason=<r>` and exits 0.
+      (2) Reads workflow_run.head_branch and head_repository.full_name from the event payload at $GITHUB_EVENT_PATH
+      (GitHub-set fields only, never pull_requests[] or an upload); a head repository other than $GITHUB_REPOSITORY ->
+      skip. Loads branching_topology.agent_branch_prefixes from main's docs/contracts/git-ops.yaml (path derived from
+      this file's own location); a head ref matching none -> skip. If that list is missing or unreadable it logs
+      `PERSONA-VERDICT wake prefixes-unreadable` and continues as if it matched (fail toward waking, Decision 211
+      note). (3) Refuses to interpolate anything it has not validated: head_sha must be 40 lowercase hex and each
+      route id must match ^[a-z][a-z0-9_]*(\.[a-z0-9_]+)?$ (a failing id is logged and dropped), so nothing can close
+      the HTML comment. (4) Lists the check runs on head_sha (GET /repos/{repo}/commits/{sha}/check-runs, paginated)
+      and splits the routes into landed (a check run named persona-verdict/<route> exists) and unlanded. (5) Lists the
+      PR's issue comments (paginated, per_page 100) and collects markers only from comments whose user.login is
+      github-actions[bot] and user.type is Bot, matching each marker line exactly and whole; a listing failure after 3
+      tries leaves the set empty (post anyway: a duplicate wake is cheap, a missed one strands a session). (6) For the
+      landed routes whose marker `<!-- persona-verdict-wake:<head_sha>:<route_id> -->` is not in the set, posts ONE
+      comment: one marker line per such route, then exactly `Persona verdict check runs are posted for <head_sha> (run
+      <run_url>). Automated wake signal for a watching session; this comment carries no verdict - read the
+      persona-verdict/ check runs on that head.` (7) When POST_RESULT is not success or any route is unlanded, posts
+      one fault comment unless its marker exists: `<!-- persona-verdict-fault:<run_id>.<run_attempt> -->` then exactly
+      `Persona verdict run <run_url> for <head_sha> ended without posting every check run. Automated wake signal for a
+      watching session; this comment carries no verdict - read that run.` run_url is
+      $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. (8) Every comment POST is tried at most 3
+      times and re-lists the comments before each retry, posting only if the marker is still absent (the rec-3068
+      duplicate). Nothing it posts or logs carries a conclusion, title, summary, count, author or any text read from
+      the PR or a result file. Logs one line `PERSONA-VERDICT wake head_sha=<sha> new=<n> fault=<bool>`. The wake is
+      idempotent per (head SHA, persona): a same-head re-run (PLAN-persona-verdict-override's c6 re-run) finds its
+      markers and posts nothing; that plan owns extending the key.
+  - file: scripts/personas/run.py
+    action: Modify
+    purpose: The verb table gains wake -> scripts.personas.wake.main; the sys.path guard and other verbs are unchanged.
+  - file: scripts/checks/ci_guards/validate_persona_verdict_chain.py
+    action: Modify
+    purpose: >-
+      Extends plan 1's rules to the wake job, as a tightening: the job set is exactly prepare, run, post and wake; wake's
+      permissions are exactly contents: read, actions: read, checks: read and pull-requests: write, and pull-requests:
+      write on any other job (or at workflow level) is refused; wake's needs is exactly [prepare, post] and its
+      condition, after the existing unwrap and whitespace normalisation, exactly `!cancelled()`; its pip line is
+      exactly pyyaml with the absolute constraint; it has the mkdir step before its python step; its one python step is
+      the wake verb in plan 1's exact form with env keys exactly GH_TOKEN, PERSONA_SNAPSHOT and POST_RESULT and no
+      continue-on-error; its download-artifact step names persona-verdict-prepared, path `${{ runner.temp
+      }}/work/prepared` and continue-on-error: true; the wake verb in any job but wake, or any verb but wake in wake,
+      is refused. The id-token, environment, secrets, SHA-pin, bare-variable and token-in-env rules already apply to
+      every job and are kept. Reads YAML text only; imports nothing from scripts/personas/.
+  - file: tests/checks/ci_guards/test_validate_persona_verdict_chain.py
+    action: Modify
+    purpose: >-
+      One red fixture per new refused shape (wake missing, a fifth job, wake permissions widened or narrowed,
+      pull-requests: write on post or at workflow level, needs or condition changed, extra env key, continue-on-error
+      on the wake step, download without continue-on-error or into another path, wake verb in post, execute verb in
+      wake, wake job with id-token or an environment); the live file stays green. Additive: no existing case changes.
+  - file: tests/personas/test_wake.py
+    action: Create
+    purpose: >-
+      Mirror test with a fake HTTP layer and a temp event payload: one comment with four markers for four landed
+      probe routes; a second call with those markers present posts nothing; a marker in a comment by another author
+      does not suppress; a marker that only prefixes a longer one does not count; a non-prefix head ref, a fork head
+      repository, an unresolved or empty resolution and an absent prepared artifact post nothing; an unreadable prefix
+      list still wakes; a comment-listing failure still posts; POST_RESULT failure or one unlanded route posts the
+      fault comment once (and not again for the same run id and attempt); a bad head_sha or route id is never
+      interpolated; the wake and fault bodies equal the exact texts; no body contains success, failure, PROCEED,
+      REVISE, BLOCK, NO_FLAGS or FLAGS_FOUND; a POST retry re-lists and does not duplicate; a final POST failure exits
+      non-zero.
+  - file: tests/personas/test_run.py
+    action: Modify
+    purpose: >-
+      The verb-closure assertion gains wake (stdlib, scripts.* and yaml, which the wake job installs); the existing
+      cases are unchanged.
+  - file: docs/contracts/git-ops.yaml
+    action: Modify
+    purpose: >-
+      Exactly the four blocks of docs/plans/approved/persona-verdict-wake.yaml (an amendment_log row, field_add,
+      semantic_break false, so contract_version stays 16; coverage_note naming the signals without a count;
+      merge_conflict's rec-3874 probe narrative cut to one clause; push_pr_ci_merge_flow.wake_signals.persona_verdict),
+      plus a re-wrap of coverage_note, ci_green_comment, merge_conflict, cc_web_permission_gotcha and
+      auto_merge_relationship to about 118 characters with words unchanged (the approved-text binding ignores wrapping;
+      the yaml.safe_load value of every re-wrapped entry is unchanged). referenced_repo_paths is not edited (the row
+      names persona-verdict.yml by basename). Measured 496 of 500 effective lines in the wording-check tree; re-measure
+      at build.
+bundled_recommendations: []
+followon_recs: []
+closes_criteria: []
+infrastructure_dependencies:
+  - >-
+    None. No .tf file is in scope, no Lambda-packaged path (docs/contracts/git-ops.yaml and the workflow are not
+    in any manifest's patterns), no Environment, no AWS role. The wake job takes effect on main at merge (workflow_run
+    reads main's definition); VP 7 to VP 9 are its post-deploy proof.
+acceptance_criteria:
+  - "A fixture PR head whose diff touches only the four tests/fixtures/persona_verdict/fixture_pr/*.txt files gets, after its persona-verdict run, exactly one comment by github-actions[bot] carrying the four markers persona-verdict-wake:<head sha>:verdict_probe.<stem>, whose text names no conclusion."
+  - "Re-running that persona-verdict run on the same head adds no wake comment (idempotent per head SHA and persona)."
+  - "A PR whose diff routes nothing gets no persona-verdict-wake comment."
+  - "validate_persona_verdict_chain refuses each new wake-job shape (red fixtures) and is green on the live workflow; pull-requests: write sits on the wake job alone and checks: write on post alone."
+  - "docs/contracts/git-ops.yaml differs from main by exactly the four approved sidecar blocks (approved_text verify OK), stays at or under 500 effective lines, and every re-wrapped wake_signals entry parses to the same value."
+  - "The build session's n=1 observation of which event woke it on the fixture PR is appended to rec-3335 (read back); delivery stays recorded as observed, not proven."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: Wake verb and run.py verb table.
+    command: bin/venv-python -m pytest tests/personas/test_wake.py tests/personas/test_run.py -q
+    expected: All tests pass.
+    expected_literals: [passed]
+    fix_if: Any failure; fix the module, never the assertion.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: persona-verdict-wake-verb
+  - step: 2
+    phase: pre-deploy
+    action: The workflow-shape check, its red fixtures and the live workflow with the wake job.
+    command: bin/venv-python -m pytest tests/checks/ci_guards/test_validate_persona_verdict_chain.py -q && bin/venv-python -c "from scripts.checks.ci_guards.validate_persona_verdict_chain import validate_persona_verdict_chain as v; f=[]; v(f); print('FAILED', f) if f else print('CHAIN_SHAPE_OK')"
+    expected: Tests pass and the live tree prints the ok marker.
+    expected_literals: [passed, CHAIN_SHAPE_OK]
+    fix_if: A refused shape passes or the live workflow fails; fix the workflow or the check, never loosen a rule.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: persona-verdict-wake-shape
+  - step: 3
+    phase: pre-deploy
+    action: The trigger-policy check still accepts the workflow pair with the new job.
+    command: bin/venv-python -c "from scripts.checks.ci_guards.validate_persona_trigger_policy import validate_persona_trigger_policy as v; f=[]; v(f); print('FAILED', f) if f else print('TRIGGER_POLICY_OK')"
+    expected: Prints the ok marker.
+    expected_literals: [TRIGGER_POLICY_OK]
+    fix_if: The policy check names persona-verdict.yml; fix the workflow, never the policy check.
+    hermetic: true
+    graduation: not-applicable
+  - step: 4
+    phase: pre-deploy
+    action: Approved git-ops.yaml text placed word-exactly, line budget held, re-wrapped entries unchanged in value.
+    command: >-
+      bin/venv-python -m scripts.roadmap.approved_text verify --slug persona-verdict-wake --base origin/main &&
+      bin/venv-python -c "import subprocess,yaml; from scripts.checks.structural._classify import effective_lines; t=open('docs/contracts/git-ops.yaml').read(); n=effective_lines(t); a=yaml.safe_load(subprocess.run(['git','show','origin/main:docs/contracts/git-ops.yaml'],capture_output=True,text=True).stdout)['push_pr_ci_merge_flow']['wake_signals']; b=yaml.safe_load(t)['push_pr_ci_merge_flow']['wake_signals']; assert n<=500, n; assert all(a[k]==b[k] for k in ('ci_green_comment','cc_web_permission_gotcha','auto_merge_relationship')); assert 'persona_verdict' in b; print('GITOPS_OK', n)"
+    expected: Prints APPROVED-TEXT OK, then the ok marker with the line count.
+    expected_literals: [APPROVED-TEXT OK, GITOPS_OK]
+    fix_if: Any drift; re-place the blocks from the sidecar, never edit the sidecar; over 500 lines is a STOP to the plan owner.
+    hermetic: true
+    graduation: not-applicable
+  - step: 5
+    phase: pre-deploy
+    action: Fast tier on the branch.
+    command: bin/venv-python -m scripts.validate --pre
+    expected: Exit 0.
+    fix_if: Any failing check; fix the cause.
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: pre-deploy
+    action: Full tier on the ready head (background, 2 h limit) and its verdict.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: verify-head reports ok for HEAD.
+    fix_if: Any failure; fix and re-run from the start (handoff_policy).
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: post-deploy
+    action: >-
+      After merge, on the build session's own branch (restarted from main per git-ops.yaml; no new branch), commit one
+      head that appends a newline to each of the four tests/fixtures/persona_verdict/fixture_pr/*.txt files and nothing
+      else; that head needs one full-tier run and validation_result --verify-head before the push (plan 1's VP 8
+      pattern). Push it, open one draft fixture PR, subscribe to it (mcp__claude-code-remote__subscribe_pr_activity)
+      and end the turn. When woken, record which event woke the session first (its event name, e.g. issue_comment or
+      check_run) and whether the wake comment produced a turn of its own.
+    command: >-
+      mcp__github__actions_list(method="list_workflow_runs", owner="otl-labs", repo="ontheloop",
+      resource_id="persona-verdict.yml") for the concluded run whose prepare log carries `PERSONA-VERDICT
+      head_sha=<the fixture head>`; mcp__github__get_job_logs for its wake job; mcp__github__pull_request_read(method="get_comments",
+      owner="otl-labs", repo="ontheloop", pullNumber=<n>) and mcp__github__pull_request_read(method="get_check_runs", ...) on that head.
+    expected: >-
+      The four persona-verdict/verdict_probe.<stem> check runs exist on the head; exactly one comment by
+      github-actions[bot] carries the four markers for that head, in the exact wake text, naming no conclusion; no
+      fault comment; the wake job log shows `PERSONA-VERDICT wake head_sha=<head> new=4 fault=False`; the run concluded
+      success.
+    fix_if: >-
+      No comment, a duplicate, a fault comment, or a conclusion in the body: close the fixture PR and send the defect
+      to the plan owner. A 403 on the comment POST means pull-requests: write is not enough there: a plan defect.
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: post-deploy
+    action: Idempotency on the same head, then no wake on a PR that routes nothing.
+    command: >-
+      mcp__github__actions_run_trigger(method="rerun_workflow_run", owner="otl-labs", repo="ontheloop", run_id=<VP 7's
+      run>); after it concludes, mcp__github__pull_request_read(method="get_comments", ...) on the fixture PR and
+      mcp__github__get_job_logs for the re-run's wake job; then, for the first non-fixture PR head pushed after the
+      merge whose persona-verdict run has concluded, mcp__github__pull_request_read(method="get_comments", ...) on
+      that PR; then mcp__github__update_pull_request(state="closed") for the fixture PR.
+    expected: >-
+      The re-run concluded success, its wake log shows new=0 fault=False, and the fixture PR still has exactly one
+      wake comment; the real PR has no comment containing persona-verdict-wake; the fixture PR is closed.
+    fix_if: A second wake comment on the same head, or a wake on a PR that routed nothing; a plan defect to the plan owner.
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: post-deploy
+    action: rec-3335 carries the n=1 delivery observation (read-back of the execution step's update_rec).
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import make_reader; r=[x for x in make_reader(profile='agent_platform').named('recs_by_ids', ids='rec-3335')][0]; assert 'PLAN-persona-verdict-wake' in r['context'] and r['status']=='open'; print('REC_3335_OBSERVED')"
+    expected: Prints REC_3335_OBSERVED.
+    fix_if: The update did not land; re-run update_rec, never edit a cache.
+    hermetic: false
+    graduation: not-applicable
+  - step: 10
+    phase: pre-deploy
+    action: rec-5249 names the wake's structural assumptions (read-back of the execution step's update_rec).
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import make_reader; r=[x for x in make_reader(profile='agent_platform').named('recs_by_ids', ids='rec-5249')][0]; assert 'PLAN-persona-verdict-wake' in r['context'] and 'agent_branch_prefixes' in r['context']; print('REC_5249_EXTENDED')"
+    expected: Prints REC_5249_EXTENDED.
+    fix_if: The update did not land; re-run update_rec through the portal; a refusal is a STOP to the plan owner.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: .github/workflows/persona-verdict.yml
+    behavior: the wake job's needs, condition, permissions and step shape
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test_validate_persona_verdict_chain.py
+    red_green_expectation: red before (no wake job, so the live-file case requiring it fails), green after
+  - source: scripts/personas/wake.py
+    behavior: one value-free comment per run with a marker per new pair, bot-only exact markers, prefix and fork skip, fault wake, no duplicate on retry
+    verification_step: 1
+    test_selector: tests/personas/test_wake.py
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/personas/run.py
+    behavior: the wake verb dispatches and its import closure stays inside the wake job's install
+    verification_step: 1
+    test_selector: tests/personas/test_run.py
+    red_green_expectation: red before (no wake verb), green after
+  - source: scripts/checks/ci_guards/validate_persona_verdict_chain.py
+    behavior: refuses every new wake-job shape and pull-requests write outside wake
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test_validate_persona_verdict_chain.py
+    red_green_expectation: red before (new fixtures pass the old rules), green after
+  - source: docs/contracts/git-ops.yaml
+    behavior: exactly the four approved sidecar blocks are placed, within the line budget
+    verification_step: 4
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug persona-verdict-wake --base origin/main
+    red_green_expectation: red before (blocks not placed), green after
+constraints:
+  - "Starts only after PLAN-persona-verdict-chain's build has merged: every Modify row here edits a file that build creates. If its merged shape differs from that plan's scope rows (job names, artifact names, file names), STOP and send the plan owner the difference; never adapt silently."
+  - No inference key, no OIDC token, no AWS call and no Environment in the wake job (operator card 2026-11-16; T4.32 c7).
+  - Nothing under scripts/personas/ names a registered persona id or contract path (executor-personas.yaml implementation_binding); wake.py validates route ids by pattern only.
+  - A wake never carries a verdict, title, summary, count or PR-authored text (T4.2 c9); the verdict is read only from the persona-verdict/ check runs.
+  - "docs/contracts/git-ops.yaml: only the sidecar's four blocks plus words-unchanged re-wraps; at or under 500 effective lines; docs/contracts/ports.yaml is not edited (rec-5249 carries the record)."
+  - The same-head re-run key extension and its c1 wording belong to PLAN-persona-verdict-override (c6), not here.
+  - No rescue agents or workaround loops (Decision 55); never skip or loosen a test to get green (Decision 235).
+context:
+  - "Decision-scout r1 FLAGS_FOUND (Decisions triaged: 216 of 216; Roadmap items intersected: 4; CONFLICT: 0; RELATED: 3; Serves: NS.3 3/5). CITE: dec:76, dec:205, dec:229, dec:246; no CONTRADICT. Its one flag, a Decision 211 spirit note (the prefix read is a repo-layout assumption an adopter may lack), is adopted: an unreadable prefix list fails toward waking with a logged line, and rec-5249 gains the wake's assumptions (VP 10). Report: /mnt/project-files/persona-verdict-wake/SCOUT-r1.md."
+  - "Design settled on a blind Fable consult (/mnt/project-files/persona-verdict-wake/advisor-brief/ADVICE.md): separate wake job, agent-prefix and same-repo scope, no head re-check (cancel-in-progress plus the SHA in the body), bot comment not a label, fault wake keyed on run id and attempt, bot-only exact markers. Operator card 2026-11-17: one comment per run with a marker per (head SHA, persona) pair."
+  - "Event class: rec-3335 (open, High) saw one github-actions[bot] comment fail to wake (n=1); rec-3866 saw native check_suite and check_run wakes (n=2, another repo). The CI-green, conflict and approval-run wakes are bot comments in daily use. Delivery is UNPROVEN here; T4.32 c3 proves it, and VP 7 adds one recorded observation, not a gate."
+  - "Plan 1 (PLAN-persona-verdict-chain, merged #2097 7cd38349) defines the jobs, verbs, artifact names, the PERSONA-VERDICT log line and validate_persona_verdict_chain this plan extends; its build was in progress when this plan was written."
+  - "git-ops.yaml: 497 of 500 effective lines on main; 496 in the wording-check tree. Other unbuilt plans scoping it: PLAN-merge-race-attestation and PLAN-plans-only-main-fast-tier (plan_obligations); whichever builds second rebases and re-measures."
+  - "CI Reform's #2071 (Decision 267, open): once merged, only git-ops.yaml approved_text_binding is gated; this plan's sidecar binds its edits either way, so its leg P is satisfied."
+  - "No roadmap edit: c1 stays open and no criterion closes here (closes_criteria []); the T4.32 hint naming this plan lands with plan 1's build (its sidecar)."
+  - "rec-3068 (gh pr comment retry can duplicate a wake) is avoided here by re-listing before each retry; not bundled, since its file is pr_conflict_signal.sh."
+  - "Actions capacity: one extra short job per verdict run; public-repo minutes are free."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:60197d52f079f053b0b7ff683bb267441e42b8a61e449b4a8014a821f6e1050b"}
+  - {gate: wording-check, round: 1, verdict: PASS, digest: 6466491ced47b515fad02fde3175d79200471c4a3292a39ec67614cedd2fef9e, base: 7cd38349dcb17e5b477fa5693159003143ad37cd, selection: complete}  # pragma: allowlist secret
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "Pre: PLAN-persona-verdict-chain's build PR is merged (mcp__github__list_pull_requests / git log origin/main -- .github/workflows/persona-verdict.yml); its persona-verdict.yml has exactly prepare, run and post; no other open PR edits persona-verdict.yml, scripts/personas/ or docs/contracts/git-ops.yaml."
+  - "Create scripts/personas/wake.py and tests/personas/test_wake.py; add the wake verb to run.py and test_run.py; post: VP 1 green."
+  - "Add the wake job to persona-verdict.yml; extend validate_persona_verdict_chain and its mirror test; post: VP 2 and VP 3 green."
+  - "Place the four sidecar blocks in docs/contracts/git-ops.yaml with {{DATE}} set to the build date, and re-wrap the five named wake_signals entries (words unchanged); post: VP 4 OK."
+  - "Before the PR is ready: update_rec rec-5249 through scripts.ops_data_portal, appending to its context that PLAN-persona-verdict-wake adds scripts/personas/wake.py, which assumes the workflow_run head_branch and head_repository fields, the issue-comments API, the github-actions[bot] login and git-ops.yaml branching_topology.agent_branch_prefixes; post: VP 10."
+  - "Execute Verification Plan -- VP 5 and VP 6 before the PR is ready; loop until pass; on unrecoverable V3 failure stop and RCA (Decision 55)"
+  - "After merge: VP 7 and VP 8; then update_rec rec-3335 appending the n=1 observation (date, fixture PR, which event woke the session first, whether the wake comment produced its own turn, labelled observed, not proven) and VP 9; report run ids and the observation to the coordinator."
+  - "Report: what was implemented, verification results"
+rollback: >-
+  Revert the build PR: the wake job disappears and the chain runs as plan 1 left it; the git-ops.yaml row reverts with
+  it. Wake comments already posted are inert text.
