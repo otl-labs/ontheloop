@@ -128,6 +128,7 @@ class TestUpdateLambdaFunctions:
         """All expected Lambda function names are present."""
         assert "agent-platform-scheduled-agent-dispatcher" in _LAMBDA_FUNCTION_NAMES
         assert "agent-platform-findings-processor" in _LAMBDA_FUNCTION_NAMES
+        assert "agent-platform-workflow-dispatcher" in _LAMBDA_FUNCTION_NAMES
 
     def test_prod_path_writes_deploy_records_to_prod_prefix(self):
         """T2.43: the prod path (only_ducklake=False, default) now writes deploy-records/prod/<fn>.json
