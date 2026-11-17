@@ -181,7 +181,8 @@ class TestBudgetBreachRecFiling:
     def test_breach_priority_survives_real_accepted_values_validator(self) -> None:
         """Anti-vacuous: the priority _file_budget_breach_rec passes must survive the REAL
         row-rule gate, not just a hardcoded set in this test."""
-        from scripts.ops_data_portal import _derive_computed_fields, gate_write  # noqa: PLC0415
+        from scripts.ops_data_portal import _derive_computed_fields  # noqa: PLC0415
+        from tests.fixtures.portal_gate import assert_portal_gate_clean  # noqa: PLC0415
 
         mock_portal = MagicMock()
         git_result = MagicMock(returncode=0, stdout="agent/test\n")
@@ -194,12 +195,13 @@ class TestBudgetBreachRecFiling:
 
         fields = dict(mock_portal.file_rec.call_args[0][0])
         _derive_computed_fields(fields)
-        gate_write("ops_recommendations", fields, insert=True)  # must not raise
+        assert_portal_gate_clean("ops_recommendations", fields, insert=True)  # must not raise
 
     def test_bypass_priority_survives_real_accepted_values_validator(self) -> None:
         """Anti-vacuous: the priority _file_budget_bypass_rec passes must survive the REAL
         row-rule gate, not just a hardcoded set in this test."""
-        from scripts.ops_data_portal import _derive_computed_fields, gate_write  # noqa: PLC0415
+        from scripts.ops_data_portal import _derive_computed_fields  # noqa: PLC0415
+        from tests.fixtures.portal_gate import assert_portal_gate_clean  # noqa: PLC0415
 
         mock_portal = MagicMock()
         git_result = MagicMock(returncode=0, stdout="agent/test\n")
@@ -212,7 +214,7 @@ class TestBudgetBreachRecFiling:
 
         fields = dict(mock_portal.file_rec.call_args[0][0])
         _derive_computed_fields(fields)
-        gate_write("ops_recommendations", fields, insert=True)  # must not raise
+        assert_portal_gate_clean("ops_recommendations", fields, insert=True)  # must not raise
 
 
 class TestBudgetRecFilingCiGuard:
