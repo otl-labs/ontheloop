@@ -55,7 +55,17 @@ def _unwrap(expr: str) -> str:
 
 
 def _on(doc: dict[str, Any]) -> Any:
-    return doc.get("on", doc.get(True))
+    keyed: dict[Any, Any] = doc
+    return keyed.get("on", keyed.get(True))
+
+
+def _map(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _jobs(doc: dict[str, Any]) -> dict[str, Any]:
+    jobs = doc.get("jobs")
+    return jobs if isinstance(jobs, dict) else {}
 
 
 def _text(value: Any) -> str:
@@ -84,7 +94,7 @@ def _load(root: Path, rel: str) -> tuple[dict[str, Any] | None, str | None]:
 
 def _common_problems(rel: str, doc: dict[str, Any]) -> list[str]:
     out: list[str] = []
-    jobs = doc.get("jobs") if isinstance(doc.get("jobs"), dict) else {}
+    jobs = _jobs(doc)
     for name, job in jobs.items():
         for step in _steps(job):
             uses = step.get("uses")
@@ -107,7 +117,7 @@ def trigger_problems(doc: dict[str, Any]) -> list[str]:
         out.append(f"{TRIGGER}: pull_request types are not exactly opened, synchronize, reopened, ready_for_review")
     if doc.get("permissions") != {}:
         out.append(f"{TRIGGER}: top-level permissions are not {{}}")
-    for name, job in (doc.get("jobs") or {}).items():
+    for name, job in _jobs(doc).items():
         if job.get("permissions") != {}:
             out.append(f"{TRIGGER}: job {name} permissions are not {{}}")
         if any("uses" in s for s in _steps(job)):
@@ -138,7 +148,7 @@ def _job_problems(name: str, job: dict[str, Any]) -> list[str]:
     for step in py:
         run = str(step.get("run", "")).strip()
         verb = run[len(RUN_PREFIX) :] if run.startswith(RUN_PREFIX) else ""
-        env = step.get("env") if isinstance(step.get("env"), dict) else {}
+        env = _map(step.get("env"))
         if verb not in VERBS:
             out.append(f"{VERDICT}: job {name} python step {run!r} is not the pinned run.py argv")
         if env.get("PERSONA_SNAPSHOT") != SNAPSHOT:
@@ -166,7 +176,7 @@ def _artifact_problems(jobs: dict[str, Any], evidence: dict[str, Any] | None) ->
     seen: set[tuple[str, str, str]] = set()
     for name, job in jobs.items():
         for step in _steps(job):
-            action, with_ = _action(step), (step.get("with") if isinstance(step.get("with"), dict) else {})
+            action, with_ = _action(step), _map(step.get("with"))
             artifact = str(with_.get("name", ""))
             if action == "actions/upload-artifact":
                 seen.add((name, str(step.get("name", "")), artifact))
@@ -201,7 +211,7 @@ def verdict_problems(doc: dict[str, Any], evidence: dict[str, Any] | None) -> li
             out.append(f"{VERDICT}: workflow_run types are not exactly [completed]")
     if doc.get("permissions") != {}:
         out.append(f"{VERDICT}: top-level permissions are not {{}}")
-    jobs = doc.get("jobs") if isinstance(doc.get("jobs"), dict) else {}
+    jobs = _jobs(doc)
     if set(jobs) != set(JOB_PERMISSIONS):
         out.append(f"{VERDICT}: jobs are not exactly prepare, run and post")
     for name in sorted(set(jobs) & set(JOB_PERMISSIONS)):

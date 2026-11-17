@@ -241,6 +241,18 @@ RED = [
         "not only the execute verb",
         lambda d: _set_run(_step(_jobs(d)["run"], "execute"), v.RUN_PREFIX + "post"),
     ),
+    _red(
+        "bare-working-directory",
+        "bare variable in working-directory",
+        lambda d: _named(_jobs(d)["run"], "Create the work directory").update({"working-directory": "$RUNNER_TEMP"}),
+    ),
+    _red(
+        "upload-wrong-path",
+        "path is not its work directory",
+        lambda d: _named(_jobs(d)["run"], "Upload verdict results")["with"].update({"path": "elsewhere"}),
+    ),
+    _red("no-permissions-mapping", "no permissions mapping", lambda d: _jobs(d)["prepare"].pop("permissions")),
+    _red("missing-prepare-job", "jobs are not exactly", lambda d: _jobs(d).pop("prepare")),
     _red("extra-job", "jobs are not exactly", lambda d: _jobs(d).update({"extra": {"permissions": {}, "steps": []}})),
 ]
 
@@ -281,3 +293,16 @@ def test_registered_check_reports_and_passes(capsys: pytest.CaptureFixture[str])
 def test_registered_in_fast_tier() -> None:
     assert "validate_persona_verdict_chain" in [step.name for step in registry.pre_sequence()]
     assert registry.resolve("validate_persona_verdict_chain") is v.validate_persona_verdict_chain
+
+
+def test_unparseable_workflow_is_refused(tmp_path: Path) -> None:
+    root = _tree(tmp_path, None)
+    (root / v.VERDICT).write_text("a: [unclosed\n", encoding="utf-8")
+    assert any("does not parse" in p for p in v.check_tree(root)[0])
+
+
+def test_registered_check_reports_each_problem(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(v, "check_tree", lambda root: (["boom"], 2))
+    failed: list[str] = []
+    v.validate_persona_verdict_chain(failed)
+    assert failed == ["persona verdict chain: boom"] and "FAIL: boom" in capsys.readouterr().out
