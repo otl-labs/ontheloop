@@ -69,12 +69,15 @@ scope:
   - file: src/persona_backends/litellm_backend.py
     action: Modify
     purpose: >-
-      run_persona gains keyword `mcp_server: StdioServerParameters | None = None`. A contract with warehouse_verbs and
+      run_persona gains keyword `mcp_server: Callable[[], StdioServerParameters] | None = None`, a factory called only in
+      the warehouse branch (StdioServerParameters named under TYPE_CHECKING only), so building the parameters never
+      imports mcp for a run that names no warehouse_read. A contract with warehouse_verbs and
       mcp_server None is RunRefused ("warehouse_read needs the MCP server"); keyword `mcp_errlog: TextIO | None = None`
       (None means os.devnull, opened by a synchronous helper outside the async function, as ruff ASYNC230 forbids
-      open() inside it) is passed through as open_bridge's errlog. The run's wall-clock deadline is taken once,
+      open() inside it, and closed when the bridge exits, so no handle leaks per run) is passed through as open_bridge's
+      errlog. The run's wall-clock deadline is taken once,
       before the bridge opens (moved out of go()), so startup counts against max_wall_clock_seconds. After the input check
-      passes (so an input_incomplete run starts no server), a contract with warehouse_verbs opens open_bridge(mcp_server,
+      passes (so an input_incomplete run starts no server), a contract with warehouse_verbs opens open_bridge(mcp_server(),
       verbs, startup_timeout=deadline - clock()) around the run loop: BridgeTimeout returns failure budget_exhausted
       (detail "max_wall_clock_seconds reached while the MCP server started"), and BridgeUnavailable aborts with kind
       tool_server_unavailable (header and end records written, no model call). The tool list is the read_input spec when
@@ -85,7 +88,8 @@ scope:
       kind tool_server_error. The turn record of the provider call that asked for the tools is written before either
       exit (budget_exhausted from a call timeout, or the tool_server_error abort): ended_at_ms is taken when the
       transport returned (not when the record is written, so a model_call row never includes warehouse latency, on the
-      success path too), turns_used counts that turn, and tool_result_bytes covers the calls that finished, so every
+      success path too), turns_used counts that turn, and tool_result_bytes covers the calls that finished (tool calls dispatch one at a time in tool_calls order, so
+      tool_result_bytes stays a positional prefix of tool_calls), so every
       billed model call keeps its model_call row (run_persona.events, one per turn) ahead of the end record, as plan 1's
       transport paths do. A RunAborted the loop raises while the bridge is open (transport outage or exception)
       reaches run_persona's caller as itself with its own kind (open_bridge's unwrapping above), never as an
@@ -96,13 +100,15 @@ scope:
   - file: scripts/run_persona.py
     action: Modify
     purpose: >-
-      MCP_SERVER_MODULE = "scripts.agent_sdk.mcp_server"; `server_parameters(environ=os.environ)` returns
-      StdioServerParameters(command=sys.executable, args=["-m", MCP_SERVER_MODULE], cwd=<repo root>, env=server_env(environ)).
+      MCP_SERVER_MODULE = "scripts.agent_sdk.mcp_server"; `server_parameters(environ=os.environ)` imports mcp inside its
+      body and returns StdioServerParameters(command=sys.executable, args=["-m", MCP_SERVER_MODULE], cwd=<repo root>, env=server_env(environ)).
       `server_env(environ)` returns only the environ variables whose names start with AWS_, DUCKLAKE_ or OTL_ and the
       proxy and CA-bundle variables (HTTPS_PROXY, HTTP_PROXY, NO_PROXY and their lowercase forms, SSL_CERT_FILE,
       REQUESTS_CA_BUNDLE, CURL_CA_BUNDLE); stdio_client itself merges it over the library's default environment (HOME,
-      PATH and the like). It is the reader's configuration and credentials, never an inference key or GITHUB_TOKEN.
-      main() passes mcp_server=server_parameters() to run_persona with the default errlog (os.devnull), so the server's
+      PATH and the like). It is the reader's configuration and credentials, never an inference key or GITHUB_TOKEN; the
+      allow-list stays by prefix and no variable name such as GITHUB_TOKEN is spelled as a string constant in
+      scripts/run_persona.py or src/persona_backends (the persona image plan's persona-code check reads those copies;
+      tests may name it). main() passes mcp_server=server_parameters, uncalled, to run_persona with the default errlog (os.devnull), so the server's
       stderr (tracebacks that can name a reader host or carry response text, and runpy's warning) never reaches the run's
       stderr or an Actions log (Decision 101); failures surface as the class-only abort kind. The server is started only
       for a contract that names warehouse_read; stdout still carries only the result. Exit 4 covers the two new abort
@@ -154,8 +160,8 @@ scope:
       test_input_incomplete_starts_no_server; test_unavailable_server_aborts_before_any_call (kind
       tool_server_unavailable, zero transport calls, end record aborted); test_server_failure_mid_run_aborts (kind
       tool_server_error; the transport called exactly once and a turn record listing the verb written before the end
-      record); test_tool_turn_ended_at_is_transport_return (a fake clock advanced inside the
-      warehouse call shows the turn record's ended_at_ms equals the time the transport returned, before the warehouse call); test_startup_hang_returns_budget_exhausted (mode hang, a contract copy with
+      record); test_tool_turn_ended_at_is_transport_return (the wall fake, run_persona's
+      wall injectable that stamps ended_at_ms, not the deadline clock, advanced inside the warehouse call shows the turn record's ended_at_ms equals the time the transport returned, before the warehouse call); test_startup_hang_returns_budget_exhausted (mode hang, a contract copy with
       max_wall_clock_seconds 1: the run returns budget_exhausted within seconds, with no transport call);
       test_warehouse_call_past_deadline_returns_budget_exhausted (mode slow, a roomy max_wall_clock_seconds, and
       asyncio.wait_for monkeypatched to time out the bridge call as test_wait_for_timeout_returns_budget_exhausted does,
@@ -164,7 +170,7 @@ scope:
       test_transport_outage_with_bridge_open_aborts (the fake transport raises an outage after the bridge opened:
       RunAborted kind outage, not an ExceptionGroup and not tool_server_error); test_contract_without_read_input_blob_offers_no_read_input_tool (no
       read_input tool and no blob lines in the opening message); a contract naming no tools sends tools None; a contract without warehouse_read starts no server
-      (mcp_server pointing at a command that does not exist still succeeds).
+      (an mcp_server factory that raises if called still succeeds).
   - file: tests/test_run_persona.py
     action: Modify
     purpose: >-
@@ -177,7 +183,9 @@ scope:
       monkeypatched to the fake server in mode crash with FAKE_MCP_RAN_FILE set, main() run under capfd on a contract
       copy naming warehouse_read: exit 4, abort kind tool_server_unavailable, the ran file exists, and
       FAKE-SERVER-STDERR-MARKER is absent from captured fd 1 and fd 2; this also proves a warehouse run's abort exits
-      4, not a traceback with exit 1); the isolated-mode subprocess refusal case names
+      4, not a traceback with exit 1); test_non_warehouse_run_imports_no_mcp (a fresh subprocess sets sys.modules["mcp"]
+      to None, then runs scripts/run_persona.py through runpy on the fixture contract with an incomplete input: exit 0,
+      result input_incomplete, no transport call; red while main() builds the parameters eagerly); the isolated-mode subprocess refusal case names
       read_repo in place of warehouse_read:x.
   - file: docs/contracts/executor-personas.yaml
     action: Modify
@@ -201,6 +209,7 @@ acceptance_criteria:
   - A contract naming warehouse_read:<verb> runs with the model offered exactly the named verbs, with the server's input schemas, and a tool call to one returns the server's text as the tool message.
   - The bridge never offers or calls a verb the contract does not name, refuses a run whose named verb the server does not list, aborts (exit 4) when the server cannot spawn, start or keep its session, and a server startup that outlasts the run's wall clock returns budget_exhausted.
   - The server's stderr never reaches the run's stdout or stderr.
+  - A run whose contract names no warehouse_read imports no mcp module, entry point included.
   - The server is started only for a contract that names warehouse_read, and only after the input check passes.
   - The server's environment carries AWS_, DUCKLAKE_ and OTL_ variables and the proxy and CA-bundle variables, and no inference key or GITHUB_TOKEN.
   - BUILT holds read_input and warehouse_read, equal to every T4.32:c1-owned binding in the live index; src/persona_backends imports nothing under scripts.
@@ -375,7 +384,7 @@ test_obligations:
     test_selector: tests/persona_backends/test_litellm_backend.py
     red_green_expectation: red before (run_persona takes no mcp_server argument), green after.
   - source: scripts/run_persona.py
-    behavior: The server module equals the index binding, runs from the repository root, and gets no inference key or GITHUB_TOKEN.
+    behavior: The server module equals the index binding, runs from the repository root, and gets no inference key or GITHUB_TOKEN; a non-warehouse run imports no mcp.
     verification_step: 3
     test_selector: tests/test_run_persona.py
     red_green_expectation: red before (server_parameters and server_env absent), green after.
@@ -437,7 +446,10 @@ context:
     needs point-in-time reads (Decision 231 cl.3); PC-01's ports list stays [ops_verbs, persona_compute_host] (approved
     text names the run_persona dependency in its description). Also UNPROVEN: server_env leaves out PYTHONPATH,
     PYTHONHOME and locale variables, and VP7 proves only the CC-web venv; the persona image (T4.32 c2/c3) case belongs
-    to rec-5312 or the image plan.
+    to rec-5312 or the image plan. PLAN-persona-image-twin (its ENTRYPOINT runs scripts/run_persona.py; its hash-locked
+    requirements are the entry closure's direct imports) owns adding mcp, scripts/agent_sdk and the reader closure to
+    the image before any image run names warehouse_read; the lazy server parameters keep every other run mcp-free, so
+    its conformance step keeps passing whichever plan builds first.
   - >-
     Red-overlap 2026-11-17: blocked, slo_breached, on rec-5247 (telemetry-reader smoke 504; Feedback Loop's), shared
     paths none. Deferral: this plan touches no telemetry path, and its build still needs a green full tier.
@@ -458,6 +470,7 @@ gate_rounds:
   - {gate: decision-scout, round: 4, verdict: NO_FLAGS, scout_input_fingerprint: "v1:daca14bcb4dfcfed5b2ecb7809cff4445e129e17043e853d5ef28383a3955b79"}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 3, nits: 10}
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 5}
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 5}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
