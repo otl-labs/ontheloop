@@ -416,3 +416,59 @@ def test_registry_sourced_value_sets_follow_the_registry_arm(tmp_path: Path) -> 
 
 def test_missing_trees_have_no_scope(tmp_path: Path) -> None:
     assert ratchet.in_scope_tables(tmp_path) == [] and ratchet.registry_ids(tmp_path) == set()
+
+
+_V1 = {"required": {"schema_version": "integer"}}
+_V2 = {"required": {"schema_version": "integer", "a": "string"}}
+
+
+def _json_base(spec: dict[str, Any]) -> None:
+    spec["tables"]["ops_demo"]["fields"]["j"] = _field(
+        json_object={"max_bytes": 64, "versions": {1: dict(_V1)}, "exclude_before": "2026-12-01"}
+    )
+    spec["tables"]["ops_demo"]["fields"]["jt"] = _field(
+        json_object={"max_bytes": 64, "versions": {1: dict(_V1)}}, write_time_exemptions={"json_object": dict(_TEMP)}
+    )
+
+
+def _json_leg(spec: dict[str, Any]) -> dict[str, Any]:
+    return _dq(spec, "j")["json_object"]
+
+
+def test_json_object_added_version_or_larger_cap_is_free(tmp_path: Path) -> None:
+    def head(spec: dict[str, Any]) -> None:
+        _json_leg(spec)["versions"][2] = dict(_V2)
+        _json_leg(spec)["max_bytes"] = 128
+
+    assert _run(tmp_path, head, _json_base) == []
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda leg: leg.update(max_bytes=32),
+        lambda leg: leg["versions"][1].update(required={"schema_version": "integer", "a": "string"}),
+        lambda leg: leg["versions"].pop(1) and None or leg["versions"].update({2: dict(_V2)}),
+    ],
+)
+def test_json_object_changed_version_or_smaller_cap_refused(tmp_path: Path, mutate: Callable) -> None:
+    errors = _run(tmp_path / "plain", lambda s: mutate(_json_leg(s)), _json_base)
+    assert any("beyond an added version or a larger cap" in e for e in errors), errors
+    census_head = lambda s: (mutate(_json_leg(s)), _entry(s, "j", **_census_entry()))  # noqa: E731
+    errors = _run(tmp_path / "census", census_head, _json_base)
+    assert any("beyond an added version or a larger cap" in e for e in errors), errors  # no census-token route
+
+
+def test_json_object_earlier_date_refused(tmp_path: Path) -> None:
+    head = lambda s: (_json_leg(s).update(exclude_before="2026-11-01"), _entry(s, "j", **_census_entry()))  # noqa: E731
+    errors = _run(tmp_path, head, _json_base)
+    assert any("moved earlier" in e and "no entry backs it" in e for e in errors), errors
+
+
+def test_json_object_exemption_removal_on_an_undated_leg_has_no_census_route(tmp_path: Path) -> None:
+    def head(spec: dict[str, Any]) -> None:
+        del _dq(spec, "jt")["write_time_exemptions"]
+        _entry(spec, "jt", **_census_entry())
+
+    errors = _run(tmp_path, head, _json_base)
+    assert any("jt.json_object temporary exemption removed" in e for e in errors), errors

@@ -14,6 +14,7 @@ ops_recommendations contract as the acceptance_lint and glossary_lint exemption 
 from __future__ import annotations
 
 import copy
+import dataclasses
 import functools
 import re
 import sys
@@ -78,6 +79,10 @@ def _limit_in_words(rule: str, spec: dict[str, Any]) -> str:
         return f"elements must match {spec.get('array_element_format')!r}"
     if rule == "not_null":
         return "is required"
+    if rule == "json_object":
+        return (
+            f"must be a JSON object of a declared schema_version within {spec.get('json_object', {}).get('max_bytes')} bytes"
+        )
     return "violates its declared rule"
 
 
@@ -223,11 +228,18 @@ def _run_row_rules(table: str, record: dict[str, Any], *, insert: bool) -> None:
     rules = RowRules.from_projection(columns)
     now = datetime.now(timezone.utc)
     try:
-        check_write(spec, rules, record, now, now, _PLACEHOLDER_ULID, None)
+        check_write(dataclasses.replace(spec, fields=columns), rules, record, now, now, _PLACEHOLDER_ULID, None)
     except RowRuleViolationError as exc:
         raise RowRuleRejected(
             table, exc.column, exc.rule, _limit_in_words(exc.rule, spec.fields.get(exc.column, {})), exc.exclude_before
         ) from exc
+
+
+def carry_forward(table: str, existing: dict[str, Any]) -> dict[str, Any]:
+    """The prior row minus its per_write columns: the one merge source for every portal update path, so an update that
+    omits such a column sends no value (the writer stores NULL) instead of re-sending the stored one."""
+    per_write = {name for name, spec in resolve_table_spec(table).fields.items() if spec.get("per_write")}
+    return {k: v for k, v in existing.items() if k not in per_write}
 
 
 def _report(table: str, results: list[LintResult]) -> None:
