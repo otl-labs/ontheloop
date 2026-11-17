@@ -78,11 +78,12 @@ scope:
       last_green.last_green_sha(..., ref=head) (a green on origin/main that is not an ancestor of head never counts); if
       neither resolves, the range is head alone with range_status "unresolved". Output JSON: {head, prev, range_status:
       recorded|resolved|widened|unresolved|head_only, commits: [first-parent shas prev..head, oldest first], prs: [{sha,
-      pr}] one per commit from commits/{sha}/pulls (null when none)}. Step outputs (key=value lines for
-      $GITHUB_OUTPUT): range_status; diff_base = prev for a resolved, widened or recorded ci range, empty for an
+      pr}] one per commit from commits/{sha}/pulls (null when none)}. Step outputs, which resolve appends
+      itself to the file named by os.environ["GITHUB_OUTPUT"] (the deploy_gate.py _emit pattern; never through stdout): range_status; diff_base = prev for a resolved, widened or recorded ci range, empty for an
       unresolved ci range, and the literal HEAD^ for every other slug (so vacuous_pass diffs HEAD^..HEAD there exactly as
       today); prompt_note = one sentence naming /tmp/ci-rca-range.json and its pull requests for slug ci, else empty.
-      As its last act, after the outputs are written, it prints the workflow annotation "::notice
+      As its last act, after the outputs are written, it prints to stdout (the step log, where the runner processes
+      workflow commands) the annotation "::notice
       title=ci-rca-range::range_status=<s> diff_base=<b>" (the proof that resolve completed; a continue-on-error step's
       conclusion reads success whatever its outcome, validate_oidc_failopen_guards.py:20-22). Any other slug: {head, prev: null,
       range_status: head_only, commits: [head]}, as today. A failing API read degrades to range_status unresolved,
@@ -113,7 +114,8 @@ scope:
       resolve_prev stops on it, when the oracle disagrees, or when K is 0; a commit whose job failed before the fast
       tier is excluded from the oracle; observe skips runs whose range step was skipped, takes the oldest remaining,
       reads completed from the notice, reads incomplete when the step's conclusion is success but the notice is
-      absent, and prints none-yet on an empty page.
+      absent, and prints none-yet on an empty page; resolve with GITHUB_OUTPUT set to a tmp file writes its three
+      outputs there and the ci-rca-range notice to stdout only (the notice never appears in the outputs file).
   - file: tests/ci/test_last_green.py
     action: Create
     purpose: >-
@@ -129,8 +131,9 @@ scope:
       is ci && hashFiles('scripts/ci_rca/range_context.py') != '' -- the job checks out the failing commit, which may
       predate the module; continue-on-error: true; timeout-minutes: 3; env GH_TOKEN): its body has no branch and no
       VAR=$(...) assignment (validate_masked_errexit_steps): fetch the run JSON (gh api to a file, the meta step's
-      source) and run bin/venv-python -m scripts.ci_rca.range_context resolve, appending its outputs (range_status,
-      diff_base, prompt_note) to $GITHUB_OUTPUT and writing /tmp/ci-rca-range.json. "Range fallback" (id
+      source) and run bin/venv-python -m scripts.ci_rca.range_context resolve with no redirect of its stdout (resolve itself
+      appends range_status, diff_base and prompt_note to $GITHUB_OUTPUT and writes /tmp/ci-rca-range.json; its stdout
+      carries the ci-rca-range notice to the runner). "Range fallback" (id
       range_fallback; if: the slug is not ci || that hashFiles is ''): writes diff_base=HEAD^. Under bash -e a failed
       fetch stops the body before resolve, so the run abstains (empty diff_base); a hang hits the timeout and, through
       continue-on-error, abstains too. Only resolve's closing ci-rca-range notice proves it completed. (2) "Generate evidence bundle" gains env CI_RCA_RANGE_PREV: ${{
@@ -153,7 +156,8 @@ scope:
     action: Create
     purpose: >-
       Structural pins on ci-rca.yml: the range step runs scripts.ci_rca.range_context resolve after the meta step and
-      before the evidence step, its if: requiring the ci slug and hashFiles of the module, with continue-on-error
+      before the evidence step with no redirect of its stdout (no >> "$GITHUB_OUTPUT" on the resolve line), its if:
+      requiring the ci slug and hashFiles of the module, with continue-on-error
       true, timeout-minutes 3 and GH_TOKEN in its env; the range_fallback step's if: is the exact complement and it
       writes HEAD^; the evidence step's CI_RCA_RANGE_PREV is exactly the two-output
       expression; the agent step's PROMPT= line
@@ -350,7 +354,7 @@ verification_plan:
     phase: pre-deploy
     action: resolve_prev against live GitHub passes over plans-only main commits (the jobs-API assumption, proven live).
     command: bin/venv-python -m scripts.ci_rca.range_context probe --ref origin/main --depth 20
-    expected: exit 0 and a line "probe=ok skipped=K" with K above 0; push_scope's plans-only rule agrees with every skipped and started commit. About 40 public reads, inside the unauthenticated hourly limit; export GH_TOKEN where one is available.
+    expected: exit 0 and a line "probe=ok skipped=K" with K above 0; push_scope's plans-only rule agrees with every compared (fast-tier step ran) skipped and started commit. About 40 public reads, inside the unauthenticated hourly limit; export GH_TOKEN where one is available.
     fix_if: probe=fail on an oracle disagreement over a compared commit (fast-tier step ran) means full_tier_state misreads the live jobs API; fix it and its fixtures to the live shape, never the probe. probe=fail with K 0 means no plans-only merge in the window; rerun after the next plan PR merges
     hermetic: false
     graduation: waive
@@ -367,7 +371,7 @@ verification_plan:
     graduation: not-applicable
   - step: 12
     phase: post-deploy
-    action: The first failing-upstream ci-rca run after merge runs the range step to success (observation only; no red is induced).
+    action: The first ci-rca run after merge whose range step ran carries resolve's ci-rca-range notice (observation only; no red is induced).
     command: bin/venv-python -m scripts.ci_rca.range_context observe --merge-sha "$(git rev-parse origin/main)"
     expected: run with the build's merge commit still origin/main's tip, or pass its SHA in place of the rev-parse; exit 0 with "observe=<run id> slug=ci resolve=completed range_status=<s>" on the oldest ci-rca run after the merge whose range step ran, or "observe=none-yet" (rerun on the next CI red).
     fix_if: "resolve=incomplete (the step ran but its notice is absent: a crash, a failed fetch or the timeout); read that run's log, and file a rec against this plan (forward fix)"
@@ -488,6 +492,7 @@ gate_rounds:
   - {gate: decision-scout, round: 6, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:bdb4699c23550d14c0687e483069dfc09377280238f2b955cf895c98becdc86a"}  # pragma: allowlist secret
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 4}
   - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 2}
+  - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 1, nits: 2}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
