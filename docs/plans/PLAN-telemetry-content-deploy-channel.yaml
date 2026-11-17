@@ -23,7 +23,7 @@ phase: >-
   ad_hoc_rec (soft-warn category; no tier_item claimed, so the Tier Item Freshness Gate is skipped): rec-5246 (High)
   and rec-4696 (High), a prerequisite on the operator's feedback-loop gate before T3.3/T3.4 waves 2-4. closes_criteria
   is empty.
-cites: [dec:239, dec:270, dec:249, dec:254, dec:154, dec:125, dec:126, dec:79, dec:238, dec:232]
+cites: [dec:239, dec:270, dec:249, dec:254, dec:154, dec:125, dec:126, dec:79, dec:238, dec:232, dec:246, dec:267]
 closes_criteria: []
 implementation_declared: true
 amends:
@@ -56,7 +56,9 @@ scope:
     action: Create
     purpose: >-
       Header comment naming Decisions 239 cl.5, 249, 254, 270 and {{N}}. on: workflow_run (workflows [CI], types
-      [completed]) and workflow_dispatch (input force, boolean, default false). Top-level permissions contents: read.
+      [completed]) and workflow_dispatch (inputs force and rebaseline, boolean, default false; rebaseline is the recovery
+      for a BASELINE_UNPROVEN run: the summary lists every bundled commit since ddb28a40 and both baseline checks are
+      skipped for that run only). Top-level permissions contents: read.
       concurrency: group deploy-telemetry-content, cancel-in-progress false (a newer pending run replaces an older
       pending one; an in-flight deploy always completes). Every non-local uses: is pinned to a 40-hex commit SHA with a
       version comment. Jobs, in order:
@@ -73,8 +75,14 @@ scope:
           held=true writing a TELEMETRY_PRODUCTION_HOLD notice, a green skip); python -m scripts.build_lambda
           --content-reader-only with its CONTENT_READER_SHA256 exported as output sha256; upload
           lambda-packages/ducklake-telemetry-content-reader.zip as artifact telemetry-content-<sha256>, retention-days
-          30, if-no-files-found error; "Write the approval summary" (bash scripts/ci/telemetry_content_deploy.sh summary
-          with GATE_SHA, HEAD_SHA (github.sha), RUN_URL of the waking CI run, CONTENT_SHA256 and HELD through env).
+          30, if-no-files-found error; "Prove the recorded baseline" when needs.gate.outputs.record_sha is non-empty and
+          rebaseline is not true (git worktree add at record_sha, python -m scripts.build_lambda --content-reader-only
+          there, and fail with BASELINE_UNPROVEN unless base64 of that digest equals needs.gate.outputs.record_code_sha256:
+          the deploy record is writable by agent-reachable identities, so the summary's commit range is trusted only
+          once the recorded commit is shown to build the recorded code; decision-scout r3 NOTE); "Write the approval
+          summary" (bash scripts/ci/telemetry_content_deploy.sh summary with GATE_SHA, HEAD_SHA (github.sha), RECORD_SHA
+          (empty, or rebaseline, means the range starts at ddb28a40), RUN_URL of the waking CI run, CONTENT_SHA256 and
+          HELD through env).
         - deploy: needs [gate, build], if needs.build.outputs.held == 'false', environment telemetry-content-deploy,
           permissions id-token write, contents read and actions read. Steps: checkout (ref gate sha, persist-credentials
           false) for the scripts and deploy_config.json; "Check the reviewer approval for telemetry-content-deploy"
@@ -82,7 +90,8 @@ scope:
           download the artifact by its digest name; configure-aws-credentials with role-to-assume
           arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/telemetry-content-deploy, aws-region env.AWS_REGION and
           MASK_AWS_ROLE_ID_ACCOUNT_PART from secrets.AWS_ROLE_ID_ACCOUNT_PART in the step env; bash
-          scripts/ci/telemetry_content_deploy.sh deploy with ZIP and CONTENT_SHA256 through env, exporting code_sha256.
+          scripts/ci/telemetry_content_deploy.sh deploy with ZIP, CONTENT_SHA256, RECORD_CODE_SHA256
+          (needs.gate.outputs.record_code_sha256) and REBASELINE through env, exporting code_sha256.
           It runs no pip install and no repo Python while it holds the role.
         - record: needs [gate, deploy], if needs.deploy.result == 'success'. permissions id-token write, contents read.
           Checkout at the gate sha; aws-region; configure-aws-credentials for agent-platform-github-ci-deploy (the
@@ -103,7 +112,10 @@ scope:
           going out over the manifest's paths; then deploy_config.json's diff over the range; then the line "CI
           publishes the layers: a pin proves which bytes run, not who built them (rec-4742)". It prints gate and HEAD
           shas. It reads no credential.
-        - deploy: fails unless sha256sum(ZIP) equals CONTENT_SHA256; adds a mask for the STS account; for each
+        - deploy: fails unless sha256sum(ZIP) equals CONTENT_SHA256; adds a mask for the STS account; when
+          RECORD_CODE_SHA256 is non-empty and REBASELINE is not true, fails at step baseline unless get-function's live
+          Configuration.CodeSha256 equals it (the live reader is the recorded one, so the approved summary listed
+          everything that changes); for each
           deploy_config.json layer resolves its version ARN and fails unless get-layer-version's Content.CodeSha256
           equals the pin; update-function-configuration with exactly --handler, --layers and --environment from
           deploy_config.json, wait function-updated-v2; update-function-code --zip-file, wait again; fails unless the
@@ -114,7 +126,8 @@ scope:
     action: Create
     purpose: >-
       Literal-argv tests of telemetry_content_deploy.sh with a fake aws on PATH (the Decision 162 R2 precedent): a
-      digest mismatch, a layer pin mismatch and a read-back mismatch each exit non-zero naming the step and printing no
+      digest mismatch, a live-versus-record baseline mismatch, a layer pin mismatch and a read-back mismatch each exit
+      non-zero naming the step and printing no
       environment value; the happy path calls update-function-configuration before update-function-code and writes
       code_sha256; summary writes the evidence block before the commit lists.
   - file: scripts/ci/telemetry_content_record.py
@@ -168,6 +181,9 @@ scope:
     action: Modify
     purpose: >-
       deploy_code names the operator-gated content channel and its recovery: a held run clears with the sidecar; a
+      BASELINE_UNPROVEN or a baseline step failure means the reader or its record changed outside the channel: the
+      operator checks Decision 270 cl.3's content-change alarm history, then dispatches with rebaseline, whose summary
+      lists every bundled commit since ddb28a40; a
       layer republish that deleted a pinned version fails the next deploy until a deploy_config.json pin commit
       (rec-4738); break-glass is the operator's admin tier (Decision 125 cl.3's command is refused by Decision 270
       cl.3). An amendment_log row. NEAR_CAP (482 of 500 effective lines at 163d90b1 per plan_obligations; re-measure on
@@ -193,10 +209,19 @@ scope:
     purpose: >-
       Channel telemetry-content: _channel_inputs names [agent-platform-ducklake-telemetry-content] and
       TELEMETRY_CONTENT_SOURCE_PATHSPECS; ducklake and prod keep theirs; any other channel raises GateError (no
-      fall-through to prod); the CLI choices gain it.
+      fall-through to prod); the CLI choices gain it. read_record(channel, function) returns the record mapping or None
+      (read_record_sha keeps its signature and wraps it); resolve also emits record_sha and record_code_sha256, set
+      only for a channel with exactly one function and a present record, else empty.
+  - file: .github/workflows/deploy-gate.yml
+    action: Modify
+    purpose: >-
+      The workflow and gate-job outputs gain record_sha and record_code_sha256 from steps.resolve. The ducklake and
+      prod callers ignore them; nothing else changes.
   - file: tests/ci/test_deploy_gate.py
     action: Modify
-    purpose: The new channel resolves its function and pathspecs; an unknown channel raises; a change under src/common outside the protective set gives no_source_change, one under src/sensitive_values gives source_changed.
+    purpose: The new channel resolves its function and pathspecs; an unknown channel raises; a single-function channel
+      emits record_sha and record_code_sha256 from its record, a two-function channel and an absent record emit them
+      empty; a change under src/common outside the protective set gives no_source_change, one under src/sensitive_values gives source_changed.
   - file: scripts/convergence_health/code_drift.py
     action: Modify
     purpose: >-
@@ -216,7 +241,8 @@ scope:
         (c) no other workflow, and no build-lambda.yaml ducklake_function_zip_keys entry, names
             agent-platform-ducklake-telemetry-content or ducklake-telemetry-content-reader.zip;
         (d) the deploy job runs only when needs.build.outputs.held is 'false', passes the digest through env (no
-            ${{ }} inside a run body), and its run bodies invoke no python and no pip;
+            ${{ }} inside a run body) together with RECORD_CODE_SHA256 from needs.gate.outputs.record_code_sha256, and
+            its run bodies invoke no python and no pip; the build job's baseline step precedes its summary step;
         (e) TELEMETRY_CONTENT_SOURCE_PATHSPECS covers the protective set and every file it matches is bundled by the
             content manifest.
       An early warning (Decision 239 cl.5): an agent PR can edit the check itself.
@@ -438,7 +464,7 @@ test_obligations:
     test_selector: tests/checks/iam_tf/test_ci_deploy_record_prefixes.py
     red_green_expectation: red before (two prefixes), green after
   - source: .github/workflows/deploy-telemetry-content.yml
-    behavior: Only this workflow names the Environment; no reusable or PR trigger; the deploy job is held on held, takes the digest through env and runs no python or pip.
+    behavior: Only this workflow names the Environment; no reusable or PR trigger; the deploy job is held on held, takes the digest through env and runs no python or pip; the build proves the recorded baseline before the summary unless rebaseline.
     verification_step: 1
     test_selector: tests/checks/ci_guards/test_validate_content_reader_lock.py
     red_green_expectation: red before (the check and the workflow are absent), green after
@@ -448,7 +474,7 @@ test_obligations:
     test_selector: tests/checks/ci_guards/test_validate_content_reader_lock.py
     red_green_expectation: red before, green after
   - source: scripts/ci/telemetry_content_deploy.sh
-    behavior: Digest, layer-pin and read-back mismatches fail naming the step and printing no value; configuration precedes code; the summary leads with evidence.
+    behavior: Digest, live-versus-record baseline, layer-pin and read-back mismatches fail naming the step and printing no value; configuration precedes code; the summary leads with evidence.
     verification_step: 1
     test_selector: tests/ci/test_telemetry_content_deploy_script.py
     red_green_expectation: red before, green after
@@ -458,7 +484,7 @@ test_obligations:
     test_selector: tests/ci/test_telemetry_content_record.py
     red_green_expectation: red before, green after
   - source: scripts/ci/deploy_gate.py
-    behavior: telemetry-content resolves its own function and pathspecs; an unknown channel raises; a shared-module change gives no_source_change and a masking change gives source_changed.
+    behavior: telemetry-content resolves its own function and pathspecs; an unknown channel raises; a shared-module change gives no_source_change and a masking change gives source_changed; a single-function channel emits record_sha and record_code_sha256, an absent record emits them empty.
     verification_step: 1
     test_selector: tests/ci/test_deploy_gate.py
     red_green_expectation: red before (the channel falls through to prod), green after
@@ -495,6 +521,7 @@ constraints:
   - "The deploy job holds the locked role only for aws calls in telemetry_content_deploy.sh: no repo Python, no pip, no third-party action other than the SHA-pinned checkout, download-artifact and configure-aws-credentials."
 context:
   - "Decision-scout r1 FLAGS_FOUND (NOTEs: 249 SPIRIT on the protective-set pathspecs -> the new Decision amends 249 cl.2 for this channel; 232/NS.9 SPIRIT -> the summary leads with intent and evidence). r2 FLAGS_FOUND (NOTEs: Decision 267's lock-available condition fires when this closes rec-4696 -> rec-5323 re-decides 267 cl.5; Decision 181 cl.2 residual owners -> rec-5322 named in the Decision and followon_recs). Spirit flags: none at r2. Decisions triaged: 219 of 219. Roadmap items intersected: 10; CONFLICT: 0; RELATED: 10. Serves: NS.9 4/5. CITE: 239, 270, 249, 254, 154, 125, 126, 79, 238, 232."
+  - "Decision-scout r3 FLAGS_FOUND (r1 and r2 flags resolved; one new NOTE: 232 SPIRIT, github_ci_branch can write deploy-records/telemetry-content/, so a forged record could make the approval summary under-list what ships -> the build proves the recorded commit builds the recorded digest and the deploy step proves the live CodeSha256 equals the record before any change, with a rebaseline dispatch as the recovery). Decisions triaged: 219 of 219. Roadmap items intersected: 10; CONFLICT: 0; RELATED: 10. Serves: NS.9 4/5. CITE: 239, 270, 249, 254, 154, 125, 126, 79, 238, 232, 246, 267."
   - "Operator rulings 2026-11-17 (this planning thread): the split into plan A (this) and plan B (rec-5322: protected-path edit hook, golden masked read-back leg); the channel asks only when the protective set changes or on a deliberate dispatch (his words: the daily asks would be ceremony); 'write the plan' 19:47Z. Blind Fable consult: /mnt/project-files/content-reader-lock/advisor-brief-plan2/ (adopted: 249 gate, record via the CI deploy role, pinned layers, no invoke, narrow watched set)."
   - "Live grants read at planning (main 163d90b1): telemetry-content-deploy holds GetFunction/GetFunctionConfiguration/UpdateFunctionCode/UpdateFunctionConfiguration on the function and GetLayerVersion on both layers (terraform/bootstrap/telemetry_content_deploy_role.tf); its trust names deploy-telemetry-content.yml@refs/heads/main and the Environment sub; github_ci_branch's S3ReadWrite (bucket/*) covers the gate's read of deploy-records/telemetry-content/; the execution role already reads the data and blob prefixes and the reader DSN parameter. Whether a run waiting on Environment approval holds the workflow concurrency group is UNPROVEN; VP 9's first run shows it."
   - "Bootstrap apply is red on main since #2076 (Access Analyzer preview, unowned per the coordinator 2026-11-17); this plan changes no bootstrap file. The sandbox apply was green on ddb28a40."
@@ -509,6 +536,9 @@ context:
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:d9d6ce8b3bc9ccdc230cbe0f7e6d584cd703d11b06713a1c8fb373cc36a8b46b'}  # pragma: allowlist secret
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:a15caee1aad2ff925dc6dd2e60fbf4050840193d8e60116e3643ed878a73e501'}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:ec2261b10f09636dd516264c5eeba11bee9f56ab19231551cf00e29151a3a7d9'}  # pragma: allowlist secret
+  - {gate: wording-check, round: 1, verdict: FAIL, digest: 042b3d268505bce0bb048131795934e2d1b7420b6aa23bd3c007796f5cd13392, base: 163d90b12426a7e978e3f88fbdd2ee941db973f5, selection: complete}  # pragma: allowlist secret
+  - {gate: wording-check, round: 2, verdict: PASS, digest: 1f8c2fd943933c49f6049fa0fe80a6c075e850a35e3686d0079f03fe0da906fa, base: 163d90b12426a7e978e3f88fbdd2ee941db973f5, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
