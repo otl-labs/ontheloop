@@ -93,7 +93,7 @@ class _Run:
         ]
         self.tools: list[dict[str, Any]] = [read_input.tool_spec(loaded.blob_names)] if loaded.blob_names else []
         self.bridge: Any = None
-        self.bridge_errors: tuple[type[Exception], ...] = ()
+        self.bridge_errors: tuple[type[BaseException], ...] = ()
         self.deadline = 0.0
         self.emit(head)
 
@@ -272,11 +272,12 @@ class _Run:
         self, result: Any, probe: int, started: int, returned: int, common: dict[str, Any]
     ) -> dict[str, Any] | None:
         texts: list[str] = []
-        problem: Exception | None = None
+        problem: BaseException | None = None
+        tool_errors: tuple[type[BaseException], ...] = (asyncio.TimeoutError, *self.bridge_errors)
         try:
             for call in result.tool_calls:
                 texts.append(await self.tool_text(call))
-        except (asyncio.TimeoutError, *self.bridge_errors) as exc:
+        except tool_errors as exc:
             problem = exc
         self.transport_turn(
             result.attempts,

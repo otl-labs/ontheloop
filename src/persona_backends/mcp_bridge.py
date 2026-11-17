@@ -15,6 +15,7 @@ import anyio
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 from mcp.shared.exceptions import MCPError
+from mcp.types import TextContent
 
 from src.persona_backends.read_input import READ_CAP_BYTES
 
@@ -68,7 +69,7 @@ class Bridge:
             result = await self._session.call_tool(name, arguments)
         except Exception as exc:  # intentionally broad: any session-level failure is class-only
             raise BridgeFailed(type(exc).__name__) from exc
-        text = "\n".join(part.text for part in result.content if getattr(part, "type", None) == "text")
+        text = "\n".join(part.text for part in result.content if isinstance(part, TextContent))
         return _cut(f"error: {text}" if result.is_error else text)
 
 
