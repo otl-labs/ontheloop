@@ -143,3 +143,41 @@ class TestGatedEntryInputClosures:
             "scripts/checks/_common.py",
             "scripts/checks/registry.py",
         } <= self._globs("validate_actions_sha_pinned")
+
+    def test_persona_github_agnosticism_entry_closes_over_its_inputs(self) -> None:
+        """Every path the agnosticism check reads (the pin, the lock, the persona closure, the pin loader, its
+        module and the shared primitives) is in its pre_globs; unrelated paths are not."""
+        from pathlib import Path
+
+        from src.persona_hosts import load_pin
+
+        entry = next(e for e in _manifest.ENTRIES if e.name == "validate_persona_github_agnosticism")
+        assert entry.pre is True
+        assert entry.full_segment == "full_after_lint"
+        globs = self._globs("validate_persona_github_agnosticism")
+        reads = [
+            "config/persona_image.yaml",
+            "docker/persona/requirements-persona.txt",
+            "src/persona_backends/x.py",
+            "scripts/run_persona.py",
+            "scripts/llm/x.py",
+            "src/persona_hosts/__init__.py",
+            "src/persona_hosts/image_pin.py",
+            "scripts/checks/ci_guards/validate_persona_github_agnosticism.py",
+            "scripts/checks/_common.py",
+            "scripts/checks/registry.py",
+        ]
+        root = Path(__file__).resolve().parents[3]
+        for entry_path in load_pin(root).copy:
+            target = root / entry_path
+            py_files = [target] if target.is_file() else list(target.rglob("*.py"))
+            reads += [p.relative_to(root).as_posix() for p in py_files if p.suffix == ".py"]
+        for changed in reads:
+            assert any(fnmatch(changed, glob) for glob in globs), changed
+        assert not any(fnmatch("README.md", glob) for glob in globs)
+
+    def test_persona_image_digest_entry_is_ungated(self) -> None:
+        entry = next(e for e in _manifest.ENTRIES if e.name == "validate_persona_image_digest")
+        assert entry.pre is True
+        assert entry.pre_globs is None
+        assert entry.full_segment == "full_after_lint"

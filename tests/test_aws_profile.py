@@ -16,10 +16,11 @@ _CREDENTIAL_ENV_KEYS = ("AWS_ACCESS_KEY_ID", "AWS_LAMBDA_FUNCTION_NAME", "AWS_PR
 
 
 def _env(**overrides: str) -> dict[str, str]:
-    """A copy of os.environ with the credential-signal keys cleared, plus overrides."""
+    """A copy of os.environ with the credential-signal keys cleared, the shared config emptied, plus overrides."""
     base = dict(os.environ)
     for key in _CREDENTIAL_ENV_KEYS:
         base.pop(key, None)
+    base["AWS_CONFIG_FILE"] = os.devnull
     base.update(overrides)
     return base
 
@@ -66,6 +67,14 @@ def _with_config(tmp_path, text: str | None, **overrides: str) -> dict[str, str]
     return _env(AWS_CONFIG_FILE=str(path), **overrides)
 
 
+def test_returns_none_when_oidc_env_credentials_present_with_host_config(tmp_path):
+    """_env shields the host's shared config: a self-sufficient HOME profile cannot leak into the OIDC case."""
+    (tmp_path / ".aws").mkdir()
+    (tmp_path / ".aws" / "config").write_text(_SELF_SUFFICIENT, encoding="utf-8")
+    with mock.patch.dict(os.environ, _env(HOME=str(tmp_path), AWS_ACCESS_KEY_ID="AKIAEXAMPLE"), clear=True):
+        assert resolve_aws_profile(default="agent_platform") is None
+
+
 def test_proxy_placeholder_env_credentials_keep_a_self_sufficient_profile(tmp_path):
     for akid in ("proxy-injected", "any-other-placeholder"):
         with mock.patch.dict(os.environ, _with_config(tmp_path, _SELF_SUFFICIENT, AWS_ACCESS_KEY_ID=akid), clear=True):
@@ -103,7 +112,9 @@ def test_name_precedence_is_checked_against_the_config_under_env_credentials(tmp
 def test_config_defaults_to_the_home_file_and_an_unreadable_path_counts_as_absent(tmp_path):
     (tmp_path / ".aws").mkdir()
     (tmp_path / ".aws" / "config").write_text(_SELF_SUFFICIENT, encoding="utf-8")
-    with mock.patch.dict(os.environ, _env(HOME=str(tmp_path), AWS_ACCESS_KEY_ID="proxy-injected"), clear=True):
+    env = _env(HOME=str(tmp_path), AWS_ACCESS_KEY_ID="proxy-injected")
+    env.pop("AWS_CONFIG_FILE", None)
+    with mock.patch.dict(os.environ, env, clear=True):
         assert resolve_aws_profile() == "agent_platform"
     with mock.patch.dict(os.environ, _env(AWS_CONFIG_FILE=str(tmp_path), AWS_ACCESS_KEY_ID="proxy-injected"), clear=True):
         assert resolve_aws_profile() is None
