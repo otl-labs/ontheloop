@@ -1,0 +1,400 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: rec-provenance-column-add
+intent: >-
+  Add provenance_json to ops_recommendations: a nullable per_write VARCHAR column whose contract declares a dated
+  json_object leg (schema_version 1, 4096 bytes, closed key set), projected into field_semantics.yaml, physically added
+  by the admin-tier reconcile_columns action, and proven on the first serving deploy by two new --lambda-row-rules
+  vectors. Plan C2 of the rec write-path data-quality series (C1 rec-provenance-shape-check shipped the writer check and
+  the per_write attribute); it gives plan D a declared column to fill. Serves NS.5 (a data rule is enforced at the
+  write boundary wherever the write can decide it).
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-rec-provenance-column-add.yaml
+phase: >-
+  ad_hoc_rec (soft-warn exception category; no tier_item claimed, so the Tier Item Freshness Gate is skipped). Operator
+  work item from the 2026-11-12 rec read/write audit and the 2026-11-16 consult (plan C of the B-F brief, split C1/C2
+  on a blind Fable consult; C1 merged #2123, built #2145, deployed run 44153472191). Relates to T2.29 c4 (cited).
+  Decision 79 makes it V3 (field_semantics.yaml is in every DuckLake Lambda package), met by steps 6-9.
+closes_criteria: []
+amends: []
+cites: [dec:64, dec:79, dec:81, dec:126, dec:143, dec:210]
+scope:
+  - file: docs/contracts/ops_recommendations.yaml
+    action: Modify
+    purpose: |-
+      Operator-approved words (context item 1); nothing else in the file changes.
+      Part 1: this field, inserted immediately before _contract_version (<build UTC date> is the build commit's UTC
+      date, the same in part 3):
+        provenance_json:
+          type: str
+          iceberg_type: string
+          nullable: true
+          per_write: true
+          description: >-
+            How this row version was written, as a JSON object: the writing client and its commit, whether that checkout had
+            uncommitted changes, the rule set and each write-path check with its outcome, and optionally the inputs the
+            client scored risk from. NULL when the client sent none.
+          semantics: >-
+            Describes the write that produced this row version, never the recommendation. per_write: a portal update path
+            never carries it forward from the prior row, so an update that sends none stores NULL; the writer stores what it
+            is sent and checks only its shape (json_object). The key set is closed per schema_version; once declared, a
+            version never changes and max_bytes never shrinks, so a new key set is a new schema_version. No producer emits it
+            yet: the plan that makes the portal fill it defines ruleset_version's value and the risk keys' sources and adds a
+            dated not_null leg.
+          populated_by: Caller-supplied on file_rec and update_rec (scripts/ops_data_portal.py); no producer emits it yet.
+          dq_intent:
+            json_object:
+              max_bytes: 4096
+              exclude_before: "<build UTC date>"
+              versions:
+                1:
+                  required:
+                    schema_version: integer
+                    client: string
+                    client_commit: string
+                    client_dirty: boolean
+                    ruleset_version: string
+                    checks: {map: {key_pattern: '^[a-z][a-z0-9_]{0,63}$', values: [pass, fail, advisory, skipped]}}
+                  optional:
+                    risk_formula_version: string
+                    file_exists_at_commit: boolean
+                    complexity_fallback: boolean
+                    effort_fallback: boolean
+                    coverage_present: boolean
+                    ceiling_fallback: boolean
+                    boundary_match: boolean
+                    empty_file_fallback: boolean
+                    complexity_max: number
+                    effort_scale: number
+                    risk_raw: number
+                    maturity_ceiling: number
+                    coverage_line_rate: number?
+      Part 2: the header comment "(25 columns + _contract_version = 26 total)" becomes "(26 columns +
+      _contract_version = 27 total)" and the description's "26 fields: 25 from the live" becomes "27 fields: 26 from
+      the live".
+      Part 3: this row, appended as the last entry of the table-level amendment_log:
+        - {date: "<build UTC date>", semantic_break: false, change_class: field_add, summary: "PLAN-rec-provenance-column-add: add provenance_json, a nullable per_write VARCHAR column with a dated json_object leg (schema_version 1, 4096 bytes). No not_null leg yet; no column removed or retyped.", migration_story: "Additive: every existing row reads NULL, which the leg admits. The physical column lands through the maintenance function's reconcile_columns (listed in pending_reconcile until then, which holds the serving deploy); the plan that makes the portal fill the column adds a dated not_null leg."}
+      Part 4 (structural relief: the file is 554 of its 556-line budget): rewrite block-style amendment_log rows,
+      oldest first, as one-line flow mappings until the file is at most 556 effective lines; each row's parsed value
+      stays identical (step 1 asserts it).
+  - file: docs/contracts/data-modeling-standard.yaml
+    action: Modify
+    purpose: >-
+      Operator-approved words (context item 1), rule write-time-enforcement only, the text half of rec-5281. Part 1
+      (DECLARATIONS): "so a new field on an existing SCD2 contract is nullable with a dated not_null." becomes "so a new
+      field on an existing SCD2 contract is nullable and any not_null leg it carries is dated; a per_write column
+      (nullable, never derived) is never carried forward from the prior row by a portal update path, and the writer
+      stores what it is sent." Part 2 (RATCHET), after "adding or removing advisory: true on a leg needs a semantic-break
+      entry": "; a json_object leg, which the census cannot check, changes only by an added schema_version or a larger
+      max_bytes, and its date never moves earlier (any other change is a temporary exemption, the drop, then a new dated
+      leg)". Part 3 (COVERAGE), after "with rec-4166's monitor a backstop;": " the json_object shape leg -> the ops
+      writer (check_json_objects), proven by its unit tests and the --lambda-row-rules gate, the portal running it as
+      the insert pre-check;". Part 4: amendment row first in amendment_log: {date: "<build UTC date>",
+      semantic_break: true, change_class: governance_note_add, summary: "PLAN-rec-provenance-column-add (rec-5281 text
+      half): rule write-time-enforcement states the json_object leg's ratchet and coverage and the per_write column
+      attribute; a new field's not_null leg, when it has one, is dated."}. Nothing else changes.
+  - file: config/lambda/ducklake/field_semantics.static.yaml
+    action: Modify
+    purpose: >-
+      contract_table_ops.ops_recommendations: migration_columns history and current each gain "provenance_json: {role:
+      input, sql_type: VARCHAR, nullable: true}" after context_v2_json; pending_reconcile history and current become
+      [provenance_json] (the merge-time gate requires it; the deploy gate holds serving until the bookkeeping PR).
+  - file: config/lambda/ducklake/field_semantics.yaml
+    action: Modify
+    purpose: Regenerated by bin/venv-python -m scripts.schema_to_field_semantics; never hand-edited.
+  - file: scripts/ducklake_smoke/lambda_ops_gates.py
+    action: Modify
+    purpose: >-
+      ROW_RULES_CASES gains ("json_object", {"provenance_json": '{"schema_version": 1}'}, "provenance_json") (required
+      keys missing). A per-write probe inside lambda_row_rules on its own test-pw- key: write_ops ROW_RULES_BASE plus a
+      valid v1 value, read_ops_current must return that value, then update_ops to status closed with a resolution and no
+      provenance_json, and read_ops_current must return provenance_json null. The OK line names both; a FAIL message
+      names the step and never echoes a row (rec-4409).
+  - file: tests/ducklake_neon_smoke_test/test_lambda_ops_gates.py
+    action: Modify
+    purpose: >-
+      The scripted transport answers the probe key; new nodes test_lambda_row_rules_per_write_probe_ok,
+      test_per_write_probe_fails_when_value_not_stored, test_per_write_probe_fails_when_update_keeps_value; existing
+      nodes adjust their write_ops and update_ops counts to the probe.
+  - file: tests/common/test_ducklake_write_rules.py
+    action: Modify
+    purpose: >-
+      test_row_rule_gate_cases_trip_their_rule's pinned list gains json_object; test_json_object_spec_built_from_projected_leg
+      asserts set(json_object_columns(SPEC.fields)) == {"provenance_json"} (was == {}).
+  - file: tests/test_contract_rules.py
+    action: Modify
+    purpose: test_ops_recommendations_declares_its_rule_list's expected map gains provenance_json's json_object leg and date.
+  - file: tests/test_schema_to_field_semantics.py
+    action: Modify
+    purpose: test_ops_recommendations_columns_present asserts provenance_json in cols and 27 columns (in place; file 498 of 500 SLOC).
+  - file: tests/checks/ops_governance/test_validate_reconcile_pending_gate.py
+    action: Modify
+    purpose: >-
+      test_pending_reconcile_map_real asserts _blocking_tables == ["ops_recommendations"] and its pending sides name
+      provenance_json (in place; file 500 of 500 SLOC: no net line). The bookkeeping PR restores the empty assertion.
+bundled_recommendations: []
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - >-
+    ops_recommendations.yaml declares provenance_json exactly as its scope row gives it, the field count reads 27, the
+    amendment row is present, every compacted amendment row parses to its prior value, and the file is within its
+    structural budget; data-modeling-standard.yaml carries exactly parts 1-4 of its scope row.
+  - >-
+    field_semantics.yaml is the generator's output: ops_recommendations has 27 columns and provenance_json projects
+    per_write true, the json_object leg and exclude_before.json_object; the static sidecar lists provenance_json in
+    migration_columns and pending_reconcile on both sides.
+  - >-
+    The writer's rule engine, built from the repo projection, refuses a provenance_json missing required keys with rule
+    json_object on column provenance_json, and the rule source, conformance, census, ratchet and structural checks pass.
+  - >-
+    Before the reconcile, the deploy gate refuses the serving deploy naming ops_recommendations and ci-rca files no
+    fresh critical for it (designed refusal); after the operator's reconcile_columns response lists provenance_json in
+    added_history and added_current and the bookkeeping PR merges, the serving deploy and every smoke job are green and
+    --lambda-row-rules reports 6 cases plus the per-write probe.
+  - The reader returns provenance_json as null for an existing rec after the serving deploy.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: >-
+      Contract to projection: the declared rule list, the column count, per_write projection, the repo spec's
+      json_object column, the generator drift check, and every compacted amendment row parsing to its base value.
+    command: >-
+      bin/venv-python -m pytest -q
+      tests/test_contract_rules.py::test_ops_recommendations_declares_its_rule_list
+      tests/test_schema_to_field_semantics.py::TestGenerateIntegration::test_ops_recommendations_columns_present
+      tests/test_schema_to_field_semantics_columns.py::test_projected_per_write_equals_contract_declared
+      tests/common/test_ducklake_write_rules.py::test_json_object_spec_built_from_projected_leg
+      tests/common/test_ducklake_write_rules.py::test_row_rule_gate_cases_trip_their_rule
+      && bin/venv-python -m scripts.schema_to_field_semantics --check
+      && bin/venv-python -c "import subprocess,yaml;p='docs/contracts/ops_recommendations.yaml';
+      b=yaml.safe_load(subprocess.run(['git','show','origin/main:'+p],capture_output=True,text=True,check=True).stdout);
+      h=yaml.safe_load(open(p));fl=lambda d:[e for e in d.get('amendment_log',[])]+[e for f in d['fields'].values() for e in f.get('amendment_log',[])];
+      new=[e for e in fl(h) if e not in fl(b)];assert all(e in fl(h) for e in fl(b));assert len(new)==1,new;print('AMENDMENTS_PRESERVED')"
+    expected: Every selected test passed, the generator reports no drift, then AMENDMENTS_PRESERVED.
+    fix_if: >-
+      Never hand-edit field_semantics.yaml; a compacted row that no longer parses to its base value is restored, not
+      re-baselined.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      The nodes are existing registered tests updated in place and run by every fast tier that selects these files; the
+      amendment comparison reads origin/main, which a graduated replay cannot pin.
+  - step: 2
+    phase: pre-deploy
+    action: The --lambda-row-rules gate's new json_object case and per-write probe on a scripted transport.
+    command: >-
+      bin/venv-python -m pytest -q
+      tests/ducklake_neon_smoke_test/test_lambda_ops_gates.py::test_lambda_row_rules_ok
+      tests/ducklake_neon_smoke_test/test_lambda_ops_gates.py::test_lambda_row_rules_per_write_probe_ok
+      tests/ducklake_neon_smoke_test/test_lambda_ops_gates.py::test_per_write_probe_fails_when_value_not_stored
+      tests/ducklake_neon_smoke_test/test_lambda_ops_gates.py::test_per_write_probe_fails_when_update_keeps_value
+    expected: Every selected test passed.
+    fix_if: Fix the gate, never the assertion; a FAIL message must not echo a row (rec-4409).
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: row-rules-gate-per-write-probe
+  - step: 3
+    phase: pre-deploy
+    action: >-
+      The merge-time reconcile gate accepts the added column with its pending entry, and the deploy gate refuses while it
+      is pending.
+    command: >-
+      bin/venv-python -m pytest -q
+      tests/checks/ops_governance/test_validate_reconcile_pending_gate.py::TestRealRepoIntegration::test_pending_reconcile_map_real
+      && bin/venv-python -m scripts.checks.ops_governance.validate_reconcile_pending_gate;
+      bin/venv-python -m scripts.checks.ops_governance.validate_reconcile_pending_gate --deploy-gate; test $? -ne 0 && echo DEPLOY_GATE_HOLDS
+    expected: The test passed, the merge-time check exits 0, the deploy gate exits non-zero naming ops_recommendations, then DEPLOY_GATE_HOLDS.
+    fix_if: A merge-time failure means the pending entry or migration_columns row is missing; fix the sidecar.
+    hermetic: false
+    graduation: not-applicable
+  - step: 4
+    phase: pre-deploy
+    action: >-
+      Fast presubmit, then the full tier before handoff, started backgrounded with a 2 h limit from the top-level
+      session; its verdict is validation_result --verify-head, never a pipe's exit status.
+    command: >-
+      bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.validate && bin/venv-python -m
+      scripts.checks.validation_result --verify-head
+    expected: Both tiers exit 0 and --verify-head confirms a PASS recorded for the current HEAD.
+    fix_if: Fix each failure at root cause on the branch and re-run from the start (Decision 55; timeout_disposition blocked).
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      Graduating it would invoke scripts.validate recursively; PR CI runs the fast tier on every push and main runs the
+      full tier after merge.
+  - step: 5
+    phase: post-deploy
+    action: >-
+      The merge's governed deploy run (first deploy-ducklake-lambdas run whose gate sha is $MERGE_SHA or a first-parent
+      descendant, jobs saved to $DEPLOY_JOBS_JSON): the maintenance functions ship the new projection and the serving
+      deploy is refused by design. Then confirm ci-rca filed no fresh critical for that run (ci_rca_open read).
+    command: >-
+      test -s "$DEPLOY_JOBS_JSON" && bin/venv-python -c "import json,os;j=json.load(open(os.environ['DEPLOY_JOBS_JSON']));
+      jobs={x['name']:x.get('conclusion') for x in (j.get('jobs') if isinstance(j,dict) else j)};print(jobs);
+      assert jobs.get('deploy-maintenance')=='success' and jobs.get('reconcile-gate')=='failure',jobs;
+      assert jobs.get('deploy-serving') in ('skipped',None),jobs;print('HELD_AS_DESIGNED')"
+    expected: deploy-maintenance success, reconcile-gate failure, deploy-serving skipped, then HELD_AS_DESIGNED.
+    fix_if: >-
+      A red deploy-maintenance or maintenance-smoke is root-caused and fixed forward before the admin step (Decision 55).
+      A fresh critical ci-rca rec for the designed refusal is a designed_refusal predicate defect: report it, do not close it by hand.
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: post-deploy
+    action: >-
+      ADMIN STEP (operator only, on his own words naming it; Decisions 126, 143): from AWS CloudShell, invoke
+      reconcile_columns on the deployed maintenance function with the block in execution step 6. The operator pastes the
+      response; save it to $RECONCILE_JSON.
+    command: >-
+      bin/venv-python -c "import json,os;r=json.load(open(os.environ['RECONCILE_JSON']));b=r.get('body',r);
+      b=json.loads(b) if isinstance(b,str) else b;print(b);assert b.get('ok') is True and b.get('table')=='ops_recommendations';
+      assert 'provenance_json' in b['added_history'] and 'provenance_json' in b['added_current'],b;print('RECONCILED')"
+    expected: The response is ok for ops_recommendations and names provenance_json in added_history and added_current, then RECONCILED.
+    fix_if: >-
+      columns_pre_existing true on both sides with empty added lists means it was already added (idempotent re-run):
+      record that response instead. A 500 is reported to the operator verbatim; never retried autonomously.
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: post-deploy
+    action: >-
+      Bookkeeping PR (does not declare this plan; static sidecar plus one test line): provenance_json moves from
+      pending_reconcile to reconciled on both sides with {at: <UTC date>, evidence: the step 6 response body}, and
+      test_pending_reconcile_map_real asserts the empty map again. Merge on green.
+    command: >-
+      bin/venv-python -m scripts.checks.ops_governance.validate_reconcile_pending_gate --deploy-gate && bin/venv-python -m
+      pytest -q tests/checks/ops_governance/test_validate_reconcile_pending_gate.py::TestRealRepoIntegration::test_pending_reconcile_map_real
+    expected: The deploy gate exits 0 (nothing pending) and the test passed.
+    fix_if: Evidence must be the response body verbatim; never clear pending_reconcile without it.
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: post-deploy
+    action: >-
+      The bookkeeping merge's governed deploy run (jobs to $DEPLOY_JOBS_JSON, smoke job log to $SMOKE_LOG): every deploy
+      and smoke job green, and the row-rules gate reports the new case and the per-write probe.
+    command: >-
+      bin/venv-python -c "import json,os;j=json.load(open(os.environ['DEPLOY_JOBS_JSON']));
+      jobs={x['name']:x.get('conclusion') for x in (j.get('jobs') if isinstance(j,dict) else j)};
+      want=['deploy-maintenance','maintenance-smoke','reconcile-gate','deploy-serving','smoke','deploy-telemetry'];
+      assert all(jobs.get(w)=='success' for w in want),jobs;print('DEPLOY_OK')" && grep -E
+      "LAMBDA_ROW_RULES OK 6 cases.*per_write probe" "$SMOKE_LOG" && echo ROW_RULES_GATE_OK
+    expected: DEPLOY_OK, the gate's OK line with 6 cases and the per_write probe, then ROW_RULES_GATE_OK.
+    fix_if: >-
+      A red job is root-caused and fixed forward, never re-run to green (Decision 55). A telemetry red attributable to
+      rec-5247 is reported to the coordinator with the run id and is not fixed in this plan.
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: post-deploy
+    action: The reader returns the new column for an existing rec, empty.
+    command: >-
+      bin/venv-python -c "from src.common import ducklake_reader_client as rc;rows,_=rc.fetch_recs_by_ids(rc.make_reader(),['rec-5281']);
+      assert rows and 'provenance_json' in rows[0] and rows[0]['provenance_json'] is None,rows[0].keys();print('READER_SEES_COLUMN')"
+    expected: READER_SEES_COLUMN
+    fix_if: A missing key means the reconcile or the serving deploy did not land; re-check steps 6-8.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: scripts/ducklake_smoke/lambda_ops_gates.py
+    behavior: The row-rules gate refuses a malformed provenance_json and proves a per-write update stores NULL.
+    verification_step: 2
+    test_selector: tests/ducklake_neon_smoke_test/test_lambda_ops_gates.py::test_lambda_row_rules_per_write_probe_ok
+    red_green_expectation: red before (no probe), green after
+constraints:
+  - Never hand-edit config/lambda/ducklake/field_semantics.yaml; regenerate it.
+  - >-
+    The ops_recommendations.yaml and data-modeling-standard.yaml words are exactly the scope rows' parts; any other
+    change to either file needs the planner (plan amendment) and a fresh operator message.
+  - The admin step runs only on the operator's own words naming it; an agent never invokes the maintenance function.
+  - No rescue agents or workaround loops (Decision 55); no break-glass deploy to escape the hold.
+context:
+  - >-
+    1. Approval route (operator card 2026-11-17 19:39 UTC): the two contract files' words ride the operator's own
+    message naming them at build merge (Decision 246 cl.4), as plans rec-dependency-existence-at-writer and
+    rec-lints-advisory did; record its message id in the PR body. No sidecar: the column add must change four pinned
+    tests in the same commit and a sidecar's words must pass the fast tier alone (gap rec-5319; #2071 makes both
+    files notice class).
+  - >-
+    2. Merging holds every writer, reader, catalog-dr and production telemetry deploy (all projects) until the
+    bookkeeping PR (execution step 4); keep the window short. The ducklake_code_drift sensor may file a High rec while
+    serving is held: the reminder, not a red.
+  - >-
+    3. Window residual: after the reconcile the old reader returns provenance_json; a checkout older than this merge
+    sends it back on update_rec and the old writer refuses the unknown field. Post-merge checkouts strip it (per_write,
+    C1); sessions rebase onto main before writing recs in that window.
+  - >-
+    4. Decision 63 (scout NOTE): provenance describes the write itself, written in the same row and transaction and
+    never edited, not denormalised execution state; telemetry records sessions, not this write. Decision 222's
+    objection to an unchecked JSON column does not apply: C1's leg checks it at write.
+  - >-
+    5. Not taken: a writer-clock key (written_at) needs a new leg type; plans E and F own the stale-value residual.
+    rec-5299 (non-finite numbers) goes to plan D, the first emitter. rec-5302 does not bite (the leg is dated). Data
+    model: grain unchanged; the value describes its history row.
+  - >-
+    Decision-scout verdict + CITE list: r1 FLAGS_FOUND, CITE 64, 79, 81, 126, 143, 210 (roadmap CITE T2.29); NOTE 246
+    resolved by the operator's card (item 1); NOTE 63 answered in item 4. Decisions triaged: 219 of 219. Roadmap items
+    intersected: 10; CONFLICT: 0; RELATED: 9. Serves: NS.5 4/5.
+  - >-
+    red_overlap 2026-11-17: blocked by rec-5247 (Critical, SLO breached, no shared files, Feedback Loop's); deferred.
+    The build re-runs it; a telemetry red from rec-5247 in VP step 8 is reported with the run id, never fixed here.
+  - >-
+    Overlaps: unbuilt billing-shape-local, merge-annotate-contract-reader, scheduled-workflow-dispatch and
+    telemetry-claude-p-capture-adapter also regenerate field_semantics.yaml (second to build rebases). Kept shards:
+    ops-contract-rule-table, ops-row-rules-ratchet, write-time-enforcement-advisory-decision, ops-json-object-writer,
+    ops-row-rules-writer, ops-dependency-reference-projection, ops-row-rules-wiring,
+    row-rules-gate-refuses-dormant-tables, reconcile-pending-gate-unit-tests, reconcile-gate-knows-control-class,
+    telemetry-production-column-hold, telemetry-writer-smoke-gate, field-semantics-event-dispatch,
+    field-semantics-reconcile-scope-subset-rejection, maintenance-policy-matrix-reaches-lambda-asset,
+    control-class-registry-projection.
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:6b7b8962c202eae75d0e6db26abbff605a876640eeea4f444a09a3425880eced"}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Decisions 64, 79, 81, 126, 143, 210 and 246 cl.4 read
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - >-
+    1. Static sidecar (scope row 3), then the contract (scope row 1, parts 1-4) and data-modeling-standard.yaml (scope
+    row 2, parts 1-4) word for word; regenerate field_semantics.yaml with bin/venv-python -m
+    scripts.schema_to_field_semantics. Post: --check reports no drift; the structural-size check passes for both
+    contract files.
+  - >-
+    2. Tests (scope rows 7-10) in place, then the smoke gate (scope rows 5-6). Post: VP steps 1-3 pass; the pinned
+    list in test_row_rule_gate_cases_trip_their_rule now ends with json_object.
+  - >-
+    3. VP step 4 (fast tier, then full tier backgrounded with a 2 h limit; verdict from validation_result
+    --verify-head). Code review per the implement skill; flip implementation_declared in this PR.
+  - >-
+    4. Open the build PR (title feat(rec-provenance-column-add): ...). Merge ONLY after: green CI, code review PROCEED,
+    the operator's own message naming the ops_recommendations.yaml and data-modeling-standard.yaml edits (record its
+    message id in the PR body), and his word that he is ready at CloudShell. Immediately before merging, post a
+    coordinator-log entry on issue #1963: the merge holds writer, reader, catalog-dr and production telemetry deploys
+    for every project until the bookkeeping PR. Squash-merge; MERGE_SHA = the squash commit.
+  - >-
+    5. VP step 5 on the merge's deploy run.
+  - >-
+    6. Admin step: post this block for the operator and wait for his words naming the reconcile_columns step; he runs
+    it in AWS CloudShell (eu-west-2) and pastes the output, which is VP step 6's input. Never invoke it from a session.
+    aws lambda invoke --function-name agent-platform-ducklake-maintenance --region eu-west-2
+    --cli-binary-format raw-in-base64-out --payload
+    '{"action":"reconcile_columns","data_path":"s3://agent-platform-data-lake/ducklake/","meta_schema":"ducklake_ops","table":"ops_recommendations"}'
+    /tmp/reconcile.json && cat /tmp/reconcile.json
+  - >-
+    7. Bookkeeping PR (VP step 7): branch from main, move provenance_json from pending_reconcile to reconciled on both
+    sides of contract_table_ops.ops_recommendations with {at, evidence: the response body verbatim} (the 2026-07-26
+    ops_decisions intent entry is the shape), and restore test_pending_reconcile_map_real's empty assertion. It does
+    not touch this plan file. Merge on green; that merge's deploy run ships the held functions.
+  - >-
+    8. VP steps 8 and 9. If the ducklake_code_drift sensor filed a High rec during the hold, confirm it closed after the
+    serving deploy (or close it with the run id as evidence).
+  - >-
+    9. Execute Verification Plan -- run each step; loop until pass; on unrecoverable V3 failure stop and RCA
+    (Decision 55).
+  - '10. Report: what was implemented, the reconcile response, the deploy run ids and verification results.'
