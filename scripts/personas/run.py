@@ -21,6 +21,7 @@ VERBS = {
     "materialise": "materialise",
     "execute": "execute",
     "post": "post_verdict",
+    "wake": "wake",
 }
 EXIT_SNAPSHOT_ON_PATH = 3
 
