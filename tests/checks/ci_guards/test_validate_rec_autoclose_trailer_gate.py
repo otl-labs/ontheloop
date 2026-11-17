@@ -136,7 +136,8 @@ class TestAcceptanceGateAssertions:
     def test_evaluator_job_fails_when_it_gains_id_token(self) -> None:
         sources = _real_sources()
         sources[_CI_WORKFLOW_PATH], count = re.subn(
-            r"(timeout-minutes: 30\n    permissions:\n      contents: read\n)(    steps:\n      - uses: actions/checkout@\S+[^\n]*\n"
+            r"(timeout-minutes: 30\n    permissions:\n      contents: read\n)"
+            r"(    steps:\n      - uses: actions/checkout@\S+[^\n]*\n"
             r"        with:\n          persist-credentials: false)",
             r"\1      id-token: write\n\2",
             sources[_CI_WORKFLOW_PATH],
