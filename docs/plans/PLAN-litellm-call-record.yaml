@@ -25,7 +25,8 @@ plan_path: docs/plans/PLAN-litellm-call-record.yaml
 phase: >-
   T4.32 c1 (telemetry leg, part; plan 3a of rec-4028's split); closes no criterion. T4.32 is in_progress, and plan 1
   (PLAN-run-persona-litellm-backend) is merged and built (#2132, eed2f6e4). scripts/llm/ is in no Lambda bundle, and the
-  data-pipeline manifest excludes src/turn_capture and src/persona_backends, so nothing deploys (V2).
+  data-pipeline manifest excludes src/turn_capture and src/persona_backends, so nothing deploys (V2). closes_criteria
+  is [] because c1 has unbuilt legs (3b, the fixture run), so naming T4.32:c1 would be false.
 closes_criteria: []
 cites: [dec:166, dec:173, dec:199, dec:246]
 scope:
@@ -51,9 +52,11 @@ scope:
         guaranteed (e.g. default's prompt_tokens_details.cached_tokens) reads 0 and is not named.
       - A structural 0 is never named. A difference below 0 is 0, and its class is named.
       - reasoning_tokens is the provider's count (deepseek) or None, never LiteLLM's local estimate.
-      - Each split value is None when absent, and None when above tokens_cache_creation, by calling
-        src/turn_capture/usage.py's existing at_most guard (_split, or a public helper split out of it in the same
-        module if its signature does not fit), so the 1h/5m rule has one implementation in src/turn_capture.
+      - Each split value is None when absent, and None when above tokens_cache_creation. The guard is a few local
+        lines with the same semantics as src/turn_capture/usage.py _split, never an import of usage.py: that module's
+        closure brings about 20 modules (src/telemetry, src/sensitive_values with GITHUB_TOKEN string constants) into
+        scripts/run_persona.py's closure, which the persona image's agnosticism check refuses (critique r5 B1).
+      - Imports stdlib only; no src.* or scripts.* import at all.
       - Only int values count; a bool or other type is treated as missing.
   - file: scripts/llm/litellm_wire.py
     action: Modify
@@ -74,8 +77,9 @@ scope:
     purpose: >-
       Every Attempt carries the selection's provider and billing_shape and its wall-clock start, from a module-level
       _wall = time.time that tests replace; it also gives read_response its started_at_ms and responded_at_ms.
-      TransportResult gains probe_record (CallRecord | None, default None), and TransportError gains probe_record
-      (attribute, default None). A fresh cold-start probe run in this call is surfaced from both places complete and
+      TransportResult gains probe_record (CallRecord | None, default None), and TransportError (defined in
+      scripts/llm/litellm_wire.py, about :61-78) gains probe_record, set to None in its __init__ there, which the
+      transport assigns. A fresh cold-start probe run in this call is surfaced from both places complete and
       acomplete run one: the direct `role == warm_fetched_escape_hatch` ensure_asserted call before the role runs
       (litellm_transport.py about :214-215 and :248-249), and the fail-over fallback_gate. Its record is set on the
       result, or on the TransportError the call raises after the probe. A cached assertion (fresh False) sets None.
@@ -155,6 +159,11 @@ scope:
       - test_negative_difference_is_zero_and_absent.
       - test_split_above_cache_creation_is_none.
       - test_non_int_value_is_missing: a bool, float or str in a guaranteed key counts as missing.
+      - test_run_persona_closure_adds_only_litellm_usage: an AST walk of scripts/run_persona.py's static first-party
+        import closure (import and from-import of src.* and scripts.*, following packages' __init__.py) holds, under
+        src/turn_capture/, exactly src/turn_capture/__init__.py and src/turn_capture/litellm_usage.py, and nothing under
+        src/sensitive_values/ or src/telemetry/. This pins the conditional image rows' enumeration whether or not the
+        image plan has merged.
       - test_reasoning_tokens_provider_only.
   - file: tests/test_llm_litellm_robustness.py
     action: Create
@@ -216,8 +225,9 @@ scope:
       Conditional: only if PLAN-persona-image-twin has merged at build time (the file exists on origin/main). This plan
       puts src/turn_capture/litellm_usage.py into the static import closure of scripts/run_persona.py (run_persona ->
       litellm_transport -> litellm_wire -> litellm_usage), and that plan's validate_persona_github_agnosticism fails on a
-      closure module build.copy does not hold. build.copy gains src/turn_capture/__init__.py and
-      src/turn_capture/litellm_usage.py, measured from the closure. No other key changes. If the plan has not merged,
+      closure module build.copy does not hold. build.copy gains exactly src/turn_capture/__init__.py and
+      src/turn_capture/litellm_usage.py, the two files test_run_persona_closure_adds_only_litellm_usage pins. No other
+      key changes. If the plan has not merged,
       skip this row and the two below: that plan measures build.copy from the closure when it builds.
   - file: docker/persona/Dockerfile
     action: Modify
@@ -476,7 +486,8 @@ context:
     text, the failed-attempt ref grammar, the sender with the egress plan, and thinking rows as a child rec. Shared files
     with parallel plans: src/persona_backends/litellm_backend.py and events.py (plan 4, rec-5267, told 2026-11-17;
     tools_sha256 must hash the full tool list once MCP tools join it). inference-provider.yaml is also scoped by unbuilt
-    PLAN-billing-shape-local and PLAN-retire-github-pat-secret. Whichever builds second rebases. PLAN-persona-image-twin
+    PLAN-billing-shape-local and PLAN-retire-github-pat-secret, and tests/persona_backends/fakes.py by unbuilt
+    PLAN-run-persona-verdict-consistency. Whichever builds second rebases. PLAN-persona-image-twin
     (T7, building) gives the persona image its own litellm lock that Dependabot bumps apart from requirements-dev.txt;
     re-running these vectors at that lock's version is rec-5318 (filed 2026-11-17, owner the T7 image planning line). That plan's
     build.copy is measured from run_persona's closure, which this plan widens to src/turn_capture/litellm_usage.py, hence
@@ -509,6 +520,7 @@ gate_rounds:
   - {gate: wording-check, round: 4, verdict: PASS, digest: ceb9bc98ae024a0951d42c87a76d21bb89e2ffd519082b81d03f464a15d6fd7f, base: ddb28a40c5dc5d3b382ea45fa403772f8c833edf, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 6}
   - {gate: decision-scout, round: 5, verdict: NO_FLAGS, scout_input_fingerprint: "v1:977ceafed1430fa6a3c2faa13b6eafd6c1f0ff3841c9f39acf29b8ee187d9aa2"}
+  - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 4}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
