@@ -64,6 +64,7 @@ class _Run:
         clock: Callable[[], float],
         wall: Callable[[], float],
         head: dict[str, Any],
+        tools: list[dict[str, Any]],
     ) -> None:
         self.loaded = loaded
         self.blobs = {name: materialised_input[name] for name in loaded.blob_names if name in materialised_input}
@@ -81,7 +82,7 @@ class _Run:
             {"role": "system", "content": loaded.prompt},
             {"role": "user", "content": _opening(loaded, materialised_input)},
         ]
-        self.tools = [read_input.tool_spec(loaded.blob_names)]
+        self.tools = tools
         self.emit(head)
 
     def emit(self, record: dict[str, Any]) -> None:
@@ -161,7 +162,14 @@ class _Run:
         return self.on_result(result, started)
 
     def transport_turn(
-        self, attempts: tuple[Any, ...], known: bool, probe: int, started: int, kind: str, **extra: Any
+        self,
+        attempts: tuple[Any, ...],
+        known: bool,
+        probe: int,
+        started: int,
+        kind: str,
+        source: Any = None,
+        **extra: Any,
     ) -> dict[str, Any]:
         fields: dict[str, Any] = {
             "turn": len([e for e in self.events if "turn" in e]) + 1,
@@ -177,6 +185,7 @@ class _Run:
             "started_at_ms": started,
             "ended_at_ms": self.now_ms(),
             "kind": kind,
+            "probe_record": _probe(getattr(source, "probe_record", None)),
         }
         fields.update(extra)
         return self.turn(**fields)
@@ -193,9 +202,9 @@ class _Run:
         if failed_over:
             self.role = _FALLBACK
         if kind not in _REPAIRABLE:
-            self.transport_turn(attempts, known, probe, started, "transport_error")
+            self.transport_turn(attempts, known, probe, started, "transport_error", exc)
             raise self.abort(kind, str(exc))
-        self.transport_turn(attempts, known, probe, started, "terminal_invalid", failed_over=failed_over)
+        self.transport_turn(attempts, known, probe, started, "terminal_invalid", exc, failed_over=failed_over)
         return self.invalid([f"$: the transport returned {kind}"], None)
 
     def invalid(self, errors: list[str], message: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -226,6 +235,7 @@ class _Run:
                 probe,
                 started,
                 "tool",
+                result,
                 tool_calls=[str(call["function"]["name"]) for call in result.tool_calls],
                 tool_result_bytes=[len(text.encode("utf-8")) for text in texts],
                 **common,
@@ -236,7 +246,7 @@ class _Run:
             return None
         checked = output.check(result.content, result.finish_reason, self.loaded)
         kind = "terminal_valid" if checked.value is not None else "terminal_invalid"
-        self.transport_turn(result.attempts, True, probe, started, kind, **common)
+        self.transport_turn(result.attempts, True, probe, started, kind, result, **common)
         if checked.value is not None:
             return self.end(checked.value)
         return self.invalid(checked.errors, result.message)
@@ -246,6 +256,10 @@ class _Run:
         if function["name"] != "read_input":
             return "error: unknown tool"
         return read_input.serve(function["arguments"], self.blobs)
+
+
+def _probe(record: Any) -> dict[str, Any] | None:
+    return None if record is None else dataclasses.asdict(record)
 
 
 async def run_persona(
@@ -265,6 +279,7 @@ async def run_persona(
     if workspace is not None:
         raise RunRefused("no workspace capability is built (T4.15:c3)")
     loaded = load(Path(contract_path))
+    tools = [read_input.tool_spec(loaded.blob_names)]
     head = ev.header(
         str(contract_path),
         loaded.persona,
@@ -272,8 +287,9 @@ async def run_persona(
         loaded.prompt_sha256,
         ev.input_sha256(materialised_input),
         int(wall() * 1000),
+        ev.tools_sha256(tools),
     )
-    run = _Run(loaded, materialised_input, transport, on_event, max_tokens, clock, wall, head)
+    run = _Run(loaded, materialised_input, transport, on_event, max_tokens, clock, wall, head, tools)
     refusal = _input_check(loaded, materialised_input)
     result = run.end(refusal) if refusal is not None else await run.go()
     return result, run.events
