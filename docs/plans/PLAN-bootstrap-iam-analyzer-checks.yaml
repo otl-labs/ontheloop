@@ -159,17 +159,20 @@ scope:
       AWS::IAM::AssumeRolePolicyDocument only (FAIL on FAIL); a trust is never sent to an IDENTITY_POLICY call.
       Amended 2026-11-17 (BUILD PR 3, scope row 24): CheckNoPublicAccess rejects with InvalidParameterException any
       trust statement whose Principal.Federated holds an OIDC provider ARN or "*" (VP 9 run 43981827988; the operator's
-      probe of twelve shapes), so such a statement is routed to the analyzer's local rule, check oidc-trust-pin (PASS or
+      probe of twelve shapes), so every statement whose Principal.Federated holds any value other than a SAML provider
+      ARN (an OIDC provider ARN, "*", or a well-known web-identity name such as accounts.google.com, whose API verdict
+      is unprobed; fail toward checking) is routed to the analyzer's local rule, check oidc-trust-pin (PASS or
       FAIL, no API call). A routed Allow statement PASSes only when its principal is Federated alone (no other principal
       key, no NotPrincipal), every Federated value is a full OIDC provider ARN of the caller's account with no wildcard,
       and for each provider host its Condition holds a plain StringEquals or StringLike (an allow-list of those two
       operators: no IfExists, ForAnyValue, ForAllValues or negated operator counts) on "<host>:sub" (key
       case-insensitive) whose value, a string or a non-empty list, is each "repo:<owner>/<name>" optionally followed by
       ":" and a context, owner and name non-empty and holding no "/" or ":" and no value
-      holding "*" or "?" anywhere (Decision 172 cl.3, exact match only: a StringLike value is held to the same literal
+      holding "*", "?" or "$" anywhere (no wildcard and no ${...} policy variable, which IAM expands in a string
+      condition value) (Decision 172 cl.3, exact match only: a StringLike value is held to the same literal
       form as a StringEquals one, so every pin is an exact subject); any
       other routed Allow FAILs (Federated "*", a provider of another account, a SAML value beside an OIDC one, a missing
-      repository pin or any wildcard in a sub value), printing sid= or index= of the first failing statement as for any FAIL. A routed
+      repository pin, or a wildcard or "$" in a sub value), printing sid= or index= of the first failing statement as for any FAIL. A routed
       statement whose Effect is exactly "Deny" is skipped and never sent; any other Effect is held as an Allow. A trust
       whose routed statements are all Deny and that has no other statement prints oidc-trust-pin PASS (it admits no
       one) and makes no API call. The document's remaining statements, if any, still go to
@@ -393,11 +396,12 @@ scope:
     action: Modify
     purpose: >-
       BUILD PR 3 (forward-fix after VP 9 failed closed, scope amendment 3). Only the trust branch changes, exactly as
-      scope row 7's 2026-11-17 amendment states: route statements whose Principal.Federated holds an OIDC provider ARN
-      or "*" to the local check oidc-trust-pin, send the remaining statements (if any) to check-no-public-access, skip
+      scope row 7's 2026-11-17 amendment states: route statements whose Principal.Federated holds any value other than
+      a SAML provider ARN to the local check oidc-trust-pin, send the remaining statements (if any) to check-no-public-access, skip
       routed Deny statements. No other check, output field, exit code, selection, digest or select-module change; the
       account used to recognise the caller's providers is the one the never rows already fill (row 7's Cli.identity), never
       printed. Measured at build: 337 SLOC (302 on main), under 500.
+    new_imports: []
   - file: tests/fixtures/bootstrap_analyzer.py
     action: Modify
     purpose: >-
@@ -414,7 +418,9 @@ scope:
       under a wildcard-free StringLike, a list of pinned subs and an @-id owner and name (Decision 172); FAIL with
       sid= or index= for Federated "*", a provider of another account, a wildcard provider ARN, a missing sub
       condition, an aud-only condition, a StringNotEquals, StringEqualsIfExists or ForAnyValue operator, repo:owner/*,
-      repo:owner/na*, repo:*, repo:owner/name:*, repo:owner/name:ref:refs/heads/*, a "?" value, an empty owner or
+      repo:owner/na*, repo:*, repo:owner/name:*, repo:owner/name:ref:refs/heads/*, a "?" value, a "$" in the context and a
+      repo:owner/name:environment:${token.actions.githubusercontent.com:environment} value, a Federated
+      accounts.google.com value (routed, FAIL), an empty owner or
       name, a ForAllValues operator, a statement whose Effect is neither "Allow" nor "Deny", a statement mixing Federated with AWS "*", a Federated list holding a SAML value, and
       NotPrincipal; a routed Deny is skipped and a Deny-only trust prints oidc-trust-pin PASS with no API call; the fake
       answers InvalidParameterException for a Federated OIDC trust sent to check-no-public-access, so main's analyzer
@@ -422,7 +428,7 @@ scope:
       the pin line; a mixed trust sends the API a document without the OIDC statements (the fake records it) and the
       worst verdict wins, a public AWS "*" statement beside a pinned OIDC one still FAILs no-public-access; a trust
       with no routed statement is sent whole as before; the digest equals classify.document_digest of the whole trust;
-      no output line holds twelve digits or "arn:". Measured at build: 39 nodes, 139 SLOC, 36 red without row 24.
+      no output line holds twelve digits or "arn:". Measured at build: 48 nodes, 154 SLOC, 45 red without row 24.
 infrastructure_dependencies:
   - "terraform/bootstrap is admin-only and bootstrap_ci_apply.tf is in Decision 257 cl.3's protected set: BUILD PR 1 gets the operator's ENVIRONMENT CHECK and screened pre-merge CloudShell plan (VP 6-7) and the operator's CloudShell apply in the same sitting as its merge (VP 8). Its own merge push runs the workflow, whose preview ends CLOUDSHELL_REQUIRED neutral (expected). BUILD PR 2 changes no file under terraform/, so it needs no CloudShell plan; its first live contact is its merge push's preview (VP 9). No unmerged PR code runs under the operator's credentials (Decision 238 cl.3's principle): VP 7 and VP 8 run only terraform at screened heads and inline aws CLI probes written in this plan."
   - "Order: PR 1 built to CI green; one sitting runs VP 6, VP 7 (PR 1's head plan and the live API probes) and, after PR 1 merges, VP 8. PR 2 may be built in parallel and merges only after VP 8 passes: before that its preview would call Access Analyzer without the grant and exit ANALYZER_UNREADABLE (a red main run). PR 2's first full sweep is its merge push (VP 9); a FAIL there on an existing document makes that run red, applies nothing (PR 2 changes no Terraform) and routes per VP 9's fix_if."
@@ -436,7 +442,7 @@ acceptance_criteria:
   - "The analyzer checks, in changed mode (every dispatch, and every push that changes none of the sweep triggers), exactly the documents classify.checked_document selects (created, updated, replaced, imported or moved policies, created, imported or moved attachments' policies, and new, changed, imported or moved trusts), and sweeps every kept and unchanged document when a push changes config/iam-invariants.json, an analyzer, classify or plan_names_core file, has an empty or zero before, or has an unreadable or truncated compare, classes each document by its name and the principals it grants (a ci_writable boundary skipping the never rows), refuses on a ValidatePolicy ERROR, on a SECURITY_WARNING in classes session and ci_writable, on a granted never row or on a public trust, holds each trust statement with a Federated OIDC provider or '*' principal to the local oidc-trust-pin rule instead of check-no-public-access (scope row 7's 2026-11-17 amendment; BUILD PR 3), flags widening without refusing, prints names only, and the gate refuses the CI apply on its REFUSED verdict and refuses at apply time any document whose digest differs from the previewed one (VP 4; the existing gate tests unchanged in assertion)."
   - "PR 1's head plans exactly its three changes, and the live probes, with the operator's credentials and no PR code, return FAIL for a document granting s3:GetObject against the s3_objects row, FAIL for one granting ssm:GetParameter on a parameter/secret/ name against the secret_values_ssm row, PASS for a CloudWatch read against the s3_objects row and FAIL for a trust open to every principal (VP 7)."
   - "The merge push preview of BUILD PR 3 (PR 2's run 43981827988 failed closed on the OIDC trusts, scope amendment 3) runs a full sweep that ends ANALYZER_SUMMARY verdict=PASS mode=full, with the five GitHub OIDC role trusts printing oidc-trust-pin PASS, and BOOTSTRAP_APPLY_PREVIEW verdict=NO_CHANGES; a prove_gate dispatch runs in changed mode (ANALYZER_SUMMARY verdict=PASS mode=changed documents=0), and its approved apply job prints PROVE_OK without calling Access Analyzer (VP 9-10)."
-  - "Each build PR that writes governed words carries exactly its base sidecar's words: PR 2 the 2026-11-16 Update and the two deploy-paths lines, PR 3 the 2026-11-17 Update (approved_text verify passes, VP 5)."
+  - "Each build PR that writes governed words carries exactly its base sidecar's words: PR 2 the 2026-11-16 Update and the two deploy-paths lines, PR 3 the OIDC-trust Update dated at build (approved_text verify passes, VP 5)."
 verification_plan:
   - step: 1
     phase: pre-deploy
@@ -718,7 +724,7 @@ verification_plan:
     fix_if: >-
       ANALYZER_UNREADABLE with an AccessDenied class: VP 8's grant is missing or wrong; a protected-set fix applied from
       CloudShell after a plan amendment. A FAIL: as VP 7's fix_if. A digit run or ARN in the analyzer or gate lines or the summary: a Decision 101 leak;
-      revert PR 2 at once and file a rec. A pending change (REVIEWABLE or CLOUDSHELL_REQUIRED): another bootstrap change
+      revert the PR whose run introduced the line (PR 2, or PR 3 on the re-run) at once and file a rec. A pending change (REVIEWABLE or CLOUDSHELL_REQUIRED): another bootstrap change
       landed unapplied; stop and report. A FAIL on an existing document: either a real grant the never-list forbids
       (file a rec and fix the grant through a reviewed bootstrap change) or a reading of a row the operator disputes
       (his word, then a plan amendment); never a silent narrowing of a row (Decision 235). Until then every bootstrap
@@ -843,7 +849,7 @@ test_obligations:
     behavior: BUILD PR 3. A trust statement with a Federated OIDC provider or '*' principal is checked by oidc-trust-pin, never sent to check-no-public-access; the remaining statements still are; routed Denies are skipped.
     verification_step: 4
     test_selector: tests/test_terraform_bootstrap_apply_analyzer_trust.py
-    red_green_expectation: red before (on main's analyzer the fake API rejects the OIDC statements, so it exits 2 with no oidc-trust-pin line; 36 of 39 nodes), green after
+    red_green_expectation: red before (on main's analyzer the fake API rejects the OIDC statements, so it exits 2 with no oidc-trust-pin line; 45 of 48 nodes), green after
   - source: tests/fixtures/bootstrap_analyzer.py
     behavior: BUILD PR 3. The fake API rejects OIDC and Federated '*' trust statements on check-no-public-access as the real one does.
     verification_step: 4
@@ -886,7 +892,9 @@ constraints:
   - "No grant beyond scope row 2 and no change to bootstrap-apply, the CI apply boundary, the session user or any Deny other than DenyAllButReads' NotAction. A never row is never removed or narrowed to obtain green (Decision 235); a FAIL on an existing document routes per VP 7's fix_if."
   - "A PASS is evidence for the operator's review, never a substitute for the tf-bootstrap-apply approval (Decision 92 pt 1); no code path lets a FAIL be waived or skipped."
 context:
-  - "Scope amendment 3 (2026-11-17, human-directed: the operator chose 'Amend the Update (one sentence)' on the build thread's card at 11:48Z). Cause: VP 9 (run 43981827988, PR 2's merge push) failed closed with ANALYZER_UNREADABLE; the operator's read-only CloudShell diagnostic named the five GitHub OIDC role trusts as the only failing calls (30 of 35 documents pass), and his probe of twelve synthetic trusts at 10:38Z showed CheckNoPublicAccess answers InvalidParameterException for every trust whose principal is Federated with an OIDC provider ARN or '*', whatever the action or condition, while AWS-principal, SAML and public-star controls answer normally. This retires half of the UNPROVEN line below: the AssumeRolePolicyDocument resource type is accepted, but not for OIDC principals. The fix (rows 7, 24-26, 18) checks those statements locally and sends the rest to the API; the sidecar now carries only the block BUILD PR 3 applies, because its three original blocks landed with PR 2 (#2076, approval run 43889471894) and a sidecar is verified against the current main. implementation_declared is reset to false (critique r10 B3) because work remains: BUILD PR 3 flips it true again, so validate_merge_step binds the new Update and validate_scope_boundary holds PR 3 to this scope in PR CI. The build thread measured the fix locally on main 58985f48 (analyzer 337 SLOC, fixture 154, new test 139 SLOC and 39 nodes, 36 red without it)."
+  - "Scope amendment 3 (2026-11-17, human-directed: the operator chose 'Amend the Update (one sentence)' on the build thread's card at 11:48Z). Cause: VP 9 (run 43981827988, PR 2's merge push) failed closed with ANALYZER_UNREADABLE; the operator's read-only CloudShell diagnostic named the five GitHub OIDC role trusts as the only failing calls (30 of 35 documents pass), and his probe of twelve synthetic trusts at 10:38Z showed CheckNoPublicAccess answers InvalidParameterException for every trust whose principal is Federated with an OIDC provider ARN or '*', whatever the action or condition, while AWS-principal, SAML and public-star controls answer normally. This retires half of the UNPROVEN line below: the AssumeRolePolicyDocument resource type is accepted, but not for OIDC principals. The fix (rows 7, 24-26, 18) checks those statements locally and sends the rest to the API; the sidecar now carries only the block BUILD PR 3 applies, because its three original blocks landed with PR 2 (#2076, approval run 43889471894) and a sidecar is verified against the current main. implementation_declared is reset to false (critique r10 B3) because work remains: BUILD PR 3 flips it true again, so validate_merge_step binds the new Update and validate_scope_boundary holds PR 3 to this scope in PR CI. The build thread measured the fix locally on main 58985f48 (analyzer 337 SLOC, fixture 154, new test 154 SLOC and 48 nodes, 45 red without it)."
+  - "Critique r11 REVISE, all adopted: B1 the Update's words say exact repository subjects, not one repository (each live trust lists two owner segments of one repository id, Decision 172 cl.1); B2 a sub value holding a dollar sign (an IAM policy variable) FAILs; B3 weakening_dispositions is cleared because PR 2's two entries (test_registered_check_passes_on_the_real_tree, test_verdicts_and_preview_outputs, both planned-change citing AC[2]) are in its merged history and would read as stale on PR 3's flip; nits N1-N5 adopted (the Update is named by content, the revert target, every non-SAML Federated value routed and so failing toward checking, the provider-host residual, row 24's new_imports)."
+  - "Decision-scout r8 FLAGS_FOUND (/mnt/project-files/ceilings-grants/SCOUT-r8.md), re-run after critique r10. Decisions triaged: 216 of 216. Roadmap items intersected: 4; CONFLICT: 0; RELATED: 4. Serves: NS.9 4/5. The 172 SPIRIT note is resolved by the exact-pin grammar; the one flag is the 246 cl.4 NOTE, accept-with-deferral as in r3-r7 (the approval request names the trust-branch change and the Update's words). Precision note: the rule passes a list of exact pins (the live trusts list two owner segments of one repository id, Decisions 172 cl.1 and 218), so a list naming two repositories would pass too; the Update's residual (which repository is not checked) covers it."
   - "Critique r10 (scope amendment 3) REVISE, all adopted: B1 the pin is exact (no '*' or '?' under either operator; an allow-list of StringEquals and StringLike; non-empty owner and name; only Effect Deny skipped), B2 the Update's words name the routed statements and the unchecked-repository residual (wording r6), B3 implementation_declared reset so PR 3's checks bind in PR CI, B4 the wording and scout rows recorded (the critic read the pre-scout tree), B5 AC[4] and VP 9's expected re-pointed to PR 3's merge push; nits N1-N4 adopted (row numbers, the fail-closed sentence, the fixture's red node named in row 26, AC[5], rollback and the Deny-only trust). Q3 (ValidatePolicy on AssumeRolePolicyDocument may warn on GitHub sub conditions) is inferred, not probed; not adopted."
   - "Red overlap (scripts.ci_rca.red_overlap, 2026-11-17, scope amendment 3): verdict blocked by SLO only; reds rec-5247 (telemetry-reader smoke read deadline) and rec-5248 (telemetry-arrival read deadline), both slo_breached with shared none. Deferral rationale: this amendment and BUILD PR 3 repair neither and touch no file of theirs (telemetry reads, Feedback Loop's area); the build re-runs red_overlap at its start."
   - "Decision-scout r7 FLAGS_FOUND (/mnt/project-files/ceilings-grants/SCOUT-r7.md), run for scope amendment 3. Decisions triaged: 216 of 216. Roadmap items intersected: 6; CONFLICT: 0; RELATED: 6. Serves: NS.9 4/5. CITE: 257, 177, 246, 235, 238, 101, 172 (172 added to cites). Dispositions: 246 cl.4 NOTE (BUILD PR 3 changes refusal logic, security code) accept-with-deferral as in r3-r6: the operator's 2026-11-16 standing rule (rec-5206) governs, and the approval request names the trust-branch change and the two-sentence block; 172 SPIRIT NOTE adopted: the rule PASSes only wildcard-free sub values (cl.3 exact match), which every live GitHub trust meets (all five use StringEquals with exact subs)."
@@ -903,7 +911,7 @@ context:
   - "Follow-on recs filed at planning time (the deferred halves): rec-5207 the session ceiling/grant split (amends Decisions 256 cl.1 and 257 cl.3), rec-5208 enumerated AWS-managed service-role policies, rec-5209 the same checks on terraform/personal's trusted plan (amends Decision 238), rec-5210 read-class grants for the CI apply role, then service-level writes behind these checks."
   - "Split: one plan, two build PRs, disjoint files. PR 1 (bootstrap_ci_apply.tf's one line, the new bootstrap_preview_analyzer.tf and three tests) is protected-set, so CloudShell plan and apply. PR 2 (everything else) touches nothing under terraform/ and merges after VP 8; its analyzer first runs in CI at its merge push (VP 9), never under the operator's credentials (critique r1 finding 7; Decision 238 cl.3's principle)."
   - "UNPROVEN until VP 7: the aws CLI's accessanalyzer commands accept wildcard actions and resources in --access and the AWS::IAM::AssumeRolePolicyDocument resource type for check-no-public-access, one access entry per call, and return statementId or statementIndex in reasons (recalled from AWS docs, not fetched); the price per paid call. UNPROVEN until VP 9 (VP 7's validate pass retires the ValidatePolicy half for prior-state documents): that every current document passes the never-list and ValidatePolicy (an offline read by critique r1 found PlatformAdmin's iam:* on * would draw a ValidatePolicy SECURITY_WARNING, hence class other blocks on ERROR only, and the CI apply boundary's s3:* and secretsmanager:* on *, hence the boundary rule); that the GitHub runner's preinstalled aws CLI carries the accessanalyzer commands and that the compare API answers with the job token."
-  - "Residuals (in the Update): each check reads one document, never its boundary or its principal's other policies (conservative: a grant a boundary would block still fails); an AWS-managed attachment, a document unknown until apply and IAM group policies and membership are not checked (bootstrap-apply's Denies refuse every group write); trust policies are checked only for public access, not for which principals they admit, except that a federated OIDC (or federated '*') trust statement is held by the local rule to the account's providers and one exact repository pin, which repository not being checked (the 2026-11-17 Update); outside classes session and ci_writable a ValidatePolicy security warning is shown, not refused."
+  - "Residuals (in the Update): each check reads one document, never its boundary or its principal's other policies (conservative: a grant a boundary would block still fails); an AWS-managed attachment, a document unknown until apply and IAM group policies and membership are not checked (bootstrap-apply's Denies refuse every group write); trust policies are checked only for public access, not for which principals they admit, except that a federated OIDC (or federated '*') trust statement is held by the local rule to the account's providers and exact, variable-free repository subjects, which repository, and which of the account's OIDC providers (the host is not pinned to GitHub's; identity providers are protected-set, Decision 257 cl.3), not being checked (the OIDC-trust Update, dated at build); outside classes session and ci_writable a ValidatePolicy security warning is shown, not refused."
   - "V3 resolution: VP 7's operator-run pre-merge plan at PR 1's head substitutes for pre-merge post-deploy evidence for PR 1; PR 2 changes no non-Markdown bootstrap file. Behavioural acceptance is VP 8 (apply and simulation), VP 9 (first preview sweep) and VP 10 (dispatch and approved no-op), with the operator's returned lines labelled operator-reported in counts-only PR comments naming the applied sha."
   - "Approvals at build start: the operator's direction of 2026-11-16 (Access Analyzer checks first, changed documents only) and the operator's GitHub approval of this plan's approval run, which the plan PR records; no final-diff word is asked (operator, 2026-11-16). The build session holds no AWS identity for these steps; VP 6-8 are the operator's CloudShell blocks and VP 10 the operator's GitHub approval."
   - "Overlaps: rec-5168 (PR-time trusted plan for terraform/bootstrap) will later need the same analyzer at PR time; rec-5174 (CI simulate) and rec-5169 (gate-role alarm) touch the same workflow and root but no file here; PLAN-wording-approval-routing (#2052, rec-5137) changes how wording approvals route, not this sidecar's shape. No open PR edits a scope file (checked 2026-11-16)."
@@ -941,6 +949,9 @@ gate_rounds:
   - {gate: decision-scout, round: 7, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:82485ab84a8d085de01b9aeaaa9ed5e16008de90b1c231d8cfd8695dac7fcfa4'}  # pragma: allowlist secret
   - {gate: plan-critique, round: 10, verdict: REVISE, blocking: 5, nits: 4}
   - {gate: wording-check, round: 6, verdict: PASS, digest: 172f01cbcc938f4a06795cb2a8c8d2c2921233a01bfece63e0e7ee950ae445de, base: 3a1d2b5b1b91bc4e6c26510d0137b1c2fe6b9bc7, selection: complete}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 8, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:52c90cf78a3731653fd01b1eb328d93a6ae04432695241a8338d083b8f95646f'}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 11, verdict: REVISE, blocking: 3, nits: 5}
+  - {gate: wording-check, round: 7, verdict: PASS, digest: 0eb93093f9cfe39e2095dc9cc7fe5c1d1b1d761a4144627dc5f65413d2fec459, base: 7cd38349dcb17e5b477fa5693159003143ad37cd, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -962,13 +973,7 @@ rollback: >-
   (append-only, Decision 177) with a dated note that the checks are off; the preview then behaves as before. PR 1: the
   analyzer grant is harmless without PR 2; to remove it a reviewed PR drops the policy and attachment and the operator
   applies it from CloudShell. PR 3: a revert returns full sweeps and OIDC-trust changes to fail-closed
-  ANALYZER_UNREADABLE; the 2026-11-17 Update stays (Decision 177) with a dated note.
+  ANALYZER_UNREADABLE; the OIDC-trust Update stays (Decision 177) with a dated note.
 cites: [dec:101, dec:126, dec:168, dec:172, dec:177, dec:181, dec:235, dec:237, dec:238, dec:246, dec:247, dec:256, dec:257]
 implementation_declared: false
-weakening_dispositions:
-  - candidate: "[assertion-changed] tests/checks/ci_guards/test_validate_bootstrap_apply.py::test_registered_check_passes_on_the_real_tree"
-    disposition: planned-change
-    cite: "acceptance_criteria[2]"
-  - candidate: "[assertion-changed] tests/test_terraform_bootstrap_apply_gate.py::test_verdicts_and_preview_outputs"
-    disposition: planned-change
-    cite: "acceptance_criteria[2]"
+weakening_dispositions: []
