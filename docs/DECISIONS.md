@@ -2,6 +2,72 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 268: The ops writer checks, inside its own transaction, that every rec a dependencies list names exists -- one point lookup by merge key on the same table's current projection is write-decidable (amends Decision 210 clause 2(a)) (Decided)
+
+```yaml
+number: 268
+status: Decided
+decided_date: "2026-11-16"
+kind:
+  value: mechanism
+  justification: >-
+    Only the means: clauses 1-3 move where an existing rule (each dependencies element names an existing rec, rec-3307)
+    is enforced, from the portal's pre-check to the writer, so undoing them changes no goal, human gate or data
+    commitment.
+amends: [210]
+significance:
+  value: numbered_decision
+  justification: >-
+    It widens Decision 210 cl.2(a)'s test and re-assigns a rule from its DQ owner (rec-4166) to the writer, under
+    reversal conditions; a dated amendment_forms note (considered) cannot re-assign a ratified clause (Decision 210's
+    own envelope; Decisions 216 and 254 for a ratified scope), and docs/contracts/data-modeling-standard.yaml
+    (considered) carries the operational rule text, not which clauses the Decisions sanction.
+```
+
+**Status:** Decided
+**Date:** 2026-11-16
+**Warehouse ID:** dec-268 (per Decision 84 backfill)
+
+**Problem:** Each element of ops_recommendations.dependencies must name an existing rec, but only the portal checks it,
+by a reader round-trip before the write. Any session can call the writer route directly under the one shared session
+identity (Decisions 255 and 256), so a dangling dependency can land unseen; Decision 210 cl.2(a) keeps the check out of
+the writer because the lookup reads outside the batch's partitions, and the DQ monitor named as its owner (rec-4166)
+was never built. A 2026-11-16 census found 2 of 390 rows with dependencies dangling (rec-610 and rec-613, both naming
+rec-608, deleted under Decision 70).
+
+**Intent:** No route to the writer can store a dangling dependency.
+
+**Decision:**
+1. **Test.** Decision 210 cl.2(a) also admits one point lookup by merge key on the same table's current projection,
+   inside the write's own transaction. Cl.2(b) holds for such a lookup while the key set only grows: ids are
+   writer-allocated (Decision 84 I-2), so a rec can be named only after it commits, and a rec leaves only by a
+   Decision 70 exceptional deletion (cl.3's backstop covers it). Decision 207's grain lookup is not widened; it
+   stays bounded to the batch's partitions.
+2. **Enforcement.** The ops writer enforces array_element_reference on ops_recommendations.dependencies on every write
+   verb: on an insert, and on an update or upsert that changes the column, it reads the named ids in one statement
+   (Decision 88) and, if any is absent, rejects the request naming the rule and writes nothing, never retried
+   (Decision 207 reject semantics). An unchanged stored value is not re-read, so older rows stay updatable. The
+   portal's lookup stays a derived pre-check, never authoritative (Decision 210 cl.5).
+3. **Backstop.** rec-4166's monitor no longer owns the rule; it is a backstop for rows written before this Decision and
+   for any deletion.
+
+```yaml reversal-conditions
+decision: 268
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: lookup-cost
+    kind: manual
+    description: "The writer's per-invocation wall p95 (Decision 214 cl.4's signal; commit latency is attribution) rises by more than a fifth over the 7 days before the lookup shipped: re-decide the lookup's shape or return the rule to a DQ owner."
+  - id: keyspace-shrinks
+    kind: manual
+    description: "Recs become deletable other than by a Decision 70 exceptional deletion: cl.2(b) no longer holds for the lookup; re-decide."
+```
+
+**Related:** Decision 210 (amended), 81 cl.8, 84 I-2, 207, 88, 214 cl.4, 70, 103, 255, 256; rec-4166, rec-3307.
+
+---
+
 ## Decision 267: An AWS clock dispatches the three hourly loops through a dedicated GitHub App held inside the agent merge loop -- an accepted residual against Decision 143 clause 1 (Decided)
 
 ```yaml
@@ -3965,6 +4031,8 @@ producer. Detail: data-modeling-standard.yaml.]
 new exemptions ratchet. Detail: data-modeling-standard.yaml.]
 
 > **Update (2026-10-18):** the Coverage line's rec-4101 residual is enforced by telemetry_orphan_counts and telemetry-verification workflow; rec-4439 owns the rest. No clause changes.
+
+> **Amended by Decision 268 (2026-11-16):** Clause 2(a) also admits one point lookup by merge key on the same table's current projection inside the write's own transaction; under it the ops writer enforces ops_recommendations.dependencies existence on an insert and on a change to the column, and the rec-4166 monitor (data-modeling-standard.yaml COVERAGE) is a backstop (Decision 268 cl.1-3).
 
 ---
 

@@ -4,8 +4,9 @@ Owner-concern: gate_write runs the DuckLake writer's own pure gate (schema_gate 
 field_semantics.yaml projection of the Class A contract, so file_rec, update_rec, file_decision and update_decision
 refuse early with the rule the writer would apply. It is a derived pre-check, never authoritative: the writer
 re-evaluates every rule (Decision 81 cl.5 as widened by Decision 210 cl.5). The producer-side rules no row-local
-evaluator can run (acceptance lint, dependency existence, and the glossary rule, whose ground is house style the
-repository's profile decides) are driven from the contract's own exemptions. This path is named by the
+evaluator can run (acceptance lint and the glossary rule, whose ground is house style the repository's profile decides)
+are driven from the contract's own exemptions; dependency existence is enforced by the writer (reference_columns) and
+this module's lookup is its derived pre-check. This path is named by the
 ops_recommendations contract as the acceptance_lint and glossary_lint exemption owner; it must not move.
 """
 
@@ -24,7 +25,12 @@ from scripts.executor.acceptance_lint import lint_acceptance_command
 from scripts.ops_portal._common import _REPO_ROOT
 from scripts.ops_portal.writer_transport import _project_ops_record
 from src.common.ducklake_scd2_schema import SchemaGateError, resolve_table_spec, schema_gate
-from src.common.ducklake_write_rules import RowRuleViolationError, check_write
+from src.common.ducklake_write_rules import (
+    WRITER_REFERENCE_KINDS,
+    RowRuleViolationError,
+    check_write,
+    reference_columns,
+)
 from src.row_rules.rules import RowRules
 
 _PLACEHOLDER_ULID = "0" * 26
@@ -201,11 +207,13 @@ def _run_row_rules(table: str, record: dict[str, Any], *, insert: bool) -> None:
 
 
 def _run_producer_rules(table: str, projected: dict[str, Any], *, insert: bool, existing: dict[str, Any] | None) -> None:
-    exemptions = RowRules.from_projection(resolve_table_spec(table).fields).producer_exemptions
-    if not exemptions:
+    fields = resolve_table_spec(table).fields
+    references = ((c, k) for c in sorted(reference_columns(fields)) for k in sorted(WRITER_REFERENCE_KINDS))
+    targets = [*RowRules.from_projection(fields).producer_exemptions, *references]
+    if not targets:
         return
     params, handlers = _producer_params(table), _producer_handlers(existing)
-    for column, kind in exemptions:
+    for column, kind in targets:
         handler = handlers.get(kind)
         if handler is None:
             raise ValueError(f"{table}.{column}: producer-side rule {kind!r} has no portal handler (fails closed)")

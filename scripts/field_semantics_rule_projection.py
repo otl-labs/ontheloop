@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from scripts.contract_rules import CONTRACTS_DIR, DeclaredRule, declared_rules
-from src.row_rules.rules import RowRules
+from src.row_rules.rules import WRITER_REFERENCE_KINDS, RowRules
 
 
 def _rule_value(rule: DeclaredRule) -> Any:
@@ -21,6 +21,8 @@ def _rule_value(rule: DeclaredRule) -> Any:
         return list(params["values"])
     if rule.kind == "array_element_format":
         return params["pattern"]
+    if rule.kind in WRITER_REFERENCE_KINDS:
+        return True
     if rule.kind in ("min_length", "pattern", "not_before"):
         return params["value"]
     raise ValueError(f"{rule.table}.{rule.column}: unknown rule kind {rule.kind!r} -- fail closed")
