@@ -68,14 +68,15 @@ scope:
       rule before it reads the record, so a pre-channel target skips without a registry read. resolve's CLI: --channel choices ducklake, prod, persona_image; main passes
       registry_record.read_record (bound to the pin's image and first_publish) as the reader for persona_image and
       read_record_sha otherwise, converting registry_record.RecordError to GateError (the module runs as __main__, so
-      registry_record never imports deploy_gate's GateError); --first-publish is refused for any other channel. freshness and its choices unchanged.
+      registry_record never imports deploy_gate's GateError; main imports registry_record lazily through importlib, as
+      _channel_inputs does, since test_module_imports_only_stdlib refuses a scripts import at the top); --first-publish is refused for any other channel. freshness and its choices unchanged.
       The module stays stdlib at import (test_module_imports_only_stdlib).
   - file: scripts/ci/registry_record.py
     action: Create
     purpose: >-
       Stdlib GHCR channel-record reader (Decision 100: a thin reader of the registry's own API).
       read_record(image: str, *, token: str | None, first_publish: bool = False, opener=urllib.request.urlopen) ->
-      str | None, every request with a 30 s timeout: GET https://ghcr.io/token?service=ghcr.io&scope=repository:<owner/name>:pull (Basic auth, user GITHUB_ACTOR or "token", with the token when set; the scope is load_pin's image with the ghcr.io/
+      str | None, every request with a 30 s timeout and the token as an unredirected header: GET https://ghcr.io/token?service=ghcr.io&scope=repository:<owner/name>:pull (Basic auth, user GITHUB_ACTOR or "token", with the token when set; the scope is load_pin's image with the ghcr.io/
       host stripped, which the test asserts),
       then the manifest of tag main (Accept the OCI and Docker v2 manifest and index/manifest-list types, so a tag on an index answers as one and is
       refused rather than MANIFEST_UNKNOWN), then its config
@@ -98,8 +99,10 @@ scope:
       manifest (registry_record's shape rule, shared), else exits 1 before any output is written, so nothing is
       attested; asserts the pushed config's revision
       label equals S; writes image and digest to GITHUB_OUTPUT and a job summary naming the digest, the source commit S
-      and the two pin lines to paste (digest, source_commit) for PLAN-persona-image-pin's pin PR; docker logout in a
-      finally (the attest job needs no registry login).
+      and the two pin lines to paste (digest, source_commit) for PLAN-persona-image-pin's pin PR, plus one log line
+      PERSONA-IMAGE-PUBLISHED digest=<d> source_commit=<s> on stdout; docker logout in a finally (the attest job needs
+      no registry login). Every registry request sends the Bearer token with add_unredirected_header, so GHCR's
+      cross-host blob redirect never carries it.
   - file: src/persona_hosts/local_container/build.py
     action: Modify
     purpose: >-
@@ -314,12 +317,14 @@ verification_plan:
       assert hit,'no run published yet';r,j=hit[0];print('run',r['id'],r['event'],j);assert j.get('attest')=='success'"
     expected: >-
       The newest run whose publish job succeeded also has attest success. Record its run id, and export the run
-      summary's digest and source commit as PUBLISHED_DIGEST and PUBLISHED_SHA (read through mcp__github__get_job_logs
-      or the run page) for VP 8-9; record all three in the PR and the handoff.
+      PERSONA-IMAGE-PUBLISHED log line's digest and source commit as PUBLISHED_DIGEST and PUBLISHED_SHA (read through
+      mcp__github__get_job_logs) for VP 8-9; record all three in the PR and the handoff.
     fix_if: >-
       A gate failure on the record read: the first_publish dispatch (once), then close the ci-rca rec that failure
       filed with update_rec, citing the first_publish run id. A suite failure: fix forward through a new PR (nothing
-      was pushed). A push refused: operator step A3. Never push by hand.
+      was pushed). A push refused: operator step A3. Attest failed after a push: one force dispatch republishes and
+      attests, and the unattested digest is never pinned. first_publish still failing closed on another registry answer
+      (UNAUTHORIZED, a /token 403): STOP to this planning thread with the observed code. Never push by hand.
     hermetic: false
     graduation: waive
     graduation_waiver_reason: A one-time read of the first run; the ci_rca watch on the workflow is the standing signal.
@@ -550,6 +555,7 @@ gate_rounds:
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 2, nits: 7}
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 2, nits: 5}
   - {gate: plan-critique, round: 5, verdict: PROCEED, blocking: 0, nits: 7}
+  - {gate: plan-critique, round: 6, verdict: PROCEED, blocking: 0, nits: 7}
   - {gate: wording-check, round: 1, verdict: FAIL, digest: 12deeeebb013324e8c2955e54c12e07e6873d218cfdacf3fda6aeef3cabc54e0, base: d98906cb276ed169bc961da1ae8b9d0ce3a8c9a8, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 2, verdict: PASS, digest: 11659336334a406af399a9d8a668d1c5f14b78057f1e2712428d58a835919528, base: d98906cb276ed169bc961da1ae8b9d0ce3a8c9a8, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 3, verdict: PASS, digest: e2195f5b3f6ccebdb6cf17b61318cf8169317171b9e5f7d7a3d54ae1174ce252, base: d98906cb276ed169bc961da1ae8b9d0ce3a8c9a8, selection: complete}  # pragma: allowlist secret
@@ -588,7 +594,9 @@ execution_steps:
     own words, then VP 9, VP 8 and VP 10.
   - >-
     Report: the publish run id, digest, source commit and attestation result, the working gh flags, and the operator
-    approvals with their dates, in the handoff for PLAN-persona-image-pin.
+    approvals with their dates, in the handoff for PLAN-persona-image-pin, which also carries that the attestation's
+    source digest is main HEAD at wake, so verification never uses --source-digest and the revision label is the only
+    source binding.
 rollback: >-
   Revert the workflow file to stop publishing; published versions stay (nothing consumes them until the pin plan). The
   package's public visibility cannot be undone; the image holds only this public repository's code.
