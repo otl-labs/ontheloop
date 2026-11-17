@@ -85,7 +85,8 @@ scope:
       attempts together never pass R. turns_used += len(attempts) (TransportResult.attempts, or TransportError.attempts
       on a raise), plus one for the cold-start probe when the call failed over, which is when result.failed_over is
       true or, on a raise, when any returned attempt's role is warm_fetched_escape_hatch (acomplete merges the primary's
-      attempts into a fallback TransportError but marks no fail-over); either way the role then becomes
+      attempts into a fallback TransportError but marks no fail-over) or when F was passed and the raise carries A
+      primary outage attempts (the fallback's own setup refused after an asserted probe); either way the role then becomes
       warm_fetched_escape_hatch for the rest of the run. Where the attempts are unknown (a fallback_unavailable
       TransportError carries none; a wait_for timeout cancels the call), the turn record sets attempts_known false and
       turns_used adds the upper bound (A + 1 + A when F, else A). (4) a response with tool_calls: append result.message as the
@@ -94,7 +95,11 @@ scope:
       valid -> return it; invalid -> revisions_used += 1, and past max_revisions return failure schema_invalid, else append
       the assistant message and repair_message() as a role user message. A TransportError of kind empty_output or
       malformed_output is an invalid terminal turn (revision counted) with no assistant message to append: only the
-      role user repair message is appended; any other TransportError raises RunAborted(kind, events so far). (6)
+      role user repair message is appended; any other TransportError raises RunAborted(kind, events so far). The
+      backend cannot import TransportError (the import boundary), so it recognises one by duck typing: an exception
+      carrying a str kind and a tuple attempts; any other exception the transport raises (a TierSelectionError from
+      role resolution, for example) is RunAborted with kind "transport_exception" and the exception's class name in
+      detail, so the entry point still exits 4. (6)
       before every call: turns_used >= max_turns or remaining <= 0 returns failure budget_exhausted (detail names which);
       asyncio.TimeoutError from wait_for returns budget_exhausted. injection_suspected is only ever the model's own
       failure value. Under 500 SLOC; split a helper module out if it nears the limit.
@@ -164,7 +169,8 @@ scope:
       test_input_incomplete_makes_no_call; test_type_error_returns_input_unusable_when_listed;
       test_fail_over_keeps_fallback_role (later calls pass role warm_fetched_escape_hatch, only the first passes
       fail_over=True); test_fallback_unavailable_counts_upper_bound; test_outage_raises_run_aborted_with_events;
-      test_malformed_output_is_a_repair_turn; test_unknown_tool_gets_error_text; every call passes response_format
+      test_malformed_output_is_a_repair_turn; test_unknown_tool_gets_error_text;
+      test_non_transport_exception_aborts (a plain exception from the transport is RunAborted transport_exception); every call passes response_format
       json_object and the read_input tool; the facade refuses claude_cli, codex_cli and a non-None workspace.
   - file: tests/persona_backends/test_events.py
     action: Create
@@ -422,9 +428,11 @@ constraints:
   - No rescue agents or workaround loops (Decision 55); never skip, disable or quarantine a test (Decision 235).
 context:
   - >-
-    Decision-scout r3 (2026-11-17): Verdict: NO_FLAGS. Decisions triaged: 216 of 216. Roadmap items intersected: 7;
-    CONFLICT: 0; RELATED: 7. Serves: NS.1, NS.3 3/5. CITE: 117, 173, 205, 206, 212, 246. r1 FLAGS_FOUND on 163 (no
-    full-tier step) and 131 (CLI test path), both fixed. /mnt/project-files/run-persona-backend/SCOUT-r1.md.
+    Decision-scout r5 (2026-11-17): Verdict: NO_FLAGS. Decisions triaged: 216 of 216. Roadmap items intersected: 8;
+    CONFLICT: 0; RELATED: 8. Serves: NS.1, NS.3 3/5. CITE: 117, 173, 205, 206, 212, 246. r1 FLAGS_FOUND on 163 (no
+    full-tier step) and 131 (CLI test path), both fixed (/mnt/project-files/run-persona-backend/SCOUT-r1.md); r4
+    FLAGS_FOUND on 249 (VP5 read deploy push paths that no longer exist), fixed by checking the deploy gate's
+    pathspecs.
   - >-
     Split settled on a blind consult (/mnt/project-files/run-persona-backend/advisor-brief-split/ADVICE.md and
     ADVICE-followup.md): this backend, then rec-5052 (verdict consistency) and rec-4028 (telemetry producer, which owns
@@ -463,7 +471,9 @@ context:
     turn records; rec-4028's plan maps them to rows and reconciles the declared and built shapes before the Decision 212
     conformance suite. scripts/tool_runtime.py (the retained workspace tool set) is the starting point for T4.15:c3's
     read_repo, run_tests and edit_repo. plan_agent (T4.31) and implement_agent also name read_repo; they are compute
-    personas, so their litellm runs wait on T4.15:c3, the compute-plane leg they run on.
+    personas, so their litellm runs wait on T4.15:c3, the compute-plane leg they run on; a T4.15 planner should know c3
+    now owns those three bindings. rec-5267 (warehouse_read, an mcp_tool owned by T4.32:c1) must widen
+    test_capability_gate_matches_index's derivation, which counts only backend_tool bindings, when it builds the bridge.
   - >-
     CI Reform's #2071 (open): this plan's only contract edits ride its own sidecar, so its leg P holds.
 gate_rounds:
@@ -475,6 +485,8 @@ gate_rounds:
   - {gate: wording-check, round: 2, verdict: PASS, digest: 6db9cd8cce33b7f99fe41a7a1172d0c435c05064d342728b3ef692a086cafea4, base: 65646dbaef915514a5da2c55b4f7d535730441ff, selection: complete}  # pragma: allowlist secret
   - {gate: decision-scout, round: 4, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:c0cc48f49f1630f7ba5f5b17faa648001f6e5e2a9bbc1b013a1f7174d67b4c88"}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 9}
+  - {gate: decision-scout, round: 5, verdict: NO_FLAGS, scout_input_fingerprint: "v1:c0cc48f49f1630f7ba5f5b17faa648001f6e5e2a9bbc1b013a1f7174d67b4c88"}
+  - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 7}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -489,6 +501,7 @@ execution_steps:
   - Place the sidecar's six blocks in docs/contracts/executor-personas.yaml ({{DATE}} = build date).
   - Edit config/agent/executor/capabilities.yaml, .importlinter, src/lambdas/data-pipeline/manifest.yaml and docs/contracts/file-router.yaml (compaction first, measured on main), then tests/persona_backends/test_package_boundary.py.
   - Run bin/venv-python -m scripts.validate --pre and fix.
+  - git add the new files (validate_placement reads git ls-files, so VP6's placement leg sees scripts/run_persona.py only once it is tracked).
   - Execute Verification Plan steps 1-6 -- run each step; loop until pass; on an unrecoverable failure stop and RCA (Decision 55).
   - >-
     CLOSURE, each outcome reported separately: readiness, parent-validator evidence, postflight evidence and the real
