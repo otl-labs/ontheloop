@@ -259,3 +259,8 @@ def test_a_failed_recheck_posts_nothing_and_is_a_shell_fault(tmp_path: Path, mon
     )
     with pytest.raises(RuntimeError):
         post_verdict.post_all(ROOT, work, "o/r", "t")
+    monkeypatch.setattr(
+        post_verdict.override, "origin", lambda *a: ({"verdict": "BLOCK", "blocking_ids": [], "run_id": "9"}, "")
+    )
+    with pytest.raises(RuntimeError):
+        post_verdict.post_all(ROOT, work, "o/r", "t")

@@ -157,7 +157,11 @@ def post_override(
         if not override.overridable(route_id):
             raise override.Refused("the route is not overridable")
         rec, _text = override.origin(repo, token, head, route_id, int(ov["check_run_id"]))
-        if rec["verdict"] not in override.OVERRIDABLE_VERDICTS or override.ids_digest(rec["blocking_ids"]) != ov["ids_digest"]:
+        if (
+            not rec["blocking_ids"]
+            or rec["verdict"] not in override.OVERRIDABLE_VERDICTS
+            or override.ids_digest(rec["blocking_ids"]) != ov["ids_digest"]
+        ):
             raise override.Refused("the record does not match the approved override")
     except override.Refused as exc:
         raise RuntimeError(f"override re-check failed: {exc}") from exc

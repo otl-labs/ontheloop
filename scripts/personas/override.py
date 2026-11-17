@@ -142,13 +142,21 @@ def origin(repo: str, token: str | None, head_sha: str, route: str, check_run_id
     if rec is None or rec["route"] != route or rec["head_sha"] != head_sha:
         raise Refused("the check run holds no matching verdict record")
     prod = _get(f"/repos/{repo}/actions/runs/{rec['run_id']}", token)
-    if not isinstance(prod, dict) or not (
+    suite = (run.get("check_suite") or {}).get("id")
+    if not isinstance(prod, dict) or suite is None or prod.get("check_suite_id") != suite:
+        raise Refused("the check run was not created by the record's producing run")
+    if not (
         prod.get("path") == VERDICT_WORKFLOW
         and prod.get("event") == "workflow_run"
         and prod.get("head_branch") == "main"
         and prod.get("display_title") == f"persona-verdict pull_request {head_sha}"
     ):
         raise Refused("the record's producing run is not a verdict run for this head")
+    listed = _get(f"/repos/{repo}/commits/{head_sha}/check-runs?check_name=persona-verdict%2F{route}&per_page=100", token)
+    rows = listed.get("check_runs") if isinstance(listed, dict) else None
+    ids = [r.get("id") for r in rows or [] if isinstance(r, dict) and isinstance(r.get("id"), int)]
+    if not ids or max(ids) != check_run_id:
+        raise Refused("the check run is not the newest persona-verdict check of that name on the head")
     return rec, text
 
 
@@ -281,7 +289,7 @@ def render(env: dict[str, str]) -> list[str]:
         "",
     ]
     for fid in rec["blocking_ids"]:
-        lines += ["```", f"{fid}: {_clean(titles.get(fid, ''))}", "```"]
+        lines += ["```", f"{_clean(fid)}: {_clean(titles.get(fid, ''))}", "```"]
     return lines
 
 

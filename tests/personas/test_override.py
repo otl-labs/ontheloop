@@ -34,12 +34,15 @@ class Api:
                 "app": {"slug": "github-actions"},
                 "name": f"persona-verdict/{ROUTE}",
                 "head_sha": HEAD,
+                "check_suite": {"id": 5},
                 "output": {"text": _text()},
             },
+            f"/repos/o/r/commits/{HEAD}/check-runs": {"check_runs": [{"id": 55}, {"id": 40}]},
             "/repos/o/r/actions/runs/900": {
                 "path": override.VERDICT_WORKFLOW,
                 "event": "workflow_run",
                 "head_branch": "main",
+                "check_suite_id": 5,
                 "display_title": PRODUCER,
             },
             "/repos/o/r/actions/runs/70": {
@@ -137,6 +140,10 @@ def test_overridable_follows_persona_class(monkeypatch: pytest.MonkeyPatch) -> N
         ("/repos/o/r/actions/runs/900", {"event": "push"}),
         ("/repos/o/r/actions/runs/900", {"head_branch": "feat"}),
         ("/repos/o/r/actions/runs/900", {"display_title": "x"}),
+        ("/repos/o/r/actions/runs/900", {"check_suite_id": 6}),
+        ("/repos/o/r/check-runs/55", {"check_suite": {}}),
+        (f"/repos/o/r/commits/{HEAD}/check-runs", {"check_runs": [{"id": 55}, {"id": 56}]}),
+        (f"/repos/o/r/commits/{HEAD}/check-runs", {"check_runs": []}),
     ],
 )
 def test_origin_refuses(api: Api, path: str, patch: dict[str, Any]) -> None:
@@ -231,3 +238,14 @@ def test_render_refuses_an_id_set_the_record_does_not_hold(
 ) -> None:
     monkeypatch.setattr(override.os, "environ", _env(INPUT_IDS_DIGEST=override.ids_digest(["probe:block-1"])))
     assert override.main([]) == 1
+
+
+def test_render_escapes_a_fence_breaking_finding_id(api: Api, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ids = ["x```\n[evil](u)"]
+    api.routes["/repos/o/r/check-runs/55"]["output"] = {"text": _text(blocking_ids=ids)}
+    summary = tmp_path / "s.md"
+    monkeypatch.setattr(
+        override.os, "environ", _env(INPUT_IDS_DIGEST=override.ids_digest(ids), GITHUB_STEP_SUMMARY=str(summary))
+    )
+    assert override.main([]) == 0
+    assert summary.read_text().count("```") == 2
