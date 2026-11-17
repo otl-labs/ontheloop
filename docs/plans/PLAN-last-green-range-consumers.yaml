@@ -1,0 +1,397 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: last-green-range-consumers
+intent: >-
+  rec-4874 build plan 2a (the first half of rec-5106; Decision 254 cl.2 and cl.4): before batching starts, give the full
+  tier one shared resolver module, scripts/ci/last_green.py (Decision 254 cl.2's last-green ref, "covered" and prev),
+  and make the consumers that do not belong to the trailer gate range-aware: push_context_base reads the prev a job
+  passes (never HEAD~1), and ci-rca diagnoses a CI red over its run's range and dedups one cause across the two
+  workflows that run the full tier (rec-4900). Serves NS.6: every merged tree's verification stays proven from run
+  evidence once one run covers several merges. Behaviour is unchanged wherever HEAD^'s main-validate ran the full tier;
+  after a plans-only parent ci-rca's range correctly reaches past it.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-last-green-range-consumers.yaml
+phase: >-
+  rec-4874 (ad_hoc_rec; no tier_item names it). Build plan 2a of rec-4874's design (#1946); build plan 1 merged as #1998
+  (Decision 254). Closes no exit criterion. rec-5106 stays open for build plan 2b, which closes it.
+closes_criteria: []
+cites: [dec:142, dec:159, dec:162, dec:168, dec:249, dec:254]
+scope:
+  - file: scripts/ci/last_green.py
+    action: Create
+    purpose: >-
+      The shared resolver module (Decision 254 cl.2). (1) newest_green_sha and _full_tier_passed move here from
+      scripts/ci/deploy_gate.py byte-for-byte in behaviour (push runs, latest attempt; Decision 249 cl.2), with the
+      FULL_TIER_JOB and FULL_TIER_STEP constants. (2) last_green_sha(api, git, *, ref="origin/main", limit=50): the
+      newest first-parent commit of ref whose ci.yml main-validate run, event push or workflow_dispatch, passed the
+      full-tier step on ANY attempt (a listing shows the latest attempt only, so a run whose latest attempt did not
+      pass reads its attempts); used by covered() and by prev widening, not by the deploy gate. (3) covered(api, git,
+      sha) -> bool: sha equals or is a first-parent ancestor of last_green_sha. (4) resolve_prev(api, git, head) ->
+      str | None: the nearest first-parent ancestor of head (head excluded) whose main-validate JOB started the
+      full-tier step (a runner assigned and that step executed or executing) and did not conclude timed_out or
+      cancelled; a job still in progress counts; a run whose full-tier step was skipped (plans-only, fast tier alone)
+      or never started is passed over; the walk is capped at the same limit and returns None past it. No module-level
+      I/O; the api and git objects are the deploy_gate GithubApi/Git seams, injected.
+  - file: scripts/ci/deploy_gate.py
+    action: Modify
+    purpose: >-
+      Import newest_green_sha, _full_tier_passed, FULL_TIER_JOB and FULL_TIER_STEP from scripts.ci.last_green and keep
+      them importable from this module (scripts/convergence_health/code_drift.py and tests/ci/test_deploy_gate.py call
+      deploy_gate.newest_green_sha); remove the moved bodies. No behaviour change: the deploy gate keeps
+      newest_green_sha until rec-5108 rewires it.
+  - file: scripts/checks/_common.py
+    action: Modify
+    purpose: >-
+      push_context_base: when FULL_TIER_PREV is set and non-empty, return it if it names a commit present locally that
+      is an ancestor of HEAD (git merge-base --is-ancestor, cwd as today); else FULL_TIER_LAST_GREEN under the same
+      test; else raise RuntimeError naming both values, so the calling check goes red. Never HEAD~1 on this branch, and
+      no API call (Decision 254's note on Decision 159 cl.1: the job passes prev in). When FULL_TIER_PREV is unset or
+      empty, today's code path runs unchanged (GITHUB_EVENT_BEFORE, then HEAD~1, then None). Module constants
+      FULL_TIER_PREV_ENV and FULL_TIER_LAST_GREEN_ENV carry the two names.
+    new_imports: []
+  - file: tests/checks/_common/test_push_context_base.py
+    action: Modify
+    purpose: >-
+      Add the FULL_TIER_PREV cases on a real temp git repo: an ancestor prev is returned (even when it is HEAD~3); a
+      non-ancestor or absent prev falls to a qualifying FULL_TIER_LAST_GREEN; neither qualifying raises; an unset
+      variable keeps today's GITHUB_EVENT_BEFORE then HEAD~1 results (existing tests unchanged).
+  - file: scripts/ci_rca/range_context.py
+    action: Create
+    purpose: >-
+      CLI and pure core for ci-rca's meta step (Decision 162: the shell stays a thin adapter). Inputs: --run-json (the
+      failing run, already fetched), --workflow-slug, --repo, --out. For slug "ci" only: a range artifact the run
+      recorded wins (read from --recorded-range PATH when the file exists; rec-5107 adds the producer); else
+      last_green.resolve_prev(head); a prev that is absent or not an ancestor of head widens to last_green.last_green_sha;
+      if neither resolves, the range is head alone with range_status "unresolved". Output JSON: {head, prev,
+      range_status: recorded|resolved|widened|unresolved|head_only, commits: [first-parent shas prev..head, oldest
+      first], prs: [{sha, pr}] one per commit from commits/{sha}/pulls (null when none)}; prints key=value lines
+      (prev=, range_status=, prs=) for $GITHUB_OUTPUT. Any other slug: {head, prev: null, range_status: head_only,
+      commits: [head]}, as today. A failing API read degrades to range_status unresolved, never a red ci-rca job.
+  - file: tests/ci_rca/test_range_context.py
+    action: Create
+    purpose: >-
+      Fake api/git fixtures: parent ran the full tier -> prev is HEAD^ and commits == [head] (the neutrality case);
+      plans-only parent (full-tier step skipped) -> prev is HEAD^^ and commits holds both; timed_out parent passed
+      over; in-progress parent counts; recorded range wins over resolve_prev; non-ancestor prev widens to the
+      last-green sha; nothing resolves -> unresolved and head alone; a non-CI slug returns head_only; an API error
+      returns unresolved; one PR per commit.
+  - file: tests/ci/test_last_green.py
+    action: Create
+    purpose: >-
+      last_green_sha counts a workflow_dispatch run and an earlier passing attempt whose latest attempt failed;
+      newest_green_sha still ignores both (Decision 249 cl.2 unchanged); covered() is true for the green sha and its
+      first-parent ancestors and false above it; resolve_prev cases mirror range_context's at the function level; the
+      deploy_gate module still exposes newest_green_sha as the same object.
+  - file: .github/workflows/ci-rca.yml
+    action: Modify
+    purpose: >-
+      (1) A new step after "Resolve run metadata": fetch the run JSON (gh api, already the meta step's source) and run
+      bin/venv-python -m scripts.ci_rca.range_context, writing /tmp/ci-rca-range.json and step outputs prev and
+      range_status. (2) "Generate evidence bundle" gains env CI_RCA_RANGE_PREV from that step's prev output (empty when
+      unresolved or head_only). (3) The agent prompt appends one sentence naming /tmp/ci-rca-range.json and its PR list
+      when the slug is ci. (4) Unchanged: the meta step's anchor, the selection-manifest step (the head commit's PR
+      until rec-5107's culprit job names one; Decision 142 cl.5, Decision 186), the commit-status dedup (keyed on the
+      run head) and every other step. No existing inline body grows: each composite_action_body_baseline.yaml row for
+      this file stays at or below its value (Decision 162 R3); the new step's body is a thin adapter.
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: >-
+      One row for the new ci-rca.yml step's inline body at its measured length (Decision 162 R3 records every inline
+      body); no existing row increases.
+  - file: tests/verify_ci_workflow/test_ci_rca_range_step.py
+    action: Create
+    purpose: >-
+      Structural pins on ci-rca.yml: the range step runs scripts.ci_rca.range_context after the meta step and before
+      the evidence step; the evidence step's env carries CI_RCA_RANGE_PREV from the range step's output; the
+      selection-manifest step still resolves the PR from the anchor sha (unchanged); the dedup step still keys on
+      steps.meta.outputs.anchor_sha.
+  - file: scripts/ci_rca/vacuous_pass.py
+    action: Modify
+    purpose: >-
+      _run_git_diff diffs CI_RCA_RANGE_PREV..HEAD when that variable is set and non-empty; when it is set but empty
+      (the range step ran and the range is unresolved) every diff-derived result is "undetermined", never a HEAD^ diff;
+      when it is unset (the step did not run, e.g. a local caller) HEAD^..HEAD as today. Docstrings follow.
+  - file: tests/test_ci_rca_vacuous_pass.py
+    action: Modify
+    purpose: "Add: a two-commit range diff lists both commits' files; set-but-empty returns undetermined; unset keeps HEAD^."
+  - file: scripts/ci_rca/dedup.py
+    action: Modify
+    purpose: >-
+      Cross-workflow dedup (rec-4900; Decision 142 cl.1 and cl.3, fingerprint unchanged). FULL_TIER_SIBLING_SLUGS =
+      ("ci", "main_canary"). sibling_fingerprints(bundle) -> list[str]: the bundle's own fingerprint first, then, when
+      its workflow slug is a sibling, compute_fingerprint_v2(slug, failure_category, error_signature) for each other
+      sibling. The finder and the closed-head resolver try that list in order and stop at the first open match (one
+      bump), so a Main Canary red of a cause already open from main-validate bumps that rec instead of filing a
+      second. Bundles carry workflow_name, failure_category and error_signature today (scripts/ci_rca/evidence/
+      _bundle_core.py); a bundle missing any of them is looked up on its own fingerprint only.
+  - file: scripts/ops_portal/ci_rca_runtime.py
+    action: Modify
+    purpose: >-
+      Write-time backstop (Decision 142 cl.3): find_open_ci_rca_rec_by_fingerprint accepts one fingerprint or a list
+      and matches any, from the SAME single current_state read (no extra reader call; Decision 88, 215); the file_rec
+      backstop passes dedup.sibling_fingerprints for the bundle the rec cites when that bundle is in
+      CI_RCA_BUNDLE_EMIT_DIR, else the rec's own fingerprint as today. Net SLOC growth at most 15; past 500, decompose
+      (Decision 128), never raise.
+  - file: tests/test_ci_rca_cross_workflow_dedup.py
+    action: Create
+    purpose: >-
+      rec-4900's acceptance node test_same_full_tier_failure_on_two_workflows_files_one_rec: a main_canary bundle and
+      an open ci rec of the same failure_category and error_signature -> decide() dedupes and bumps the ci rec, and
+      the write-time backstop returns the same rec id; plus red cases: a different signature still runs the agent; a
+      non-sibling slug (terraform-apply-sandbox) never matches a ci rec; a sibling's CLOSED head goes through
+      classify_closed_head as its own slug's would.
+  - file: docs/contracts/full-tier-range.yaml
+    action: Create
+    purpose: >-
+      New Class D subject contract (Decision 168), the approved words of docs/plans/approved/
+      last-green-range-consumers.yaml block c01: prev, range, last-green ref, covered, the three variables, the read
+      order, ci-rca's range use and the full-tier sibling set, and what stays dormant until rec-5107. Evaluator
+      validate_full_tier_range. Build plans 2b to 4 extend this file instead of the capped git-ops.yaml and
+      ci-rca-lifecycle.yaml.
+  - file: scripts/checks/ci_guards/validate_full_tier_range.py
+    action: Create
+    purpose: >-
+      The contract's evaluator (Decision 168; derive-and-assert, the validate_presubmit_tool_pin_escalation shape):
+      the contract's variables equal _common.FULL_TIER_PREV_ENV, _common.FULL_TIER_LAST_GREEN_ENV and
+      vacuous_pass.RANGE_PREV_ENV; its sibling slugs equal dedup.FULL_TIER_SIBLING_SLUGS and each is the slug of a
+      workflow in config/ci_rca_taxonomy.yaml's workflows map whose tier is the CI tier; its job and step names equal
+      last_green.FULL_TIER_JOB and FULL_TIER_STEP. Holds the contract basename as a literal; reports
+      registry.examined(n, unit="contract_fields").
+  - file: scripts/checks/ci_guards/_manifest.py
+    action: Modify
+    purpose: >-
+      Entry(name="validate_full_tier_range", ...) with pre=True, pre_globs naming the check, the contract, scripts/
+      checks/_common.py, scripts/ci/last_green.py, scripts/ci_rca/dedup.py, scripts/ci_rca/vacuous_pass.py,
+      scripts/ci_rca/fingerprint.py and config/ci_rca_taxonomy.yaml plus its import closure, full_segment
+      full_after_lint.
+  - file: tests/checks/ci_guards/test_validate_full_tier_range.py
+    action: Create
+    purpose: >-
+      Green on the live tree; red per drift (a renamed variable, a sibling slug missing from the taxonomy or from
+      dedup, a job-name drift) on tmp copies; test_registered_in_fast_tier (the registry resolves the Entry with
+      pre=True).
+  - file: config/ci_rca_taxonomy.yaml
+    action: Modify
+    purpose: >-
+      One function_to_category row, validate_full_tier_range: schema_drift. At 497 of 500 effective lines: if the
+      row would cross 500, compact an existing row in the same file (structural relief valve), never raise.
+bundled_recommendations: [rec-4900]
+followon_recs: [rec-5106]
+infrastructure_dependencies: []
+acceptance_criteria:
+  - "rec-4900's acceptance passes: one full-tier failure seen by main-validate and Main Canary files one rec."
+  - "scripts/ci/last_green.py answers last_green_sha (push or dispatch, any attempt), covered and resolve_prev, each unit-tested; the deploy gate's newest_green_sha behaves exactly as before."
+  - "push_context_base with FULL_TIER_PREV set returns an ancestor prev, else a qualifying FULL_TIER_LAST_GREEN, else fails; unset, every existing push_context_base test passes unchanged."
+  - "ci-rca computes a CI run's range through range_context.py; when HEAD^ ran the full tier the range is the head commit alone (behaviour unchanged); after a plans-only parent it holds both commits; vacuous_pass diffs the range and abstains when it is unresolved."
+  - "docs/contracts/full-tier-range.yaml matches its approved sidecar word for word, and validate_full_tier_range is green on the tree and red on each drift fixture."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: rec-4900's acceptance node and the write-time backstop (cross-workflow dedup).
+    command: bin/venv-python -m pytest "tests/test_ci_rca_cross_workflow_dedup.py::test_same_full_tier_failure_on_two_workflows_files_one_rec" "tests/test_ci_rca_cross_workflow_dedup.py::test_backstop_matches_sibling_fingerprint" -q
+    expected: exit 0; red before (the test file does not exist).
+    fix_if: the canary bundle files a second rec; fix sibling_fingerprints or the finder order, never the fixture
+    hermetic: true
+    expected_literals: [" 2 passed"]
+    graduation: graduate
+    graduation_check_id: ci-rca-cross-workflow-dedup
+  - step: 2
+    phase: pre-deploy
+    action: The range resolves past a plans-only parent and equals the head alone when the parent ran the full tier.
+    command: bin/venv-python -m pytest "tests/ci_rca/test_range_context.py::test_plans_only_parent_widens_range" "tests/ci_rca/test_range_context.py::test_full_tier_parent_gives_head_only_range" -q
+    expected: exit 0; red before (the module and test file do not exist).
+    fix_if: the plans-only parent is taken as prev, or the neutral case yields more than the head commit
+    hermetic: true
+    expected_literals: [" 2 passed"]
+    graduation: graduate
+    graduation_check_id: ci-rca-range-resolves-prev
+  - step: 3
+    phase: pre-deploy
+    action: "The read order -- recorded range wins, a bad prev widens to last-green, nothing resolves is unresolved."
+    command: bin/venv-python -m pytest "tests/ci_rca/test_range_context.py::test_recorded_range_wins" "tests/ci_rca/test_range_context.py::test_non_ancestor_prev_widens_to_last_green" "tests/ci_rca/test_range_context.py::test_nothing_resolves_is_unresolved_head_alone" -q
+    expected: exit 0; red before (the module and test file do not exist).
+    fix_if: any rung of the read order is skipped or reordered
+    hermetic: true
+    expected_literals: [" 3 passed"]
+    graduation: graduate
+    graduation_check_id: ci-rca-range-read-order
+  - step: 4
+    phase: pre-deploy
+    action: The shared resolver answers Decision 254 cl.2 and leaves the deploy gate's resolver as it was.
+    command: bin/venv-python -m pytest "tests/ci/test_last_green.py::test_last_green_counts_dispatch_and_any_attempt" "tests/ci/test_last_green.py::test_newest_green_sha_unchanged_for_dispatch_and_attempts" "tests/ci/test_last_green.py::test_covered_is_green_and_its_ancestors" tests/ci/test_deploy_gate.py -q
+    expected: exit 0; the three new nodes red before (the module does not exist); test_deploy_gate.py green before and after.
+    fix_if: a dispatch run or an earlier passing attempt is missed, newest_green_sha starts counting either, or a deploy_gate test changes
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: last-green-resolver-cl2
+  - step: 5
+    phase: pre-deploy
+    action: push_context_base honours a passed prev, widens to a passed last-green, fails otherwise, and is unchanged when unset.
+    command: bin/venv-python -m pytest tests/checks/_common/test_push_context_base.py -q
+    expected: exit 0; the new FULL_TIER_PREV cases red before, every existing case green before and after.
+    fix_if: HEAD~1 is returned while FULL_TIER_PREV is set, or an existing case changes result
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: push-context-base-full-tier-prev
+  - step: 6
+    phase: pre-deploy
+    action: vacuous_pass diffs the range and abstains when it is unresolved.
+    command: bin/venv-python -m pytest tests/test_ci_rca_vacuous_pass.py -q
+    expected: exit 0; the new range cases red before, existing cases unchanged.
+    fix_if: a set-but-empty range diffs HEAD^, or an unset variable stops diffing HEAD^
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: waive
+    graduation_waiver_reason: >-
+      A whole-file run of an existing test file this plan extends; its nodes already run in the full tier, and steps 2
+      and 3 graduate the range behaviour that feeds it.
+  - step: 7
+    phase: pre-deploy
+    action: The contract's evaluator is green on the tree, red on each drift, and registered in the fast tier; the workflow pins hold.
+    command: bin/venv-python -m pytest tests/checks/ci_guards/test_validate_full_tier_range.py tests/verify_ci_workflow/test_ci_rca_range_step.py -q && bin/venv-python -c "from scripts.checks.ci_guards.validate_full_tier_range import validate_full_tier_range as v; f=[]; v(f); raise SystemExit(1 if f else 0)"
+    expected: exit 0; tests red before (files absent); the check prints its examined count and passes.
+    fix_if: a drift fixture stays green, or the check is not registered pre=True
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      The check itself becomes the standing guard in the fast tier (pre=True), so a graduated shard would re-run what
+      every PR already runs.
+  - step: 8
+    phase: pre-deploy
+    action: Bind the contract to the approved words.
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug last-green-range-consumers --base origin/main
+    expected: exit 0; APPROVED-TEXT OK, every block word for word.
+    fix_if: any word differs; fix the file, never the sidecar (operator-approved text)
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: validate_merge_step and the approved-text check run this on every PR; a shard would duplicate them.
+  - step: 9
+    phase: pre-deploy
+    action: Every remaining new or touched test file and the size budgets.
+    command: bin/venv-python -m pytest tests/ci_rca/test_range_context.py tests/ci/test_last_green.py tests/test_ci_rca_cross_workflow_dedup.py tests/test_ci_rca_dedup.py tests/ops_data_portal/test_ci_rca_fingerprint.py -q && bin/venv-python -c "from scripts.checks.sloc.sloc_limits import validate_sloc_limits as a; from scripts.checks.structural.size_limits import validate_structural_size_limits as b; f=[]; a(f); b(f); raise SystemExit(1 if f else 0)"
+    expected: exit 0
+    fix_if: an existing dedup or fingerprint test changes result, or a file crosses its budget (decompose, never raise)
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      A whole-file sweep and the size checks, both already in the full tier; steps 1-5 graduate the behaviours.
+  - step: 10
+    phase: pre-deploy
+    action: Fast tier, then the full tier, on the build head.
+    command: bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: exit 0; --verify-head reads a completed full-tier run of this head (started backgrounded from the top-level session with a 2 h limit, HOME set to an empty dir for tests/test_aws_profile.py).
+    fix_if: any check fails; fix forward on the branch
+    hermetic: false
+    graduation: not-applicable
+  - step: 11
+    phase: post-deploy
+    action: First real CI red on main after merge (observation only; no red is induced).
+    command: >-
+      bin/venv-python -c "print('Read the next ci-rca run on a CI red: its range step prints range_status and prev, and /tmp/ci-rca-range.json names the run head as the only commit when HEAD^ ran the full tier')"
+    expected: The first ci-rca run on a CI red after merge logs range_status=resolved with prev equal to HEAD^ (or past a plans-only parent), and files or dedups exactly as before.
+    fix_if: the step errors or its range differs from the run's parent chain; file a rec against this plan (forward fix)
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: scripts/ci/last_green.py
+    behavior: last_green_sha counts push or dispatch runs on any attempt; covered is the green sha and its ancestors; resolve_prev passes over skipped and timed-out full tiers
+    verification_step: 4
+    test_selector: tests/ci/test_last_green.py::test_last_green_counts_dispatch_and_any_attempt
+    red_green_expectation: red before (module and test absent), green after
+  - source: scripts/ci/deploy_gate.py
+    behavior: the deploy gate's newest_green_sha is unchanged after the move
+    verification_step: 4
+    test_selector: tests/ci/test_last_green.py::test_newest_green_sha_unchanged_for_dispatch_and_attempts
+    red_green_expectation: red before (test absent), green after; tests/ci/test_deploy_gate.py green throughout
+  - source: scripts/checks/_common.py
+    behavior: a passed FULL_TIER_PREV wins, a passed FULL_TIER_LAST_GREEN is the fallback, neither fails, unset is unchanged
+    verification_step: 5
+    test_selector: tests/checks/_common/test_push_context_base.py::TestPushContextBase::test_full_tier_prev_ancestor_is_returned
+    red_green_expectation: red before (the variable is ignored), green after
+  - source: scripts/ci_rca/range_context.py
+    behavior: the range widens past a plans-only parent and is the head alone when the parent ran the full tier
+    verification_step: 2
+    test_selector: tests/ci_rca/test_range_context.py::test_plans_only_parent_widens_range
+    red_green_expectation: red before (module and test absent), green after
+  - source: .github/workflows/ci-rca.yml
+    behavior: the range step feeds the evidence step's CI_RCA_RANGE_PREV and leaves the manifest and dedup anchors on the head
+    verification_step: 7
+    test_selector: tests/verify_ci_workflow/test_ci_rca_range_step.py::test_evidence_step_reads_range_prev
+    red_green_expectation: red before (no range step), green after
+  - source: scripts/ci_rca/vacuous_pass.py
+    behavior: diffs the passed range and abstains when it is unresolved
+    verification_step: 6
+    test_selector: tests/test_ci_rca_vacuous_pass.py::test_set_but_empty_range_is_undetermined
+    red_green_expectation: red before (HEAD^ is diffed), green after
+  - source: scripts/ci_rca/dedup.py
+    behavior: a sibling workflow's failure of the same cause matches the open rec
+    verification_step: 1
+    test_selector: tests/test_ci_rca_cross_workflow_dedup.py::test_same_full_tier_failure_on_two_workflows_files_one_rec
+    red_green_expectation: red before (a second rec is filed), green after
+  - source: scripts/ops_portal/ci_rca_runtime.py
+    behavior: the write-time backstop matches the sibling fingerprints from one reader read
+    verification_step: 1
+    test_selector: tests/test_ci_rca_cross_workflow_dedup.py::test_backstop_matches_sibling_fingerprint
+    red_green_expectation: red before (only the rec's own fingerprint matches), green after
+  - source: docs/contracts/full-tier-range.yaml
+    behavior: the contract's declared names match the live code
+    verification_step: 7
+    test_selector: tests/checks/ci_guards/test_validate_full_tier_range.py::test_live_tree_is_green
+    red_green_expectation: red before (contract and check absent), green after
+  - source: scripts/checks/ci_guards/validate_full_tier_range.py
+    behavior: each contract drift turns the check red
+    verification_step: 7
+    test_selector: tests/checks/ci_guards/test_validate_full_tier_range.py::test_renamed_variable_is_red
+    red_green_expectation: red before (check absent), green after
+constraints:
+  - "Behaviour-neutral where HEAD^'s main-validate ran the full tier: ci-rca's range is the head alone, vacuous_pass diffs HEAD^..HEAD, and nothing sets FULL_TIER_PREV, so push_context_base runs today's path."
+  - "The deploy gate keeps newest_green_sha (push, latest attempt; Decision 249 cl.2) until rec-5108; last_green_sha is not wired into any deploy channel here."
+  - "Validate makes no GitHub API call: push_context_base reads only the two variables; resolving and widening prev are the job's (rec-5107) or ci-rca's."
+  - "The v2 fingerprint is unchanged (Decision 142 cl.1); no open rec is migrated or re-keyed."
+  - "The selection manifest stays the head commit's PR; escape_class is never dropped here (Decision 186's closure obligation keeps its reach)."
+  - "ci-rca.yml: no existing inline body grows past its composite_action_body_baseline.yaml row (Decision 162 R3, Decision 165); new logic lives in scripts/ci_rca/range_context.py."
+  - "docs/contracts/full-tier-range.yaml lands word for word as docs/plans/approved/last-green-range-consumers.yaml binds it (Decision 246); git-ops.yaml and ci-rca-lifecycle.yaml are not edited (497 and 499 of 500)."
+  - "Out of scope, build plan 2b (rec-5106): the trailer census, junit verdict and closure over a range, scripts/rec_trailer_acceptance*.py, scripts/session/merge_step.py and git-ops.yaml. Out of scope, rec-5107: ci.yml main-validate (concurrency, the prev step that sets FULL_TIER_PREV and FULL_TIER_LAST_GREEN, the recorded range)."
+  - "No rescue agents or workaround loops (Decision 55)."
+context:
+  - "Decision-scout round 1 (draft): FLAGS_FOUND, 217 of 217 triaged; CITE 254, 249, 159, 142, 168; WARN 254 (a) push_context_base skipped the last-green widening -> folded (FULL_TIER_LAST_GREEN), (b) the moved resolver was not cl.2's -> folded (last_green_sha beside an unchanged newest_green_sha). Round 2: FLAGS_FOUND (NOTEs), 217 of 217 triaged, Roadmap items intersected: 6; CONFLICT: 0; RELATED: 6; NOTE 254 unresolved range must not diff HEAD^ -> folded (vacuous_pass abstains), cl.4's main-validate leg dormant until rec-5107 -> recorded below; NOTE 162 inline bodies -> folded, dec:162 cited. RELATED 72, 73, 135, 186, 226, 170, 169, 128, 165, 210, 215, 84, 88, 181, 205, 212, 234, 100. Serves: NS.6 3/5. Evidence /mnt/project-files/rec-4874-build-plan-2/SCOUT-r1.md, SCOUT-r2.md."
+  - "Design: blind Fable consult /mnt/project-files/rec-4874-build-plan-2/advisor-brief/ADVICE.md; presentation PRESENTATION.md beside it. Operator sign-off 'write the plan' 2026-11-17 15:01 UTC."
+  - "Premise corrected by the consult and re-read (ci.yml:114-120, 165-189): plans-only pushes skip the full tier, so prev is already HEAD^^ after a plans-only merge; the full-tier step sets no GITHUB_EVENT_BEFORE, so it takes push_context_base's HEAD~1 branch today. Neutrality therefore holds where HEAD^ ran the full tier, and the wider range after a plans-only parent is the correct one."
+  - "fork: split | chosen: 2a (this plan) then 2b (trailer census, junit binding over a range, merge_step readback window, git-ops.yaml; closes rec-5106) | class: consistency-only | precedent: Decision 247; coordinator split_rule | precedent_kind: decision | reversible: yes | persisted: followon_recs"
+  - "fork: prev source | chosen: resolve_prev built now, a recorded range wins once rec-5107 writes one | class: consistency-only | precedent: REPORT section 3.1 | precedent_kind: contract | reversible: yes | persisted: docs/contracts/full-tier-range.yaml read_order"
+  - "fork: unset variable | chosen: today's push_context_base path until rec-5107 sets FULL_TIER_PREV | class: consistency-only | precedent: Decision 159 cl.1 | precedent_kind: decision | reversible: yes | persisted: docs/contracts/full-tier-range.yaml variables"
+  - "fork: slug-free cause key | chosen: sibling-slug v2 fingerprints through the existing lookup (rec-4900) | class: consistency-only | precedent: Decision 142 cl.1 | precedent_kind: decision | reversible: yes | persisted: docs/contracts/full-tier-range.yaml ci_rca.full_tier_siblings"
+  - "fork: escape attribution over a range | chosen: the head commit's PR as today until rec-5107's culprit job | class: consistency-only | precedent: Decision 142 cl.5 | precedent_kind: decision | reversible: yes | persisted: docs/contracts/full-tier-range.yaml ci_rca.escape_attribution"
+  - "fork: contract home | chosen: new subject contract full-tier-range.yaml (git-ops.yaml 497/500, ci-rca-lifecycle.yaml 499/500) | class: consistency-only | precedent: structural_size_budgets relief_valve split by subject; Decision 168 | precedent_kind: contract | reversible: yes | persisted: docs/contracts/full-tier-range.yaml"
+  - "Deferral (Decision 181 cl.2): Decision 254 cl.4's main-validate leg (push_context_base anchored on prev) has no producer until rec-5107 sets FULL_TIER_PREV; rec-5107 owns turning it on, and rec-5106's closure by build plan 2b claims only the consumers. Brief for 2b: /mnt/project-files/rec-4874-build-plan-2/BRIEF-plan-2b.md."
+  - "rec-5106 relevance gate read stale_target (scripts/ci/last_green.py absent): expected, this plan creates it. rec-4900 relevance: unknown (no signals), bundled."
+  - "Unbuilt plans on the same files (plan_obligations): ci-rca.yml with PLAN-scheduled-workflow-dispatch, PLAN-telemetry-claude-p-capture-adapter, PLAN-telemetry-producer-admission-plan-review-capture, PLAN-wording-approval-routing (CI Reform #2071); config/ci_rca_taxonomy.yaml with many (one row added here). Whichever builds second rebases."
+  - "Live assumptions UNPROVEN until step 11: the GitHub jobs API exposes a skipped full-tier step as conclusion skipped and a started one as in_progress or completed (resolve_prev's started test); proven in fixtures only."
+  - "Graduated shards kept unchanged (their tests are extended, never edited in meaning): push-context-diff-base-tests, root-scoped-diff-base-regression-suite (tests/checks/_common/test_push_context_base.py), syspath-injection-test-under-polluted-path (tests/test_ci_rca_vacuous_pass.py). New shards from VP 1-5 are sanction_rows (no scope row)."
+  - "Related-work check (red_overlap at plan write 2026-11-17 15:3x UTC): blocked on rec-5247 (telemetry-reader smoke 504, Critical, past SLO, shared: [], Feedback Loop owns it) and rec-5276 (arrival-red excuse row in config/telemetry/arrival.yaml, Critical, shared: test files under tests/checks/ci_guards/ and tests/checks/_common/ reached only through the dependency selector's import fan-out). Deferral rationale: this plan repairs neither and edits none of their files (no telemetry reader, arrival config or verify path); it proceeds as planning only. The build re-runs red_overlap before /implement and waits for their repair if still red (slo_clock)."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:12cdbae5161ee13cc2acf32f3219ba810c8e5d2e13b05044906d6d8f50a420a5"}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:ca65999e5d58206118707448d24b2679e39f91ed79c21582dc03cbcfbe2c9eb7"}  # pragma: allowlist secret
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Decisions 142, 159, 162, 168, 249 and 254 sections read
+  - docs/plans/reports/REPORT-last-green-batched-full-tier-design.md sections 2, 3.1, 3.2, 3.5 and 3.8 read
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "Contract: place sidecar block c01 (bin/venv-python -m scripts.roadmap.approved_text apply, or by hand word for word, {{DATE}} filled with the build date); VP 8."
+  - "Resolver: create scripts/ci/last_green.py, move the deploy gate's resolver into it, keep the re-exports; tests/ci/test_last_green.py; VP 4."
+  - "push_context_base and its tests; VP 5."
+  - "range_context.py, the ci-rca.yml step and env, the baseline row, vacuous_pass and their tests; VP 2, 3, 6."
+  - "Cross-workflow dedup in dedup.py and ci_rca_runtime.py, tests/test_ci_rca_cross_workflow_dedup.py; VP 1."
+  - "Evaluator check, manifest Entry, taxonomy row (compacting if needed) and mirror test; VP 7, VP 9."
+  - "Graduate VP 1-5 into config/agent/verification_registry/entries/ with their graduation_check_id slugs."
+  - "CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; commit with the trailer 'Resolves: rec-4900' (rec-5106 stays open for build plan 2b); git fetch origin main && git rebase origin/main; VP 8; VP 10 (full tier backgrounded from the top-level session, then --verify-head; a timeout is BLOCKED, no push); push; open the PR; subscribe; code review; merge on code review PROCEED and green CI under standing authorisation (validate_merge_step reads the sidecar's approval); merge_step premerge and readback."
+  - "Report: what was implemented, verification results, merge SHA; VP 11 is read on the first CI red after merge."
+rollback: Revert the build PR; nothing is stored, deployed or migrated, and the fingerprint is unchanged, so no data or infrastructure rollback exists.
