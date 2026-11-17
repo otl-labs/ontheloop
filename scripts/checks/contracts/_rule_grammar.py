@@ -17,7 +17,7 @@ import yaml
 
 from scripts import contract_rules
 from scripts.field_semantics_event_projection import KNOWN_DQ_KEYS as EVENT_DQ_KEYS
-from src.row_rules.rules import EXEMPTABLE_LEGS, PRODUCER_SIDE_KINDS, WAIVABLE_KINDS
+from src.row_rules.rules import EXEMPTABLE_LEGS, PRODUCER_SIDE_KINDS, WAIVABLE_KINDS, WRITER_REFERENCE_KINDS
 
 SCD2_VOCABULARY = frozenset(
     {
@@ -149,7 +149,7 @@ def _leg_errors(floor: str | None, where: str, kind: str, value: Any, exemptions
         err = regex_subset_error(pat)
         if err:
             errors.append(f"{where}: {kind} pattern {err}")
-    if kind in PRODUCER_SIDE_KINDS and kind not in exemptions:
+    if kind in PRODUCER_SIDE_KINDS - WRITER_REFERENCE_KINDS and kind not in exemptions:
         errors.append(f"{where}: producer-side rule {kind!r} needs a write_time_exemptions entry")
     return errors
 

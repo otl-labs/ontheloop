@@ -435,6 +435,22 @@ def test_array_element_reference_skips_reader_when_all_elements_memoised():
     _write_validators._rec_exists_memo.clear()
 
 
+def test_reference_precheck_runs_from_writer_leg():
+    """The pre-check is driven by reference_columns (Decision 268), not a producer exemption: no exemption remains."""
+    from src.common.ducklake_write_rules import reference_columns  # noqa: PLC0415
+
+    fields = rt.resolve_table_spec("ops_recommendations").fields
+    assert "dependencies" in reference_columns(fields)
+    assert ("dependencies", "array_element_reference") not in RowRules.from_projection(fields).producer_exemptions
+    _write_validators._rec_exists_memo.clear()
+    reader = MagicMock()
+    reader.named.return_value = []
+    with patch(_REF, return_value=reader):
+        with pytest.raises(ValueError, match="absent"):
+            gate_write("ops_recommendations", _deps(["rec-424242"]), insert=True)
+    _write_validators._rec_exists_memo.clear()
+
+
 # ---------------------------------------------------------------------------
 # The removal ledger: every retired portal check maps to the contract leg that replaces it
 # ---------------------------------------------------------------------------
@@ -449,7 +465,7 @@ def _without_leg(semantics: dict[str, Any], column: str, leg: str) -> dict[str, 
         else:
             field["sql_type"] = "VARCHAR"
         return mutated
-    if leg in ("acceptance_lint", "array_element_reference"):
+    if leg == "acceptance_lint":
         field["write_time_exemptions"].pop(leg)
         return mutated
     field.pop(leg)

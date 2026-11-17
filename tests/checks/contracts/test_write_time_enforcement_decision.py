@@ -102,3 +102,16 @@ def test_coverage_sentence_and_decision_annotation_name_the_conformance_check() 
     assert (
         "(validate_write_time_enforcement_conformance); a declared rule is enforced, so the enforced key is retired" in section
     )
+
+
+def test_dependency_lookup_names_its_amending_decision() -> None:
+    _, rule, decisions_text = _load()
+    statement = " ".join(rule["statement"].split())
+    match = re.search(r"dependencies existence lookup \(Decision (\d+)\)", statement)
+    assert match, "the write-owned cross-row list must name the dependencies lookup and its Decision"
+    number = match.group(1)
+    assert number != _decision_number(rule["statement"])
+    section = _section(decisions_text, number)
+    assert re.search(r"^amends: \[210\]$", section, re.MULTILINE), f"Decision {number} must amend Decision 210"
+    assert f"Amended by Decision {number} (" in _section(decisions_text, "210")
+    assert "ops_recommendations dependencies existence lookup" in statement
