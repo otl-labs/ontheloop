@@ -21,7 +21,7 @@ from scripts.session import merge_checks
 
 ROOT = Path(__file__).resolve().parents[2]
 PROBE_DIR = "tests/fixtures/persona_verdict/fixture_pr/"
-PROBE_STEMS = ("proceed", "revise", "fail", "malformed")
+PROBE_STEMS = ("proceed", "revise", "fail", "malformed", "block", "flags")
 PROBE_PREFIX = "verdict_probe."
 PLAN_PATH = re.compile(r"docs/plans/PLAN-[^/]+\.yaml")
 PLAN_SIZE_CAP = 512 * 1024
@@ -198,7 +198,7 @@ def main(argv: list[str]) -> int:
     repo = os.environ["GITHUB_REPOSITORY"]
     routes: list[str] = []
     plans: list[str] = []
-    if resolution.get("resolved"):
+    if resolution.get("resolved") and not resolution.get("override"):
         files, unknown, merge_base = changed_files(repo, resolution["base_ref"], resolution["head_sha"], token)
         routes = route(files, unknown, bool(resolution["draft"]), repo, resolution["head_sha"], merge_base, token)
         plans = [str(f["filename"]) for f in plan_files(files)]

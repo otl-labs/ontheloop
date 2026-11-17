@@ -17,7 +17,7 @@ from typing import Any
 
 import jsonschema
 
-from scripts.personas import execute, resolve_pr
+from scripts.personas import execute, override, resolve_pr
 
 SUCCESS_VERDICTS = frozenset({"NO_FLAGS", "FLAGS_FOUND", "PROCEED"})
 FAILURE_VERDICTS = frozenset({"BLOCK", "REVISE"})
@@ -75,6 +75,7 @@ def post_check(
     title: str,
     summary: str,
     sleep: Callable[[float], None] = time.sleep,
+    text: str | None = None,
 ) -> None:
     body = {
         "name": name,
@@ -83,6 +84,8 @@ def post_check(
         "conclusion": conclusion,
         "output": {"title": title[:200], "summary": summary[:TEXT_LIMIT]},
     }
+    if text is not None:
+        body["output"]["text"] = text[:TEXT_LIMIT]
     status = 0
     for attempt in range(RETRIES):
         status, _ = resolve_pr.request("POST", f"/repos/{repo}/check-runs", token, body)
@@ -93,6 +96,78 @@ def post_check(
     raise RuntimeError(f"check-run POST for {name} failed with {status}")
 
 
+def _escape(value: str) -> str:
+    return " ".join(value.replace("<!--", "&lt;!--").split())
+
+
+def overridable_output(root: Path, route_id: str, result: Any) -> tuple[str, list[str], dict[str, Any]] | None:
+    """(verdict, blocking ids, parsed output) of a parsed, schema-valid, overridable verdict result, else None."""
+    if not (isinstance(result, dict) and result.get("route") == route_id and override.overridable(route_id)):
+        return None
+    extract = override.extractor_for(route_id)
+    if extract is None or result.get("failure") or result.get("timed_out") or result.get("exit_code") != 0:
+        return None
+    try:
+        out = json.loads(str(result.get("stdout") or ""))
+        schema = execute.schema_for(root, route_id, "output")
+        if schema is None:
+            return None
+        jsonschema.validate(out, schema)
+    except (ValueError, jsonschema.ValidationError):
+        return None
+    if not isinstance(out, dict) or out.get("outcome") != "success":
+        return None
+    verdict, ids = extract(out)
+    if verdict not in override.OVERRIDABLE_VERDICTS or not ids:
+        return None
+    return verdict, sorted(set(ids)), out
+
+
+def record_text(route_id: str, head_sha: str, verdict: str, ids: list[str], out: dict[str, Any]) -> str:
+    lines = [override.render_record(route_id, head_sha, verdict, ids, os.environ.get("GITHUB_RUN_ID", "0"))]
+    titles = {
+        str(f.get("id")): str(f.get("title") or "")
+        for f in out.get("findings") or []
+        if isinstance(f, dict) and isinstance(f.get("id"), str)
+    }
+    for fid in ids:
+        lines.append(f"- {_escape(fid).replace(' ', '_')}: {_escape(titles.get(fid, ''))}")
+    return "\n".join(lines)
+
+
+def _override_form(approved: dict[str, Any], verdict: str, ids: list[str], record: str) -> tuple[str, str, str]:
+    who = approved["approver"]
+    title = f"{verdict} dispositioned by {who}" if verdict == "FLAGS_FOUND" else f"{verdict} overridden by {who}"
+    summary = (
+        f"Original verdict: {verdict}. Covered ids: {', '.join(ids)}. Approver: {who}. "
+        f"Approved at: {approved['approved_at']}. Override run: {approved['url']}."
+    )
+    marker = {"run_id": approved["run_id"], "approver": who, "approved_at": approved["approved_at"]}
+    text = record.split("\n", 1)[0] + "\n" + override.OVERRIDE_PREFIX + json.dumps(marker, sort_keys=True) + " -->"
+    return title, summary, text
+
+
+def post_override(
+    resolution: dict[str, Any], repo: str, token: str | None, sleep: Callable[[float], None] = time.sleep
+) -> str:
+    """The re-run event: one new success check run of the failing check's name, from the stored record."""
+    ov = resolution["override"]
+    route_id, head = ov["route"], ov["head_sha"]
+    try:
+        if not override.overridable(route_id):
+            raise override.Refused("the route is not overridable")
+        rec, _text = override.origin(repo, token, head, route_id, int(ov["check_run_id"]))
+        if rec["verdict"] not in override.OVERRIDABLE_VERDICTS or override.ids_digest(rec["blocking_ids"]) != ov["ids_digest"]:
+            raise override.Refused("the record does not match the approved override")
+    except override.Refused as exc:
+        raise RuntimeError(f"override re-check failed: {exc}") from exc
+    record = override.render_record(route_id, head, rec["verdict"], rec["blocking_ids"], rec["run_id"])
+    title, summary, text = _override_form(ov, rec["verdict"], rec["blocking_ids"], record)
+    name = f"persona-verdict/{route_id}"
+    post_check(repo, token, head, name, "success", title, summary, sleep, text)
+    return name
+
+
 def post_all(root: Path, work: Path, repo: str, token: str | None, sleep: Callable[[float], None] = time.sleep) -> list[str]:
     resolution = _read(work / "prepared" / "resolution.json")
     routes_doc = _read(work / "prepared" / "routes.json")
@@ -100,12 +175,30 @@ def post_all(root: Path, work: Path, repo: str, token: str | None, sleep: Callab
         raise RuntimeError("the prepared artifact is missing: no resolution to post against")
     if not resolution.get("resolved"):
         return []
+    if resolution.get("override"):
+        return [post_override(resolution, repo, token, sleep)]
     posted = []
     for route_id in routes_doc.get("routes", []):
         result = _read(work / "results" / f"{route_id}.json")
-        conclusion, title, summary = judge(root, route_id, result, bool(resolution.get("allowlisted")))
+        allowlisted = bool(resolution.get("allowlisted"))
+        conclusion, title, summary = judge(root, route_id, result, allowlisted)
+        text: str | None = None
+        info = overridable_output(root, route_id, result) if allowlisted else None
+        if info is not None:
+            verdict, ids, out = info
+            text = record_text(route_id, resolution["head_sha"], verdict, ids, out)
+            if conclusion == "failure":
+                try:
+                    approved = override.lookup(
+                        repo, token, int(resolution["number"]), resolution["head_sha"], route_id, override.ids_digest(ids)
+                    )
+                except override.Refused:
+                    approved = None
+                if approved:
+                    conclusion = "success"
+                    title, summary, text = _override_form(approved, verdict, ids, text)
         name = f"persona-verdict/{route_id}"
-        post_check(repo, token, resolution["head_sha"], name, conclusion, title, summary, sleep)
+        post_check(repo, token, resolution["head_sha"], name, conclusion, title, summary, sleep, text)
         posted.append(name)
     return posted
 

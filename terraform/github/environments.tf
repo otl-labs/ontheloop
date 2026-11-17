@@ -240,3 +240,37 @@ resource "github_repository_environment_deployment_policy" "tf_bootstrap_apply_m
   environment    = github_repository_environment.tf_bootstrap_apply.environment
   branch_pattern = "main"
 }
+
+# GitHub Environment: persona-verdict-override (T4.32 c6; PLAN-persona-verdict-override).
+#
+# The operator-only gate of a verdict override run: a run of persona-verdict-override.yml waits here, and CI reads
+# GitHub's record of the operator's approval. Required reviewers from var.gated_apply_reviewer_user_ids; with
+# can_admins_bypass false GitHub records an approval only from a required reviewer. Never in any OIDC trust, never a job
+# holding id-token or secrets. Created by an operator-approved terraform-github-apply.yml dispatch naming both addresses
+# in gate_change (Decision 248). Destroying it fails open for the same reason as tf_gated_apply, which the approvals
+# preflight catches.
+resource "github_repository_environment" "persona_verdict_override" {
+  repository          = github_repository.this.name
+  environment         = "persona-verdict-override"
+  prevent_self_review = false
+  can_admins_bypass   = false
+
+  reviewers {
+    users = var.gated_apply_reviewer_user_ids
+  }
+
+  deployment_branch_policy {
+    protected_branches     = false
+    custom_branch_policies = true
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "github_repository_environment_deployment_policy" "persona_verdict_override_main" {
+  repository     = github_repository.this.name
+  environment    = github_repository_environment.persona_verdict_override.environment
+  branch_pattern = "main"
+}

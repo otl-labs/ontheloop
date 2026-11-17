@@ -21,6 +21,7 @@ VERBS = {
     "materialise": "materialise",
     "execute": "execute",
     "post": "post_verdict",
+    "override-render": "override",
 }
 EXIT_SNAPSHOT_ON_PATH = 3
 

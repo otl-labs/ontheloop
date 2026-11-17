@@ -14,7 +14,7 @@ from scripts.checks import _common, registry
 from scripts.checks.ci_guards import validate_persona_verdict_chain as v
 
 LIVE = Path(_common.ROOT)
-Docs = tuple[dict[str, Any], dict[str, Any], dict[str, Any]]
+Docs = tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]
 
 
 def _load(rel: str) -> dict[str, Any]:
@@ -32,11 +32,11 @@ def _named(job: dict[str, Any], name: str) -> dict[str, Any]:
 
 
 def _tree(tmp_path: Path, edit: Callable[[Docs], None] | None) -> Path:
-    docs: Docs = (_load(v.TRIGGER), _load(v.VERDICT), _load(v.EVIDENCE))
+    docs: Docs = (_load(v.TRIGGER), _load(v.VERDICT), _load(v.EVIDENCE), _load(v.OVERRIDE))
     docs = copy.deepcopy(docs)
     if edit:
         edit(docs)
-    for rel, doc in zip((v.TRIGGER, v.VERDICT, v.EVIDENCE), docs, strict=True):
+    for rel, doc in zip((v.TRIGGER, v.VERDICT, v.EVIDENCE, v.OVERRIDE), docs, strict=True):
         target = tmp_path / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
@@ -49,6 +49,15 @@ def _set_run(step: dict[str, Any], text: str) -> None:
 
 def _red(name: str, expect: str, edit: Callable[[Docs], None]) -> Any:
     return pytest.param(edit, expect, id=name)
+
+
+def _ojobs(d: Docs) -> dict[str, Any]:
+    return d[3]["jobs"]
+
+
+def _ostep(d: Docs, step_id: str) -> dict[str, Any]:
+    (found,) = [s for j in _ojobs(d).values() for s in j["steps"] if s.get("id") == step_id]
+    return found
 
 
 def _on(doc: dict[str, Any]) -> dict[str, Any]:
@@ -252,17 +261,89 @@ RED = [
         lambda d: _named(_jobs(d)["run"], "Upload verdict results")["with"].update({"path": "elsewhere"}),
     ),
     _red("no-permissions-mapping", "no permissions mapping", lambda d: _jobs(d)["prepare"].pop("permissions")),
+    _red(
+        "verdict-third-upstream",
+        "does not name exactly",
+        lambda d: _on(d[1])["workflow_run"].update({"workflows": [*v.UPSTREAMS, "third"]}),
+    ),
+    _red(
+        "verdict-missing-override-upstream",
+        "does not name exactly",
+        lambda d: _on(d[1])["workflow_run"].update({"workflows": ["persona-verdict-trigger"]}),
+    ),
+    _red(
+        "verdict-old-run-condition",
+        "run job condition",
+        lambda d: _jobs(d)["run"].update({"if": "${{ !cancelled() && needs.prepare.result == 'success' }}"}),
+    ),
+    _red("verdict-prepare-no-actions-read", "permissions differ", lambda d: _jobs(d)["prepare"]["permissions"].pop("actions")),
+    _red("verdict-run-name", "run-name is not", lambda d: d[1].update({"run-name": "x"})),
+    _red("verdict-concurrency-group", "concurrency group", lambda d: d[1]["concurrency"].update({"group": "x"})),
+    _red("override-id-token", "id-token", lambda d: _ojobs(d)["render"]["permissions"].update({"id-token": "write"})),
+    _red(
+        "override-secret",
+        "secrets or id-token",
+        lambda d: _ojobs(d)["render"]["steps"][0].update({"env": {"K": "${{ secrets.X }}"}}),
+    ),
+    _red(
+        "override-extra-job", "jobs are not exactly", lambda d: _ojobs(d).update({"extra": {"permissions": {}, "steps": []}})
+    ),
+    _red(
+        "override-env-on-render", "render job names an Environment", lambda d: _ojobs(d)["render"].update({"environment": "e"})
+    ),
+    _red("override-approve-no-env", "does not name the", lambda d: _ojobs(d)["approve"].pop("environment")),
+    _red("override-approve-no-needs", "does not need render", lambda d: _ojobs(d)["approve"].pop("needs")),
+    _red(
+        "override-unpinned-uses",
+        "not pinned",
+        lambda d: _ojobs(d)["render"]["steps"][0].update({"uses": "actions/checkout@v7"}),
+    ),
+    _red(
+        "override-sixth-input",
+        "five string inputs",
+        lambda d: _on(d[3])["workflow_dispatch"]["inputs"].update({"extra": {"type": "string"}}),
+    ),
+    _red("override-extra-trigger", "not exactly workflow_dispatch", lambda d: _on(d[3]).update({"push": {}})),
+    _red("override-render-condition", "render condition", lambda d: _ojobs(d)["render"].update({"if": "true"})),
+    _red(
+        "override-other-verb",
+        "three pinned lines",
+        lambda d: _ostep(d, "override-render").update({"run": "python3 -I scripts/personas/run.py post"}),
+    ),
+    _red(
+        "override-other-pip",
+        "only pip line",
+        lambda d: _ostep(d, "install-override-dependencies").update(
+            {"run": "pip install pyyaml requests -c requirements.txt"}
+        ),
+    ),
+    _red(
+        "override-pip-in-approve",
+        "approve job has a pip line",
+        lambda d: _ojobs(d)["approve"]["steps"].append({"id": "p", "run": "pip install x"}),
+    ),
+    _red(
+        "override-token-leak",
+        "holds the token",
+        lambda d: _ostep(d, "gate-opened").update({"env": {"X": "${{ github.token }}"}}),
+    ),
+    _red("override-run-without-id", "without an id", lambda d: _ostep(d, "gate-opened").pop("id")),
+    _red(
+        "override-permissions-widened",
+        "permissions differ",
+        lambda d: _ojobs(d)["render"]["permissions"].update({"checks": "write"}),
+    ),
     _red("missing-prepare-job", "jobs are not exactly", lambda d: _jobs(d).pop("prepare")),
     _red("extra-job", "jobs are not exactly", lambda d: _jobs(d).update({"extra": {"permissions": {}, "steps": []}})),
 ]
 
 
 def test_green_on_the_live_pair() -> None:
-    assert v.check_tree(LIVE) == ([], 2)
+    assert v.check_tree(LIVE) == ([], 3)
 
 
 def test_green_on_an_unedited_copy(tmp_path: Path) -> None:
-    assert v.check_tree(_tree(tmp_path, None)) == ([], 2)
+    assert v.check_tree(_tree(tmp_path, None)) == ([], 3)
 
 
 @pytest.mark.parametrize(("edit", "expect"), RED)
@@ -273,7 +354,7 @@ def test_red_fixture_is_refused(tmp_path: Path, edit: Callable[[Docs], None], ex
 
 def test_missing_files_are_refused(tmp_path: Path) -> None:
     problems, examined = v.check_tree(tmp_path)
-    assert examined == 0 and sum("is missing" in p for p in problems) == 3
+    assert examined == 0 and sum("is missing" in p for p in problems) == 4
 
 
 def test_stale_evidence_row_is_refused(tmp_path: Path) -> None:
@@ -287,7 +368,7 @@ def test_stale_evidence_row_is_refused(tmp_path: Path) -> None:
 def test_registered_check_reports_and_passes(capsys: pytest.CaptureFixture[str]) -> None:
     failed: list[str] = []
     v.validate_persona_verdict_chain(failed)
-    assert failed == [] and "PASS: 2 workflow(s)" in capsys.readouterr().out
+    assert failed == [] and "PASS: 3 workflow(s)" in capsys.readouterr().out
 
 
 def test_registered_in_fast_tier() -> None:
@@ -302,7 +383,7 @@ def test_unparseable_workflow_is_refused(tmp_path: Path) -> None:
 
 
 def test_registered_check_reports_each_problem(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    monkeypatch.setattr(v, "check_tree", lambda root: (["boom"], 2))
+    monkeypatch.setattr(v, "check_tree", lambda root: (["boom"], 3))
     failed: list[str] = []
     v.validate_persona_verdict_chain(failed)
     assert failed == ["persona verdict chain: boom"] and "FAIL: boom" in capsys.readouterr().out

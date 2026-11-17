@@ -1,10 +1,11 @@
 """Shape check for the verdict chain workflows (PLAN-persona-verdict-chain; T4.2 c8, c9 and c12; Decision 205 cl.2).
 
-Refuses an unsafe shape of .github/workflows/persona-verdict-trigger.yml (a secretless pull_request trigger) or
-persona-verdict.yml (the workflow_run verdict workflow on main's definition): any widened trigger, permission, secret,
-Environment or OIDC grant, any unpinned action, any python step off the one pinned argv, working directory or snapshot
-variable, any token in the steps that handle untrusted data, an unpinned or unclassified inter-job artifact. It reads the
-two workflow files and the evidence contract as YAML only and imports nothing from scripts/personas/.
+Refuses an unsafe shape of .github/workflows/persona-verdict-trigger.yml (a secretless pull_request trigger),
+persona-verdict.yml (the workflow_run verdict workflow on main's definition, two upstreams) or
+persona-verdict-override.yml (the operator-gated override, PLAN-persona-verdict-override): any widened trigger,
+permission, secret, Environment or OIDC grant, any unpinned action, any python step off the pinned argv, working directory
+or snapshot variable, any token in the steps that handle untrusted data, an unpinned or unclassified inter-job artifact.
+It reads the three workflow files and the evidence contract as YAML only and imports nothing from scripts/personas/.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from scripts.checks import _common, registry
 
 TRIGGER = ".github/workflows/persona-verdict-trigger.yml"
 VERDICT = ".github/workflows/persona-verdict.yml"
+OVERRIDE = ".github/workflows/persona-verdict-override.yml"
 EVIDENCE = "docs/contracts/github-actions-evidence.yaml"
 PR_TYPES = ["opened", "ready_for_review", "reopened", "synchronize"]
 PINNED = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
@@ -30,12 +32,43 @@ SNAPSHOT = "${{ runner.temp }}/snapshot"
 WORKDIR = "${{ runner.temp }}/work"
 PIP_SETS = {"prepare": "pyyaml", "run": "jsonschema", "post": "pyyaml jsonschema"}
 JOB_PERMISSIONS: dict[str, dict[str, str]] = {
-    "prepare": {"contents": "read", "pull-requests": "read"},
+    "prepare": {"contents": "read", "pull-requests": "read", "actions": "read"},
     "run": {"contents": "read"},
     "post": {"checks": "write", "contents": "read", "actions": "read"},
 }
 ARTIFACT_DIRS = {"persona-verdict-prepared": "prepared", "persona-verdict-results": "results"}
-RUN_CONDITION = "!cancelled() && needs.prepare.result == 'success'"
+RUN_CONDITION = "!cancelled() && needs.prepare.result == 'success' && github.event.workflow_run.event == 'pull_request'"
+UPSTREAMS = ["persona-verdict-trigger", "persona-verdict-override"]
+VERDICT_RUN_NAME = "persona-verdict ${{ github.event.workflow_run.event }} ${{ github.event.workflow_run.head_sha }}"
+VERDICT_GROUP = (
+    "persona-verdict-${{ github.event.workflow_run.head_repository.full_name }}-"
+    "${{ github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.head_branch || "
+    "github.event.workflow_run.id }}"
+)
+OVERRIDE_RUN_NAME = (
+    "persona-verdict-override ${{ inputs.pr }} ${{ inputs.head_sha }} ${{ inputs.route }} "
+    "${{ inputs.check_run_id }} ${{ inputs.ids_digest }}"
+)
+OVERRIDE_INPUTS = frozenset({"pr", "head_sha", "route", "check_run_id", "ids_digest"})
+OVERRIDE_ENV = "persona-verdict-override"
+OVERRIDE_PERMISSIONS: dict[str, dict[str, str]] = {
+    "render": {"contents": "read", "actions": "read", "checks": "read", "pull-requests": "read"},
+    "approve": {"contents": "read", "actions": "read"},
+}
+OVERRIDE_RENDER_IF = (
+    "(github.event_name != 'workflow_dispatch' || github.actor != 'otl-workflow-dispatcher[bot]') && "
+    "(github.ref == 'refs/heads/main')"
+)
+OVERRIDE_PIP = "pip install pyyaml -c requirements.txt"
+_PREFLIGHT = "python3 -I scripts/ci/environment_reviewer_preflight.py "
+OVERRIDE_PYTHON = frozenset(
+    {
+        _PREFLIGHT + "environment --environment persona-verdict-override --require-no-admin-bypass",
+        _PREFLIGHT + "approvals --environment persona-verdict-override",
+        "python3 -I scripts/personas/run.py override-render",
+    }
+)
+OVERRIDE_TOKEN_STEPS = frozenset({"reviewers-preflight", "approvals-preflight", "override-render"})
 POST_CONDITION = "!cancelled()"
 PYTHON_CMD = re.compile(r"(?:^|[\s;&|(`])(?:\S*/)?python[0-9.]*(?=$|[\s;&|)`])")
 TOKEN_REF = re.compile(
@@ -92,7 +125,7 @@ def _load(root: Path, rel: str) -> tuple[dict[str, Any] | None, str | None]:
     return (data, None) if isinstance(data, dict) else (None, f"{rel} is not a mapping")
 
 
-def _common_problems(rel: str, doc: dict[str, Any]) -> list[str]:
+def _common_problems(rel: str, doc: dict[str, Any], environments: frozenset[str] = frozenset()) -> list[str]:
     out: list[str] = []
     jobs = _jobs(doc)
     for name, job in jobs.items():
@@ -100,7 +133,7 @@ def _common_problems(rel: str, doc: dict[str, Any]) -> list[str]:
             uses = step.get("uses")
             if uses is not None and not PINNED.match(str(uses)):
                 out.append(f"{rel}: job {name} uses {uses!r}, which is not pinned to a 40-hex SHA")
-        if "environment" in job:
+        if "environment" in job and name not in environments:
             out.append(f"{rel}: job {name} names an Environment")
         perms = job.get("permissions")
         if isinstance(perms, dict) and perms.get("id-token") == "write":
@@ -205,12 +238,16 @@ def verdict_problems(doc: dict[str, Any], evidence: dict[str, Any] | None) -> li
         out.append(f"{VERDICT}: the trigger is not exactly workflow_run")
     else:
         wr = on["workflow_run"] or {}
-        if wr.get("workflows") != ["persona-verdict-trigger"]:
-            out.append(f"{VERDICT}: workflow_run does not name exactly persona-verdict-trigger")
+        if wr.get("workflows") != UPSTREAMS:
+            out.append(f"{VERDICT}: workflow_run does not name exactly {', '.join(UPSTREAMS)}")
         if wr.get("types") != ["completed"]:
             out.append(f"{VERDICT}: workflow_run types are not exactly [completed]")
     if doc.get("permissions") != {}:
         out.append(f"{VERDICT}: top-level permissions are not {{}}")
+    if doc.get("run-name") != VERDICT_RUN_NAME:
+        out.append(f"{VERDICT}: run-name is not {VERDICT_RUN_NAME!r}")
+    if _map(doc.get("concurrency")).get("group") != VERDICT_GROUP:
+        out.append(f"{VERDICT}: the concurrency group is not {VERDICT_GROUP!r}")
     jobs = _jobs(doc)
     if set(jobs) != set(JOB_PERMISSIONS):
         out.append(f"{VERDICT}: jobs are not exactly prepare, run and post")
@@ -226,6 +263,67 @@ def verdict_problems(doc: dict[str, Any], evidence: dict[str, Any] | None) -> li
     out.extend(_prepare_problems(jobs.get("prepare")))
     out.extend(_token_problems(doc, jobs))
     out.extend(_artifact_problems(jobs, evidence))
+    return out
+
+
+def _override_step_problems(name: str, job: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    pips = [str(s.get("run", "")).strip() for s in _steps(job) if "pip install" in str(s.get("run", ""))]
+    if name == "approve" and pips:
+        out.append(f"{OVERRIDE}: the approve job has a pip line")
+    if name == "render" and pips != [OVERRIDE_PIP]:
+        out.append(f"{OVERRIDE}: the render job's only pip line is not exactly {OVERRIDE_PIP!r}")
+    for step in _python_steps(job):
+        if str(step.get("run", "")).strip() not in OVERRIDE_PYTHON:
+            out.append(f"{OVERRIDE}: job {name} python step {step.get('run')!r} is not one of the three pinned lines")
+    for step in _steps(job):
+        allowed = step.get("id") in OVERRIDE_TOKEN_STEPS
+        for field in ("env", "with"):
+            for key, value in _map(step.get(field)).items():
+                held = TOKEN_REF.search(str(value))
+                if held and not (allowed and field == "env" and key == "GH_TOKEN" and str(value) == "${{ github.token }}"):
+                    out.append(f"{OVERRIDE}: job {name} holds the token in {field} {key}")
+        if "run" in step and not step.get("id"):
+            out.append(f"{OVERRIDE}: job {name} has a run: step without an id")
+    return out
+
+
+def override_problems(doc: dict[str, Any]) -> list[str]:
+    out = _common_problems(OVERRIDE, doc, frozenset({"approve"}))
+    on = _on(doc)
+    if not (isinstance(on, dict) and set(on) == {"workflow_dispatch"}):
+        out.append(f"{OVERRIDE}: the trigger is not exactly workflow_dispatch")
+    else:
+        inputs = _map(_map(on["workflow_dispatch"]).get("inputs"))
+        if set(inputs) != OVERRIDE_INPUTS or any(_map(v).get("type") != "string" for v in inputs.values()):
+            out.append(f"{OVERRIDE}: the inputs are not exactly the five string inputs")
+    if doc.get("run-name") != OVERRIDE_RUN_NAME:
+        out.append(f"{OVERRIDE}: run-name is not {OVERRIDE_RUN_NAME!r}")
+    if doc.get("permissions") != {}:
+        out.append(f"{OVERRIDE}: top-level permissions are not {{}}")
+    for key in ("env", "concurrency"):
+        if key in doc:
+            out.append(f"{OVERRIDE}: a top-level {key}")
+    if re.search(r"secrets\b|id-token", _text(doc), re.IGNORECASE):
+        out.append(f"{OVERRIDE}: a secrets or id-token reference")
+    jobs = _jobs(doc)
+    if set(jobs) != set(OVERRIDE_PERMISSIONS):
+        out.append(f"{OVERRIDE}: jobs are not exactly render and approve")
+    for name in sorted(set(jobs) & set(OVERRIDE_PERMISSIONS)):
+        job = jobs[name]
+        if job.get("permissions") != OVERRIDE_PERMISSIONS[name]:
+            out.append(f"{OVERRIDE}: job {name} permissions differ from {OVERRIDE_PERMISSIONS[name]}")
+        out.extend(_override_step_problems(name, job))
+    if "render" in jobs:
+        if "environment" in jobs["render"]:
+            out.append(f"{OVERRIDE}: the render job names an Environment")
+        if _unwrap(jobs["render"].get("if", "")) != OVERRIDE_RENDER_IF:
+            out.append(f"{OVERRIDE}: the render condition is not {OVERRIDE_RENDER_IF}")
+    if "approve" in jobs:
+        if jobs["approve"].get("environment") != OVERRIDE_ENV:
+            out.append(f"{OVERRIDE}: the approve job does not name the {OVERRIDE_ENV} Environment")
+        if jobs["approve"].get("needs") not in ("render", ["render"]):
+            out.append(f"{OVERRIDE}: the approve job does not need render")
     return out
 
 
@@ -271,7 +369,11 @@ def check_tree(root: Path) -> tuple[list[str], int]:
     evidence, err = _load(root, EVIDENCE)
     if err:
         problems.append(err)
-    for rel, fn in ((TRIGGER, lambda d: trigger_problems(d)), (VERDICT, lambda d: verdict_problems(d, evidence))):
+    for rel, fn in (
+        (TRIGGER, lambda d: trigger_problems(d)),
+        (VERDICT, lambda d: verdict_problems(d, evidence)),
+        (OVERRIDE, lambda d: override_problems(d)),
+    ):
         doc, err = _load(root, rel)
         if err:
             problems.append(err)
@@ -283,7 +385,7 @@ def check_tree(root: Path) -> tuple[list[str], int]:
 
 @registry.register("validate_persona_verdict_chain", owner="platform")
 def validate_persona_verdict_chain(failed: list[str]) -> None:
-    """Refuse an unsafe shape of the two verdict chain workflows.
+    """Refuse an unsafe shape of the three verdict chain workflows.
 
     Declares examined(workflow files read, unit="workflows") (Decision 170 cl.3).
     """

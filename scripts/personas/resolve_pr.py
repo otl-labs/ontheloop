@@ -17,6 +17,7 @@ from typing import Any
 
 API = "https://api.github.com"
 ALLOWED_ROLES = frozenset({"admin", "maintain"})
+OVERRIDE_WORKFLOW = ".github/workflows/persona-verdict-override.yml"
 RESOLUTION = Path("prepared") / "resolution.json"
 
 
@@ -70,10 +71,56 @@ def is_allowlisted(repo: str, login: str, token: str | None) -> bool:
         return False
 
 
+def resolve_override(run: dict[str, Any], repo: str, token: str | None) -> dict[str, Any]:
+    """An approved override run resolves to its PR (open, head unmoved, same repository) with no routes."""
+    from scripts.personas import override  # noqa: PLC0415 - override imports this module
+
+    head_sha = str(run.get("head_sha") or "")
+    try:
+        run_id = int(run.get("id"))
+        proven = override.approval(repo, token, run_id)
+    except (TypeError, ValueError, override.Refused):
+        return _unresolved(head_sha, "the override run is not proven")
+    if proven is None:
+        return _unresolved(head_sha, "the override run holds no proven approval")
+    try:
+        row = get_json(f"/repos/{repo}/pulls/{proven['pr']}", token)
+    except Exception:  # noqa: BLE001 - fail closed
+        return _unresolved(head_sha, "the override pull request is unreadable")
+    head = row.get("head") if isinstance(row, dict) else None
+    if not (
+        isinstance(head, dict)
+        and row.get("state") == "open"
+        and head.get("sha") == proven["head_sha"]
+        and (head.get("repo") or {}).get("full_name") == repo
+    ):
+        return _unresolved(head_sha, "the override is stale or foreign")
+    author = row.get("user") or {}
+    return {
+        "resolved": True,
+        "change_id": f"{repo}#{proven['pr']}",
+        "number": int(proven["pr"]),
+        "head_sha": proven["head_sha"],
+        "base_sha": str((row.get("base") or {}).get("sha") or ""),
+        "base_ref": str((row.get("base") or {}).get("ref") or ""),
+        "draft": bool(row.get("draft")),
+        "author_login": str(author.get("login") or ""),
+        "author_id": int(author.get("id") or 0),
+        "allowlisted": False,
+        "reason": "override",
+        "override": {
+            k: proven[k]
+            for k in ("run_id", "pr", "head_sha", "route", "check_run_id", "ids_digest", "approver", "approved_at", "url")
+        },
+    }
+
+
 def resolve(event: dict[str, Any], repo: str, token: str | None) -> dict[str, Any]:
     run = event.get("workflow_run") if isinstance(event, dict) else None
     run = run if isinstance(run, dict) else {}
     head_sha = str(run.get("head_sha") or "")
+    if run.get("event") == "workflow_dispatch" and run.get("path") == OVERRIDE_WORKFLOW:
+        return resolve_override(run, repo, token)
     if run.get("event") != "pull_request":
         return _unresolved(head_sha, "the trigger run was not a pull_request event")
     head_repo = (run.get("head_repository") or {}).get("full_name")
@@ -130,6 +177,7 @@ def main(argv: list[str]) -> int:
     change = resolution["change_id"] or "none"
     allowed = "true" if resolution["allowlisted"] else "false"
     sha = resolution["head_sha"] if re.fullmatch(r"[0-9a-f]{40}", resolution["head_sha"]) else "unknown"
-    print(f"PERSONA-VERDICT head_sha={sha} change_id={change} allowlisted={allowed}")
+    override_id = (resolution.get("override") or {}).get("run_id") or "none"
+    print(f"PERSONA-VERDICT head_sha={sha} change_id={change} allowlisted={allowed} override={override_id}")
     write_output(allowlisted=allowed)
     return 0
