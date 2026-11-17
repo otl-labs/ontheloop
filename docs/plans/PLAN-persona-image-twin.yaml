@@ -1,0 +1,608 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: persona-image-twin
+intent: >-
+  Build the digest-pinnable persona container image and its local container twin (T4.32 c1 image legs, T4.2 c13 and
+  c14; audit WP-11 part 1), the first of the two plans the hint PLAN-persona-image-channel splits into (blind consult,
+  settled). A Dockerfile under docker/persona/ builds python 3.12 from a digest-pinned base, installs a hash-locked
+  requirements file with pip --require-hashes, copies the run_persona entrypoint, its import closure, the persona
+  contracts with their rendered prompts and the two contract files the tier resolver reads, at their repository paths,
+  and runs as a numeric non-root user. src/persona_hosts/ holds the pin loader for config/persona_image.yaml (image
+  name, digest and source commit, both null until the publish plan pins them; the watched build inputs; a closed
+  consumer list) and the local_container adapter of the persona_compute_host port: run_image runs one persona in a
+  locked-down container and returns its result, exit code and events file. A credential-free conformance suite builds
+  the image from the change under test and runs a fixture persona through run_image against a stub OpenAI-compatible
+  server on an internal network. Two registered checks keep persona code GitHub-agnostic and keep the image name and
+  digest in one file. The publish channel (GHCR, attestation, newest-green gate, pin PRs, deploy-paths row) is
+  PLAN-persona-image-channel. Serves NS.3: verdicts run on GitHub from main's definition.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-persona-image-twin.yaml
+phase: >-
+  T4.32 c1 (image legs, part) and T4.2 c14 (closes_criteria). T4.32 is in_progress. Builds after
+  PLAN-run-persona-litellm-backend's build merges (the image packages its entrypoint and package). Nothing is
+  published or deployed; no Lambda bundle holds the new paths (V2).
+closes_criteria:
+  - T4.2:c14
+cites: [dec:205, dec:212, dec:234]
+scope:
+  - file: docker/persona/Dockerfile
+    action: Create
+    purpose: >-
+      FROM python:3.12-slim@sha256:<the digest current at build time, read with docker buildx imagetools inspect>. ENV
+      PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1. COPY docker/persona/requirements-persona.txt, then one RUN with a
+      BuildKit secret mount id=build_ca (required=false; when present PIP_CERT points at it) running pip install
+      --no-cache-dir --require-hashes --no-deps --only-binary :all: -r, then removes the file. Then one COPY per
+      config/persona_image.yaml build.inputs source entry, to /app/<same path>, dependency layer first so a prompt change
+      reuses it. USER 10001:10001, WORKDIR /app, ENTRYPOINT ["python", "-I", "/app/scripts/run_persona.py"], LABEL
+      org.opencontainers.image.source="https://github.com/otl-labs/ontheloop". No syntax directive (it would pull an
+      unpinned frontend image), no ADD, no curl, no shell entrypoint.
+  - file: docker/persona/Dockerfile.dockerignore
+    action: Create
+    purpose: >-
+      BuildKit's per-Dockerfile ignore file: "*" then one "!<path>" per build.inputs entry, so the context sends only
+      the image inputs (a session checkout holds .venv and logs).
+  - file: docker/persona/requirements-persona.in
+    action: Create
+    purpose: >-
+      The image's direct third-party imports, measured at build time from the copied closure (expected litellm,
+      jsonschema, pyyaml), each with "-c ../../requirements-dev.txt" so versions equal the dev lock the backend tests
+      ran against.
+  - file: docker/persona/requirements-persona.txt
+    action: Create
+    purpose: >-
+      pip-compile --generate-hashes --strip-extras --output-file=docker/persona/requirements-persona.txt
+      docker/persona/requirements-persona.in under Python 3.12, header comment naming the command. Every pin carries
+      sha256 hashes; measured 2026-11-17: the closure of litellm 1.106.2 + jsonschema + pyyaml is 58 binary wheels.
+  - file: config/persona_image.yaml
+    action: Create
+    purpose: >-
+      The one image file (T4.32 c2): image: ghcr.io/otl-labs/ontheloop-persona; digest: null; source_commit: null
+      (both null or both set; digest sha256:<64 hex>, source_commit 40 hex; no tag field); build.dockerfile
+      docker/persona/Dockerfile; build.inputs: the watched list (Dockerfile, its .dockerignore, requirements-persona.txt,
+      scripts/__init__.py, scripts/run_persona.py, the scripts/llm modules in the entrypoint's closure, src/__init__.py
+      if present, src/persona_backends/, docs/contracts/personas/, docs/contracts/inference-provider.yaml,
+      docs/contracts/project-configuration.yaml), measured from the closure at build time; consumers: local_container
+      {status: built, location: src/persona_hosts/local_container/adapter.py}, github_actions_shell {status: pending,
+      owning_item: "T4.32:c3"}, fargate {status: pending, owning_item: "T4.15:c12"}. Header comment: written by the
+      publish channel's pin PRs (PLAN-persona-image-channel) and read only through src/persona_hosts/image_pin.py.
+  - file: src/persona_hosts/__init__.py
+    action: Create
+    purpose: Package facade re-exporting ImagePin, PinUnset and load_pin from image_pin.
+  - file: src/persona_hosts/image_pin.py
+    action: Create
+    purpose: >-
+      `load_pin(root: Path) -> ImagePin` (frozen dataclass: image, digest | None, source_commit | None, inputs tuple,
+      consumers tuple); `ImagePin.reference() -> str` returns "<image>@<digest>" or raises PinUnset while the digest is
+      null; any schema breach raises ValueError naming the field. Stdlib plus yaml; no network.
+  - file: src/persona_hosts/local_container/__init__.py
+    action: Create
+    purpose: Facade (the adapter) re-exporting run_image, RunImageResult, build_image and BuildOptions.
+  - file: src/persona_hosts/local_container/adapter.py
+    action: Create
+    purpose: >-
+      `run_image(image_ref: str, persona: str, materialised_input: dict, *, key_variable: str | None,
+      base_url_variable: str | None = None, network: str =
+      "bridge", timeout_s: int = 3700, docker: str = "docker") -> RunImageResult(exit_code, result: dict | None,
+      events: dict | None, stderr: str)`. image_ref must match <name>@sha256:<64 hex> or a local image id sha256:<64 hex>
+      (a tag is refused); persona must match ^[a-z][a-z0-9_]*$ and maps to docs/contracts/personas/<persona>.yaml inside
+      the image (no caller-supplied path). Writes input.json to a fresh temp dir mounted read-only at /run/persona/in and
+      an empty world-writable temp dir at /run/persona/events. argv: docker run --rm --read-only --tmpfs /tmp
+      --cap-drop ALL --security-opt no-new-privileges --user 10001:10001 --network <network> plus the two mounts plus
+      "-e <key_variable>" (name only; the value is inherited, never in argv) when key_variable is set, which must be one
+      of the variable names the ports.run_persona.litellm.api_key rows of docs/contracts/project-configuration.yaml name;
+      and "-e <base_url_variable>" (name only) when base_url_variable is set, which must be <PROVIDER>_API_BASE for a
+      provider docs/contracts/inference-provider.yaml's litellm_tier_models names (a vendor variable litellm reads, used
+      by the conformance suite to reach its stub; no repository setting, so no project-configuration row);
+      then image_ref --contract ... --input ... --events .... Never mounts the workspace, .git, home or the Docker socket;
+      never --privileged, host PID or an --env-file. Result is stdout parsed as one JSON object (None when not JSON);
+      events is the events file parsed (None when absent). An unreachable daemon raises RuntimeError naming it.
+  - file: src/persona_hosts/local_container/build.py
+    action: Create
+    purpose: >-
+      `build_image(root: Path, options: BuildOptions | None = None) -> str` runs docker build -f the pin's
+      build.dockerfile with root as context and --iidfile, returning the image id (sha256:<64 hex>). BuildOptions
+      (ca_bundle, http_proxy) default from the process's PIP_CERT or SSL_CERT_FILE and HTTPS_PROXY: a CA bundle passes
+      as --secret id=build_ca, and a proxy on a loopback host adds --network host and --build-arg HTTPS_PROXY (a
+      predefined proxy arg, kept out of image history); on a hosted runner neither is set and the build is plain.
+  - file: tests/persona_hosts/__init__.py
+    action: Create
+    purpose: Package marker; empty.
+  - file: tests/persona_hosts/test_image_pin.py
+    action: Create
+    purpose: >-
+      Mirror test for image_pin: the live config/persona_image.yaml loads with digest None; reference() raises PinUnset;
+      a digest without source_commit, a tag-shaped digest, an unknown consumer status and an extra key each raise.
+  - file: tests/persona_hosts/local_container/__init__.py
+    action: Create
+    purpose: Package marker; empty.
+  - file: tests/persona_hosts/local_container/test_adapter.py
+    action: Create
+    purpose: >-
+      Mirror test for adapter.py without a daemon (subprocess.run patched): the exact run argv, the read-only input
+      mount, the key passed by name only, a tag or a bad persona id refused, an unlisted key variable refused, no argv
+      element mentions docker.sock, the workspace or --privileged, a non-JSON stdout gives result None.
+  - file: tests/persona_hosts/local_container/test_build.py
+    action: Create
+    purpose: >-
+      Mirror test for build.py without a daemon: the build argv plain, with a CA bundle (secret, never a build arg) and
+      with a loopback proxy (--network host and the proxy build arg); a non-loopback proxy adds no --network host.
+  - file: tests/persona_hosts/test_package_boundary.py
+    action: Create
+    purpose: >-
+      The .importlinter contract for src.persona_hosts exists; config/agent/executor/capabilities.yaml boundary_patterns
+      cover the four new roots; src/lambdas/data-pipeline/manifest.yaml excludes src/persona_hosts; and an ast walk finds
+      no import of scripts or src.persona_backends under src/persona_hosts/.
+  - file: tests/persona_hosts/conformance_suite.py
+    action: Create
+    purpose: >-
+      Named outside pytest's test_*.py pattern so no default collection, affected-test selection or tier run picks it
+      up (it is passed explicitly by the pr-validate step and by the publish plan's workflow). The persona_compute_host
+      conformance suite (Decision 212 cl.2; T4.2 c14), written for reuse by every adapter of
+      the port (Decision 234 cl.2, T4.34 c3): the legs take the adapter's run_image from a module-level ADAPTERS map
+      (local_container today) and the image build is a separate fixture, so a later adapter adds a map entry, never a
+      second suite. The dummy key value and DEEPSEEK_API_BASE are set inside the suite process, never in the workflow
+      step's env (validate_persona_trigger_policy's secret signature, Decision 184 cl.3). Builds the image from the tree under
+      test with build_image, then a derived fixture image (tests/persona_hosts/fixture_image/Dockerfile) adding the
+      backend plan's fixture contract and rendered prompt at docs/contracts/personas/fixture_persona.yaml; creates an
+      --internal docker network; starts tests/persona_hosts/stub_provider.py in the pinned base image on it; then through
+      run_image with key_variable set to the tier 1 api_key variable holding a dummy value and DEEPSEEK_API_BASE pointing
+      at the stub: (1) the complete input returns exit 0 and a success value valid against the fixture contract's
+      output_schema, after one read_input tool turn the stub scripts; the events header names the fixture persona and
+      its rendered_prompt_sha256; (2) the incomplete input returns exit 0, failure input_incomplete and zero stub hits;
+      (3) an unknown persona exits 2; (4) the image's configured user is 10001 and a write to /app fails under run_image's
+      flags; (5) the dummy key value appears in neither stdout nor the events file. Cleans up network and containers in
+      a finally. Without a reachable daemon it fails with a "docker unreachable" message, never skips.
+  - file: tests/persona_hosts/stub_provider.py
+    action: Create
+    purpose: >-
+      Stdlib http.server answering POST /chat/completions (and /v1/chat/completions) in the OpenAI shape: first a
+      read_input tool call, then a final JSON object valid against the fixture output_schema; counts hits and prints
+      one "STUB_HIT <n>" line per request for the suite to read from the container log.
+  - file: tests/persona_hosts/fixture_image/Dockerfile
+    action: Create
+    purpose: >-
+      ARG BASE then FROM ${BASE}; COPY the backend plan's tests/fixtures/persona_backends/fixture_persona.yaml and
+      rendered/fixture_persona.txt to /app/docs/contracts/personas/ and /app/docs/contracts/personas/rendered/ (the
+      backend's contract loader reads the rendered prompt from the sibling rendered/<stem>.txt), as root then back to USER
+      10001:10001. Test-only: never published.
+  - file: tests/persona_hosts/fixtures/input_complete.json
+    action: Create
+    purpose: A materialised input carrying every field the fixture contract's input_schema requires.
+  - file: tests/persona_hosts/fixtures/input_incomplete.json
+    action: Create
+    purpose: The same input with head_sha removed.
+  - file: scripts/checks/ci_guards/validate_persona_github_agnosticism.py
+    action: Create
+    purpose: >-
+      Registered check (T4.2 c13 first half). Persona code = every .py file the pin's build.inputs copy. Fails on: a gh
+      command (a call whose argv list or string starts with "gh", or a string constant matching
+      (^|[\s;&|`(])gh\s); an import of github, ghapi, githubkit, github3 or octokit, by import statement or
+      importlib.import_module / __import__ with a literal; a string constant GITHUB_TOKEN or GH_TOKEN; a
+      requirements-persona.txt pin of PyGithub, ghapi, githubkit or github3.py; and a first-party module in the static
+      import closure of scripts/run_persona.py that build.inputs does not copy. Docstrings are not scanned for the gh
+      pattern.
+  - file: scripts/checks/ci_guards/validate_persona_image_digest.py
+    action: Create
+    purpose: >-
+      Registered check (T4.2 c13 second half, T4.32 c2's one file). Fails when: the pin breaches its schema
+      (load_pin); any tracked text file other than config/persona_image.yaml contains the image name; a consumer with
+      status built names a location that does not exist or never calls load_pin, or a pending consumer's owning_item is
+      not an open roadmap criterion; the Dockerfile's FROM is not pinned by digest, its COPY sources differ from
+      build.inputs, or its .dockerignore allow-list differs from build.inputs; or a package pinned in both
+      requirements-persona.txt and requirements-dev.txt carries two versions.
+  - file: scripts/checks/ci_guards/_manifest.py
+    action: Modify
+    purpose: >-
+      Two Entry literals, pre=True with pre_globs naming config/persona_image.yaml, docker/persona/**,
+      src/persona_backends/**, src/persona_hosts/**, scripts/run_persona.py, scripts/llm/**, the check module itself,
+      scripts/checks/_common.py and scripts/checks/registry.py (the image-digest entry also requirements-dev.txt and
+      .github/workflows/**), full_segment full_after_lint.
+  - file: tests/checks/ci_guards/test_validate_persona_github_agnosticism.py
+    action: Create
+    purpose: >-
+      Mirror test over tmp_path fixture trees (one function each, red): subprocess ["gh", ...]; os.system("gh pr view");
+      import github; importlib.import_module("ghapi"); os.environ["GITHUB_TOKEN"]; os.getenv("GH_TOKEN"); a violation two
+      imports deep; a lock pin of PyGithub; a closure module not copied. Green: the word github in a docstring; the live
+      repository.
+  - file: tests/checks/ci_guards/test_validate_persona_image_digest.py
+    action: Create
+    purpose: >-
+      Mirror test over tmp_path trees (red each): a workflow naming the image with a tag; an adapter with a second
+      digest; a file repeating the same digest; a FROM without a digest; a COPY not in build.inputs; an input not copied;
+      a built consumer that never calls load_pin; a version split against requirements-dev.txt. Green: the live repository.
+  - file: scripts/ci/persona_image_changed.py
+    action: Create
+    purpose: >-
+      Stdlib decision script for the pr-validate step: `python3 scripts/ci/persona_image_changed.py --base <sha>` reads
+      build.inputs from config/persona_image.yaml with a minimal line parser (no yaml import, so it runs before any
+      install) plus the fixed extra paths tests/persona_hosts/ and src/persona_hosts/, diffs <base>...HEAD, and writes
+      run=true|false to GITHUB_OUTPUT and one "PERSONA-IMAGE-CONFORMANCE run=<v> reason=<r>" line. Any error (unreadable
+      file, git failure, missing base) writes run=true (fail closed).
+  - file: tests/ci/test_persona_image_changed.py
+    action: Create
+    purpose: >-
+      Mirror test: each build.inputs entry and each extra path changed -> run=true; only an unrelated path -> run=false;
+      unreadable pin or a git failure -> run=true; the line parser reads the live config/persona_image.yaml the same as
+      yaml.safe_load. test_ci_step_shape: ci.yml's pr-validate has the decision step and the conformance step, both after
+      the validate --pre step, neither with continue-on-error, the conformance step's if reading the decision output.
+  - file: .github/workflows/ci.yml
+    action: Modify
+    purpose: >-
+      pr-validate gains two steps after "Validate fast tier": "Persona image inputs changed?" (id persona_image, runs
+      python3 scripts/ci/persona_image_changed.py --base the PR base sha) and "Persona image conformance (local_container
+      suite)" with if steps.persona_image.outputs.run == 'true' and timeout-minutes 15, running python -m pytest -p
+      no:randomly tests/persona_hosts/conformance_suite.py -q; no env block, and neither run text names run_persona or
+      persona_compute_host (validate_persona_trigger_policy's signatures, Decision 229 cl.3). The required pr-validate job then gates on it (Decision 73) with no
+      ruleset change (rec-4624) and outside the fast-tier budget (selection_budget.py NON_TEST_BUDGET_SECONDS).
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: >-
+      r3_workflows gains one entry per new inline run body (Decision 162 R3), at its effective line count (1 each):
+      ".github/workflows/ci.yml::pr-validate::<step-id>" for the two new steps, the step ids as the guard derives them.
+      Neither body writes GITHUB_OUTPUT itself (the decision script does), so R1 is not engaged.
+  - file: config/ci_rca_taxonomy.yaml
+    action: Modify
+    purpose: >-
+      The two new checks' rows (category environment, as validate_persona_trigger_policy's row). The file is at 497 of
+      500 effective lines and twelve unbuilt plans add rows; measured on main at build time, first compact block-style
+      entries to flow style with the words unchanged (PLAN-persona-verdict-chain's relief) until both rows land at or
+      under 500; if no such relief remains, STOP to this planning thread (never a budget raise).
+  - file: .github/dependabot.yml
+    action: Modify
+    purpose: >-
+      A pip entry for /docker/persona (weekly, the minor-and-patch group with the same exclude-patterns the guard
+      derives) and a docker entry for /docker/persona (weekly), so the hashed lock and the base digest stay current.
+  - file: docs/contracts/ports.yaml
+    action: Modify
+    purpose: >-
+      Registry status and provenance only, no governing text (coordinator always_ask: a meaning-free pointer or
+      provenance swap needs no word): persona_compute_host's local_container adapter becomes {id: local_container, tier:
+      supported, status: implemented, location: src/persona_hosts/local_container/}, the oracle {kind: adapter, ref:
+      local_container, status: present}, conformance_suite {status: present, path:
+      tests/persona_hosts/conformance_suite.py}; one amendment_log row naming the plan, T4.2 c14 and the three flips.
+      Net +1 effective line (498 of 500 on 2026-11-17). If, measured on main at build time, that row breaches 500,
+      rewrite SA-01 as one flow mapping with its words unchanged (-8 lines); if that is gone too, STOP to this planning
+      thread. The image's structural assumption row (SA-14) is PLAN-persona-image-channel's, whose sidecar can name
+      docker/persona/Dockerfile once it exists on main.
+  - file: docs/ROADMAP-PLATFORM.yaml
+    action: Modify
+    purpose: >-
+      /implement's closes_criteria flip only (Decision 136): T4.2 c14 status open -> met with met_by persona-image-twin.
+      No criterion text, progress note or hint changes; T4.32 is untouched (the in-flight verdict chain build anchors
+      there) and its PLAN-persona-image-channel hint is delivered by this plan and that one.
+  - file: .importlinter
+    action: Modify
+    purpose: >-
+      One forbidden contract: src.persona_hosts imports nothing under scripts, src.persona_backends, src.lambdas or
+      src.data (a host runs an image; it never runs the backend in-process).
+  - file: config/agent/executor/capabilities.yaml
+    action: Modify
+    purpose: >-
+      boundary_patterns gain docker/persona/, config/persona_image.yaml, src/persona_hosts/ and tests/persona_hosts/
+      under a "# persona image and local twin (T4.32 c1)" comment, beside the backend plan's rows.
+  - file: src/lambdas/data-pipeline/manifest.yaml
+    action: Modify
+    purpose: excludes gain src/persona_hosts, beside the backend plan's src/persona_backends exclude.
+bundled_recommendations: []
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - A pull request touching any image input runs the conformance suite in the required pr-validate job, and one touching none skips it with a printed reason.
+  - The image builds from the tree with pip --require-hashes, runs as user 10001 and holds the entrypoint, its closure, the persona contracts and the two resolver files at their repository paths.
+  - Through run_image on local_container, a fixture persona against a stub provider returns a schema-valid success, an incomplete input returns input_incomplete with no provider call, and an unknown persona exits 2, credential-free in PR CI.
+  - validate_persona_github_agnosticism is red on each fixture violation and green on the repository.
+  - validate_persona_image_digest is red on each fixture violation and green on the repository; the image name appears only in config/persona_image.yaml.
+  - ports.yaml records local_container as implemented and its suite present, and T4.2 c14 reads met with met_by persona-image-twin.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The pin loader and the local_container adapter and build helper, without a daemon.
+    command: bin/venv-python -m pytest tests/persona_hosts/test_image_pin.py tests/persona_hosts/local_container/ tests/persona_hosts/test_package_boundary.py -q
+    expected: Exit 0, every node passes. Red before (modules and tests absent).
+    fix_if: A tag accepted, a key value in argv, a forbidden mount or flag, or a schema breach loaded; fix the module, never the test.
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: persona-image-twin-adapter
+  - step: 2
+    phase: pre-deploy
+    action: The two checks red on every fixture violation and green on the repository, and their manifest entries.
+    command: bin/venv-python -m pytest tests/checks/ci_guards/test_validate_persona_github_agnosticism.py tests/checks/ci_guards/test_validate_persona_image_digest.py tests/checks/ci_guards/test__manifest.py -q
+    expected: Exit 0, every node passes. Red before (checks absent).
+    fix_if: A fixture violation passing; widen the check, never drop the fixture.
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: persona-image-twin-checks
+  - step: 3
+    phase: pre-deploy
+    action: The decision script and the shape of the two pr-validate steps.
+    command: bin/venv-python -m pytest tests/ci/test_persona_image_changed.py -q
+    expected: Exit 0, every node passes. Red before (script, steps and test absent).
+    fix_if: An image input that does not trigger the suite, or an error that skips it; fix the script (fail closed).
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: persona-image-twin-ci-step
+  - step: 4
+    phase: pre-deploy
+    action: The registered checks over the live tree, including the companions this change touches.
+    command: >-
+      bin/venv-python -c "from scripts.checks.ci_guards.validate_persona_github_agnosticism import validate_persona_github_agnosticism as a;
+      from scripts.checks.ci_guards.validate_persona_image_digest import validate_persona_image_digest as b;
+      from scripts.checks.ci_guards.validate_ci_rca_taxonomy import validate_ci_rca_taxonomy as c;
+      from scripts.checks.ci_guards.validate_dependabot_config import validate_dependabot_config as d;
+      from scripts.checks.ci_guards.validate_composite_action_shell_bodies import validate_composite_action_shell_bodies as e;
+      f=[];[g(f) for g in (a,b,c,d,e)];print(*f,sep='\n');print(f'image checks: {len(f)} failures');assert not f"
+      && bin/venv-python -m scripts.import_governance --check-contracts
+    expected: The last line of the first command reports 0 failures and the import-linter run keeps the src.persona_hosts contract.
+    expected_literals:
+      - 'image checks: 0 failures'
+    fix_if: A failure names the file to fix; never loosen a check.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: All five are registered checks that already run in every tier; a shard would duplicate them.
+  - step: 5
+    phase: pre-deploy
+    action: >-
+      The conformance suite in this cloud session: start dockerd as root, then build and run through run_image (the
+      build helper passes the session proxy CA as a build secret and builds on the host network).
+    command: >-
+      (docker info >/dev/null 2>&1 || (sudo -n dockerd >/tmp/dockerd.log 2>&1 &)); for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done;
+      bin/venv-python -m pytest -p no:randomly tests/persona_hosts/conformance_suite.py -q
+    expected: >-
+      Exit 0, every node passes; the stub's hit count is two for the complete input and zero for the incomplete one.
+      Record the suite's wall time in the PR body (Decision 73 note: the step is an unbudgeted gate).
+    fix_if: >-
+      A build failure on a hash: regenerate the lock with the recorded command, never drop --require-hashes. A missing
+      module at run time: add it to build.inputs (the agnosticism check's closure rule should have caught it; fix that
+      too). If dockerd cannot start in the session, record the step UNPROVEN in the PR body and rely on step 6.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: The pr-validate conformance step (step 6) is the standing guard on every PR touching an image input.
+  - step: 6
+    phase: pre-deploy
+    action: >-
+      On the build PR's head, pr-validate ran the conformance step and it passed (the PR touches image inputs, so the
+      decision line reads run=true).
+    command: >-
+      bin/venv-python -c "import json,os,subprocess,urllib.request as u;sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip();
+      g=lambda p:json.load(u.urlopen(u.Request('https://api.github.com/repos/otl-labs/ontheloop/'+p,headers={'Accept':'application/vnd.github+json'})));
+      run=[r for r in g('actions/workflows/ci.yml/runs?event=pull_request&head_sha='+sha)['workflow_runs']][0];
+      job=[j for j in g('actions/runs/%d/jobs'%run['id'])['jobs'] if j['name']=='pr-validate'][0];
+      st={s['name']:s['conclusion'] for s in job['steps']};c=st.get('Persona image conformance (local_container suite)');print('conformance step:',c);assert c=='success'"
+    expected: The last line reads that the conformance step concluded success.
+    fix_if: Skipped means the decision script missed an input; failure means fix the image or adapter on the branch.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: It reads one PR's run; the step itself is the standing guard.
+  - step: 7
+    phase: pre-deploy
+    action: The ports registry flips and the c14 flip, and the checks that read them.
+    command: >-
+      bin/venv-python -c
+      "from scripts.checks.contracts.validate_ports_contract import validate_ports_contract as a;
+      f=[];a(f);print(*f,sep='\n');print(f'ports checks: {len(f)} failures');assert not f"
+      && bin/venv-python -m pytest tests/roadmap/test_verdict_persona_criteria.py -q
+    expected: The ports check reports 0 failures (every new location and suite path exists) and the roadmap criteria tests pass.
+    expected_literals:
+      - 'ports checks: 0 failures'
+    fix_if: A missing path -- fix the location, never revert the flip; a cap breach -- the SA-01 relief in the ports.yaml scope row.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: The ports check and the roadmap integrity check are standing checks in every tier.
+  - step: 8
+    phase: pre-deploy
+    action: Pre-handoff full tier on the committed, rebased tree (Decision 163), read through its evidence file.
+    command: bin/venv-python -m scripts.validate; bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: The verify-head read reports the full tier passed on HEAD's tree.
+    fix_if: Any failure; fix and re-run both from the start (timeout_disposition blocked).
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: docker/persona/Dockerfile
+    behavior: hashed-lock install, digest-pinned base, numeric non-root user, entrypoint and closure at repository paths
+    verification_step: 5
+    test_selector: tests/persona_hosts/conformance_suite.py
+    red_green_expectation: red before (Dockerfile and suite absent), green after
+  - source: docker/persona/Dockerfile.dockerignore
+    behavior: the build context allow-list equals build.inputs
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test_validate_persona_image_digest.py
+    red_green_expectation: red before (check absent), green after
+  - source: docker/persona/requirements-persona.in
+    behavior: direct imports constrained to the dev lock, so no version splits from requirements-dev.txt
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test_validate_persona_image_digest.py
+    red_green_expectation: red before (check absent), green after
+  - source: config/persona_image.yaml
+    behavior: the one image file loads with digest and source_commit null and a closed consumer list
+    verification_step: 1
+    test_selector: tests/persona_hosts/test_image_pin.py
+    red_green_expectation: red before (file and loader absent), green after
+  - source: src/persona_hosts/__init__.py
+    behavior: facade re-exporting the pin loader
+    verification_step: 1
+    test_selector: tests/persona_hosts/test_image_pin.py
+    waiver_reason: Re-export facade with no logic; the pin tests import through it.
+  - source: src/persona_hosts/image_pin.py
+    behavior: schema-checked pin load; reference() refuses while the digest is null
+    verification_step: 1
+    test_selector: tests/persona_hosts/test_image_pin.py
+    red_green_expectation: red before (module absent), green after
+  - source: src/persona_hosts/local_container/__init__.py
+    behavior: facade re-exporting run_image and build_image
+    verification_step: 1
+    test_selector: tests/persona_hosts/local_container/test_adapter.py
+    waiver_reason: Re-export facade with no logic; the adapter and build tests import through it.
+  - source: src/persona_hosts/local_container/adapter.py
+    behavior: locked-down docker run argv, key by name only, tags and bad persona ids refused
+    verification_step: 1
+    test_selector: tests/persona_hosts/local_container/test_adapter.py
+    red_green_expectation: red before (module absent), green after
+  - source: src/persona_hosts/local_container/build.py
+    behavior: build argv with the CA as a secret and host network only for a loopback proxy
+    verification_step: 1
+    test_selector: tests/persona_hosts/local_container/test_build.py
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/checks/ci_guards/validate_persona_github_agnosticism.py
+    behavior: red on each GitHub coupling fixture and an uncopied closure module, green on the repository
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test_validate_persona_github_agnosticism.py
+    red_green_expectation: red before (check absent), green after
+  - source: scripts/checks/ci_guards/validate_persona_image_digest.py
+    behavior: red on a second image name or digest, an unpinned FROM, a COPY or input mismatch and a version split
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test_validate_persona_image_digest.py
+    red_green_expectation: red before (check absent), green after
+  - source: scripts/checks/ci_guards/_manifest.py
+    behavior: the two checks registered pre=True with their pre_globs and full_after_lint
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test__manifest.py
+    red_green_expectation: red before (entries absent), green after
+  - source: scripts/ci/persona_image_changed.py
+    behavior: run=true on any image input change or any error, run=false otherwise, with a printed reason
+    verification_step: 3
+    test_selector: tests/ci/test_persona_image_changed.py
+    red_green_expectation: red before (script absent), green after
+  - source: .github/workflows/ci.yml
+    behavior: pr-validate runs the decision step and the conditional conformance step after validate --pre
+    verification_step: 3
+    test_selector: tests/ci/test_persona_image_changed.py::test_ci_step_shape
+    red_green_expectation: red before (steps absent), green after
+  - source: config/composite_action_body_baseline.yaml
+    behavior: r3 entries for the two new inline run bodies
+    verification_step: 4
+    command: >-
+      bin/venv-python -c "from scripts.checks.ci_guards.validate_persona_github_agnosticism import
+      validate_persona_github_agnosticism as a; from scripts.checks.ci_guards.validate_persona_image_digest import
+      validate_persona_image_digest as b; from scripts.checks.ci_guards.validate_ci_rca_taxonomy import
+      validate_ci_rca_taxonomy as c; from scripts.checks.ci_guards.validate_dependabot_config import
+      validate_dependabot_config as d; from scripts.checks.ci_guards.validate_composite_action_shell_bodies import
+      validate_composite_action_shell_bodies as e; f=[];[g(f) for g in (a,b,c,d,e)];print(*f,sep='\n');print(f'image
+      checks: {len(f)} failures');assert not f" && bin/venv-python -m scripts.import_governance --check-contracts
+    red_green_expectation: red before (ci.yml steps without entries), green after
+  - source: config/ci_rca_taxonomy.yaml
+    behavior: rows for the two new checks, file at or under 500 effective lines
+    verification_step: 4
+    command: >-
+      bin/venv-python -c "from scripts.checks.ci_guards.validate_persona_github_agnosticism import
+      validate_persona_github_agnosticism as a; from scripts.checks.ci_guards.validate_persona_image_digest import
+      validate_persona_image_digest as b; from scripts.checks.ci_guards.validate_ci_rca_taxonomy import
+      validate_ci_rca_taxonomy as c; from scripts.checks.ci_guards.validate_dependabot_config import
+      validate_dependabot_config as d; from scripts.checks.ci_guards.validate_composite_action_shell_bodies import
+      validate_composite_action_shell_bodies as e; f=[];[g(f) for g in (a,b,c,d,e)];print(*f,sep='\n');print(f'image
+      checks: {len(f)} failures');assert not f" && bin/venv-python -m scripts.import_governance --check-contracts
+    red_green_expectation: red before (checks registered without rows), green after
+  - source: .github/dependabot.yml
+    behavior: pip and docker entries for /docker/persona
+    verification_step: 4
+    command: >-
+      bin/venv-python -c "from scripts.checks.ci_guards.validate_persona_github_agnosticism import
+      validate_persona_github_agnosticism as a; from scripts.checks.ci_guards.validate_persona_image_digest import
+      validate_persona_image_digest as b; from scripts.checks.ci_guards.validate_ci_rca_taxonomy import
+      validate_ci_rca_taxonomy as c; from scripts.checks.ci_guards.validate_dependabot_config import
+      validate_dependabot_config as d; from scripts.checks.ci_guards.validate_composite_action_shell_bodies import
+      validate_composite_action_shell_bodies as e; f=[];[g(f) for g in (a,b,c,d,e)];print(*f,sep='\n');print(f'image
+      checks: {len(f)} failures');assert not f" && bin/venv-python -m scripts.import_governance --check-contracts
+    red_green_expectation: red before (new manifest directory without an entry), green after
+  - source: docs/contracts/ports.yaml
+    behavior: local_container implemented, oracle and suite present, each path existing
+    verification_step: 7
+    test_selector: tests/roadmap/test_verdict_persona_criteria.py
+    waiver_reason: Registry data, not code; validate_ports_contract (run in the same step and every tier) fails on a missing location or suite path.
+  - source: docs/ROADMAP-PLATFORM.yaml
+    behavior: T4.2 c14 met with met_by persona-image-twin
+    verification_step: 7
+    test_selector: tests/roadmap/test_verdict_persona_criteria.py
+    waiver_reason: A closes_criteria status flip, not code; validate_platform_roadmap checks met_by resolves in every tier.
+  - source: .importlinter
+    behavior: the src.persona_hosts forbidden contract exists and holds
+    verification_step: 1
+    test_selector: tests/persona_hosts/test_package_boundary.py
+    red_green_expectation: red before (contract absent), green after
+  - source: config/agent/executor/capabilities.yaml
+    behavior: boundary_patterns cover the four new roots
+    verification_step: 1
+    test_selector: tests/persona_hosts/test_package_boundary.py
+    red_green_expectation: red before (patterns absent), green after
+  - source: src/lambdas/data-pipeline/manifest.yaml
+    behavior: the data-pipeline bundle excludes src/persona_hosts
+    verification_step: 1
+    test_selector: tests/persona_hosts/test_package_boundary.py
+    red_green_expectation: red before (exclude absent), green after
+constraints:
+  - >-
+    No governing text changes: ports.yaml gets only the three registry flips, one amendment_log row and, if needed, the
+    SA-01 format relief; ROADMAP-PLATFORM.yaml gets only the c14 closes_criteria flip. Any other wording need is a plan
+    defect back to this planning thread (it would need an approved-text sidecar, Decision 246).
+  - >-
+    Nothing is pushed to any registry, no workflow file is added, and config/persona_image.yaml's digest and
+    source_commit stay null; the publish channel, attestation, pin PRs and the deploy-paths row are
+    PLAN-persona-image-channel's.
+  - >-
+    No key, account id, hostname or proxy value enters the image, a fixture, a log or the repository (Decision 101);
+    the conformance suite's key is a fixed dummy string, and the session CA passes only as a build secret.
+  - >-
+    No code under src/persona_hosts/ imports scripts or src.persona_backends, names a registered persona id, or calls the
+    GitHub API; the fixture persona lives under tests/ and enters only the test-only derived image.
+  - Every new module stays under 500 SLOC (Decision 128).
+  - No rescue agents or workaround loops (Decision 55); never skip, disable or quarantine a test (Decision 235).
+context:
+  - >-
+    Decision-scout r1 (2026-11-17): Verdict: FLAGS_FOUND. Decisions triaged: 216 of 216. Roadmap items intersected: 12;
+    CONFLICT: 0; RELATED: 11. Serves: NS.1 5/5. CITE: 205, 212, 234, 246. Flags, all adopted: the ports block names
+    conformance_suite.py; the suite is reusable per adapter (234 cl.2, T4.34 c3); the dummy key stays out of the step env
+    (184); the base-URL variable passes by name (224); 73 NOTE and 254 NOTE (next two items).
+  - >-
+    Decision 73/208 note: the conformance step is an unbudgeted gate outside validate --pre (timeout 15 min, wall time
+    recorded at VP 5). Move it out of the required job by a plan amendment if its p90 passes 5 minutes or it runs on more
+    than a fifth of PRs over a month (actions-capacity gauge, rec-5022).
+  - >-
+    Decision 254 note (accepted deferral): two PRs that each pass the suite can merge into a main tree that fails it,
+    because required checks are not strict (terraform/github/repo.tf:116). The cover is PLAN-persona-image-channel's
+    publish workflow, which re-runs the suite on the built image before any push, so a failing tree never publishes;
+    until that build lands nothing consumes the image.
+  - >-
+    Split and design settled on a blind consult (two plans, this one first; contracts baked in; conformance as a
+    conditional pr-validate step, never in the full tier; the publish workflow re-runs it before push; no skip).
+  - >-
+    Depends on PLAN-run-persona-litellm-backend's build (plan merged #2111, 95e0d5c2; entry point `scripts/run_persona.py
+    --contract --input --events`, exit 2 on a refused contract; fixture tests/fixtures/persona_backends/fixture_persona.yaml
+    with input change_id, head_sha, notes and capability read_input:notes). No sidecar: the plan changes no governing
+    text, so Decision 246 does not bind it (wording-check round 1 failed because flips naming build-created paths cannot
+    pass on main; SA-14 moved to plan 2).
+  - >-
+    Measured 2026-11-17 in a cloud session: dockerd starts as root; image pulls work; pip in a build needs the proxy CA
+    as a build secret and --network host; 58 binary wheels. litellm reads DEEPSEEK_API_BASE (deepseek transformation.py:350).
+  - >-
+    Required checks are pr-validate and terraform-validate only (terraform/github/repo.tf:102-116) and rec-4624 freezes
+    the ruleset, so the suite gates inside pr-validate. .github/workflows/ci.yml is shared: no open PR touches it
+    (checked 2026-11-17).
+  - >-
+    plan_obligations (2026-11-17): shared files with unbuilt plans, second builder rebases; notably
+    PLAN-plans-only-main-fast-tier (ci.yml, composite baseline) and PLAN-persona-verdict-chain (_manifest.py, taxonomy,
+    capabilities.yaml, roadmap). NEAR_CAP ci_rca_taxonomy.yaml 497 and ports.yaml 498 carry relief in their scope rows.
+  - >-
+    red_overlap (2026-11-17 13:25 UTC): {"verdict": "blocked", "reds": [{"id": "rec-5247", "rule": "slo_breached",
+    "track": "product_regression", "shared": []}]}. Deferral rationale: rec-5247 is the production telemetry-reader
+    smoke 504 on sessions_window (deploy-ducklake-lambdas); this plan shares no path with it and touches no Lambda,
+    reader or deploy workflow. Writing the plan does not wait on it; the build's full tier (VP 8, Decision 163) waits for
+    its repair, and /implement re-runs red_overlap before it starts.
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:dc811ee0182474acb310ad37264417d875aef05e005d86f759cd249ebac6a4b1"}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - PLAN-run-persona-litellm-backend built on main (scripts/run_persona.py and src/persona_backends/ exist)
+  - All files in scope located and readable
+execution_steps:
+  - "Measure the entrypoint's static first-party import closure and its third-party imports on main; write build.inputs into config/persona_image.yaml and requirements-persona.in from them; post: the two files exist."
+  - "Compile requirements-persona.txt with hashes (the recorded command); write the Dockerfile and its .dockerignore with the base digest read at build time; post: the digest check's Dockerfile rules pass."
+  - "Create src/persona_hosts/ (image_pin, local_container adapter and build) and their mirror tests; post: VP 1 green."
+  - "Create the two checks, their manifest entries, taxonomy rows and tests; post: VP 2 and VP 4 green."
+  - "Create scripts/ci/persona_image_changed.py, the two pr-validate steps, the baseline entries and the test; post: VP 3 green."
+  - "Create the stub, the fixture image, the inputs and conformance_suite.py; run VP 5."
+  - "Edit .importlinter, capabilities.yaml, the data-pipeline manifest and dependabot.yml; make the ports.yaml flips and amendment row and the c14 flip; post: VP 7 green."
+  - Execute the Verification Plan -- run each step; loop until pass; on an unrecoverable failure stop and RCA (Decision 55)
+  - "Report: what was implemented, verification results, and whether VP 5 ran or is UNPROVEN"
