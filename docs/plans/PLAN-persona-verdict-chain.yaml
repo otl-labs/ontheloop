@@ -58,17 +58,24 @@ scope:
       `PERSONA-VERDICT head_sha=<sha> change_id=<id> allowlisted=<bool>`; route (GH_TOKEN), which logs
       `PERSONA-VERDICT routes=<n> <ids>`; and, only when a route
       exists and the author is allowlisted, fetch (GH_TOKEN) then materialise, whose step env holds no token (no
-      github.token, secrets.GITHUB_TOKEN or GH_TOKEN reference); uploads one artifact persona-verdict-prepared
-      (resolution, routes, one input JSON per routed persona). (2) run (needs prepare; timeout-minutes 15; permissions
+      github.token, secrets.GITHUB_TOKEN or GH_TOKEN reference, and none at workflow or job level, so nothing is
+      inherited); uploads one artifact persona-verdict-prepared with `path: ${{ runner.temp }}/work/prepared`
+      (resolution, routes, one input JSON per routed persona). No job reads any secret other than its own
+      GITHUB_TOKEN. (2) run (needs prepare; timeout-minutes 15; permissions
       contents: read; no environment, no id-token; if: ${{ !cancelled() && needs.prepare.result == 'success' }}): checks out main,
       sets up Python 3.12, runs `pip install jsonschema -c "$GITHUB_WORKSPACE/main/requirements.txt"`, downloads the artifact and runs the
       execute verb (no token in its env), skipped when the resolution is not allowlisted; uploads
-      persona-verdict-results. No bound persona other than the probe exists, so this job runs nothing else in this
+      persona-verdict-results from `${{ runner.temp }}/work/results` (if-no-files-found: ignore). No bound persona
+      other than the probe exists, so this job runs nothing else in this
       plan. (3) post (needs [prepare, run]; if: ${{ !cancelled() }}, so a run cancelled by a newer push on the same
       branch posts nothing and the newer run posts; timeout-minutes 5; permissions checks: write, contents: read,
       actions: read): checks out main, sets up Python 3.12, runs `pip install pyyaml jsonschema -c
-      "$GITHUB_WORKSPACE/main/requirements.txt"` and the post verb, which posts one completed check run per route on the resolved head SHA
-      from whatever artifacts exist (a missing or invalid one maps to failure). The workflow exits 0 on every verdict
+      "$GITHUB_WORKSPACE/main/requirements.txt"`, then two actions/download-artifact steps (persona-verdict-prepared
+      and persona-verdict-results into `${{ runner.temp }}/work`), each with continue-on-error: true so an absent
+      artifact (author not allowlisted, run job skipped, failed or timed out) never stops the job, then the post
+      verb, which posts one completed check run per route on the resolved head SHA from whatever files exist (a
+      missing or invalid one maps to failure; a missing prepared artifact means no resolution, so nothing is posted
+      and the step fails as a shell fault). The workflow exits 0 on every verdict
       outcome and goes red only on a shell fault (an exception in a script, or a check-run POST that fails after
       retries), so ci-rca never files on a verdict.
   - file: scripts/personas/__init__.py
@@ -126,8 +133,8 @@ scope:
   - file: scripts/personas/snapshot.py
     action: Create
     purpose: >-
-      The fetch verb: downloads the head tarball (GET /repos/{repo}/tarball/{head_sha}) and extracts it into
-      $RUNNER_TEMP/snapshot with tarfile's filter="data", refusing (not skipping) any symlink, hard link, device,
+      The fetch verb: downloads the head tarball (GET /repos/{repo}/tarball/{head_sha}) and extracts it into the
+      directory named by $PERSONA_SNAPSHOT (the same value run.py guards; refuses to run when it is unset) with tarfile's filter="data", refusing (not skipping) any symlink, hard link, device,
       absolute or out-of-tree member, so the extracted tree holds regular files and directories only; any refusal ->
       every route input_unusable. Also the read helper materialise uses: lstat first, a non-regular file or a path
       whose resolution leaves the snapshot is refused.
@@ -137,8 +144,8 @@ scope:
       The execute verb (run job): for each route, validates the input JSON against that route's input schema with
       jsonschema (the probe's from tests/fixtures/persona_verdict/probe_schema.json; later add plans register theirs),
       runs the probe as `python3 -I <main root>/tests/fixtures/persona_verdict/probe.py <input>` (main root derived
-      from execute.py's own path) in a subprocess with a
-      240-second timeout and no token in its env, and writes results/<route>.json {route, exit_code, timed_out,
+      from execute.py's own path) in a subprocess with a timeout parameter (default 240 seconds) and no token in its
+      env, and writes results/<route>.json {route, exit_code, timed_out,
       stdout} as data, never parsed here. An invalid input writes {route, failure: input_unusable} without running.
       Output validation is post's job.
   - file: scripts/personas/materialise.py
@@ -216,7 +223,7 @@ scope:
     action: Create
     purpose: >-
       Mirror test: valid input runs the probe and records stdout and exit code; schema-invalid input records
-      input_unusable without running; a probe stub that sleeps past the timeout records timed_out; the subprocess env
+      input_unusable without running; a probe stub that sleeps past a 1-second injected timeout records timed_out; the subprocess env
       holds no GH_TOKEN or GITHUB_TOKEN.
   - file: tests/personas/test_resolve_pr.py
     action: Create
@@ -276,15 +283,22 @@ scope:
       prepare contents: read and pull-requests: read, run contents: read, post checks: write, contents: read and
       actions: read); a python step that is not `python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" <verb>`,
       lacks `PERSONA_SNAPSHOT: ${{ runner.temp }}/snapshot` in its env, or whose working-directory is not exactly `${{
-      runner.temp }}/work`; a bare $RUNNER_TEMP or $GITHUB_WORKSPACE in any env: or working-directory: value; a job
+      runner.temp }}/work`; a bare $RUNNER_TEMP or $GITHUB_WORKSPACE in any env:, working-directory: or with: value
+      (none of them is shell-expanded); a job
       with python steps but no `mkdir -p "$RUNNER_TEMP/work"` step before them; a job's pip install line other than
       its pinned set (prepare pyyaml; run jsonschema; post pyyaml jsonschema), each with -c
       "$GITHUB_WORKSPACE/main/requirements.txt"; a run job condition other than `!cancelled() &&
-      needs.prepare.result == 'success'` or a post job condition other than `!cancelled()`; a verdict workflow whose
+      needs.prepare.result == 'success'` or a post job condition other than `!cancelled()` (compared after unwrapping
+      ${{ }} and normalising whitespace, the validate_persona_trigger_policy _unwrap rule; the live file keeps the
+      wrapper because a bare leading ! is a YAML tag); a post-job download-artifact step without continue-on-error:
+      true; a verdict workflow whose
       workflow_run types are not exactly [completed], or a trigger whose pull_request types are not exactly [opened,
       synchronize, reopened, ready_for_review]; a prepare job whose fetch step comes after
       materialise, or whose fetch or materialise step lacks the allowlisted condition; a github.token,
-      secrets.GITHUB_TOKEN or GH_TOKEN reference in the env of the materialise or execute step; a run job running
+      secrets.GITHUB_TOKEN or GH_TOKEN reference in the env of the materialise or execute step, or in the
+      workflow-level env or any job-level env of persona-verdict.yml (where every step would inherit it); any secrets.
+      reference other than secrets.GITHUB_TOKEN anywhere in persona-verdict.yml (until PLAN-persona-verdict-egress
+      amends this rule; AC2's verifier); a run job running
       anything but the execute verb. It reads the
       two workflow files as YAML text only and imports nothing from scripts/personas/. Fails when either file is
       missing.
@@ -343,7 +357,7 @@ infrastructure_dependencies:
     definition); VP 8 and VP 9 are their post-deploy proof.
 acceptance_criteria:
   - "A fixture PR head whose diff touches only the four tests/fixtures/persona_verdict/fixture_pr/*.txt files gets exactly four check runs named persona-verdict/verdict_probe.<stem> on that head SHA, created by the post job of a persona-verdict run whose event is workflow_run, with the conclusion each marker selects: proceed -> success, revise -> failure, fail -> failure, malformed -> failure."
-  - "No job in any persona-verdict or persona-verdict-trigger run holds id-token: write or names an Environment, and no run reads an inference key."
+  - "No job in any persona-verdict or persona-verdict-trigger run holds id-token: write or names an Environment, and no run reads an inference key or any secret other than its GITHUB_TOKEN (validate_persona_verdict_chain refuses each, VP 3)."
   - "Until a verdict persona is bound, a PR whose diff is not confined to tests/fixtures/persona_verdict/fixture_pr/ gets no check run named persona-verdict/..., although its persona-verdict run concludes (read on a real PR after merge)."
   - "A planted module in the head-tree snapshot is never imported by the materialiser (tests/ci/test_persona_verdict_isolation.py), and the negative control fires; a symlink, hard link or out-of-tree member in the head tarball is refused (tests/personas/test_snapshot.py)."
   - "validate_persona_verdict_chain is registered in the fast tier, green on main and red on each fixture shape it refuses."
@@ -584,6 +598,7 @@ context:
   - "rec-5241 (High, filed 2026-11-16): the merge gate accepts any same-named persona check run; dormant while every gates.<persona>.verdict_source reads in_session; its fix binds before the first flip."
   - "Other unbuilt plans share scope files (bin/venv-python -m scripts.roadmap.plan_obligations --plan docs/plans/PLAN-persona-verdict-chain.yaml lists them): 12 on config/ci_rca_taxonomy.yaml and/or scripts/checks/ci_guards/_manifest.py; PLAN-telemetry-content-reader-lock and PLAN-wording-approval-routing on config/agent/executor/capabilities.yaml; PLAN-roadmap-start-edges on tests/roadmap/test_verdict_persona_criteria.py, where a rebase can move the hint-set-test anchor and force a new wording approval. Whichever builds second rebases; the taxonomy compaction leaves about 8 lines of headroom."
   - "rec-5251 (Low, filed 2026-11-17 from critique r2): scripts/session/merge_checks.py now drives routing as well as the merge gate but sits outside boundary_patterns; a pre-existing Decision 185 cl.3 gap, filed rather than widened here."
+  - "Critique r5 REVISE fixed: the shape check also refuses token references in workflow-level and job-level env and any secrets. reference other than GITHUB_TOKEN (AC2's verifier); the post job downloads artifacts with continue-on-error so an absent one maps to failure checks; fetch reads PERSONA_SNAPSHOT; with: values join the no-bare-variable rule; conditions compared after unwrapping; execute's timeout is a parameter."
   - "Critique r4 REVISE fixed: env and working-directory use ${{ runner.temp }} expression forms (Actions does not shell-expand them), a mkdir step creates the work directory, pip constraints are absolute, the run job skips cancelled runs, rule (b) compares plan text at merge_base_commit, and the shape check pins those forms and both event type lists."
   - "Critique r3 REVISE fixed: main checks out under $GITHUB_WORKSPACE and every python step uses that absolute path (isolation test and shape check follow the real layout); the sidecar's 'credential-free job' now reads 'token-free step' (wording-check r4); compare from base.ref; parse-event alias detection; closed probe stem set; pinned per-job permissions and installs; PERSONA_SNAPSHOT required; post skips cancelled runs; routes logged."
   - "Critique r2 REVISE fixed: one fixture head with four marker files (one full-tier attest, not four); an execute verb and module for the run job; snapshot fetch, materialise and run gated on allowlisted, tarball extracted with filter=data and links refused, no token in materialise or execute env; route.py counts previous_filename and routes both sets on a truncated list; PERSONA-VERDICT log line replaces job summaries; run job contents: read."
@@ -606,6 +621,7 @@ gate_rounds:
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 2, nits: 11}
   - {gate: decision-scout, round: 6, verdict: NO_FLAGS, scout_input_fingerprint: "v1:277a0225645e7039445313ae316418370e3608881eaadbc7915e32acecee76a9"}
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 2, nits: 5}
+  - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 3, nits: 6}
   - {gate: wording-check, round: 1, verdict: FAIL, digest: f6c0fd645925c434c01aa8df548d708127cbcfdbf0576fd408a684f99955b702, base: 013411ea495131d2a452823b1dade68e314a5130, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 2, verdict: FAIL, digest: b6a28e40475b85ddf637b6c39159d5ae4fac4fc9bf09068cedb3207d4ae2bf51, base: 013411ea495131d2a452823b1dade68e314a5130, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 3, verdict: PASS, digest: 1bff547d3e77c113a8820a6f41fcf6538a736b5e21c4fb8be5383901e0d3e1f0, base: 013411ea495131d2a452823b1dade68e314a5130, selection: complete}  # pragma: allowlist secret
