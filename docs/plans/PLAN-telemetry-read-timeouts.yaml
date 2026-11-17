@@ -16,7 +16,8 @@ verification_tier: V3
 plan_path: docs/plans/PLAN-telemetry-read-timeouts.yaml
 phase: 'ci_rca (soft-warn exception category): repairs Critical reds rec-5247 and rec-5248 under docs/contracts/red-main-recovery.yaml
   (Decision 226). No tier_item is targeted and no exit criterion is closed; T2.18:c8 (higher-frequency merge for a high-write table)
-  is advanced, not closed. Fewer files at the source and cheaper reads are follow-on
+  is advanced, not closed (closes_criteria stays empty: c8''s other half, co-tuning the gc deletion bound, is untouched, so this plan
+  cannot close c8). Fewer files at the source and cheaper reads are follow-on
   recs, not this plan.'
 closes_criteria: []
 amends:
@@ -34,11 +35,13 @@ cites:
 - dec:201
 - dec:235
 - dec:214
+- dec:266
 scope:
 - file: src/lambdas/ducklake_maintenance/backlog_gate.py
   action: Create
   purpose: 'decide(gate, meta_schema, now, client) -> GateDecision and gated(action_fn) -> the merge_ops_gated action. gate is the event''s
-    backlog_gate object {min_commits, max_unmerged_minutes}; client is a boto3 CloudWatch client (injected). decide takes the last pass
+    backlog_gate object {min_commits, max_unmerged_minutes}; client is a boto3 CloudWatch client (gated builds it with boto3.client("cloudwatch")
+    and the gated tests monkeypatch backlog_gate.boto3.client, so no factory body stays uncovered). decide takes the last pass
     as the latest of the newest MergeOpsTablesCount and MergeOpsGateTriggered datapoints for the MetaSchema over the last 6 hours (period
     60, SampleCount) and this warm container''s own last trigger time (none found: the window start), then reads the telemetry writer''s
     committed appends since then: DuckLakeTelemetryWriter CommitLatencyMs SampleCount with the same MetaSchema dimension (period 60;
@@ -91,23 +94,24 @@ scope:
     (rec-5248 acceptance: last pass 10 min ago, 60 commits -> merge, reason backlog; 59 -> no merge), test_merges_waiting_commits_after_the_age_bound
     (oldest unmerged commit 30 min old -> merge, reason age; 1 commit landed 1 min ago with the last pass 30 min ago -> no merge; 0 commits
     -> no merge), test_unreadable_metrics_skip_and_say_so (a raising client -> no merge, reason gate_unreadable, commits None), test_reads_commits_from_the_last_pass
-    (the CommitLatencyMs query names the MetaSchema dimension and starts at the latest of the MergeOpsTablesCount and MergeOpsGateTriggered
-    datapoints and the container''s own trigger time), test_rejects_a_malformed_gate (missing max_unmerged_minutes,
+    (the CommitLatencyMs query names the MetaSchema dimension, counts the whole minute bucket that holds the last pass (the safe
+    side: GetMetricStatistics rounds StartTime down to the minute, so a quiet hour may run one extra pass), and starts at the latest of the MergeOpsTablesCount and MergeOpsGateTriggered
+    datapoints and the container''s own trigger time), test_rejects_a_malformed_gate (drives gated(); missing max_unmerged_minutes,
     zero min_commits), and gated nodes that drive gated(fake_action) with the fake client and a patched emitter so this file alone covers
     backlog_gate.py to 100% (validate_test_coverage maps the module to this file only): test_gated_skip_emits_and_returns (below threshold
     -> MergeOpsBacklogCommits emitted, skipped response, the action never called), test_gated_unreadable_emits_and_skips (MergeOpsGateUnreadable
     1.0 emitted, skipped response), test_trigger_then_skip_in_one_container (the real decide, commits timestamped before the first
-    call, no pass datapoints: the first call emits MergeOpsGateTriggered and calls the action, the second skips with reason below_threshold).
-    An autouse fixture resets the container''s trigger time between tests.'
+    call, no pass datapoints; the first call''s fake action raises DuckLakeRuntimeError, caught with pytest.raises: MergeOpsGateTriggered
+    reaches the patched emitter before the action is entered, the second call skips with reason below_threshold, and the action ran
+    exactly once). An autouse fixture resets the container''s trigger time between tests.'
   new_imports: []
 - file: tests/lambdas/ducklake_maintenance/handler/test_merge_ops_backlog_gate.py
   action: Create
   purpose: 'Handler-dispatch nodes with decide and the connection opener monkeypatched: test_skip_opens_no_connection (merge false ->
     skipped response, the opener is never called, MergeOpsBacklogCommits emitted with the MetaSchema dimension), test_unreadable_skips_and_emits
     (MergeOpsGateUnreadable emitted with the dimension, the opener never called), test_merge_runs_the_unchanged_pass (merge true ->
-    MergeOpsGateTriggered is emitted, then the merge_ops pass runs with the same event; a second tick in the same container with no
-    new commits skips), test_files_before_total_is_emitted_for_telemetry (a telemetry pass emits MergeOpsFilesBeforeTotal
-    with the MetaSchema dimension; red before the _shared change).'
+    MergeOpsGateTriggered is emitted, then the merge_ops pass runs with the same event), test_files_before_total_is_emitted_for_telemetry (a telemetry pass emits MergeOpsFilesBeforeTotal
+    with the MetaSchema dimension; red before the _shared change). An autouse fixture resets the container''s trigger time.'
   new_imports: []
 - file: terraform/personal/ducklake_maintenance_telemetry.tf
   action: Modify
@@ -440,6 +444,8 @@ context:
   reads. The arrival check''s first (newest) 7-day read took 14-46 s at under 100 unmerged writer calls, about 80 s near 300, and hit
   the deadline from about 380 (11-17) or 510 (11-16).'
 - Merge passes ran 0.5-155 s; files after a merge 117-153 all week; writer OccRetryCount 0 every day 11-10..17.
+- 'Decision 266: every gated pass runs merge_ops''s rewrite_current_deletes step on the telemetry catalog''s ops_projects_current and
+  ops_tenants_current, still only inside a scheduled merge_ops pass (cl.1); the measured 0.5-155 s passes already include it.'
 - 'Blind consult (Fable, 2026-11-17, ADVICE-fable-telemetry-read-timeouts-2026-11-17.md in the same folder): the backlog in the newest
   partitions drives the timeouts; reject clock-only cadence changes and window narrowing; trigger the merge on backlog, alarm on the
   pile and reader duration, and cut files at the source later. Operator chose this path 2026-11-17 14:54Z (cmsg_01YbaDZWowGfXCn2WtobCVVoTaL6Mq6CEoizRq4oTSbtu8).'
@@ -492,7 +498,7 @@ context:
 - 'Decision scout rounds 6 and 7 NO_FLAGS (the round 5 flags below are cleared; decisions triaged 219 of 219; roadmap items intersected 7, CONFLICT 0, RELATED 6). Round 5 FLAGS_FOUND: Decision 128 WARN (handler.py at 497 of 500) answered by the gated(action_merge_ops) wrapper
   in backlog_gate.py, so handler.py gains an import and one _ACTIONS entry; Decision 88 NOTE (an unreadable gate merging every tick)
   answered by skip plus alarm. CITE: 236 (cl.5 amended by one dated line), 88 (cl.1(iii) cadence sized to write rate), 128, 81, 92,
-  246, 226, 250, 186, 201, 235, 214.'
+  246, 226, 250, 186, 201, 235, 214, 266 (added after critique round 7).'
 - 'Serves: NS.3 3/5 -- the plan sizes merge cadence to measured write load and measures spend against Decision 214''s capped-bill trigger.
   It does not move any adapter.'
 - 'Graduated shards kept unchanged: ducklake-maintenance-gc-rule-invariants, telemetry-gc-enablement-baseline, telemetry-maintenance-schedule-pins,
@@ -522,6 +528,7 @@ gate_rounds:
 - {gate: wording-check, round: 5, verdict: PASS, digest: ff4856b5d3fc23e5b99b985d3e45c1e6192a156a8bd50e8e5864cd535fb190c0, base: ddb28a40c5dc5d3b382ea45fa403772f8c833edf, selection: complete}  # pragma: allowlist secret
 - {gate: decision-scout, round: 7, verdict: NO_FLAGS, scout_input_fingerprint: "v1:7e59ee703544715b08a4a65c809d9f2b339fe5aaa48f1704bb14fe29d667fe36"}  # pragma: allowlist secret
 - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 3, nits: 5}
+- {gate: plan-critique, round: 7, verdict: REVISE, blocking: 1, nits: 5}
 - {gate: wording-check, round: 6, verdict: PASS, digest: c0031da5aa8e0b87c1f94ed07c15fda5f9fbbbae22695a814cc02163bad75c23, base: ddb28a40c5dc5d3b382ea45fa403772f8c833edf, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
 - Branch confirmed not on main
