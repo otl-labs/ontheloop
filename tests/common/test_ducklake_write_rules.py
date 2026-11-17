@@ -405,11 +405,24 @@ def test_json_object_spec_built_from_projected_leg() -> None:
             "versions": {1: {"required": {"schema_version": "integer", "a": {"map": {"key_pattern": "^a$", "values": []}}}}},
         },
         {"max_bytes": 8, "versions": {}, "extra": 1},
+        {"max_bytes": 8, "versions": {1: "not a mapping"}},
+        {"max_bytes": 8, "versions": {1: {"required": {"schema_version": "integer"}, "bogus": {}}}},
+        {"max_bytes": 8, "versions": {1: {"required": {"schema_version": "integer", "a": {"map": {"key_pattern": "^a$"}}}}}},
+        {
+            "max_bytes": 8,
+            "versions": {
+                1: {"required": {"schema_version": "integer", "a": {"map": {"key_pattern": "^[$", "values": ["x"]}}}}
+            },
+        },
     ],
 )
 def test_json_object_spec_refuses_malformed_params(leg: dict) -> None:
     with pytest.raises(RuleProjectionError):
         json_object_spec("c", leg)
+
+
+def test_check_json_objects_without_rules_is_a_no_op() -> None:
+    check_json_objects(SPEC, None, {"context_v2_json": "nope"}, NOW, None)
 
 
 def test_json_object_leg_with_its_exemption_is_refused() -> None:

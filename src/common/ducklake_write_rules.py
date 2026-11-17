@@ -55,7 +55,7 @@ def reference_columns(fields: Mapping[str, Mapping[str, Any]]) -> frozenset[str]
 
 
 _KEY_NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
-_SCALARS = {"string": str, "integer": int, "number": (int, float), "boolean": bool}
+_SCALARS: dict[str, type | tuple[type, ...]] = {"string": str, "integer": int, "number": (int, float), "boolean": bool}
 _MAX_BYTES_CEILING = 65536
 
 
