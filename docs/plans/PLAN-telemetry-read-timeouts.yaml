@@ -15,7 +15,8 @@ plan_type: IMPLEMENTATION
 verification_tier: V3
 plan_path: docs/plans/PLAN-telemetry-read-timeouts.yaml
 phase: 'ci_rca (soft-warn exception category): repairs Critical reds rec-5247 and rec-5248 under docs/contracts/red-main-recovery.yaml
-  (Decision 226). No tier_item is targeted and no exit criterion is closed. Fewer files at the source and cheaper reads are follow-on
+  (Decision 226). No tier_item is targeted and no exit criterion is closed; T2.18:c8 (higher-frequency merge for a high-write table)
+  is advanced, not closed. Fewer files at the source and cheaper reads are follow-on
   recs, not this plan.'
 closes_criteria: []
 amends:
@@ -37,19 +38,21 @@ scope:
 - file: src/lambdas/ducklake_maintenance/backlog_gate.py
   action: Create
   purpose: 'decide(gate, meta_schema, now, client) -> GateDecision and gated(action_fn) -> the merge_ops_gated action. gate is the event''s
-    backlog_gate object {min_commits, max_unmerged_minutes}; client is a boto3 CloudWatch client (injected). decide reads the newest
-    MergeOpsTablesCount datapoint for the MetaSchema over the last 6 hours (period 60, SampleCount) as the last pass time (none found:
-    the window start), then the telemetry writer''s committed appends since then: DuckLakeTelemetryWriter CommitLatencyMs SampleCount
-    with the same MetaSchema dimension (period 60; one sample per committed append, so refusals, describes and other verbs are excluded;
-    1,020 on 2026-11-16 against 2,712 writer invocations). merge is true when commits reach min_commits (reason backlog) or when any
-    commit waits and the last pass is at least max_unmerged_minutes old (reason age); otherwise false (reason below_threshold). When
-    either read raises, merge is false (reason gate_unreadable): the every-6h rule stays the floor, so an unreadable gate never merges
-    on every tick, and Decision 250''s "unreadable is red" is met by an alarm. GateDecision carries merge, reason, commits (None when
-    unreadable) and last_pass. The gated wrapper validates the gate object (DuckLakeRuntimeError on a missing or non-positive field),
-    emits MergeOpsBacklogCommits (when read) or MergeOpsGateUnreadable 1.0 through the catalog sink (_shared.catalog_dimensions and
-    _emit_maintenance_metric), and on merge false returns {ok, action: merge_ops_gated, skipped: true, reason, commits, last_pass} without
-    opening a catalog connection; on merge true it calls the unchanged merge_ops action with the same event. Standard library, boto3
-    and _shared only.'
+    backlog_gate object {min_commits, max_unmerged_minutes}; client is a boto3 CloudWatch client (injected). decide takes the last pass
+    as the latest of the newest MergeOpsTablesCount and MergeOpsGateTriggered datapoints for the MetaSchema over the last 6 hours (period
+    60, SampleCount) and this warm container''s own last trigger time (none found: the window start), then reads the telemetry writer''s
+    committed appends since then: DuckLakeTelemetryWriter CommitLatencyMs SampleCount with the same MetaSchema dimension (period 60;
+    one sample per committed append, so refusals, describes and other verbs are excluded; 1,020 on 2026-11-16 against 2,712 writer invocations).
+    merge is true when commits reach min_commits (reason backlog) or when the oldest non-zero per-minute commit datapoint since the last
+    pass is at least max_unmerged_minutes old (reason age); otherwise false (reason below_threshold). When any read raises, merge is
+    false (reason gate_unreadable): the every-6h rule stays the floor, so an unreadable gate never merges on every tick, and Decision
+    250''s "unreadable is red" is met by an alarm. GateDecision carries merge, reason, commits (None when unreadable), oldest_commit
+    and last_pass. The gated wrapper validates the gate object (DuckLakeRuntimeError on a missing or non-positive field), emits MergeOpsBacklogCommits
+    (when read) or MergeOpsGateUnreadable 1.0 through the catalog sink (_shared.catalog_dimensions and _emit_maintenance_metric), and
+    on merge false returns {ok, action: merge_ops_gated, skipped: true, reason, commits, last_pass} without opening a catalog connection.
+    On merge true it records the trigger time in the container, emits MergeOpsGateTriggered 1.0, then calls the unchanged merge_ops
+    action with the same event, so a pass that fails before MergeOpsTablesCount is emitted does not re-trigger on every tick. Standard
+    library, boto3 and _shared only.'
   new_imports:
   - src.lambdas.ducklake_maintenance._shared
 - file: src/lambdas/ducklake_maintenance/handler.py
@@ -61,8 +64,18 @@ scope:
   - src.lambdas.ducklake_maintenance.backlog_gate
 - file: src/lambdas/ducklake_maintenance/_shared.py
   action: Modify
-  purpose: CATALOG_METRICS gains MergeOpsBacklogCommits, MergeOpsGateUnreadable and MergeOpsFilesBeforeTotal (the pass already emits
-    the last at handler.py:461; only the catalog sink's filter drops it for telemetry today).
+  purpose: CATALOG_METRICS gains MergeOpsBacklogCommits, MergeOpsGateUnreadable, MergeOpsGateTriggered and MergeOpsFilesBeforeTotal
+    (the pass already emits the last at handler.py:461; only the catalog sink's filter drops it for telemetry today).
+  new_imports: []
+- file: tests/lambdas/ducklake_maintenance/test__shared.py
+  action: Modify
+  purpose: test_catalog_metrics_is_the_closed_alarm_input_set's closed set gains the four names (planned change to a pinned set, citing
+    acceptance_criteria[1] and [2]); every other node is unchanged.
+  new_imports: []
+- file: tests/checks/contracts/test_write_time_enforcement_conformance.py
+  action: Modify
+  purpose: The maintenance handler's _NON_ROW_WRITING entry ("moves or removes files, writes no caller row") gains merge_ops_gated,
+    so test_every_action_and_handler_is_classified classifies the new _ACTIONS key (planned change citing acceptance_criteria[1]).
   new_imports: []
 - file: src/lambdas/ducklake_maintenance/manifest.yaml
   action: Modify
@@ -73,9 +86,10 @@ scope:
   action: Create
   purpose: 'Fake CloudWatch client (datapoints keyed by namespace and metric, raising on demand). Nodes: test_merges_at_the_backlog_threshold
     (rec-5248 acceptance: last pass 10 min ago, 60 commits -> merge, reason backlog; 59 -> no merge), test_merges_waiting_commits_after_the_age_bound
-    (1 commit, last pass 30 min ago -> merge, reason age; 0 commits -> no merge), test_unreadable_metrics_skip_and_say_so (a raising
-    client -> no merge, reason gate_unreadable, commits None), test_reads_commits_from_the_last_pass (the CommitLatencyMs query names
-    the MetaSchema dimension and starts at the newest pass timestamp), test_rejects_a_malformed_gate (missing max_unmerged_minutes,
+    (oldest unmerged commit 30 min old -> merge, reason age; 1 commit landed 1 min ago with the last pass 30 min ago -> no merge; 0 commits
+    -> no merge), test_unreadable_metrics_skip_and_say_so (a raising client -> no merge, reason gate_unreadable, commits None), test_reads_commits_from_the_last_pass
+    (the CommitLatencyMs query names the MetaSchema dimension and starts at the latest of the MergeOpsTablesCount and MergeOpsGateTriggered
+    datapoints and the container''s own trigger time), test_rejects_a_malformed_gate (missing max_unmerged_minutes,
     zero min_commits).'
   new_imports: []
 - file: tests/lambdas/ducklake_maintenance/handler/test_merge_ops_backlog_gate.py
@@ -83,13 +97,14 @@ scope:
   purpose: 'Handler-dispatch nodes with decide and the connection opener monkeypatched: test_skip_opens_no_connection (merge false ->
     skipped response, the opener is never called, MergeOpsBacklogCommits emitted with the MetaSchema dimension), test_unreadable_skips_and_emits
     (MergeOpsGateUnreadable emitted with the dimension, the opener never called), test_merge_runs_the_unchanged_pass (merge true ->
-    the merge_ops pass runs with the same event), test_files_before_total_is_emitted_for_telemetry (a telemetry pass emits MergeOpsFilesBeforeTotal
+    MergeOpsGateTriggered is emitted, then the merge_ops pass runs with the same event; a second tick in the same container with no
+    new commits skips), test_files_before_total_is_emitted_for_telemetry (a telemetry pass emits MergeOpsFilesBeforeTotal
     with the MetaSchema dimension; red before the _shared change).'
   new_imports: []
 - file: terraform/personal/ducklake_maintenance_telemetry.tf
   action: Modify
   purpose: 'The every-6h :50 telemetry merge rule and its target are unchanged and stay the floor. A new rule ducklake_maintenance_telemetry_merge_gated
-    (schedule cron(0,6,8,10,16,18,20,22,24,26,32,34,36,38,40,46,52,54,56,58 * * * ? *): every two to six minutes, never in the three
+    (name agent-platform-ducklake-maintenance-telemetry-merge-gated, inside the CI apply role''s rule/agent-platform-* grant; schedule cron(0,6,8,10,16,18,20,22,24,26,32,34,36,38,40,46,52,54,56,58 * * * ? *): every two to six minutes, never in the three
     minutes up to another rule''s start minute, :05, :15, :30, :45 or :50, so a pass of up to about 155 s ends before the next reserved
     start), its target (input {action = "merge_ops_gated", data_path, meta_schema = local.ducklake_telemetry_prod_meta_schema, backlog_gate
     = {min_commits = 60, max_unmerged_minutes = 30}}) and its lambda permission. One alarm, ducklake-telemetry-merge-gate-unreadable:
@@ -111,10 +126,11 @@ scope:
   new_imports: []
 - file: tests/checks/iam_tf/test_telemetry_production_maintenance_tf.py
   action: Modify
-  purpose: 'test_rules_target_the_production_telemetry_catalog also pins the gated rule''s cron, action and backlog_gate literals (planned
+  purpose: 'test_rules_target_the_production_telemetry_catalog also pins the gated rule''s name, cron, action and backlog_gate literals (planned
     change citing acceptance_criteria[0]); the :50 merge and gc pins are unchanged. test_admin_cadence_minutes_are_distinct expands
-    each rule''s minute field (list, range or start/step) into a minute set and asserts the start minutes of the non-gated rules are
-    pairwise distinct and the gated set holds none of m-3..m for any of them (a strengthening; today it compares strings). The gate-unreadable
+    each rule''s minute field (list, range or start/step) into a minute set, looks the gated rule up by its resource name (so a missing
+    rule fails), and asserts the start minutes of the non-gated rules are pairwise distinct and the gated set holds none of m-3..m for
+    any of them (a strengthening; today it compares strings). The gate-unreadable
     alarm joins _MAINT_ALARMS. New node test_reader_slow_alarm_pins pins the reader alarm''s name, metric, statistic, threshold, periods
     and treat_missing_data.'
   new_imports: []
@@ -126,7 +142,7 @@ scope:
   new_imports: []
 - file: docs/contracts/ducklake_maintenance.yaml
   action: Modify
-  purpose: The description and governance sentences name the gated telemetry rule; a new merge_ops_gated verb entry (8 effective lines;
+  purpose: The description and governance sentences name the gated telemetry rule; a new merge_ops_gated verb entry (9 effective lines;
     with the log row 489 plus 10 is 499 of 500); one amendment_log row. All edits are bound word for word by the approved-text sidecar.
   new_imports: []
 - file: docs/DECISIONS.md
@@ -194,7 +210,8 @@ verification_plan:
 - step: 3
   phase: pre-deploy
   action: The touched suites still pass, and the staged maintenance bundle imports backlog_gate.
-  command: bin/venv-python -m pytest tests/lambdas/ducklake_maintenance tests/checks/iam_tf -q && bin/venv-python -m scripts.lambda_manifest
+  command: bin/venv-python -m pytest tests/lambdas/ducklake_maintenance tests/checks/iam_tf tests/checks/contracts/test_write_time_enforcement_conformance.py
+    -q && bin/venv-python -m scripts.lambda_manifest
     --check-bundles
   expected: exit 0
   fix_if: an existing node fails, or the bundle check names backlog_gate (add it to the manifest includes)
@@ -251,14 +268,16 @@ verification_plan:
   action: Reads fit the deadline on a busy day and merges do not crowd the writer (read 24 h after the deploy, on a day with at least
     1,000 telemetry commits; otherwise wait for the next such day).
   command: for spec in 'DuckLakeTelemetryWriter CommitLatencyMs MetaSchema ducklake_telemetry SampleCount' 'AWS/Lambda Duration FunctionName
-    agent-platform-ducklake-telemetry-reader Maximum' 'DuckLakeTelemetryWriter OccRetryCount MetaSchema ducklake_telemetry Sum'; do set
+    agent-platform-ducklake-telemetry-reader Maximum' 'DuckLakeTelemetryWriter OccRetryCount MetaSchema ducklake_telemetry Sum' 'DuckLakeMaintenance MergeOpsPassFailed MetaSchema ducklake_telemetry
+    Sum'; do set
     -- $spec; aws --profile agent_platform cloudwatch get-metric-statistics --namespace $1 --metric-name $2 --dimensions Name=$3,Value=$4
     --start-time "$(date -u -d '-24 hours' +%Y-%m-%dT%H:00:00Z)" --end-time "$(date -u +%Y-%m-%dT%H:%M:00Z)" --period 3600 --statistics
     $5 --query "[max(Datapoints[].$5), sum(Datapoints[].$5)]" --output text; done
   expected: committed appends (CommitLatencyMs SampleCount) sum at least 1000; reader Duration maximum below 100000 (ms); writer OccRetryCount sum no higher than
-    the 24 h before the deploy (0 on every day 2026-11-10..17); record the three lines.
+    the 24 h before the deploy (0 on every day 2026-11-10..17); MergeOpsPassFailed sum 0 (merge-side OCC against live appends);
+    record the four lines.
   fix_if: 'a Duration maximum at or above 100000 with the backlog maximum under 250 means the cost is no longer the backlog alone: record
-    the hour on rec-4474 and rec-5293 and report to the coordinator; a rising OccRetryCount is reported to the coordinator; nothing
+    the hour on rec-4474 and rec-5293 and report to the coordinator; a rising OccRetryCount or a non-zero MergeOpsPassFailed is reported to the coordinator; nothing
     is widened or raised in this plan'
   hermetic: false
 - step: 9
@@ -316,8 +335,8 @@ verification_plan:
   expected: daily pass counts, merge duration sums, files superseded per day (FilesBefore sum minus FilesAfter sum) and stats rows
     maxima for the 7 days before and after the deploy; the report converts the duration delta plus about 480 gate ticks a day of about
     1 s to Lambda GB-seconds at 1536 MB and records it beside the estimate
-    (2-5 USD/month) and Decision 214's capped-bill trigger, and states that Neon compute is not readable from the session, so the coordinator
-    asks the operator for one reading of Neon usage.
+    (2-5 USD/month) and Decision 214's capped-bill trigger, and states that Neon usage is not readable from the session, so the coordinator
+    asks the operator for one reading of Neon compute and network transfer (egress, Decision 88 cl.2).
   fix_if: more than 150 passes a day, a daily merge duration sum above 2 h, superseded files per day above 1.5 times the week before
     the deploy (the weekly gc's 20,000-file cap), or stats rows growing faster than before the deploy is reported
     to the coordinator for the operator; nothing is changed in this plan
@@ -329,7 +348,7 @@ test_obligations:
   test_selector: tests/lambdas/ducklake_maintenance/test_backlog_gate.py::test_merges_at_the_backlog_threshold
   red_green_expectation: red before, green after
 - source: src/lambdas/ducklake_maintenance/backlog_gate.py
-  behavior: a waiting commit merges once the last pass is 30 minutes old
+  behavior: the oldest unmerged commit merges once it is 30 minutes old, and a fresh commit after an old pass does not
   verification_step: 1
   test_selector: tests/lambdas/ducklake_maintenance/test_backlog_gate.py::test_merges_waiting_commits_after_the_age_bound
   red_green_expectation: red before, green after
@@ -342,6 +361,11 @@ test_obligations:
   behavior: merge_ops_gated dispatches; a skipped tick opens no catalog connection and emits the backlog
   verification_step: 1
   test_selector: tests/lambdas/ducklake_maintenance/handler/test_merge_ops_backlog_gate.py::test_skip_opens_no_connection
+  red_green_expectation: red before, green after
+- source: src/lambdas/ducklake_maintenance/backlog_gate.py
+  behavior: a triggered pass is marked before merge_ops runs, so the next tick in the container does not re-trigger
+  verification_step: 1
+  test_selector: tests/lambdas/ducklake_maintenance/handler/test_merge_ops_backlog_gate.py::test_merge_runs_the_unchanged_pass
   red_green_expectation: red before, green after
 - source: src/lambdas/ducklake_maintenance/_shared.py
   behavior: the catalog sink admits MergeOpsFilesBeforeTotal for the telemetry catalog
@@ -396,8 +420,8 @@ constraints:
 - handler.py is at 497 of 500 SLOC; the build adds at most 2 lines there and, if it would pass 500, moves the action into a submodule;
   never a budget raise (Decision 128).
 - No rescue agents or workaround loops (Decision 55).
-- docs/contracts/ducklake_maintenance.yaml is NEAR_CAP (489 of 500 effective lines); the edits add 10 (499); if main has used the headroom,
-  stop and report, never a raise (Decision 128).
+- docs/contracts/ducklake_maintenance.yaml is NEAR_CAP (489 of the contracts class's 500 effective lines, Decision 166); the edits add
+  10 (499); if main has used the headroom, stop and report, never a raise (Decision 128).
 context:
 - 'Measured 2026-11-17 (raw files: /mnt/project-files/telemetry-read-timeouts/advisor-brief/). Writer invocations per busy day: 2,736
   (10-30), 2,636 (11-12), 2,712 (11-16); the lows are weekends and the three capture outages. Reader Duration maximum reached 110 s on
@@ -433,7 +457,7 @@ context:
 - 'Inferred, outside this plan: the telemetry catalog''s first snapshot expiry falls about 2026-11-27 (30-day retention from capture
   start); the first real gc_ops may meet many superseded small files against the breaker''s file-share cap. VP 12 reads that Sunday.'
 - 'Spend and deploy (always_ask, Decision 246 cl.4): UNPROVEN estimate 2-5 USD/month (about 480 one-second gate ticks a day, about
-  29,000 CloudWatch metric reads a month, merges only while writes keep Neon awake); VP 13 measures it beside Decision 214''s capped-bill
+  43,000 CloudWatch metric reads a month, merges only while writes keep Neon awake); VP 13 measures it beside Decision 214''s capped-bill
   trigger. IAM: one read-only statement. The operator''s plan approval must name both; his 2026-11-16 ruling (cmsg_01YbaDZWowGfXCn2WtobCVVoNkoksprjGv5Mz9HrYSDG27)
   lets the build merge on review PROCEED and green CI once he has approved the plan.'
 - 'Singleton (reserved concurrency 1): control_health :15 (about 45 s), telemetry merge floor :50 every 6 h (up to about 155 s), ops
@@ -447,15 +471,18 @@ context:
 - 'Dependency: the fix-proof baseline thread''s merge-annotate producer (rec-5270) reuses session_presence.run''s reader call; this plan
   leaves it unchanged. The operator declined changing the arrival check''s retry in this plan (2026-11-17 15:08Z, cmsg_01YbaDZWowGfXCn2WtobCVVo1pnRy5U7izbs4czmKgbH3K).'
 - 'red_overlap: rec-5247 and rec-5248 repairs_this_red.'
+- 'Not added (critique round 5 N7): a liveness alarm on the gate''s own ticks; a dead gated rule leaves the every-6h floor, the merge-liveness
+  alarm and the reader-slow alarm, and VP 7 proves the rule is live.'
 - 'VP 10 reads run logs with gh in the session: per-run log text has no single mcp__github__ call (actions_list plus get_job_logs per
   job is the equivalent the build may use instead).'
-- 'Decision scout round 5 FLAGS_FOUND: Decision 128 WARN (handler.py at 497 of 500) answered by the gated(action_merge_ops) wrapper
+- 'Decision scout round 6 NO_FLAGS (the round 5 flags below are cleared). Round 5 FLAGS_FOUND: Decision 128 WARN (handler.py at 497 of 500) answered by the gated(action_merge_ops) wrapper
   in backlog_gate.py, so handler.py gains an import and one _ACTIONS entry; Decision 88 NOTE (an unreadable gate merging every tick)
   answered by skip plus alarm. CITE: 236 (cl.5 amended by one dated line), 88 (cl.1(iii) cadence sized to write rate), 128, 81, 92,
   246, 226, 250, 186, 201, 235, 214.'
 - 'Serves: NS.3 3/5 -- the plan sizes merge cadence to measured write load and measures spend against Decision 214''s capped-bill trigger.
   It does not move any adapter.'
-- 'Graduated shards kept unchanged: ducklake-maintenance-gc-rule-invariants, telemetry-gc-enablement-baseline, telemetry-maintenance-schedule-pins.'
+- 'Graduated shards kept unchanged: ducklake-maintenance-gc-rule-invariants, telemetry-gc-enablement-baseline, telemetry-maintenance-schedule-pins,
+  ducklake-partition-actions-guards, maintenance-metric-catalog-dimension, write-time-conformance-every-rule-has-a-validator, writer-adapters-reject-every-declared-kind.'
 - 'fork: telemetry merge trigger | chosen: a backlog-gated pass (60 commits or 30 minutes), decided from CloudWatch, beside the unchanged
   every-6h floor | class: asked | precedent: Decision 88 | precedent_kind: decision | reversible: yes | persisted: terraform/personal/ducklake_maintenance_telemetry.tf'
 - 'fork: superseded design | chosen: drop the fixed 20-minute cron and the arrival halving (critique round 3 B1, the blind consult) |
@@ -476,7 +503,10 @@ gate_rounds:
 - {gate: wording-check, round: 4, verdict: PASS, digest: 1fc3a97f949851cfd8d3c5cd0a0bd3c12e92a4c800fc854e2e433706f6ce982c, base: bbcb69c737bf9271bf1fc73f33b352866b0c663c, selection: complete}  # pragma: allowlist secret
 - {gate: decision-scout, round: 5, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:f0bccfef4796fa58af5e8287e442ea7b772ae0b04b66a4a21b527c9667b50892"}  # pragma: allowlist secret
 - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 6, nits: 8}
+- {gate: decision-scout, round: 6, verdict: NO_FLAGS, scout_input_fingerprint: "v1:9630a7a3cad80c49ff4ea65a3c7d6502116da4ea7a968f0716a8563ab3fc4c34"}  # pragma: allowlist secret
+- {gate: plan-critique, round: 5, verdict: REVISE, blocking: 3, nits: 7}
 - {gate: wording-check, round: 5, verdict: PASS, digest: ff4856b5d3fc23e5b99b985d3e45c1e6192a156a8bd50e8e5864cd535fb190c0, base: ddb28a40c5dc5d3b382ea45fa403772f8c833edf, selection: complete}  # pragma: allowlist secret
+- {gate: wording-check, round: 6, verdict: PASS, digest: c0031da5aa8e0b87c1f94ed07c15fda5f9fbbbae22695a814cc02163bad75c23, base: ddb28a40c5dc5d3b382ea45fa403772f8c833edf, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
 - Branch confirmed not on main
 - docs/PROJECT_CONTEXT.md read
