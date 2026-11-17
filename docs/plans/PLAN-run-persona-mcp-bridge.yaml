@@ -46,12 +46,17 @@ scope:
       object return "error: ..." text without a server call; a result with is_error returns "error: " + its text; otherwise the
       text contents joined by newlines; any reply past read_input.READ_CAP_BYTES is cut at that byte count (on a
       character boundary) and ends "[truncated: <total> bytes]". A failure of the session itself (closed stream, an
-      MCPError, a BaseExceptionGroup, the process gone) raises BridgeFailed (class name only). An exception raised in the
+      MCPError, a BaseExceptionGroup, the process gone, or any other non-cancellation Exception from call_tool, such as
+      its RuntimeError on output-schema validation or a pydantic ValidationError on a malformed result) raises
+      BridgeFailed (class name only). An exception raised in the
       context's body (the run loop's RunAborted, RunRefused or any other) leaves open_bridge as itself, never wrapped:
       stdio_client and ClientSession each own an anyio task group, so a body exception otherwise surfaces as a nested
       ExceptionGroup (measured: ExceptionGroup([ExceptionGroup([E])])); open_bridge records the body's exception and,
-      when a BaseExceptionGroup leaves the client contexts, re-raises that recorded exception, so only failures that
-      originate in the session become BridgeFailed. The server's stderr goes
+      when a BaseExceptionGroup leaves the client contexts, re-raises that recorded exception (a bare raise of it, never
+      `from None`, so a RunAborted keeps its __cause__), so only failures that originate in the session become
+      BridgeFailed. The startup errors open_bridge raises itself inside the client contexts (BridgeTimeout,
+      BridgeUnavailable) are recorded and re-raised the same way, so they too leave unwrapped (measured: unrecorded they
+      leave as ExceptionGroup([ExceptionGroup([BridgeTimeout])])). The server's stderr goes
       only to the injected errlog, never to the run's own stdout or stderr. Names no persona id and no scripts path.
   - file: src/persona_backends/contract.py
     action: Modify
@@ -66,7 +71,8 @@ scope:
     purpose: >-
       run_persona gains keyword `mcp_server: StdioServerParameters | None = None`. A contract with warehouse_verbs and
       mcp_server None is RunRefused ("warehouse_read needs the MCP server"); keyword `mcp_errlog: TextIO | None = None`
-      (None means os.devnull) is passed through as open_bridge's errlog. The run's wall-clock deadline is taken once,
+      (None means os.devnull, opened by a synchronous helper outside the async function, as ruff ASYNC230 forbids
+      open() inside it) is passed through as open_bridge's errlog. The run's wall-clock deadline is taken once,
       before the bridge opens (moved out of go()), so startup counts against max_wall_clock_seconds. After the input check
       passes (so an input_incomplete run starts no server), a contract with warehouse_verbs opens open_bridge(mcp_server,
       verbs, startup_timeout=deadline - clock()) around the run loop: BridgeTimeout returns failure budget_exhausted
@@ -76,7 +82,12 @@ scope:
       lines only when the contract names a blob. Tool dispatch becomes async: read_input is served as now, a named verb
       awaits Bridge.call under asyncio.wait_for(deadline - clock() measured when the call starts) (a timeout returns
       budget_exhausted, as a transport timeout does), any other name gets "error: unknown tool"; BridgeFailed aborts with
-      kind tool_server_error. A RunAborted the loop raises while the bridge is open (transport outage or exception)
+      kind tool_server_error. The turn record of the provider call that asked for the tools is written before either
+      exit (budget_exhausted from a call timeout, or the tool_server_error abort): ended_at_ms is taken when the
+      transport returned (not when the record is written, so a model_call row never includes warehouse latency, on the
+      success path too), turns_used counts that turn, and tool_result_bytes covers the calls that finished, so every
+      billed model call keeps its model_call row (run_persona.events, one per turn) ahead of the end record, as plan 1's
+      transport paths do. A RunAborted the loop raises while the bridge is open (transport outage or exception)
       reaches run_persona's caller as itself with its own kind (open_bridge's unwrapping above), never as an
       ExceptionGroup or as tool_server_error. mcp and mcp_bridge are imported inside the warehouse branch, so a run
       that names no warehouse_read never loads them. Tool turns keep the plan-1 turn
@@ -123,7 +134,10 @@ scope:
       file, a positive control, and absent from the captured fd 1 and fd 2; the error raised is BridgeUnavailable with the
       FAKE_MCP_RAN_FILE present, so a spawn failure cannot satisfy it); test_server_dying_mid_run_is_bridge_failed;
       test_body_exception_leaves_unwrapped (a sentinel raised inside the open_bridge context is caught as itself, not a
-      BaseExceptionGroup, and not BridgeFailed).
+      BaseExceptionGroup, and not BridgeFailed); test_startup_errors_leave_unwrapped (BridgeTimeout and
+      BridgeUnavailable are caught by an exact type check, not only pytest.raises, which matches inside groups). Every
+      branch the build writes in mcp_bridge.py and litellm_backend.py has a listed or added case (validate_test_coverage's
+      100% per-file line floor, full tier); a branch no case can reach is not written.
   - file: tests/persona_backends/test_contract.py
     action: Modify
     purpose: >-
@@ -139,10 +153,14 @@ scope:
       test_offered_tools_are_read_input_then_named_verbs; test_warehouse_without_server_is_refused;
       test_input_incomplete_starts_no_server; test_unavailable_server_aborts_before_any_call (kind
       tool_server_unavailable, zero transport calls, end record aborted); test_server_failure_mid_run_aborts (kind
-      tool_server_error); test_startup_hang_returns_budget_exhausted (mode hang, a contract copy with
+      tool_server_error; the transport called exactly once and a turn record listing the verb written before the end
+      record); test_tool_turn_ended_at_is_transport_return (a fake clock advanced inside the
+      warehouse call shows the turn record's ended_at_ms equals the time the transport returned, before the warehouse call); test_startup_hang_returns_budget_exhausted (mode hang, a contract copy with
       max_wall_clock_seconds 1: the run returns budget_exhausted within seconds, with no transport call);
-      test_warehouse_call_past_deadline_returns_budget_exhausted (mode slow, max_wall_clock_seconds 2, the fake
-      transport asks for one named verb: failure budget_exhausted, an end record written, elapsed bounded);
+      test_warehouse_call_past_deadline_returns_budget_exhausted (mode slow, a roomy max_wall_clock_seconds, and
+      asyncio.wait_for monkeypatched to time out the bridge call as test_wait_for_timeout_returns_budget_exhausted does,
+      so startup time cannot satisfy it: the fake transport called exactly once, a turn record whose tool_calls lists the
+      verb ahead of the end record, failure budget_exhausted, and a detail that is not the startup detail);
       test_transport_outage_with_bridge_open_aborts (the fake transport raises an outage after the bridge opened:
       RunAborted kind outage, not an ExceptionGroup and not tool_server_error); test_contract_without_read_input_blob_offers_no_read_input_tool (no
       read_input tool and no blob lines in the opening message); a contract naming no tools sends tools None; a contract without warehouse_read starts no server
@@ -439,6 +457,7 @@ gate_rounds:
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 5, nits: 13}
   - {gate: decision-scout, round: 4, verdict: NO_FLAGS, scout_input_fingerprint: "v1:daca14bcb4dfcfed5b2ecb7809cff4445e129e17043e853d5ef28383a3955b79"}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 3, nits: 10}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 5}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
