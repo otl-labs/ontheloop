@@ -6,8 +6,8 @@ slug: rec-provenance-column-add
 intent: >-
   Add provenance_json to ops_recommendations: a nullable per_write VARCHAR column whose contract declares a dated
   json_object leg (schema_version 1, 4096 bytes, closed key set), projected into field_semantics.yaml, physically added
-  by the admin-tier reconcile_columns action, and proven on the first serving deploy by two new --lambda-row-rules
-  vectors. Plan C2 of the rec write-path data-quality series (C1 rec-provenance-shape-check shipped the writer check and
+  by the admin-tier reconcile_columns action, and proven on the first serving deploy by a new --lambda-row-rules
+  vector. Plan C2 of the rec write-path data-quality series (C1 rec-provenance-shape-check shipped the writer check and
   the per_write attribute); it gives plan D a declared column to fill. Serves NS.5 (a data rule is enforced at the
   write boundary wherever the write can decide it).
 plan_type: IMPLEMENTATION
@@ -91,7 +91,7 @@ scope:
       (nullable, never derived) is never carried forward from the prior row by a portal update path, and the writer
       stores what it is sent." Part 2 (RATCHET), after "adding or removing advisory: true on a leg needs a semantic-break
       entry": "; a json_object leg, which the census cannot check, changes only by an added schema_version or a larger
-      max_bytes, and its date never moves earlier (any other change is a temporary exemption, the drop, then a new dated
+      max_bytes, and its date never moves (any other change is a temporary exemption, the drop, then a new dated
       leg)". Part 3 (COVERAGE), after "with rec-4166's monitor a backstop;": " the json_object shape leg -> the ops
       writer (check_json_objects), proven by its unit tests and the --lambda-row-rules gate, the portal running it as
       the insert pre-check;". Part 4: amendment row first in amendment_log: {date: "<build UTC date>",
@@ -105,7 +105,8 @@ scope:
     purpose: >-
       contract_table_ops.ops_recommendations: migration_columns history and current each gain "provenance_json: {role:
       input, sql_type: VARCHAR, nullable: true}" after context_v2_json; pending_reconcile history and current become
-      [provenance_json] (the merge-time gate requires it; the deploy gate holds serving until the bookkeeping PR). Size:
+      [provenance_json] (the merge-time gate requires pending_reconcile, which holds serving until the bookkeeping PR;
+      migration_columns is documentary, kept as context_v2_json's). Size:
       481 of 500 effective lines, +2; the bookkeeping PR adds about 14 (two reconciled entries, as ops_decisions'
       intent), still under 500; if not, write the evidence as one flow line, never raise the budget.
   - file: config/lambda/ducklake/field_semantics.yaml
@@ -115,18 +116,18 @@ scope:
     action: Modify
     purpose: >-
       ROW_RULES_CASES gains ("json_object", {"provenance_json": '{"schema_version": 1}'}, "provenance_json") (required
-      keys missing). A per-write probe inside lambda_row_rules on its own test-pw- key: write_ops ROW_RULES_BASE plus a
-      valid v1 value, read_ops_current must return that value, then update_ops to status closed with a resolution and no
-      provenance_json, and read_ops_current must return provenance_json null. On any unexpected answer it first closes
-      the probe row (update_ops to status closed without the column, as repair_and_fail does for its key), so a failed
-      probe never leaves an open row in current, then fails. The OK line ends with the literal "; per_write probe stored
-      and cleared key=<key>"; a FAIL message names the step and never echoes a row (rec-4409).
-  - file: tests/ducklake_neon_smoke_test/test_lambda_ops_gates.py
-    action: Modify
+      keys missing). Nothing else: the gate stays write-free (every case is refused, nothing stored), so a serving deploy
+      adds no row to the append-only rec tables.
+  - file: tests/common/test_ducklake_writes_per_write.py
+    action: Create
     purpose: >-
-      The scripted transport answers the probe key; new nodes test_lambda_row_rules_per_write_probe_ok,
-      test_per_write_probe_fails_when_value_not_stored, test_per_write_probe_fails_when_update_keeps_value; existing
-      nodes adjust their write_ops and update_ops counts to the probe.
+      Hermetic proof that the writer stores what it is sent for a per_write column, on the real repo projection
+      (FakeCon from tests/fixtures/ducklake_fakes; a MIRROR docstring like test_ducklake_writes_references.py): nodes
+      test_write_binds_provenance_json_as_sent (a valid v1 value is bound verbatim in the history and current MERGE
+      params at provenance_json's ordered position), test_update_omitting_provenance_json_binds_null (an update path
+      record without the key binds None in both MERGEs) and test_current_merge_updates_provenance_json (the current
+      MERGE's UPDATE SET names provenance_json = s.provenance_json, so an omitted value replaces the prior one). The
+      live round trip is plan D's, its first emitter.
   - file: tests/common/test_ducklake_write_rules.py
     action: Modify
     purpose: >-
@@ -170,7 +171,7 @@ acceptance_criteria:
     Before the reconcile, the deploy gate refuses the serving deploy naming ops_recommendations and ci-rca files no
     fresh critical for it (designed refusal); after the operator's reconcile_columns response lists provenance_json in
     added_history and added_current and the bookkeeping PR merges, the serving deploy and every smoke job are green and
-    --lambda-row-rules reports 6 cases plus the per-write probe.
+    --lambda-row-rules reports 6 cases refused with nothing stored.
   - The reader returns provenance_json as null for an existing rec after the serving deploy.
 verification_plan:
   - step: 1
@@ -186,7 +187,7 @@ verification_plan:
       tests/common/test_ducklake_write_rules.py::test_json_object_spec_built_from_projected_leg
       tests/common/test_ducklake_write_rules.py::test_row_rule_gate_cases_trip_their_rule
       tests/common/test_ducklake_write_rules.py::test_select_widens_only_with_dated_rules
-      && bin/venv-python -m pytest -q -m integration -p no:randomly -rs
+      && bin/venv-python -m pytest -q -m integration -rs
       tests/common/test_ducklake_write_rules_integration.py::test_the_census_sql_and_the_engine_agree_row_for_row
       && bin/venv-python -m scripts.schema_to_field_semantics --check
       && bin/venv-python -c "import subprocess,yaml;p='docs/contracts/ops_recommendations.yaml';
@@ -207,18 +208,20 @@ verification_plan:
       amendment comparison reads origin/main, which a graduated replay cannot pin.
   - step: 2
     phase: pre-deploy
-    action: The --lambda-row-rules gate's new json_object case and per-write probe on a scripted transport.
+    action: >-
+      The writer binds provenance_json as sent (None when omitted, which the current MERGE writes over the prior value),
+      and the --lambda-row-rules gate sends the new json_object case on a scripted transport, storing nothing.
     command: >-
       bin/venv-python -m pytest -q
+      tests/common/test_ducklake_writes_per_write.py::test_write_binds_provenance_json_as_sent
+      tests/common/test_ducklake_writes_per_write.py::test_update_omitting_provenance_json_binds_null
+      tests/common/test_ducklake_writes_per_write.py::test_current_merge_updates_provenance_json
       tests/ducklake_neon_smoke_test/test_lambda_ops_gates.py::test_lambda_row_rules_ok
-      tests/ducklake_neon_smoke_test/test_lambda_ops_gates.py::test_lambda_row_rules_per_write_probe_ok
-      tests/ducklake_neon_smoke_test/test_lambda_ops_gates.py::test_per_write_probe_fails_when_value_not_stored
-      tests/ducklake_neon_smoke_test/test_lambda_ops_gates.py::test_per_write_probe_fails_when_update_keeps_value
     expected: Every selected test passed.
-    fix_if: Fix the gate, never the assertion; a FAIL message must not echo a row (rec-4409).
+    fix_if: Fix the code, never the assertion; a gate FAIL message must not echo a row (rec-4409).
     hermetic: true
     graduation: graduate
-    graduation_check_id: row-rules-gate-per-write-probe
+    graduation_check_id: writer-stores-per-write-column-as-sent
   - step: 3
     phase: pre-deploy
     action: >-
@@ -255,15 +258,20 @@ verification_plan:
       head_sha is $MERGE_SHA or a first-parent descendant of it and whose gate job chose to deploy (gate output deploy
       true; a gate-skipped run is passed over), export RUN_SHA (its head_sha) and RUN_STARTED (its
       run_started_at), and save its jobs (actions_list list_workflow_jobs) to $DEPLOY_JOBS_JSON. The maintenance
-      functions ship the new projection and pass their smoke, and the serving deploy is refused by design. Then
-      ci-rca filed no critical for it: no open ci_rca rec created after RUN_STARTED names deploy-ducklake-lambdas.
+      functions ship the new projection and pass their smoke, and the serving deploy is refused by design. Export
+      RUN_ID (its id). Then ci-rca acted on it and filed nothing: with actions_list find the completed ci-rca.yml run
+      (event workflow_run, head_sha $RUN_SHA, created after the deploy run completed) whose rca job log, saved with
+      mcp__github__get_job_logs to $RCA_LOG, prints RUN_ID="$RUN_ID"; export RCA_CONCLUSION (its conclusion). Only then
+      read ci_rca_open: no open ci_rca rec created after RUN_STARTED names deploy-ducklake-lambdas.
     command: >-
       git merge-base --is-ancestor "$MERGE_SHA" "$RUN_SHA" && test -s "$DEPLOY_JOBS_JSON" && bin/venv-python -c "import
       json,os;j=json.load(open(os.environ['DEPLOY_JOBS_JSON']));jobs={x['name']:x.get('conclusion') for x in (j.get('jobs')
       if isinstance(j,dict) else j)};print(jobs);assert jobs.get('deploy-maintenance')=='success' and
       jobs.get('maintenance-smoke')=='success' and jobs.get('reconcile-gate')=='failure',jobs;
       assert jobs.get('deploy-telemetry-twin')=='success' and jobs.get('telemetry-twin-smoke')=='success',jobs;
-      assert jobs.get('deploy-serving') in ('skipped',None),jobs;print('HELD_AS_DESIGNED')" && bin/venv-python -c "import
+      assert jobs.get('deploy-serving') in ('skipped',None),jobs;print('HELD_AS_DESIGNED')"
+      && test "$RCA_CONCLUSION" = success && grep -qF "RUN_ID=\"$RUN_ID\"" "$RCA_LOG" && grep -qE 'skip=true$' "$RCA_LOG"
+      && echo CI_RCA_SKIPPED_BY_DESIGN && bin/venv-python -c "import
       os;from src.common import ducklake_reader_client as rc;rows=rc.make_reader().named('ci_rca_open');
       new=[x for x in rows if str(x.get('created_timestamp'))[:19].replace(' ','T')>os.environ['RUN_STARTED'][:19] and
       any(k in (str(x.get('title',''))+str(x.get('file',''))).lower() for k in ('deploy-ducklake','reconcile'))];
@@ -271,10 +279,11 @@ verification_plan:
     expected: >-
       The run descends from the merge; deploy-maintenance, maintenance-smoke, deploy-telemetry-twin and
       telemetry-twin-smoke success, reconcile-gate failure,
-      deploy-serving skipped, then HELD_AS_DESIGNED and NO_FRESH_CRITICAL.
+      deploy-serving skipped, then HELD_AS_DESIGNED, CI_RCA_SKIPPED_BY_DESIGN and NO_FRESH_CRITICAL.
     fix_if: >-
       A gate-skipped run is not the run (pick the next deploying one). A red deploy-maintenance, maintenance-smoke or
-      telemetry twin leg is root-caused and fixed forward before the admin step (Decision 55).
+      telemetry twin leg is root-caused and fixed forward before the admin step (Decision 55). No ci-rca run yet: wait
+      for it (event-driven, never a sleep loop); skip=false in its log is a designed_refusal defect, reported.
       A fresh critical for the designed refusal alone is a designed_refusal defect: report it, never close it by hand. A
       concurrent real failure in the run mints its own rec by design (designed_refusal suppresses only a lone
       reconcile-gate failure); triage it on its own. If ci_rca_open's row shape differs, read it and adapt the filter,
@@ -318,7 +327,7 @@ verification_plan:
       to $DEPLOY_JOBS_JSON, the smoke job's log via mcp__github__get_job_logs to $SMOKE_LOG, the telemetry-smoke job's
       log to $TELEMETRY_SMOKE_LOG): every deploy and smoke job of all six affected artifacts green (ducklake_writer,
       ducklake_reader, ducklake_maintenance, ducklake_maintenance_smoke, ducklake_telemetry_writer,
-      ducklake_telemetry_reader), and the row-rules gate reports the new case and the per-write probe. The one carve-out:
+      ducklake_telemetry_reader), and the row-rules gate reports the new case with nothing stored. The one carve-out:
       a telemetry-smoke failure whose log shows rec-5247's sessions_window read_deadline_exceeded is reported, not fixed.
     command: >-
       git merge-base --is-ancestor "$BOOK_SHA" "$RUN_SHA" && bin/venv-python -c "import json,os,re;j=json.load(open(os.environ['DEPLOY_JOBS_JSON']));
@@ -328,10 +337,10 @@ verification_plan:
       log=open(os.environ['TELEMETRY_SMOKE_LOG']).read() if ts!='success' else '';
       assert ts=='success' or re.search(r'sessions_window.*read_deadline_exceeded|read_deadline_exceeded.*sessions_window',log),ts;
       print('DEPLOY_OK' if ts=='success' else 'DEPLOY_OK TELEMETRY_SMOKE_REC_5247')" && grep -E
-      "LAMBDA_ROW_RULES OK 6 cases.*per_write probe stored and cleared" "$SMOKE_LOG" && echo ROW_RULES_GATE_OK
+      "LAMBDA_ROW_RULES OK 6 cases rejected 422 row_rule, nothing stored" "$SMOKE_LOG" && echo ROW_RULES_GATE_OK
     expected: >-
       DEPLOY_OK (or DEPLOY_OK TELEMETRY_SMOKE_REC_5247, reported to the coordinator with the run id), the gate's OK
-      line with 6 cases and the per_write probe, then ROW_RULES_GATE_OK.
+      line with 6 cases and nothing stored, then ROW_RULES_GATE_OK.
     fix_if: >-
       A red job is root-caused and fixed forward, never re-run to green (Decision 55). Only the rec-5247 signature is
       carved out; any other telemetry-smoke failure is this plan's to fix.
@@ -371,10 +380,10 @@ test_obligations:
     test_selector: tests/common/test_ducklake_write_rules.py::test_json_object_spec_built_from_projected_leg
     red_green_expectation: red before (no json_object column), green after
   - source: scripts/ducklake_smoke/lambda_ops_gates.py
-    behavior: The row-rules gate refuses a malformed provenance_json and proves the deployed writer stores what it is sent (an update omitting the column stores NULL); the portal's per_write strip is C1's, proven by tests/ops_data_portal/test_update_per_write_column.py.
-    verification_step: 2
-    test_selector: tests/ducklake_neon_smoke_test/test_lambda_ops_gates.py::test_lambda_row_rules_per_write_probe_ok
-    red_green_expectation: red before (no probe), green after
+    behavior: The row-rules gate sends a malformed provenance_json (required keys missing) as its json_object case.
+    verification_step: 1
+    test_selector: tests/common/test_ducklake_write_rules.py::test_row_rule_gate_cases_trip_their_rule
+    red_green_expectation: red before (no json_object case in the pinned list), green after
 constraints:
   - Never hand-edit config/lambda/ducklake/field_semantics.yaml; regenerate it.
   - >-
@@ -403,16 +412,16 @@ context:
     objection to an unchecked JSON column does not apply: C1's leg checks it at write.
   - >-
     5. Not taken: a writer-clock key (needs a new leg type; plans E and F own the residual). rec-5299 goes to plan D,
-    the first emitter; rec-5302 does not bite (dated leg). Grain unchanged; the value describes its history row.
+    the first emitter; rec-5302 does not bite (dated leg). Grain unchanged; the value describes its history row. No
+    live probe (a test row per deploy); scope row 6 proves the binding, plan D's emitter the live round trip.
   - >-
     Decision-scout verdict + CITE list: r2 FLAGS_FOUND (r1 same), CITE 64, 79, 81, 126, 143, 210 (roadmap CITE
     T2.29); NOTE 246 resolved by the operator's card (item 1); Decision 63 answered in item 4 (RELATED in r2).
     Decisions triaged: 219 of 219. Roadmap items intersected: 10; CONFLICT: 0; RELATED: 9. Serves: NS.5 4/5.
   - >-
     T2.29 is related only (no criterion claimed; plan D's fallback flags serve c4). red_overlap 2026-11-17: blocked
-    by rec-5247 (Critical, SLO breached, no shared files); deferred under the operator's 2026-11-17 ruling that
-    rec-5247 is Feedback Loop's and threads defer it.
-    The build re-runs it; a telemetry red from rec-5247 in VP step 8 is reported with the run id, never fixed here.
+    by rec-5247 (Critical, SLO breached, no shared files); deferred under the operator's 2026-11-17 ruling (Feedback
+    Loop's). The build re-runs it; a rec-5247 telemetry red in VP step 8 is reported with the run id, never fixed.
   - >-
     Overlaps: unbuilt billing-shape-local, merge-annotate-contract-reader, scheduled-workflow-dispatch and
     telemetry-claude-p-capture-adapter also regenerate field_semantics.yaml (second to build rebases). Kept shards:
@@ -427,6 +436,7 @@ gate_rounds:
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:91465d81b9c0dcce7ec571970f701411a935c63503b656a2a7b03b86e4657194"}
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 4, nits: 9}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 4}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 3, nits: 3}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -441,7 +451,8 @@ execution_steps:
     scripts.schema_to_field_semantics. Post: --check reports no drift; the structural-size check passes for both
     contract files.
   - >-
-    2. Tests (scope rows 7-10) in place, then the smoke gate (scope rows 5-6). Post: VP steps 1-3 pass; the pinned
+    2. Tests (scope rows 7-11) in place, then the smoke gate case (scope row 5) and the new writer test file (row 6).
+    Post: VP steps 1-3 pass; the pinned
     list in test_row_rule_gate_cases_trip_their_rule now ends with json_object.
   - >-
     3. VP step 4 (fast tier, then full tier backgrounded with a 2 h limit; verdict from validation_result
