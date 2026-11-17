@@ -14,14 +14,15 @@ _CRITIC = "persona-verdict/plan_critic"
 _TOOLS = ("mcp__github__merge_pull_request", "mcp__github__enable_pr_auto_merge")
 
 
-def _run(name: str, conclusion: str | None, run_id: int, *, status: str = "completed", app: str = "github-actions") -> dict:
+def _run(name: str, conclusion: str | None, run_id: int, *, status: str = "completed", app: str = "verdict-app") -> dict:
+    app_object = {"slug": app, "id": fx.VERDICT_APP_ID} if app == "verdict-app" else {"slug": app}
     return {
         "id": run_id,
         "name": name,
         "status": status,
         "conclusion": conclusion,
         "started_at": "2026-11-16T10:00:00Z",
-        "app": {"slug": app},
+        "app": app_object,
     }
 
 
@@ -48,9 +49,11 @@ class _Case:
         self.set_main()
 
     def set_main(self, *, rows: bool = True, **values: str) -> None:
-        text = fx.config_text(values, rows=rows)
+        app_id = fx.VERDICT_APP_ID if rows and "actions" in values.values() else None
+        text = fx.config_text(values, rows=rows, app_id=app_id)
         fx.git(self.f.work, "checkout", "-q", "main")
         self.f.sources = dict(values) if rows else {}
+        self.f.app_id = app_id
         path = self.f.work / fx.CONFIG_REL
         if not path.exists() or path.read_text(encoding="utf-8") != text:
             self.f.advance_main(fx.CONFIG_REL, text)

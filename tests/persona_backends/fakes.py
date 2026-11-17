@@ -60,16 +60,43 @@ def good_input(notes: str = "line one\nline two\nline three") -> dict[str, Any]:
 
 
 def attempt(role: str = "primary", outcome: str = "ok", n: int = 1) -> Attempt:
-    return Attempt(role, "m/x", n, outcome, 5)
+    return Attempt(role, "m/x", n, outcome, 5, "p", "b", 1000)
 
 
 def record(role: str = "primary") -> CallRecord:
-    return CallRecord("fixture_persona", role, "p", "m/x", "m/x", "b", "enabled", "high", 10, 5, 0, 0, None, 1, 5)
+    return CallRecord(
+        "fixture_persona",
+        role,
+        "p",
+        "m/x",
+        "m/x",
+        "b",
+        "enabled",
+        "high",
+        10,
+        5,
+        0,
+        0,
+        None,
+        1,
+        5,
+        response_id="resp-1",
+        usage_raw={"prompt_tokens": 10, "completion_tokens": 5},
+        started_at_ms=1000,
+        responded_at_ms=1005,
+    )
 
 
-def final(content: str = VALID, *, attempts: tuple[Attempt, ...] | None = None, failed_over: bool = False, finish="stop"):
+def final(
+    content: str = VALID,
+    *,
+    attempts: tuple[Attempt, ...] | None = None,
+    failed_over: bool = False,
+    finish="stop",
+    probe_record: CallRecord | None = None,
+):
     message = {"role": "assistant", "content": content}
-    return TransportResult(content, [], message, finish, record(), attempts or (attempt(),), failed_over)
+    return TransportResult(content, [], message, finish, record(), attempts or (attempt(),), failed_over, probe_record)
 
 
 def tool(arguments: dict[str, Any] | str, name: str = "read_input", *, attempts: tuple[Attempt, ...] | None = None):
@@ -79,8 +106,10 @@ def tool(arguments: dict[str, Any] | str, name: str = "read_input", *, attempts:
     return TransportResult("", [call], message, "tool_calls", record(), attempts or (attempt(),), False)
 
 
-def error(kind: str, attempts: tuple[Attempt, ...] = ()) -> TransportError:
-    return TransportError(kind, f"fake {kind}", attempts=attempts)
+def error(kind: str, attempts: tuple[Attempt, ...] = (), probe_record: CallRecord | None = None) -> TransportError:
+    failure = TransportError(kind, f"fake {kind}", attempts=attempts)
+    failure.probe_record = probe_record
+    return failure
 
 
 class ScriptedTransport:

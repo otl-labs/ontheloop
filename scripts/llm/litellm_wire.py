@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from scripts.llm.tier_selection import Selection
+from src.turn_capture.litellm_usage import map_usage
 
 _OUTAGE_STATUSES = frozenset({408, 429})
 _OUTAGE_NAMES = (
@@ -48,6 +49,13 @@ class CallRecord:
     reasoning_tokens: int | None
     attempt: int
     latency_ms: int
+    response_id: str | None = None
+    usage_raw: dict[str, Any] | None = None
+    cache_creation_1h_tokens: int | None = None
+    cache_creation_5m_tokens: int | None = None
+    usage_absent: tuple[str, ...] = ()
+    started_at_ms: int | None = None
+    responded_at_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -57,6 +65,9 @@ class Attempt:
     attempt: int
     outcome: str
     latency_ms: int
+    provider: str | None = None
+    billing_shape: str | None = None
+    started_at_ms: int | None = None
 
 
 class TransportError(RuntimeError):
@@ -76,6 +87,7 @@ class TransportError(RuntimeError):
         self.attempts = attempts
         self.tag = tag
         self.result = result
+        self.probe_record: CallRecord | None = None
 
 
 def load_litellm() -> Any:
@@ -163,19 +175,32 @@ def _plain_tool_calls(message: Any) -> list[dict[str, Any]]:
     ]
 
 
+def _stripped(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _stripped(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_stripped(v) for v in value if v is not None]
+    return value
+
+
 def read_response(
-    response: Any, *, selection: Selection, persona: str, role: str, attempt: int, latency_ms: int
+    response: Any,
+    *,
+    selection: Selection,
+    persona: str,
+    role: str,
+    attempt: int,
+    latency_ms: int,
+    started_at_ms: int | None = None,
+    responded_at_ms: int | None = None,
 ) -> tuple[str, list[dict[str, Any]], dict[str, Any], CallRecord]:
     message = response.choices[0].message
     content = message.content or ""
     plain = {k: v for k, v in message.model_dump().items() if v is not None}
-    usage = response.usage
-    prompt_details = getattr(usage, "prompt_tokens_details", None)
-    cache_read = getattr(prompt_details, "cached_tokens", None) or 0
-    cache_creation = getattr(prompt_details, "cache_creation_tokens", None) or 0
-    reasoning = None
-    if selection.model.split("/", 1)[0] == "deepseek":
-        reasoning = getattr(getattr(usage, "completion_tokens_details", None), "reasoning_tokens", None)
+    usage = getattr(response, "usage", None)
+    raw = _stripped(usage.model_dump()) if usage is not None else None
+    prefix = selection.model.split("/", 1)[0]
+    columns = map_usage(prefix, raw)
     record = CallRecord(
         persona=persona,
         role=role,
@@ -185,12 +210,19 @@ def read_response(
         billing_shape=selection.billing_shape,
         thinking=selection.thinking,
         reasoning_effort=selection.effort,
-        tokens_input=usage.prompt_tokens - cache_read - cache_creation,
-        tokens_output=usage.completion_tokens,
-        tokens_cache_read=cache_read,
-        tokens_cache_creation=cache_creation,
-        reasoning_tokens=reasoning,
+        tokens_input=columns.tokens_input,
+        tokens_output=columns.tokens_output,
+        tokens_cache_read=columns.tokens_cache_read,
+        tokens_cache_creation=columns.tokens_cache_creation,
+        reasoning_tokens=columns.reasoning_tokens,
         attempt=attempt,
         latency_ms=latency_ms,
+        response_id=getattr(response, "id", None) if columns.response_id == "provider" else None,
+        usage_raw=raw,
+        cache_creation_1h_tokens=columns.cache_creation_1h_tokens,
+        cache_creation_5m_tokens=columns.cache_creation_5m_tokens,
+        usage_absent=columns.usage_absent,
+        started_at_ms=started_at_ms,
+        responded_at_ms=responded_at_ms,
     )
     return content, _plain_tool_calls(message), plain, record
