@@ -26,17 +26,18 @@ scope:
     purpose: >-
       Literals only (its coverage is measured by tests/row_rules/test_rules.py alone, which is at its SLOC cap, and the
       package must stay a stdlib leaf): _COLUMN_KEYS gains json_object and per_write; _DATEABLE_KINDS gains json_object
-      (so its exclude_before is recorded and the existing-row select fetches the column); a new constant
-      WRITER_SHAPE_KINDS = frozenset({"json_object"}) beside WRITER_REFERENCE_KINDS. The engine records, never evaluates,
-      either key.
+      (so its exclude_before is recorded and the existing-row select fetches the column); WAIVABLE_KINDS gains
+      json_object (the mark-then-drop removal every dated row leg has, and the conformance check's _SUPPORTED set); a new
+      constant WRITER_SHAPE_KINDS = frozenset({"json_object"}) beside WRITER_REFERENCE_KINDS. The engine records, never
+      evaluates, either key.
     new_imports: []
   - file: src/common/ducklake_write_rules.py
     action: Modify
     purpose: >-
       json_object_spec(column, params) validates one projected leg and raises RuleProjectionError on a malformed one;
       json_object_columns(fields) builds every column's spec and refuses a leg that is also exempt; check_write calls
-      check_json_objects after check_row, on every path that calls check_write (write_scd2, file_scd2, the portal), with
-      the dated binding below. A refusal raises RowRuleViolationError(table, "json_object", column, exclude_before) and
+      check_json_objects after check_row, on every path that calls check_write (write_scd2, file_scd2,
+      src/common/ducklake_telemetry_registration.py, the portal), with the dated binding below. A refusal raises RowRuleViolationError(table, "json_object", column, exclude_before) and
       never carries a value. The leg grammar and the value rules are context items 1-2.
     new_imports: []
   - file: scripts/field_semantics_rule_projection.py
@@ -57,13 +58,22 @@ scope:
     action: Modify
     purpose: >-
       A non-exempt WRITER_SHAPE_KINDS leg is reported as "WRITER-SHAPE <table>.<column> json_object (enforced by the
-      writer per write)" and never compiled to a census check (the reader has no JSON check kind; the writer binds it).
+      writer per write)" and never compiled to a census check (the reader has no JSON check kind; the writer binds it):
+      build_plan's live filter excludes it, so declared_non_exempt matches the compiled checks.
     new_imports: []
   - file: scripts/checks/contracts/validate_write_time_enforcement_conformance.py
     action: Modify
     purpose: >-
       A json_object arm: declared {column: params} for live json_object legs equals the projection read back through
-      json_object_columns, so a declared leg the writer does not build fails closed.
+      json_object_columns, so a declared leg the writer does not build fails closed (json_object reaches _SUPPORTED
+      through WAIVABLE_KINDS).
+    new_imports: []
+  - file: scripts/checks/contracts/_rule_ratchet.py
+    action: Modify
+    purpose: >-
+      A json_object arm in _params_narrowed: free when max_bytes does not shrink and every base version is present and
+      equal in head (versions only added); any other change is refused outright, with no census-token route, naming the
+      two honest paths: a new schema_version, or a temporary exemption, the drop, then a new dated leg.
     new_imports: []
   - file: scripts/ops_portal/write_validators.py
     action: Modify
@@ -71,15 +81,21 @@ scope:
       _run_row_rules hands check_write dataclasses.replace(spec, fields=columns), the same projection it builds the
       rules from, so on an update the dated json_object leg is dropped with every other dated leg (Decision 65,
       2026-10-16: updates run undated rules only) and on an insert it is checked; _limit_in_words names json_object as
-      "must be a JSON object of a declared schema_version within <max_bytes> bytes"; per_write_columns(table) returns
-      the projection's per_write column names.
+      "must be a JSON object of a declared schema_version within <max_bytes> bytes"; carry_forward(table, existing)
+      returns existing minus the projection's per_write columns, the one merge source for every portal update path.
     new_imports: []
   - file: scripts/ops_data_portal.py
     action: Modify
     purpose: >-
-      update_rec builds merged from existing minus every per_write_columns("ops_recommendations") key, then the
-      updates, so an update that omits a per_write column sends no value and the writer stores NULL; existing itself
-      stays whole for gate_write and the closure checks. At most 3 added lines (491 of 500 SLOC).
+      update_rec merges {**carry_forward("ops_recommendations", existing), **updates}, so an update that omits a
+      per_write column sends no value and the writer stores NULL; existing itself stays whole for gate_write and the
+      closure checks. At most 3 added lines (491 of 500 SLOC).
+    new_imports: []
+  - file: scripts/ops_portal/decisions.py
+    action: Modify
+    purpose: >-
+      update_decision merges {**carry_forward("ops_decisions", existing), **updates} the same way, so a per_write
+      attribute is honoured by every portal update path (the only two prior-row merges), never by update_rec alone.
     new_imports: []
   - file: scripts/contracts_schema.py
     action: Modify
@@ -111,19 +127,27 @@ scope:
   - file: tests/checks/contracts/test_validate_write_time_enforcement_conformance.py
     action: Modify
     purpose: The conformance node (step 3).
+  - file: tests/checks/contracts/test__rule_ratchet.py
+    action: Modify
+    purpose: The json_object ratchet nodes (step 3); at most 40 added lines.
   - file: tests/test_ops_data_portal_validators.py
     action: Modify
     purpose: The portal pre-check nodes (step 4); 435 of 500 SLOC, so at most 50 added lines.
-  - file: tests/ops_data_portal/test_update_rec_per_write_column.py
+  - file: tests/ops_data_portal/test_update_per_write_column.py
     action: Create
-    purpose: The update_rec per_write nodes (step 4).
+    purpose: The update_rec and update_decision per_write nodes (step 4).
   - file: tests/test_contracts_schema.py
     action: Modify
     purpose: The FieldSpec nodes (step 5).
-  - file: tests/test_schema_to_field_semantics_per_write.py
-    action: Create
+  - file: tests/test_schema_to_field_semantics.py
+    action: Modify
     purpose: >-
-      The generator nodes (step 5), in a new file because tests/test_schema_to_field_semantics.py is at 497 of 500 SLOC.
+      The generator per_write nodes (step 5), here because the coverage gate measures scripts/schema_to_field_semantics.py
+      by this mapped file alone (100%, no baseline entry). Room (497 of 500 SLOC) comes from moving TestProjectRole out
+      verbatim; measured 2026-11-17: the file without TestProjectRole still covers the generator 213/213.
+  - file: tests/test_schema_to_field_semantics_role.py
+    action: Create
+    purpose: TestProjectRole moved verbatim from tests/test_schema_to_field_semantics.py (no node graduated; ids change).
 bundled_recommendations: []
 followon_recs: []
 infrastructure_dependencies: []
@@ -141,10 +165,11 @@ acceptance_criteria:
   - >-
     The generator projects the leg's params and per_write; the grammar refuses malformed params and the leg on an event
     contract; the conformance check fails a declared leg the writer does not build; the census reports the leg as
-    WRITER-SHAPE and compiles nothing for it.
+    WRITER-SHAPE and compiles nothing for it; the ratchet frees an added version or a larger cap and refuses any other
+    params change.
   - >-
-    update_rec never sends a per_write column it read from the prior row: an update that omits it writes NULL, and an
-    update that names it sends the named value.
+    update_rec and update_decision never send a per_write column read from the prior row: an update that omits it
+    writes NULL, and an update that names it sends the named value.
   - >-
     No contract declares json_object or per_write in this plan: config/lambda/ducklake/field_semantics.yaml is
     byte-identical before and after.
@@ -161,6 +186,7 @@ verification_plan:
       tests/common/test_ducklake_write_rules.py::test_json_object_spec_refuses_malformed_params
       tests/common/test_ducklake_write_rules.py::test_json_object_leg_with_its_exemption_is_refused
       tests/common/test_ducklake_write_rules.py::test_json_object_accepts_declared_shapes_and_null
+      tests/common/test_ducklake_write_rules.py::test_json_object_map_type_uses_declared_key_pattern_and_values
       tests/common/test_ducklake_write_rules.py::test_json_object_refusals_name_rule_and_column_without_values
       tests/common/test_ducklake_write_rules.py::test_json_object_binding_follows_exclude_before
       tests/common/test_ducklake_write_rules.py::test_check_write_evaluates_json_object_after_row_rules
@@ -181,6 +207,7 @@ verification_plan:
       tests/checks/contracts/test__rule_grammar.py::test_scd2_json_object_leg_accepted
       tests/checks/contracts/test__rule_grammar.py::test_json_object_leg_malformed_params_refused
       tests/checks/contracts/test__rule_grammar.py::test_event_json_object_leg_outside_event_vocabulary
+      tests/checks/contracts/test__rule_grammar.py::test_json_object_temporary_exemption_accepted
     expected: Every selected test passed.
     fix_if: The grammar must call json_object_spec, never restate the leg grammar.
     hermetic: true
@@ -188,27 +215,32 @@ verification_plan:
     graduation_check_id: ops-json-object-projection
   - step: 3
     phase: pre-deploy
-    action: Declared equals enforced for the leg, and the census reports it without compiling it.
+    action: Declared equals enforced for the leg, the census reports it without compiling it, and the ratchet guards it.
     command: >-
       bin/venv-python -m pytest -q
       tests/checks/contracts/test_validate_write_time_enforcement_conformance.py::test_json_object_mismatch_fails
       tests/checks/contracts/test_validate_write_time_enforcement_conformance.py::test_the_registered_check_passes_on_the_real_tree
       tests/test_contract_rule_census.py::test_writer_shape_leg_reported_not_compiled
+      tests/checks/contracts/test__rule_ratchet.py::test_json_object_added_version_or_larger_cap_is_free
+      tests/checks/contracts/test__rule_ratchet.py::test_json_object_changed_version_or_smaller_cap_refused
     expected: Every selected test passed.
-    fix_if: The conformance arm compares params exactly; the census never compiles a WRITER_SHAPE_KINDS leg.
+    fix_if: >-
+      The conformance arm compares params exactly; the census never compiles a WRITER_SHAPE_KINDS leg; the ratchet never
+      offers a census-token route for json_object.
     hermetic: true
     graduation: graduate
     graduation_check_id: ops-json-object-conformance
   - step: 4
     phase: pre-deploy
-    action: The portal pre-check and update_rec's per_write merge.
+    action: The portal pre-check and the per_write merge on both portal update paths.
     command: >-
       bin/venv-python -m pytest -q
       tests/test_ops_data_portal_validators.py::test_gate_write_insert_refuses_malformed_json_object
       tests/test_ops_data_portal_validators.py::test_gate_write_update_leaves_dated_json_object_to_writer
-      tests/ops_data_portal/test_update_rec_per_write_column.py::test_update_drops_per_write_column_from_prior_row
-      tests/ops_data_portal/test_update_rec_per_write_column.py::test_update_naming_a_per_write_column_sends_it
-      tests/ops_data_portal/test_update_rec_per_write_column.py::test_gate_and_closure_checks_still_see_the_whole_prior_row
+      tests/ops_data_portal/test_update_per_write_column.py::test_update_drops_per_write_column_from_prior_row
+      tests/ops_data_portal/test_update_per_write_column.py::test_update_naming_a_per_write_column_sends_it
+      tests/ops_data_portal/test_update_per_write_column.py::test_gate_and_closure_checks_still_see_the_whole_prior_row
+      tests/ops_data_portal/test_update_per_write_column.py::test_update_decision_drops_per_write_column_from_prior_row
     expected: Every selected test passed.
     fix_if: >-
       The prior row passed to gate_write and the closure checks stays whole; only the merge source drops per_write
@@ -223,11 +255,13 @@ verification_plan:
       bin/venv-python -m pytest -q
       tests/test_contracts_schema.py::test_field_per_write_accepted
       tests/test_contracts_schema.py::test_field_per_write_requires_nullable
-      tests/test_schema_to_field_semantics_per_write.py::test_per_write_projects_true
-      tests/test_schema_to_field_semantics_per_write.py::test_absent_or_false_per_write_adds_nothing
-      tests/test_schema_to_field_semantics_per_write.py::test_real_projection_declares_no_per_write_or_json_object
+      tests/test_schema_to_field_semantics.py::test_per_write_projects_true
+      tests/test_schema_to_field_semantics.py::test_absent_or_false_per_write_adds_nothing
+      tests/test_schema_to_field_semantics.py::test_projected_per_write_equals_contract_declared
     expected: Every selected test passed.
-    fix_if: Regenerate field_semantics.yaml and confirm it is byte-identical; never hand-edit the projection.
+    fix_if: >-
+      Never hand-edit the projection. The last node is a lasting rule (every projected per_write column is one its
+      contract declares, and the reverse), true before and after C2.
     hermetic: true
     graduation: graduate
     graduation_check_id: contract-per-write-attribute
@@ -239,8 +273,8 @@ verification_plan:
     command: bin/venv-python -m pytest -q -m integration tests/common/test_ducklake_write_rules_integration.py -p no:randomly -rs
     expected: >-
       Every test passed and none skipped, including the new nodes: a malformed value rejected on every write verb with
-      nothing written and the counter unmoved, a declared value landing, and an update omitting the column storing NULL
-      over a prior non-null value.
+      nothing written and the counter unmoved, and a declared value landing. (An update omitting the column stores NULL
+      by the writer's existing absent-means-NULL rule; per_write evidence is step 4.)
     fix_if: A malformed value that commits, or a counter that moves on a rejection, is a design defect; stop and RCA (Decision 55).
     hermetic: false
     graduation: waive
@@ -338,8 +372,18 @@ test_obligations:
   - source: scripts/ops_data_portal.py
     behavior: update_rec never carries a per_write column from the prior row.
     verification_step: 4
-    test_selector: tests/ops_data_portal/test_update_rec_per_write_column.py::test_update_drops_per_write_column_from_prior_row
+    test_selector: tests/ops_data_portal/test_update_per_write_column.py::test_update_drops_per_write_column_from_prior_row
     red_green_expectation: red before (the prior value is sent), green after
+  - source: scripts/ops_portal/decisions.py
+    behavior: update_decision never carries a per_write column from the prior row.
+    verification_step: 4
+    test_selector: tests/ops_data_portal/test_update_per_write_column.py::test_update_decision_drops_per_write_column_from_prior_row
+    red_green_expectation: red before (the prior value is sent), green after
+  - source: scripts/checks/contracts/_rule_ratchet.py
+    behavior: A json_object params change other than an added version or a larger cap fails the ratchet.
+    verification_step: 3
+    test_selector: tests/checks/contracts/test__rule_ratchet.py::test_json_object_changed_version_or_smaller_cap_refused
+    red_green_expectation: red before (refused only for want of a census entry, not by the json_object message), green after
   - source: scripts/contracts_schema.py
     behavior: FieldSpec accepts per_write and refuses it on a non-nullable field.
     verification_step: 5
@@ -348,7 +392,7 @@ test_obligations:
   - source: scripts/schema_to_field_semantics.py
     behavior: per_write true projects into the column entry; absent adds nothing.
     verification_step: 5
-    test_selector: tests/test_schema_to_field_semantics_per_write.py::test_per_write_projects_true
+    test_selector: tests/test_schema_to_field_semantics.py::test_per_write_projects_true
     red_green_expectation: red before (key not projected), green after
 constraints:
   - No rescue agents or workaround loops (Decision 55); a rejection is terminal and never retried.
@@ -368,23 +412,27 @@ constraints:
 context:
   - >-
     1. Leg grammar (json_object_spec): {max_bytes: int 1..65536, versions: {int >= 1: {required: {key: type}, optional:
-    {key: type}}}, exclude_before}; key ^[a-z][a-z0-9_]{0,63}$; type string, integer, number, boolean or check_map, each
-    optionally suffixed "?" (null allowed); every version requires schema_version: integer; no key both required and
-    optional; optional may be absent.
+    {key: type}}}, exclude_before}; a declared key name matches ^[a-z][a-z0-9_]{0,63}$ (grammar for the contract's own
+    names; data keys must equal a declared one); a type is string, integer, number or boolean, optionally suffixed "?"
+    (null allowed), or {map: {key_pattern, values}}: an anchored regex (^...$, compiles, <= 256 chars) and a non-empty
+    list of distinct strings, both contract-declared and compared by the conformance arm (Decision 210 cl.3: no data
+    vocabulary in writer code; C2 declares the check-outcome set); every version requires schema_version: integer; no key
+    both required and optional.
   - >-
     2. Value rules (None passes; first failure raises): a str; UTF-8 length <= max_bytes; json.loads refusing NaN and
     Infinity (parse_constant) and duplicate keys (object_pairs_hook); a top-level object; integer (not bool)
     schema_version naming a declared version; every required key; no undeclared key; integer is int not bool, number
-    int or float not bool, check_map an object of pattern-matching keys to pass, fail, advisory or skipped.
+    int or float not bool, a map an object whose every key fullmatches key_pattern and every value is one of values.
   - >-
     3. Binding mirrors the engine's dated rules (Decision 210, 2026-10-04): binds when undated, on insert, when
     created_timestamp >= exclude_before, or when the value differs from prior's. A new SCD2 leg needs its own
-    exclude_before (ratchet); C2 sets it; any later params change is a ratchet narrowing (semantic_break plus census).
+    exclude_before (ratchet); C2 sets it. Later: an added version or a larger cap is free; anything else is refused (the
+    census cannot check JSON, so no census token can back it): add a version, or mark-then-drop and redeclare dated.
   - >-
     Decision-scout r1 FLAGS_FOUND: SPIRIT NOTE 210 cl.3 (the draft hard-coded the column name in update_rec), resolved
     by the per_write attribute. r2 FLAGS_FOUND, CITE 65, 79, 210, 268; SPIRIT NOTE NS.5: per_write is a portal update
     semantic a direct writer caller can bypass. Accepted with note: not a data rule; plan E's alarm watches the
-    residual, plan F's hook trips direct calls, and C2's brief carries a writer-clock key option. r3 (written plan): the same. Decisions triaged:
+    residual, plan F's hook trips direct calls, and C2's brief carries a writer-clock key option. r3 (written plan) and r4 (after critique r1): the same. Decisions triaged:
     217 of 217. Roadmap items intersected: 14; CONFLICT: 0; RELATED: 14. Serves: NS.5 4/5.
   - >-
     Precedent: plan A (Decision 268, #2098; its Amendment 2) put reference evaluation in this adapter for the same
@@ -395,7 +443,13 @@ context:
     red_overlap 2026-11-17: blocked by rec-5247 (Critical ci_rca, telemetry-reader smoke 504, slo_breached, shared
     files none). Deferral: this plan shares no file with it and repairs nothing in it, but step 8 needs telemetry-smoke
     green, so the build re-runs red_overlap and waits for a clear verdict or the operator's ruling.
-  - "Overlaps: B's build #2099; unbuilt PLAN-telemetry-producer-admission-plan-review-capture. Second to build rebases."
+  - >-
+    Overlaps: PLAN-rec-lints-advisory build #2099 (_rule_grammar, _rule_ratchet, write_validators and their tests);
+    unbuilt PLAN-telemetry-producer-admission-plan-review-capture (contracts_schema.py). Second to build rebases.
+  - >-
+    Critique r1 REVISE (4 blocking, 5 nits), all taken: B1 per_write nodes in the coverage-mapped generator test; B2
+    moment-claim node restated as a lasting rule; B3 map type params declared; B4 json_object ratchet arm and waivable;
+    N1-N5 wording, update_decision honours per_write, step 6 reworded.
   - >-
     Graduated shards kept (node ids unchanged; nodes only added): ops-dependency-reference-conformance,
     ops-dependency-reference-precheck-and-gate, ops-dependency-reference-projection, ops-row-rules-projection,
@@ -403,11 +457,15 @@ context:
     portal-removal-ledger-by-mutation, portal-update-gate-never-stricter, rec-portal-glossary-lint-new-text-only,
     rec-portal-glossary-lint-refuses, repair-dependency-tokens-dry-run-safe, rule-grammar-bans-enforced,
     write-time-conformance-arms-fail-closed, none-grandfathered-kind-unrepresentable,
-    dependencies-reference-reader-loud-fail, executor-loop-kernel-path-not-automatable, growth-safe-snapshot-pins.
+    dependencies-reference-reader-loud-fail, executor-loop-kernel-path-not-automatable, growth-safe-snapshot-pins,
+    control-class-registry-projection, field-semantics-event-dispatch, field-semantics-reconcile-scope-subset-rejection,
+    maintenance-policy-matrix-reaches-lambda-asset, rule-ratchet-loosening-and-narrowing.
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:9bcefee1d58c8ac831b1521ec23c4ef6ab954ce42a4d42c9d90bf3b28870483e"}
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:f7c7d1ee40675a7eee188ae7390c143da3fe79de4ea2a42ead38de4b34ba5bd2"}
   - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:49af7c28717e049023b248dad919302eaaa017b947063395f4c6e0bd299513d7"}
+  - {gate: decision-scout, round: 4, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:1d83db02f34a9a35045a179196dc10f31e8043228c8ff0fd20a951fa0779c80b"}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 4, nits: 5}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -425,16 +483,17 @@ execution_steps:
     scripts/field_semantics_rule_projection.py, scripts/checks/contracts/_rule_grammar.py and
     scripts/checks/contracts/_manifest.py with their tests; step 2 red then green.
   - >-
-    scripts/checks/contracts/validate_write_time_enforcement_conformance.py and scripts/contract_rule_census.py with
-    their tests; step 3 red then green.
+    scripts/checks/contracts/validate_write_time_enforcement_conformance.py, scripts/contract_rule_census.py and
+    scripts/checks/contracts/_rule_ratchet.py with their tests; step 3 red then green.
   - >-
     scripts/ops_portal/write_validators.py and scripts/ops_data_portal.py with
-    tests/test_ops_data_portal_validators.py and tests/ops_data_portal/test_update_rec_per_write_column.py; step 4 red
-    then green.
+    scripts/ops_portal/decisions.py with tests/test_ops_data_portal_validators.py and
+    tests/ops_data_portal/test_update_per_write_column.py; step 4 red then green.
   - >-
-    scripts/contracts_schema.py and scripts/schema_to_field_semantics.py with tests/test_contracts_schema.py and
-    tests/test_schema_to_field_semantics_per_write.py; regenerate config/lambda/ducklake/field_semantics.yaml and
-    confirm git diff is empty for it; step 5 red then green.
+    scripts/contracts_schema.py and scripts/schema_to_field_semantics.py with tests/test_contracts_schema.py; move
+    TestProjectRole to tests/test_schema_to_field_semantics_role.py, then add the per_write nodes to
+    tests/test_schema_to_field_semantics.py and re-measure 100% with the mapped file alone; regenerate
+    config/lambda/ducklake/field_semantics.yaml and confirm git diff is empty for it; step 5 red then green.
   - The real-engine nodes in tests/common/test_ducklake_write_rules_integration.py; step 6 green with no skip.
   - >-
     CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; rebase on
