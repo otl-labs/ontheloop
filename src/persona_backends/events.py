@@ -20,8 +20,18 @@ def input_sha256(materialised_input: dict[str, Any]) -> str:
     return hashlib.sha256(canonical_json(materialised_input).encode("utf-8")).hexdigest()
 
 
+def tools_sha256(tools: list[dict[str, Any]]) -> str:
+    return hashlib.sha256(canonical_json(tools).encode("utf-8")).hexdigest()
+
+
 def header(
-    contract_path: str, persona: str, contract_version: int, prompt_sha256: str, input_hash: str, started_at_ms: int
+    contract_path: str,
+    persona: str,
+    contract_version: int,
+    prompt_sha256: str,
+    input_hash: str,
+    started_at_ms: int,
+    tools_sha256: str | None = None,
 ) -> dict[str, Any]:
     return {
         "schema": 1,
@@ -32,6 +42,7 @@ def header(
         "rendered_prompt_sha256": prompt_sha256,
         "input_sha256": input_hash,
         "started_at_ms": started_at_ms,
+        "tools_sha256": tools_sha256,
     }
 
 
@@ -42,6 +53,9 @@ def attempt_dict(attempt: Any) -> dict[str, Any]:
         "attempt": attempt.attempt,
         "outcome": attempt.outcome,
         "latency_ms": attempt.latency_ms,
+        "provider": attempt.provider,
+        "billing_shape": attempt.billing_shape,
+        "started_at_ms": attempt.started_at_ms,
     }
 
 
@@ -62,6 +76,7 @@ def turn_record(
     message: dict[str, Any] | None,
     started_at_ms: int,
     ended_at_ms: int,
+    probe_record: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "turn": turn,
@@ -79,6 +94,7 @@ def turn_record(
         "message": message,
         "started_at_ms": started_at_ms,
         "ended_at_ms": ended_at_ms,
+        "probe_record": probe_record,
     }
 
 
