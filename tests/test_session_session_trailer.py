@@ -14,7 +14,6 @@ import yaml
 
 from scripts.session import merge_step as ms
 from scripts.session import session_trailer as st
-from scripts.telemetry_verify import completeness
 from scripts.telemetry_verify import session_presence as sp
 from tests.fixtures import merge_step_repos as fx
 
@@ -98,7 +97,7 @@ def test_parity_with_the_arrival_oracle():
     for body in BODIES:
         assert st.trailer_keys(body) == sp._session_keys(_commit(body)), body
     for value in ("", "session_", "cse_", "cse_X", "session_X", "X", None, 7):
-        assert st.normalise(value) == completeness.normalise_key(value), value
+        assert st.normalise(value) == sp.normalise_key(value), value
     assert st.TRAILER.pattern == sp._TRAILER.pattern and st.TRAILER.flags == sp._TRAILER.flags
 
 
