@@ -115,6 +115,7 @@ ROW_RULES_CASES: tuple[tuple[str, dict[str, object], str], ...] = (
     ("array_element_format", {"dependencies": ["not-a-rec-id"]}, "dependencies"),
     ("pattern", {"file": "/absolute/path.py"}, "file"),
     ("array_element_reference", {"dependencies": ["rec-999999999"]}, "dependencies"),
+    ("json_object", {"provenance_json": '{"schema_version": 1}'}, "provenance_json"),
 )
 
 
