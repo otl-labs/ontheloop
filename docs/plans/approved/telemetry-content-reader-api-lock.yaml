@@ -46,7 +46,7 @@ blocks:
     1. **Path and consumer (amends 239 cl.1 and cl.4, 255 cl.1, 256 cl.2).** Agents read production transcript text
        only through agent-platform-ducklake-telemetry-content on the DuckLake API's fifth route, telemetry/content; it
        has no Function URL. Its consumer is the feedback loop's masked reads, as agent-platform-session, whose grant
-       gains the route. Clause 4's access line names the caller from the delivering path's event shape.
+       gains the route. Decision 239 cl.4's access line names the caller from the delivering path's event shape.
     2. **Roles (amends 144 cl.3, 239 cl.7, 257 cl.3).** The execution role telemetry-content-reader carries the CI
        apply boundary and is excepted by its exact ARN from Decision 230 cl.5's fence. The deploy role
        telemetry-content-deploy is boundary-free by explicit exclusion, since clause 3's Deny must not refuse it; it may
@@ -57,8 +57,8 @@ blocks:
     3. **Lock (Decision 239 cl.5; amends 202 cl.3).** The boundary's DenyTelemetryContentChange refuses every carrier
        every Lambda create, delete, publish, put, tag and update on the function and its qualifiers; the URL-only Denies
        keep refusing direct invoke and permission edits. A Decision 202 filter pages on any IAM write naming a
-       telemetry-content-* role and any Lambda write on the function by an identity but the deploy role, denied
-       attempts included. The reader's access log, that filter and its alarms join the platform-security-* family, so
+       telemetry-content-* role and any Lambda write on the function, the deploy role's included (202 cl.6: never
+       filtered by actor), denied attempts included. The reader's access log, that filter and its alarms join the platform-security-* family, so
        the detector's Denies and tamper alarm cover them.
     4. **Prefix names (amends 213 cl.1, 230 cl.5).** The three URL-only Denies name the writer and reader by prefix,
        writer* and reader*, beside telemetry-*, account wildcarded and region kept. Each prefix covers its function and
@@ -359,10 +359,11 @@ blocks:
         # ANY IAM event, reads included: the platform-security-heartbeat-canary schedule (rec-4044,
   after: |2
 
-        # Any IAM write naming a telemetry-content-* role in any case, or any Lambda write on the content reader by an
-        # identity other than the deploy role (Decision {{N}} cl.3). A denied call carries requestParameters null, so both
-        # halves also match the name CloudTrail puts in errorMessage. Invoke data events are excluded: every agent read is one.
-        "platform-security-telemetry-content-change" = "{ (($.eventSource = \"iam.amazonaws.com\") && ($.readOnly IS FALSE) && (($.requestParameters.roleName = %^[Tt][Ee][Ll][Ee][Mm][Ee][Tt][Rr][Yy]-[Cc][Oo][Nn][Tt][Ee][Nn][Tt]-%) || ($.errorMessage = %role.[Tt][Ee][Ll][Ee][Mm][Ee][Tt][Rr][Yy]-[Cc][Oo][Nn][Tt][Ee][Nn][Tt]-%))) || (($.eventSource = \"lambda.amazonaws.com\") && ($.readOnly IS FALSE) && ($.eventName != \"Invoke\") && (($.requestParameters.functionName = \"*agent-platform-ducklake-telemetry-content*\") || ($.errorMessage = \"*agent-platform-ducklake-telemetry-content*\")) && ($.userIdentity.arn != \"*:assumed-role/telemetry-content-deploy/*\")) }"
+        # Any IAM write naming a telemetry-content-* role in any case, or any Lambda write on the content reader by anyone,
+        # the gated deploy included (Decision {{N}} cl.3; never filtered by actor, Decision 202 cl.6). A denied call carries
+        # requestParameters null, so both halves also match the name CloudTrail puts in errorMessage. Invoke data events
+        # are excluded: every agent read is one.
+        "platform-security-telemetry-content-change" = "{ (($.eventSource = \"iam.amazonaws.com\") && ($.readOnly IS FALSE) && (($.requestParameters.roleName = %^[Tt][Ee][Ll][Ee][Mm][Ee][Tt][Rr][Yy]-[Cc][Oo][Nn][Tt][Ee][Nn][Tt]-%) || ($.errorMessage = %role.[Tt][Ee][Ll][Ee][Mm][Ee][Tt][Rr][Yy]-[Cc][Oo][Nn][Tt][Ee][Nn][Tt]-%))) || (($.eventSource = \"lambda.amazonaws.com\") && ($.readOnly IS FALSE) && ($.eventName != \"Invoke\") && (($.requestParameters.functionName = \"*agent-platform-ducklake-telemetry-content*\") || ($.errorMessage = \"*agent-platform-ducklake-telemetry-content*\"))) }"
 
         # ANY IAM event, reads included: the platform-security-heartbeat-canary schedule (rec-4044,
 - id: platform-security-alarms-2
@@ -383,7 +384,7 @@ blocks:
 
     resource "aws_cloudwatch_metric_alarm" "platform_security_telemetry_content_change" {
       alarm_name          = "platform-security-telemetry-content-change"
-      alarm_description   = "An IAM write named a telemetry-content-* role, or an identity other than the telemetry-content-deploy role wrote the content reader function, or either was denied (Decision {{N}} cl.3). ${local.platform_security_alarm_triage}"
+      alarm_description   = "An IAM write named a telemetry-content-* role, or any identity (the approved telemetry-content-deploy job included) wrote the content reader function, or either was denied (Decision {{N}} cl.3). ${local.platform_security_alarm_triage}"
       namespace           = "PlatformSecurity"
       metric_name         = aws_cloudwatch_log_metric_filter.platform_security["platform-security-telemetry-content-change"].metric_transformation[0].name
       statistic           = "Sum"
@@ -492,7 +493,6 @@ blocks:
             '$.eventName != "Invoke"',
             '$.requestParameters.functionName = "*agent-platform-ducklake-telemetry-content*"',
             '$.errorMessage = "*agent-platform-ducklake-telemetry-content*"',
-            '$.userIdentity.arn != "*:assumed-role/telemetry-content-deploy/*"',
         ),
     }
 - id: platform-security-patterns-4
@@ -503,6 +503,8 @@ blocks:
   after: |2
         problems += _session_denied_regex_problems(patterns.get(_SESSION, ""))
         problems += _content_regex_problems(patterns.get(_CONTENT, ""))
+        if "userIdentity" in patterns.get(_CONTENT, ""):
+            problems.append("content filter conditions on the actor (Decision 202 cl.6: never filtered by actor)")
         if "errorCode" in role:
 - id: test-bootstrap-ci-roles-1
   file: tests/checks/iam_tf/test_bootstrap_ci_roles.py
@@ -705,8 +707,8 @@ blocks:
           eventID: fixture-event-37
           eventType: AwsApiCall
           recipientAccountId: ACCOUNT
-      - name: telemetry-content-code-update-by-deploy-role-miss
-        must_match: []
+      - name: telemetry-content-code-update-by-deploy-role
+        must_match: [platform-security-telemetry-content-change]
         event:
           eventVersion: "1.08"
           userIdentity: {type: AssumedRole, arn: "arn:aws:sts::ACCOUNT:assumed-role/telemetry-content-deploy/GitHubActions"}
