@@ -34,12 +34,13 @@ scope:
       gate (name gate): if is the dispatcher-bot guard (Decision 267 cl.3) && (main-only dispatch || a successful
       same-repository push CI run), copied from deploy-ducklake-lambdas.yml's gate; permissions contents: read, actions:
       read, packages: read; timeout 10; checkout (fetch-depth 0, persist-credentials false), setup-python 3.12, pip
-      install pyyaml, then python -m scripts.ci.deploy_gate resolve --channel persona_image with --force/--first-publish
+      install pyyaml pydantic (deploy-gate.yml's set: _channel_inputs imports pydantic-backed modules), then python -m scripts.ci.deploy_gate resolve --channel persona_image with --force/--first-publish
       from the inputs, --manifest persona-image-gate.json and GITHUB_TOKEN in env; outputs sha, deploy, reason. Job
       publish: needs gate, if needs.gate.outputs.deploy == 'true'; permissions exactly contents: read, packages: write
-      (no id-token: its unhashed pip installs and the suite never hold a signing token); timeout 30; checkout the gate sha (persist-credentials false), setup-python 3.12, pip install
-      -r requirements-dev.txt; python -m scripts.ci.persona_image_publish build --sha <gate sha> (id build); python -m
-      pytest tests/persona_hosts/conformance_suite.py -q with PERSONA_IMAGE_UNDER_TEST set to the build's image_id (no
+      (no id-token: its unhashed pip installs and the suite never hold a signing token); timeout 30; checkout the gate
+      sha (persist-credentials false), setup-python 3.12, pip install pyyaml; python -m scripts.ci.persona_image_publish
+      build --sha <gate sha> (id build), before any dev dependency is installed; pip install -r requirements-dev.txt;
+      python -m pytest tests/persona_hosts/conformance_suite.py -q with PERSONA_IMAGE_UNDER_TEST set to the build's image_id (no
       other env, no token); python -m scripts.ci.persona_image_publish push --image-id <id> --sha <gate sha> with
       GITHUB_TOKEN in env (id push; job outputs image, digest). Job attest: needs publish; permissions exactly id-token:
       write, attestations: write; timeout 10; no checkout, no pip, no run step: only actions/attest-build-provenance with
@@ -57,7 +58,8 @@ scope:
       importlib of src.persona_hosts.image_pin), so config/persona_image.yaml is never a watched path and a pin merge
       never re-publishes. decide gains a required-path set per channel (default (GATE_MODULE,)); persona_image adds
       config/persona_image.yaml, the pin's build.dockerfile and scripts/ci/persona_image_publish.py, so a green target
-      older than the channel skips as pre_channel_target. resolve's CLI: --channel choices ducklake, prod, persona_image; main passes
+      older than the channel skips as pre_channel_target. resolve prints the target and applies the required-path
+      rule before it reads the record, so a pre-channel target skips without a registry read. resolve's CLI: --channel choices ducklake, prod, persona_image; main passes
       registry_record.read_record (bound to the pin's image and first_publish) as the reader for persona_image and
       read_record_sha otherwise, converting registry_record.RecordError to GateError (the module runs as __main__, so
       registry_record never imports deploy_gate's GateError); --first-publish is refused for any other channel. freshness and its choices unchanged.
@@ -83,7 +85,7 @@ scope:
       reads the image name with load_pin (the image output is that bare name, never with :main, as subject-name needs);
       docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin with the token on
       stdin (never argv), docker tag I <image>:main, docker push, reads the pushed digest from docker inspect's
-      RepoDigests, fetches that manifest with a pull token and asserts its config.digest equals I (classic store) or the
+      RepoDigests (the entry whose name is the pin's image), fetches that manifest with a pull token and asserts its config.digest equals I (classic store) or the
       digest equals I (containerd store), else exits 1 before anything is attested; asserts the pushed config's revision
       label equals S; writes image and digest to GITHUB_OUTPUT and a job summary naming the digest, the source commit S
       and the two pin lines to paste (digest, source_commit) for PLAN-persona-image-pin's pin PR; docker logout in a
@@ -166,10 +168,12 @@ scope:
   - file: tests/ci/test_persona_image_publish.py
     action: Create
     purpose: >-
-      Mirror test without a daemon (subprocess patched): build passes both labels; push sends the token on stdin and
+      Mirror test without a daemon (subprocess patched; image names from load_pin() or a fake name, never a pinned
+      reference literal, which validate_persona_image_digest scans for): build passes both labels; push sends the token on stdin and
       never in argv, refuses when the pushed manifest is not the tested image or the revision label differs, writes
       image and digest outputs and the summary, and logs out on failure. test_workflow_shape over the workflow file:
-      name persona-image-publish, the two triggers and their filters, the dispatcher-bot guard literal on gate (the
+      name persona-image-publish, the gate's pip install of pyyaml pydantic, the publish build step before its
+      requirements-dev install, the two triggers and their filters, the dispatcher-bot guard literal on gate (the
       guard's own repository-wide test, tests/verify_ci_workflow/test_dispatch_bot_guard.py, covers the file without an
       import, which validate_no_cross_test_imports refuses), publish needs gate and reads its deploy output, attest needs publish and holds only
       its one uses: step with push-to-registry false, per-job permissions exactly as above (id-token only on attest)
@@ -232,14 +236,15 @@ verification_plan:
       from scripts.checks.ci_guards.validate_persona_image_digest import validate_persona_image_digest as d;
       from scripts.checks.ci_guards.validate_persona_trigger_policy import validate_persona_trigger_policy as e;
       from scripts.checks.contracts.validate_actions_capacity import validate_actions_capacity as g;
-      f=[];[h(f) for h in (a,b,c,d,e,g)];print(*f,sep='\n');print(f'channel checks: {len(f)} failures');assert not f"
+      from scripts.checks.structural.size_limits import validate_structural_size_limits as z;
+      f=[];[h(f) for h in (a,b,c,d,e,g,z)];print(*f,sep='\n');print(f'channel checks: {len(f)} failures');assert not f"
     expected: The last line reports 0 failures.
     expected_literals:
       - 'channel checks: 0 failures'
     fix_if: A failure names the file to fix; never loosen a check. A NEAR_CAP breach takes the scope row's relief or a STOP.
     hermetic: true
     graduation: waive
-    graduation_waiver_reason: All six are registered checks that already run in every tier; a shard would duplicate them.
+    graduation_waiver_reason: All seven are registered checks that already run in every tier; a shard would duplicate them.
   - step: 4
     phase: pre-deploy
     action: The suite against a prebuilt image id in this cloud session (the publish job's path), when dockerd starts.
@@ -277,8 +282,10 @@ verification_plan:
   - step: 7
     phase: post-deploy
     action: >-
-      [post-deploy] The first publish: the CI push run of the merge commit wakes the workflow; read its run (or, if the
-      gate failed closed on a DENIED record read, dispatch it once from main with first_publish true and read that run).
+      [post-deploy] The first publish: the CI push run of the merge commit wakes the workflow; read its run. If the gate
+      failed closed on a DENIED record read, dispatch once from main with first_publish true, only after a main commit
+      holding the channel's files has passed its own full tier (Decision 254 batching may skip one); one re-dispatch
+      is allowed after a pre_channel_target or no_green_in_window skip.
     command: >-
       bin/venv-python -c "import json,urllib.request as u;
       g=lambda p:json.load(u.urlopen(u.Request('https://api.github.com/repos/otl-labs/ontheloop/'+p,headers={'Accept':'application/vnd.github+json'})));
@@ -312,7 +319,7 @@ verification_plan:
       gh reports the attestation verified for the signer workflow on refs/heads/main (or, when gh cannot run, the
       anonymous attestations API lists at least one for the digest and the signer check is recorded UNPROVEN), and the
       last line is LABELS_OK.
-    fix_if: An unknown gh flag means the flags differ from this plan (UNPROVEN until now); record the working invocation in the handoff for PLAN-persona-image-pin, never drop the signer-workflow check.
+    fix_if: An unknown gh flag means the flags differ from this plan (UNPROVEN until now); record the working invocation in the handoff for PLAN-persona-image-pin, never drop the signer-workflow check. If docker buildx cannot run in the session, record the licenses label UNPROVEN (VP 9 proves the revision label).
     hermetic: false
     graduation: waive
     graduation_waiver_reason: PLAN-persona-image-pin's pr-validate verification is the standing check for every pinned digest.
@@ -383,6 +390,19 @@ test_obligations:
     test_selector: tests/checks/contracts/test_persona_image_channel.py::test_codeowners_names_the_persona_image_channel
     red_green_expectation: red before (no lines), green after
   - source: docs/contracts/deploy-paths.yaml
+    behavior: the file stays at or under its 500-line cap after placement (NEAR_CAP)
+    verification_step: 3
+    command: >-
+      bin/venv-python -c "from scripts.checks.contracts.validate_ports_contract import validate_ports_contract as a;
+      from scripts.checks.ci_guards.validate_ci_rca_taxonomy import validate_ci_rca_taxonomy as b;
+      from scripts.checks.ci_guards.validate_composite_action_shell_bodies import validate_composite_action_shell_bodies as c;
+      from scripts.checks.ci_guards.validate_persona_image_digest import validate_persona_image_digest as d;
+      from scripts.checks.ci_guards.validate_persona_trigger_policy import validate_persona_trigger_policy as e;
+      from scripts.checks.contracts.validate_actions_capacity import validate_actions_capacity as g;
+      from scripts.checks.structural.size_limits import validate_structural_size_limits as z;
+      f=[];[h(f) for h in (a,b,c,d,e,g,z)];print(*f,sep='\n');print(f'channel checks: {len(f)} failures');assert not f"
+    red_green_expectation: red if placement passes the cap, green after
+  - source: docs/contracts/deploy-paths.yaml
     behavior: the publish_persona_image row names the channel, its gate and its pin file
     verification_step: 2
     test_selector: tests/checks/contracts/test_persona_image_channel.py::test_deploy_paths_names_the_persona_image_channel
@@ -397,7 +417,8 @@ test_obligations:
       from scripts.checks.ci_guards.validate_persona_image_digest import validate_persona_image_digest as d;
       from scripts.checks.ci_guards.validate_persona_trigger_policy import validate_persona_trigger_policy as e;
       from scripts.checks.contracts.validate_actions_capacity import validate_actions_capacity as g;
-      f=[];[h(f) for h in (a,b,c,d,e,g)];print(*f,sep='\n');print(f'channel checks: {len(f)} failures');assert not f"
+      from scripts.checks.structural.size_limits import validate_structural_size_limits as z;
+      f=[];[h(f) for h in (a,b,c,d,e,g,z)];print(*f,sep='\n');print(f'channel checks: {len(f)} failures');assert not f"
     red_green_expectation: red before a malformed or over-cap placement, green after
   - source: config/ci_rca_taxonomy.yaml
     behavior: the new workflow has its row, file at or under 500 effective lines
@@ -409,7 +430,8 @@ test_obligations:
       from scripts.checks.ci_guards.validate_persona_image_digest import validate_persona_image_digest as d;
       from scripts.checks.ci_guards.validate_persona_trigger_policy import validate_persona_trigger_policy as e;
       from scripts.checks.contracts.validate_actions_capacity import validate_actions_capacity as g;
-      f=[];[h(f) for h in (a,b,c,d,e,g)];print(*f,sep='\n');print(f'channel checks: {len(f)} failures');assert not f"
+      from scripts.checks.structural.size_limits import validate_structural_size_limits as z;
+      f=[];[h(f) for h in (a,b,c,d,e,g,z)];print(*f,sep='\n');print(f'channel checks: {len(f)} failures');assert not f"
     red_green_expectation: red before (workflow without a row), green after
   - source: config/composite_action_body_baseline.yaml
     behavior: r3 entries for the new inline run bodies
@@ -421,7 +443,8 @@ test_obligations:
       from scripts.checks.ci_guards.validate_persona_image_digest import validate_persona_image_digest as d;
       from scripts.checks.ci_guards.validate_persona_trigger_policy import validate_persona_trigger_policy as e;
       from scripts.checks.contracts.validate_actions_capacity import validate_actions_capacity as g;
-      f=[];[h(f) for h in (a,b,c,d,e,g)];print(*f,sep='\n');print(f'channel checks: {len(f)} failures');assert not f"
+      from scripts.checks.structural.size_limits import validate_structural_size_limits as z;
+      f=[];[h(f) for h in (a,b,c,d,e,g,z)];print(*f,sep='\n');print(f'channel checks: {len(f)} failures');assert not f"
     red_green_expectation: red before (bodies without entries), green after
 constraints:
   - >-
@@ -433,7 +456,7 @@ constraints:
     tag main and never deletes or retags an earlier version (a pinned digest must stay pullable).
   - >-
     No session pushes to the registry, changes package visibility or settings, or dispatches the workflow except VP 7's
-    one first_publish dispatch from main; package settings are operator steps A1-A3, each on the operator's own words.
+    first_publish dispatch from main (once, plus one re-dispatch after a skip); package settings are operator steps A1-A3, each on the operator's own words.
   - >-
     config/persona_image.yaml is not edited (digest and source_commit stay null); pinning is PLAN-persona-image-pin's.
     deploy-gate.yml and the two Lambda channel workflows are not edited.
@@ -450,7 +473,8 @@ context:
     control outside the merge loop is the reviewed pin PR (an attestation alone never proves review); CODEOWNERS is
     procedural until rec-2827, and the operator is asked before A2 whether it needs its own Decision; D212 cl.6, no
     registry port now (cl.7 grows adapters on demand; 234 cl.4 hedge in SA-14); D128, SA-03's reflow is a stopgap and
-    rec-5274 the real relief.
+    rec-5274 the real relief. The attestation proves workflow and commit identity, not integrity against a
+    compromised dev dependency in the publish job (requirements-dev.txt is unhashed).
   - >-
     Settled on a blind Fable consult (/mnt/project-files/persona-image-channel/plan2-advisor-brief/): own gate job on
     deploy_gate.py (deploy-gate.yml's gate needs an AWS role); the record is the tag main and its revision label; the
@@ -478,8 +502,7 @@ context:
   - >-
     Actions capacity: green, convergence-health run 44107526181 (projected_peak 13.62); the channel adds ~2 job-minutes
     per merge. No ledger row: two tests hard-code the row count (wording round 1); rec-5294 decouples them and
-    PLAN-persona-image-pin adds the row with its live_signal.
-  - "Next plan: PLAN-persona-image-pin, brief /mnt/project-files/persona-image-channel/BRIEF-plan3-pin.md."
+    PLAN-persona-image-pin (brief /mnt/project-files/persona-image-channel/BRIEF-plan3-pin.md) adds it with its live_signal.
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:104da68d0512845b06c6ea0f3f0fd66168488d6492845d3e6f913a8dc945a434"}
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:81d75d8df856bb6ae71a0e9440e947242d54c445d82b487d13975e02f865deb0"}
@@ -515,8 +538,9 @@ execution_steps:
   - Execute Verification Plan pre-deploy steps 1-6 -- loop until pass; on unrecoverable failure stop and RCA (Decision 55).
   - >-
     Merge on code review PROCEED, green CI, validate_merge_step and the operator's word on the final diff (CODEOWNERS
-    paths; commit body carries Resolves: rec-4477). Then VP 7 (first publish), ask the operator for A1, A2 (and A3 only if needed) one at a time,
-    each in their own words, then VP 8 and VP 9, then VP 10.
+    paths; commit body carries Resolves: rec-4477). Then VP 7 (first publish); before A2, ask the operator whether the Decision 143 cl.1
+    residual needs its own Decision (scout r3); ask for A1, A2 (and A3 only if needed) one at a time, each in their
+    own words, then VP 9, VP 8 and VP 10.
   - >-
     Report: the publish run id, digest, source commit and attestation result, the working gh flags, and the operator
     approvals with their dates, in the handoff for PLAN-persona-image-pin.
