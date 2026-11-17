@@ -10,7 +10,7 @@ intent: >-
   orphan-count and usage verbs) on both the reader and its independent verification oracle, so a merge neither keeps a
   finished session reading running nor makes the verification monitor re-read or mark an old tree moved; coverage_after's
   annotate requirement is waived until rec-4599 produces coverage, so a link row can be written; the annotate row's
-  external_ref and event_timestamp are defined.
+  external_ref and event_timestamp are defined. rec-5270 closes with PLAN-merge-annotate-producer, not with this plan.
 plan_type: IMPLEMENTATION
 verification_tier: V3
 plan_path: docs/plans/PLAN-merge-annotate-contract-reader.yaml
@@ -18,7 +18,7 @@ phase: >-
   T3.4 prerequisite capture (c1, "telemetry delta proves fix"): the fix-attempt stamp and the shadow verdict key a fix's
   merge to the sessions that produced it. Closes no exit criterion, so closes_criteria is empty.
 closes_criteria: []
-cites: [dec:166, dec:199, dec:207, dec:210, dec:228]
+cites: [dec:166, dec:199, dec:207, dec:210, dec:228, dec:246, dec:254]
 scope:
   - file: docs/contracts/telemetry_sessions.yaml
     action: Modify
@@ -30,7 +30,7 @@ scope:
       review_by: 2027-02-17}}; rec-4599 removes the exemption with its producer; the amendment row is semantic_break true, as the rule ratchet requires. Link rows written before that removal keep
       coverage_after null: a declared residual on the field (rec-4599 decides any exclude_before), never back-filled. pr_url and ci_outcome keep required_when annotate (the producer writes both). (3)
       Governance: an annotate row's external_ref is "<root entity_ref>:merge:<squash sha>#0/annotate" (one row per root
-      session and merge, so two roots sharing a harness key stay apart; the write boundary hashes it into event_id). It is
+      session started at or before the squash commit and merge, so two roots sharing a harness key stay apart; the write boundary hashes it into event_id). It is
       written once, only with final values (a concluded CI result, fixed diff stats), so an identical re-send collapses;
       a differing re-send is a GrainConflict by design (Decision 207), its event_timestamp is the squash commit's
       committer time, and its session_started_at and entity_ref are the root's. (4) The merge link columns' meaning (their
@@ -73,29 +73,45 @@ scope:
     new_imports: []
   - file: scripts/telemetry_verify/derive_usage.py
     action: Modify
-    purpose: "The per-tree last_event skips annotate rows, matching _USAGE_TREE tl."
+    purpose: >-
+      The per-tree last_event skips annotate rows, matching _USAGE_TREE tl; a tree whose only rows are annotate rows reads
+      a NULL last_event (max(..., default=None)), as the SQL does.
+    new_imports: []
+  - file: scripts/telemetry_verify/orphans.py
+    action: Modify
+    purpose: >-
+      The telemetry_orphan_counts oracle (called by monitor.py and by the verification-verbs test's _verb_equals_oracle):
+      the per-tree last event (lines 47-52) skips telemetry_sessions annotate rows, matching ORPHAN_COUNTS_SQL tl; its
+      docstring says so.
     new_imports: []
   - file: tests/telemetry/fixtures/derivation_cases.yaml
     action: Modify
     purpose: >-
       Shared golden cases (replayed against both the reader and the oracle). c05: last_event_timestamp expectation moves
       from the annotate row's time to the close's (declared assertion change, the contract it encodes changes). New case
-      c05b_annotate_row_is_not_activity: a root with an open and a success turn close at 10:30 and an annotate row at 20:00
-      the same day reads success with last_event_timestamp 10:30 at as_of 10:30:01 the next day (today: running, 20:00).
+      c05b_annotate_row_is_not_activity: a root with an open row, a turn open and a success turn close sharing one
+      observation_id (t_close joins t_open on it) closing at 10:30, and an annotate row at 20:00 the same day, reads success with last_event_timestamp 10:30 at as_of 10:30:01 the next day (today: running, 20:00).
     new_imports: []
   - file: tests/telemetry_verify/test_monitor.py
     action: Modify
-    purpose: "Additive test_a_link_row_never_reads_as_moved -- a quiet tree gains an annotate row; the run compares it (tree_moved 0)."
+    purpose: >-
+      Additive test_a_link_row_never_reads_as_moved: an annotate row stamped after the tree's quiet day is added to a quiet
+      tree; the run still selects and compares that tree (compared_trees unchanged, tree_moved 0). Red before: the root's
+      last_event and the monitor's _last_event both move to the link, so the tree leaves the quiet selection.
     new_imports: []
   - file: tests/common/test_ducklake_event_verification_verbs.py
     action: Modify
     purpose: >-
-      Additive test_a_link_row_leaves_the_tree_last_event: adding an annotate row to a golden tree leaves
-      telemetry_root_sessions' last_event_timestamp and telemetry_orphan_counts unchanged and equal to the oracle.
+      Additive test_a_link_row_leaves_the_tree_last_event: an annotate row at last+1h is added to a golden tree, and the
+      verbs are read at as_of = last+86401s (quiescent without the link, pending with it): telemetry_root_sessions'
+      last_event_timestamp stays last, and telemetry_orphan_counts counts the tree quiescent and equals the orphans.py
+      oracle. Red before on both the SQL tl and the oracle.
     new_imports: []
   - file: tests/common/test_ducklake_model_usage_rollup.py
     action: Modify
-    purpose: "Additive test_a_link_row_leaves_usage_last_event -- the verb equals the derive_usage oracle with a link row added."
+    purpose: >-
+      Additive test_a_link_row_leaves_usage_last_event: adding a later annotate row leaves the usage verb's
+      last_event_timestamp equal to its value before the link was added, and the verb still equals the derive_usage oracle.
     new_imports: []
   - file: tests/telemetry/test_annotate_link_row_write.py
     action: Create
@@ -161,9 +177,14 @@ verification_plan:
     graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion), and the earlier steps carry the durable regressions.
   - step: 5
     phase: post-deploy
-    action: The governed telemetry deploys ship the reader and writer, once the telemetry hold allows.
-    command: bin/venv-python -m scripts.checks.validate_reconcile_pending_gate --telemetry-hold
-    expected: exit 0, then the next deploy-ducklake-lambdas run's deploy-telemetry and telemetry-smoke jobs succeed.
+    action: >-
+      The governed deploy ships every affected active artifact once the telemetry hold allows. field_semantics.yaml is
+      bundled into six (compute_affected_artifacts: ducklake_reader, ducklake_writer, ducklake_maintenance,
+      ducklake_maintenance_smoke, ducklake_telemetry_reader, ducklake_telemetry_writer).
+    command: bin/venv-python -m scripts.checks.ops_governance.validate_reconcile_pending_gate --telemetry-hold
+    expected: >-
+      stdout held=false; then the next deploy-ducklake-lambdas run on a commit containing this build has the
+      deploy-maintenance, maintenance-smoke, deploy-serving, smoke, deploy-telemetry and telemetry-smoke jobs succeeded.
     fix_if: the hold is still on; wait, never bypass it
     hermetic: false
 test_obligations:
@@ -181,12 +202,17 @@ test_obligations:
     behavior: a tree with a link row is compared, not moved
     verification_step: 2
     test_selector: tests/telemetry_verify/test_monitor.py::test_a_link_row_never_reads_as_moved
-    red_green_expectation: red before (tree_moved 1), green after
+    red_green_expectation: red before (the tree leaves the quiet selection, compared_trees drops), green after
   - source: scripts/telemetry_verify/derive_usage.py
     behavior: usage last event skips annotate rows
     verification_step: 2
     test_selector: tests/common/test_ducklake_model_usage_rollup.py::test_a_link_row_leaves_usage_last_event
-    red_green_expectation: red before, green after
+    red_green_expectation: red before (last_event moves to the link), green after
+  - source: scripts/telemetry_verify/orphans.py
+    behavior: the orphan-count oracle's tree last event skips annotate rows
+    verification_step: 2
+    test_selector: tests/common/test_ducklake_event_verification_verbs.py::test_a_link_row_leaves_the_tree_last_event
+    red_green_expectation: red before (the oracle and the verb read the tree pending at last+86401s), green after
   - source: docs/contracts/telemetry_sessions.yaml
     behavior: coverage_after is waived for annotate rows until rec-4599
     verification_step: 3
@@ -211,11 +237,10 @@ constraints:
   - "Reader and oracle change together: the oracle is independent code, never an import of the reader SQL."
 context:
   - >-
-    Decision-scout r3: FLAGS_FOUND. CITE 166, 199, 207, 210, 228. NOTE 254 (ci_outcome's range-verdict deferral had no
-    owner; answered: rec-5295, named in the contract wording and followon_recs). Earlier rounds' NOTE 199, NOTE 207 and
-    SPIRIT 210 answered in scope. RELATED 246, 235, 244, 189, 163, 79, 125, 249, 126, 236, 213, 222, 84, 88, 95, 97,
-    200, 250, 181, 247, 221, 118. Decisions triaged: 218 of 218. Roadmap items intersected: 8; CONFLICT: 0; RELATED: 8.
-    Serves: NS.6 3/5.
+    Decision-scout r4: NO_FLAGS. CITE 166, 199, 207, 210, 228, 246, 254. Round 3's NOTE 254 (range-verdict deferral had no
+    owner) answered by rec-5295; earlier NOTE 199, NOTE 207 and SPIRIT 210 answered in scope. RELATED 235, 244, 189, 163,
+    181, 79, 125, 249, 126, 236, 213, 222, 84, 88, 95, 97, 200, 250, 118, 247, 128, 221, 184. Decisions triaged: 218 of
+    218. Roadmap items intersected: 8; CONFLICT: 0; RELATED: 8. Serves: NS.6 3/5.
   - "Operator fork 2026-11-17 14:52Z (card cmsg_01YbaDZWowGfXCn2WtobCVVoYEgzHgSQbfPr5wWYGqo99B): ignore links in activity checks, chosen over letting them count."
   - "Kept graduated shards (assertions additive only): telemetry-orphan-counts-verb-agrees, telemetry-root-sessions-verb, telemetry-tree-rows-verb-exact, telemetry-verify-monitor-rederivation."
 gate_rounds:
@@ -223,6 +248,8 @@ gate_rounds:
   - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: "v1:c173f5da4b5439d4a874a84e4b4daecf31f88606de5a0f3b1e0ea68d21891912"}  # pragma: allowlist secret
   - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:a053d47df83462a773cae50d2e298af63411caeaf934d5dd0fcdff0c7324ce18"}  # pragma: allowlist secret
   - {gate: wording-check, round: 1, verdict: PASS, digest: 127924884ce46aca9d6b8f378b82deeaee5429ac5236982f6fef5129d654249b, base: ba444e834563d8d98ceb74305cd6a3a156ad4582, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 5, nits: 5}
+  - {gate: decision-scout, round: 4, verdict: NO_FLAGS, scout_input_fingerprint: "v1:2418b28b3d4c773032c45bee72df99cd8c7417e0f6fc4f0a0a85434e11ef9222"}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
 execution_steps:
