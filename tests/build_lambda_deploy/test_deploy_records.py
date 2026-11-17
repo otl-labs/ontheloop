@@ -97,6 +97,51 @@ class TestWriteDucklakeDeployRecord:
         record = json.loads(captured["input"])
         assert record["source_git_sha"] is None
 
+    def test_record_carries_run_facts(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_RUN_ID", "123456")
+        monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_run")
+        monkeypatch.setenv("GITHUB_WORKFLOW", "deploy-ducklake-lambdas")
+        captured = {}
+
+        def fake_run(cmd, **kw):
+            captured["input"] = kw.get("input")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with patch("scripts.build_lambda.subprocess.run", side_effect=fake_run):
+            bd._write_ducklake_deploy_record(_DUCKLAKE_WRITER_FUNCTION, self._stdout(), "b", "p", "eu-west-2")
+        record = json.loads(captured["input"])
+        assert record["schema_version"] == 2
+        assert record["run_id"] == "123456"
+        assert record["run_attempt"] == "2"
+        assert record["trigger"] == "workflow_run"
+        assert record["workflow"] == "deploy-ducklake-lambdas"
+
+    def test_break_glass_record_carries_null_run_facts(self, monkeypatch):
+        for var in (
+            "GITHUB_RUN_ID",
+            "GITHUB_RUN_ATTEMPT",
+            "GITHUB_WORKFLOW",
+            "GITHUB_EVENT_NAME",
+            "LAMBDA_ARTIFACT_SHA",
+            "GITHUB_SHA",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        captured = {}
+
+        def fake_run(cmd, **kw):
+            captured["input"] = kw.get("input")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with patch("scripts.build_lambda.subprocess.run", side_effect=fake_run):
+            bd._write_ducklake_deploy_record(_DUCKLAKE_WRITER_FUNCTION, self._stdout(), "b", "p", "eu-west-2")
+        record = json.loads(captured["input"])
+        assert record["schema_version"] == 2
+        assert record["run_id"] is None
+        assert record["run_attempt"] is None
+        assert record["workflow"] is None
+        assert record["trigger"] == "break_glass"
+
     def test_content_type_json(self):
         captured = {}
 
