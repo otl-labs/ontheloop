@@ -4,6 +4,8 @@ probe records that must pass the shipped rules, the portal's update shaping, and
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import re
 from datetime import datetime, timezone
 
@@ -17,13 +19,16 @@ from src.common import ducklake_runtime as rt
 from src.common.ducklake_write_rules import (
     WRITER_REFERENCE_KINDS,
     RowRuleViolationError,
+    check_json_objects,
     check_references,
     check_write,
     existing_row_select,
+    json_object_columns,
+    json_object_spec,
     reference_columns,
     rules_for,
 )
-from src.row_rules.rules import RowRules, RuleProjectionError
+from src.row_rules.rules import WRITER_SHAPE_KINDS, RowRules, RuleProjectionError
 from tests.fixtures.ducklake_fakes import FakeCon, ops_rec_fields, ops_rec_record
 from tests.fixtures.ducklake_smoke_fakes import _Resp
 
@@ -336,3 +341,159 @@ def test_reference_leg_with_its_exemption_is_refused() -> None:
         reference_columns(both)
     exempt_only = {"deps": {"nullable": True, "write_time_exemptions": {"array_element_reference": _WHY}}}
     assert reference_columns(exempt_only) == frozenset()
+
+
+_V1 = {
+    "required": {"schema_version": "integer", "writer": "string"},
+    "optional": {"n": "number?", "ok": "boolean", "m": {"map": {"key_pattern": "^[a-z]+$", "values": ["pass", "fail"]}}},
+}
+_LEG = {"max_bytes": 120, "versions": {1: _V1}}
+_SENTINEL = "SECRET-SENTINEL"
+
+
+def _json_spec(leg: dict | None = None, extra: dict | None = None):
+    column = {"role": "input", "sql_type": "VARCHAR", "nullable": True, "json_object": leg or _LEG, **(extra or {})}
+    return dataclasses.replace(SPEC, fields={**SPEC.fields, "context_v2_json": column})
+
+
+def _jcheck(value, *, created=NOW, prior=None, extra=None) -> None:
+    spec = _json_spec(extra=extra)
+    check_json_objects(spec, RowRules.from_projection(spec.fields), {"context_v2_json": value}, created, prior)
+
+
+def _doc(**keys) -> str:
+    return json.dumps({"schema_version": 1, "writer": "w", **keys})
+
+
+def test_engine_records_json_object_and_per_write_keys() -> None:
+    columns = {
+        "j": {"nullable": True, "json_object": _LEG, "per_write": True, "exclude_before": {"json_object": "2026-12-01"}}
+    }
+    rules = RowRules.from_projection(columns)
+    assert rules.exclude_before["j"]["json_object"] == datetime(2026, 12, 1, tzinfo=timezone.utc)
+    assert WRITER_SHAPE_KINDS == frozenset({"json_object"})
+
+
+def test_json_object_spec_built_from_projected_leg() -> None:
+    built = json_object_spec("c", _LEG)
+    assert built.max_bytes == 120 and set(built.versions) == {1}
+    assert json_object_columns(_json_spec().fields) == {"context_v2_json": json_object_spec("context_v2_json", _LEG)}
+    assert json_object_columns(SPEC.fields) == {}
+
+
+@pytest.mark.parametrize(
+    "leg",
+    [
+        {"max_bytes": 0, "versions": {}},
+        {"max_bytes": True, "versions": {}},
+        {"max_bytes": 65537, "versions": {}},
+        {"max_bytes": 8},
+        {"max_bytes": 8, "versions": {0: {"required": {"schema_version": "integer"}}}},
+        {"max_bytes": 8, "versions": {1: {"required": {"writer": "string"}}}},
+        {
+            "max_bytes": 8,
+            "versions": {1: {"required": {"schema_version": "integer", "a": "string"}, "optional": {"a": "string"}}},
+        },
+        {"max_bytes": 8, "versions": {1: {"required": {"schema_version": "integer", "Bad": "string"}}}},
+        {"max_bytes": 8, "versions": {1: {"required": {"schema_version": "integer", "a": "date"}}}},
+        {
+            "max_bytes": 8,
+            "versions": {1: {"required": {"schema_version": "integer", "a": {"map": {"key_pattern": "a", "values": ["x"]}}}}},
+        },
+        {
+            "max_bytes": 8,
+            "versions": {1: {"required": {"schema_version": "integer", "a": {"map": {"key_pattern": "^a$", "values": []}}}}},
+        },
+        {"max_bytes": 8, "versions": {}, "extra": 1},
+    ],
+)
+def test_json_object_spec_refuses_malformed_params(leg: dict) -> None:
+    with pytest.raises(RuleProjectionError):
+        json_object_spec("c", leg)
+
+
+def test_json_object_leg_with_its_exemption_is_refused() -> None:
+    with pytest.raises(RuleProjectionError, match="exempt and must not also ship"):
+        json_object_columns(_json_spec(extra={"write_time_exemptions": {"json_object": _WHY}}).fields)
+
+
+def test_json_object_leg_on_a_non_varchar_column_is_refused() -> None:
+    with pytest.raises(RuleProjectionError, match="only legal on a VARCHAR column"):
+        json_object_columns({"j": {"sql_type": "BIGINT", "nullable": True, "json_object": _LEG}})
+
+
+def test_json_object_accepts_declared_shapes_and_null() -> None:
+    _jcheck(None)
+    _jcheck(_doc())
+    _jcheck(_doc(n=None, ok=True, m={"a": "pass"}))
+    _jcheck(_doc(n=1.5))
+    _jcheck(_doc(n=2))
+
+
+def test_json_object_map_type_uses_declared_key_pattern_and_values() -> None:
+    for bad in ({"A": "pass"}, {"a": "maybe"}, {"a": 1}, "x", None):
+        with pytest.raises(RowRuleViolationError):
+            _jcheck(_doc(m=bad))
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        7,
+        "not json",
+        "[]",
+        "null",
+        '"s"',
+        '{"schema_version": 1, "writer": "w", "writer": "x"}',
+        '{"schema_version": 1, "writer": "w", "n": NaN}',
+        '{"schema_version": 1, "writer": "w", "n": Infinity}',
+        '{"writer": "w"}',
+        '{"schema_version": "1", "writer": "w"}',
+        '{"schema_version": true, "writer": "w"}',
+        '{"schema_version": 2, "writer": "w"}',
+        '{"schema_version": 1}',
+        '{"schema_version": 1, "writer": "w", "extra": 1}',
+        '{"schema_version": 1, "writer": 3}',
+        '{"schema_version": 1, "writer": "w", "n": true}',
+        '{"schema_version": 1, "writer": "w", "ok": 1}',
+        '{"schema_version": 1, "writer": "w", "n": "x"}',
+        _doc(note="y" * 200),
+    ],
+)
+def test_json_object_refusals_name_rule_and_column_without_values(value) -> None:
+    with pytest.raises(RowRuleViolationError) as raised:
+        _jcheck(
+            value if not isinstance(value, str) else value.replace('"w"', f'"{_SENTINEL}"') if "writer" in value else value
+        )
+    error = raised.value
+    assert (error.rule, error.column, error.table) == ("json_object", "context_v2_json", "ops_recommendations")
+    assert _SENTINEL not in str(error) and _SENTINEL not in repr(error.args)
+
+
+def test_json_object_binding_follows_exclude_before() -> None:
+    dated = {"exclude_before": {"json_object": "2026-12-01"}}
+    old, new = datetime(2026, 11, 1, tzinfo=timezone.utc), datetime(2026, 12, 2, tzinfo=timezone.utc)
+    prior = {"context_v2_json": "stored-and-malformed"}
+    _jcheck("bad", created=old, prior=prior | {"context_v2_json": "bad"}, extra=dated)  # unchanged older row
+    with pytest.raises(RowRuleViolationError) as raised:
+        _jcheck("bad2", created=old, prior=prior, extra=dated)  # an older row whose write changes the column
+    assert raised.value.exclude_before == "2026-12-01"
+    with pytest.raises(RowRuleViolationError):
+        _jcheck("bad", created=new, prior=prior | {"context_v2_json": "bad"}, extra=dated)  # created on or after
+    with pytest.raises(RowRuleViolationError):
+        _jcheck("bad", created=old, prior=None, extra=dated)  # an insert always binds
+    with pytest.raises(RowRuleViolationError):
+        _jcheck("bad", created=old, prior={"context_v2_json": "bad"})  # undated always binds
+
+
+def test_check_write_evaluates_json_object_after_row_rules() -> None:
+    spec = _json_spec()
+    rules = RowRules.from_projection(spec.fields)
+    ok = ops_rec_record(context_v2_json=_doc())
+    check_write(spec, rules, ok, NOW, NOW, "01ULID", None)
+    with pytest.raises(RowRuleViolationError) as raised:
+        check_write(spec, rules, ops_rec_record(context_v2_json="nope"), NOW, NOW, "01ULID", None)
+    assert raised.value.rule == "json_object"
+    with pytest.raises(RowRuleViolationError) as first:  # a row-rule failure wins, as it runs first
+        check_write(spec, rules, ops_rec_record(effort="nope", context_v2_json="nope"), NOW, NOW, "01ULID", None)
+    assert first.value.rule == "accepted_values"
