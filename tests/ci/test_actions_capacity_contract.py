@@ -26,7 +26,8 @@ def test_real_contract_loads() -> None:
     assert (c.window.request_budget_per_tick, c.window.time_budget_seconds) == (400, 180)
     assert c.alarm.source == "actions_capacity"
     assert set(c.alarm.classes) == {"capacity_breach", "gauge_blind"}
-    assert len(c.ledger.rows) == 4
+    raw_rows = yaml.safe_load((ROOT / "docs/contracts/actions-capacity.yaml").read_text(encoding="utf-8"))["ledger"]["rows"]
+    assert raw_rows and [r.id for r in c.ledger.rows] == [r["id"] for r in raw_rows]
     assert c.contract.contract_class == "D"
 
 
