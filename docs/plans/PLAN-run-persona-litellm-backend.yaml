@@ -1,0 +1,428 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: run-persona-litellm-backend
+intent: >-
+  Build the run_persona port's litellm backend (T4.32 c1, backend leg; audit WP-07), plan 1 of the four plans the hint
+  PLAN-run-persona-litellm-backend splits into (blind consult, settled). A persona-agnostic run loop under
+  src/persona_backends/ loads a persona contract and its rendered prompt (hash-checked), refuses any capability whose
+  binding this backend does not build, checks the materialised input against input_schema (input_incomplete with no
+  model call), serves the read_input:<blob> tool, asks every call for a JSON object, checks each terminal turn against
+  output_schema or the failure envelope, repairs at most max_revisions times (then schema_invalid), counts every
+  provider attempt against max_turns, holds one monotonic deadline for max_wall_clock_seconds, uses the transport's
+  outage-only first-call fail-over and keeps the fallback role after it, and records one event per turn, rewritten
+  atomically to an events file after every turn. scripts/run_persona.py injects scripts.llm.litellm_transport into the
+  backend (no src module imports scripts) and gives the verdict chain one command: input JSON in, the result JSON alone
+  on stdout, events to a file. Later plans: verdict consistency (rec-5052), the telemetry producer (rec-4028, which maps
+  the events file to rows and writes definition_sha256) and the warehouse_read MCP bridge. Serves NS.3: verdicts run on
+  GitHub from main's definition.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-run-persona-litellm-backend.yaml
+phase: >-
+  T4.32 c1 (backend leg, part); closes no criterion. T4.32 is in_progress, and the hint's predecessors
+  (PLAN-persona-contracts-verdict-slice, PLAN-llm-client-litellm-transport, rec-4433) are merged and built. No Lambda
+  bundle holds src/persona_backends/ or scripts/llm/, so nothing deploys (V2).
+closes_criteria: []
+cites: [dec:117, dec:173, dec:205, dec:206, dec:212, dec:246]
+scope:
+  - file: src/persona_backends/__init__.py
+    action: Create
+    purpose: >-
+      Facade (the port). Re-exports run_persona, RunRefused, RunAborted, Transport and the events types.
+      `async def run_persona(contract_path: Path, materialised_input: dict, workspace: Path | None, backend: str, *,
+      transport: Transport, on_event: Callable[[dict], None] | None = None, max_tokens: int = 32000, clock=time.monotonic,
+      wall=time.time) -> tuple[dict, list[dict]]` returns (result, events). Refuses (RunRefused) a backend other than
+      "litellm" (claude_cli is T4.27's, codex_cli reserved) and a workspace that is not None (no workspace capability is
+      built; T4.15:c3). Names no persona id or contract path (implementation_binding).
+  - file: src/persona_backends/contract.py
+    action: Create
+    purpose: >-
+      `load(contract_path) -> LoadedContract` (persona, contract_version, input_schema, output_schema, capabilities,
+      budget, failure ids, rendered prompt text and sha256, blob names). The rendered prompt is read from the contract's
+      sibling rendered/<stem>.txt (the executor-personas.yaml rendered_prompt.location rule); its bytes' SHA-256 must equal
+      rendered_prompt_sha256, else RunRefused. BUILT = frozenset({"read_input"}); a capability whose id (before ":") is not
+      in BUILT is refused with RunRefused naming it. Budget values are read as integers; a missing one is refused. No
+      jsonschema metaschema check (the full tier's validate_persona_contracts owns contract validity).
+  - file: src/persona_backends/read_input.py
+    action: Create
+    purpose: >-
+      The read_input tool. `tool_spec(blob_names)` returns one OpenAI-style function tool, parameters {blob: enum of the
+      contract's read_input:<blob> names, mode: enum [lines, search], start: integer >= 1, end: integer >= 1, query:
+      string}, required [blob, mode]. `serve(arguments_json, blobs) -> str`: a str value is served as-is, any other value
+      as canonical JSON (sorted keys, two-space indent); lines mode returns "<n>: <line>" for start..end (default 1..
+      the end), capped at READ_CAP_BYTES = 65536 with a final "[truncated: next line <n> of <total>]" line; search mode is
+      a literal (never regex) substring match returning numbered matching lines, at most 200, then
+      "[<k> more matches]"; every reply ends with "[<blob>: <total> lines]". An undeclared or absent blob, bad JSON or a
+      bad mode returns "error: <reason>" as the tool result, never an exception.
+  - file: src/persona_backends/output.py
+    action: Create
+    purpose: >-
+      `check(content, finish_reason, loaded) -> Checked(value | None, errors: list[str])`. finish_reason "length",
+      blank content, text that json.loads rejects or a non-object are errors. A value whose outcome is "failure" must have
+      exactly the keys outcome, failure (a failure id the contract lists) and detail (a string); any other value is
+      checked against output_schema with jsonschema.Draft202012Validator, errors as "<json path>: <message>" sorted, at
+      most 20. `repair_message(errors)` is the fixed text "Your last reply is not a valid result:" followed by the error
+      lines and "Reply with one JSON object only: the result, or a failure the contract lists." `failure(id, detail)`
+      builds a failure value.
+  - file: src/persona_backends/litellm_backend.py
+    action: Create
+    purpose: >-
+      The run loop. (1) input check: Draft202012Validator(input_schema) over the materialised input; any error returns
+      failure input_incomplete (detail: the error paths) with zero transport calls. (2) messages: system = the rendered
+      prompt text; user = the fixed opening "Your input is attached as blobs you read with the read_input tool:" then one
+      line per declared blob "<name>: <total> lines" and the change_id and head_sha values, then "Return your result as
+      one JSON object." (3) each call: transport(persona, messages, max_tokens=max_tokens, tools=[read_input spec],
+      response_format={"type": "json_object"}, timeout=min(600, remaining), role=role, fail_over=(first call),
+      max_attempts=min(3, max_turns - turns_used)) wrapped in asyncio.wait_for(remaining); turns_used += len(attempts)
+      (TransportResult.attempts, or TransportError.attempts on a raise); when result.failed_over the role becomes
+      warm_fetched_escape_hatch for the rest of the run. (4) a response with tool_calls: append result.message as the
+      assistant message (reasoning fields kept as returned) and one role tool message per call with serve()'s text, in
+      call order; an unknown tool name gets "error: unknown tool". (5) a response without tool_calls is terminal: check();
+      valid -> return it; invalid -> revisions_used += 1, and past max_revisions return failure schema_invalid, else append
+      the assistant message and repair_message(). A TransportError of kind empty_output or malformed_output is an invalid
+      terminal turn (repair, revision counted); any other TransportError raises RunAborted(kind, events so far). (6)
+      before every call: turns_used >= max_turns or remaining <= 0 returns failure budget_exhausted (detail names which);
+      asyncio.TimeoutError from wait_for returns budget_exhausted. injection_suspected is only ever the model's own
+      failure value. Under 500 SLOC; split a helper module out if it nears the limit.
+  - file: src/persona_backends/events.py
+    action: Create
+    purpose: >-
+      Run record types, plain dicts. header {schema: 1, backend: "litellm", contract_path, persona, contract_version,
+      rendered_prompt_sha256, input_sha256 (SHA-256 of the canonical-JSON materialised input), started_at_ms (wall clock,
+      integer epoch ms, taken once before the first call)}; one turn record per transport call {turn, role, attempts
+      [{role, model, attempt, outcome, latency_ms}], record (the CallRecord as a dict, or null on a raise), failed_over,
+      finish_reason, tool_calls [names], tool_result_bytes [ints], kind (tool | terminal_valid | terminal_invalid |
+      transport_error), revision, message (the assistant message as returned, or null), started_at_ms, ended_at_ms}; and
+      an end record {outcome, failure (or null), turns_used, revisions_used, ended_at_ms}. `write_atomic(path, header,
+      turns, end)` writes one JSON document to <path>.tmp then os.replace. It holds no telemetry row shape: the producer
+      plan (rec-4028) maps it (Decision 221 cl.7: a hand-off, not a second journal).
+  - file: scripts/run_persona.py
+    action: Create
+    purpose: >-
+      Entry point: `<python> [-I] scripts/run_persona.py --contract <path> --input <json path> --events <path>
+      [--max-tokens N]`. Inserts its own repo root (Path(__file__).resolve().parents[1]) at sys.path[0] when absent, so it
+      runs under python -I; imports scripts.llm.litellm_transport.acomplete and passes it as the transport; on_event
+      rewrites the events file after every turn and once at the end. stdout carries only the result JSON (sorted keys,
+      one line); exit 0 when a result (success or failure value) was produced, 2 on RunRefused or unreadable arguments
+      (message on stderr), 4 on RunAborted (stderr carries {"error": <kind>} as JSON; the events file holds the turns so
+      far). It reads no AWS credential and calls no GitHub API; the transport reads the key variable the shell sets.
+  - file: tests/persona_backends/__init__.py
+    action: Create
+    purpose: Package marker; empty.
+  - file: tests/persona_backends/fakes.py
+    action: Create
+    purpose: >-
+      Scripted fake transport (an async callable replaying a list of TransportResult-shaped objects or TransportError
+      raises, recording every call's kwargs) and a fake monotonic and wall clock; built on scripts.llm.litellm_wire's
+      CallRecord, Attempt and TransportError and scripts.llm.litellm_transport's TransportResult so the fake keeps the real
+      shapes.
+  - file: tests/persona_backends/test_contract.py
+    action: Create
+    purpose: >-
+      Mirror test: the fixture contract loads; a rendered prompt one byte off is refused; each of read_repo, run_tests,
+      edit_repo and warehouse_read:<x> is refused by name; test_capability_gate_matches_index: over the live
+      executor-personas.yaml vocabulary, the gate builds exactly read_input, and the bindings whose owning_item is T4.15:c3
+      are exactly read_repo, run_tests and edit_repo (red before the sidecar's e03-e05 are placed).
+  - file: tests/persona_backends/test_read_input.py
+    action: Create
+    purpose: >-
+      Mirror test: line ranges and numbering, default range, byte cap with the truncation line, literal search (a regex
+      metacharacter query matches literally), match cap, a non-string blob served as canonical JSON, undeclared blob and
+      bad arguments return error text.
+  - file: tests/persona_backends/test_output.py
+    action: Create
+    purpose: >-
+      Mirror test: a valid success, a listed failure, an unlisted failure id, extra failure keys, blank content,
+      unparseable text, a non-object, finish_reason length and a schema violation each give the expected value or errors;
+      repair_message lists the errors.
+  - file: tests/persona_backends/test_litellm_backend.py
+    action: Create
+    purpose: >-
+      Mirror test on the fake transport: tool call then final -> success and two turn events;
+      test_invalid_then_valid_within_max_revisions; test_revisions_exhausted_returns_schema_invalid;
+      test_empty_output_is_a_repair_turn; test_max_turns_counts_retried_attempts (a call carrying three attempts uses
+      three turns); test_deadline_returns_budget_exhausted (fake clock); test_input_incomplete_makes_no_call;
+      test_fail_over_keeps_fallback_role (later calls pass role warm_fetched_escape_hatch, only the first passes
+      fail_over=True); test_outage_raises_run_aborted_with_events; every call passes response_format json_object and the
+      read_input tool; the facade refuses claude_cli and a non-None workspace.
+  - file: tests/persona_backends/test_events.py
+    action: Create
+    purpose: >-
+      Mirror test: header fields (rendered_prompt_sha256 equals the contract's; started_at_ms an int), one turn record
+      per call with its attempts, end record, write_atomic leaves no .tmp and a reader sees a whole document after each
+      turn.
+  - file: tests/persona_backends/test_package_boundary.py
+    action: Create
+    purpose: >-
+      No module under src/persona_backends/ imports scripts (ast walk of Import and ImportFrom); .importlinter holds a
+      forbidden contract whose source is src.persona_backends and whose forbidden_modules include scripts; and
+      config/agent/executor/capabilities.yaml boundary_patterns cover src/persona_backends/__init__.py,
+      tests/persona_backends/test_events.py, tests/fixtures/persona_backends/fixture_persona.yaml and
+      scripts/run_persona.py; and docs/contracts/file-router.yaml scripts_root_allowlist.allowed_files lists
+      scripts/run_persona.py.
+  - file: tests/test_run_persona.py
+    action: Create
+    purpose: >-
+      Mirror test for scripts/run_persona.py (Decision 131 maps a root script here): with acomplete monkeypatched to the
+      fake, the result alone on stdout and exit 0, the events file rewritten per turn; exit 2 on a refused contract; exit 4
+      and {"error": "outage"} on stderr on RunAborted with the events file holding the turns so far; a subprocess run
+      under python -I resolves the repo root from the script path (help text only, no transport call).
+  - file: tests/fixtures/persona_backends/fixture_persona.yaml
+    action: Create
+    purpose: >-
+      An unregistered fixture verdict contract (persona fixture_verdict, contract_version 1, input change_id, head_sha,
+      notes; capabilities read_input:notes; output {outcome: success, verdict: PROCEED|REVISE, findings: [str]}; budget
+      max_turns 6, max_wall_clock_seconds 60, max_revisions 1; the four required failure ids) whose
+      rendered_prompt_sha256 is its rendered prompt's hash.
+  - file: tests/fixtures/persona_backends/rendered/fixture_persona.txt
+    action: Create
+    purpose: The fixture contract's rendered prompt (starts with executor-personas.yaml's quoted_content_clause).
+  - file: docs/contracts/executor-personas.yaml
+    action: Modify
+    purpose: >-
+      Exactly the sidecar's six blocks (docs/plans/approved/run-persona-litellm-backend.yaml): the amendment_log row, the
+      run_persona.result sentences, the three owning_item moves to T4.15:c3 and the budget_rules turn sentence.
+  - file: docs/contracts/file-router.yaml
+    action: Modify
+    purpose: >-
+      scripts_root_allowlist.allowed_files gains scripts/run_persona.py, with one amendment_log row; the file is at 500 of
+      500 effective lines, so first compact the oldest amendment_log rows that can join (words unchanged, the Decision 166
+      relief valve, as the 2026-11-05 row did), measured on main at build time, until the change lands at or under 500.
+  - file: config/agent/executor/capabilities.yaml
+    action: Modify
+    purpose: >-
+      boundary_patterns gains, under a "# run_persona litellm backend (Decision 185 clause 3; T4.32 c1)" comment,
+      src/persona_backends/, tests/persona_backends/, tests/fixtures/persona_backends/ and scripts/run_persona.py.
+  - file: .importlinter
+    action: Modify
+    purpose: >-
+      One forbidden contract, src-persona-backends-imports-no-scripts, named "src.persona_backends imports nothing under
+      scripts -- the transport is injected by scripts/run_persona.py": source_modules src.persona_backends;
+      forbidden_modules scripts, src.lambdas, src.data (the transport is injected by scripts/run_persona.py).
+bundled_recommendations: []
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - A fixture persona run through run_persona on a scripted fake transport returns a schema-valid success after a read_input tool turn, with one event per transport call and an end record.
+  - An invalid terminal turn is repaired up to max_revisions and then returns schema_invalid; blank output is a repair turn.
+  - max_turns counts every provider attempt, and the deadline and max_turns each return budget_exhausted.
+  - An input missing a required field returns input_incomplete with no transport call.
+  - A contract naming any capability other than read_input, a rendered prompt off its hash, a non-litellm backend or a non-None workspace is refused.
+  - scripts/run_persona.py prints the result alone on stdout and exits 0, 2 or 4 as specified, and src/persona_backends imports nothing under scripts.
+  - executor-personas.yaml carries the sidecar's six blocks word for word, and the persona contract checks stay green.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The run loop, output checks and budgets on the fake transport.
+    command: bin/venv-python -m pytest tests/persona_backends/test_litellm_backend.py tests/persona_backends/test_output.py -q
+    expected: Exit 0, every node passes. Red before (the modules and tests are absent).
+    expected_literals:
+      - ' passed'
+    fix_if: >-
+      A repair not counted, a retried attempt not counted as a turn, a deadline that lets a call start, or fail-over
+      reused after the first call: fix the backend, never the fake or the expectation.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: run-persona-litellm-backend-loop
+  - step: 2
+    phase: pre-deploy
+    action: Contract loading and the capability gate (against the live index), read_input and the events file.
+    command: bin/venv-python -m pytest tests/persona_backends/test_contract.py tests/persona_backends/test_read_input.py tests/persona_backends/test_events.py -q
+    expected: Exit 0, every node passes. Red before (absent).
+    expected_literals:
+      - ' passed'
+    fix_if: >-
+      test_capability_gate_matches_index red after the sidecar is placed means a block was misplaced; a blob served
+      beyond its cap or a regex search: fix the tool.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: run-persona-litellm-backend-contract-tool-events
+  - step: 3
+    phase: pre-deploy
+    action: The entry point's stdout, exit codes and events file, and its python -I root resolution.
+    command: bin/venv-python -m pytest tests/test_run_persona.py -q
+    expected: Exit 0, every node passes. Red before (absent).
+    expected_literals:
+      - ' passed'
+    fix_if: Anything besides the result JSON on stdout, or a wrong exit code; fix the entry point.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: run-persona-entry-point
+  - step: 4
+    phase: pre-deploy
+    action: The import boundary (test and import-linter) and the executor boundary rows.
+    command: bin/venv-python -m pytest tests/persona_backends/test_package_boundary.py -q && bin/venv-python -m scripts.import_governance --check-contracts
+    expected: Exit 0 from both; the import-linter run lists src-persona-backends-imports-no-scripts as kept.
+    expected_literals:
+      - src.persona_backends imports nothing under scripts
+    fix_if: A src module importing scripts -- inject the dependency from scripts/run_persona.py instead.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      Two commands; the pytest half is a standing guard through the fast tier's own test run and the import-linter half
+      is already a standing check (scripts.import_governance in the tier), so a registry shard would duplicate both.
+  - step: 5
+    phase: pre-deploy
+    action: >-
+      The placed contract text and the checks that read it: the sidecar binds executor-personas.yaml, the persona contract
+      and binding checks pass, and placement accepts scripts/run_persona.py.
+    command: >-
+      bin/venv-python -m scripts.roadmap.approved_text verify --slug run-persona-litellm-backend && bin/venv-python -c
+      "from scripts.checks.contracts.validate_persona_contracts import validate_persona_contracts as a;
+      from scripts.checks.contracts.validate_persona_contract_binding import validate_persona_contract_binding as b;
+      from scripts.checks.hygiene.validate_placement import validate_placement as c;
+      f=[];a(f);b(f);c(f);print(*f,sep='\n');print(f'contract checks: {len(f)} failures');assert not f"
+    expected: The verify run passes and the last line reports 0 failures.
+    expected_literals:
+      - 'contract checks: 0 failures'
+    fix_if: >-
+      A verify mismatch: place the block word for word (never edit the sidecar). An owning_item not open: STOP to this
+      planning thread. A placement failure: the allowlist row is missing.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      Three registered checks already run in every tier and the approved-text verify runs in validate_merge_step; a shard
+      would duplicate them.
+  - step: 6
+    phase: pre-deploy
+    action: Pre-handoff full tier on the committed, rebased tree (Decision 163), read through its evidence file.
+    command: bin/venv-python -m scripts.validate; bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: The verify-head read reports the full tier passed on HEAD's tree.
+    fix_if: Any failure; fix and re-run both from the start (timeout_disposition blocked).
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: src/persona_backends/__init__.py
+    behavior: The facade refuses claude_cli, codex_cli and a non-None workspace and returns (result, events).
+    verification_step: 1
+    test_selector: tests/persona_backends/test_litellm_backend.py
+    red_green_expectation: red before (module and test absent), green after.
+  - source: src/persona_backends/contract.py
+    behavior: Hash check and the capability gate, held equal to the live index.
+    verification_step: 2
+    test_selector: tests/persona_backends/test_contract.py::test_capability_gate_matches_index
+    red_green_expectation: red before (absent; then red until e03-e05 are placed), green after.
+  - source: src/persona_backends/read_input.py
+    behavior: Ranges, cap, literal search and error results.
+    verification_step: 2
+    test_selector: tests/persona_backends/test_read_input.py
+    red_green_expectation: red before (absent), green after.
+  - source: src/persona_backends/output.py
+    behavior: Terminal-turn checks and the repair message.
+    verification_step: 1
+    test_selector: tests/persona_backends/test_output.py
+    red_green_expectation: red before (absent), green after.
+  - source: src/persona_backends/litellm_backend.py
+    behavior: Repairs, turn counting, deadline, input check, fail-over role and abort.
+    verification_step: 1
+    test_selector: tests/persona_backends/test_litellm_backend.py::test_max_turns_counts_retried_attempts
+    red_green_expectation: red before (absent), green after.
+  - source: src/persona_backends/events.py
+    behavior: Header, turn and end records written atomically.
+    verification_step: 2
+    test_selector: tests/persona_backends/test_events.py
+    red_green_expectation: red before (absent), green after.
+  - source: scripts/run_persona.py
+    behavior: stdout carries only the result; exit codes 0, 2 and 4; events file per turn.
+    verification_step: 3
+    test_selector: tests/test_run_persona.py
+    red_green_expectation: red before (absent), green after.
+  - source: .importlinter
+    behavior: src.persona_backends imports nothing under scripts.
+    verification_step: 4
+    test_selector: tests/persona_backends/test_package_boundary.py
+    red_green_expectation: red before (absent), green after.
+  - source: config/agent/executor/capabilities.yaml
+    behavior: The backend's paths are executor boundary paths.
+    verification_step: 4
+    test_selector: tests/persona_backends/test_package_boundary.py
+    red_green_expectation: red before (absent; then red until the rows land), green after.
+  - source: docs/contracts/file-router.yaml
+    behavior: scripts/run_persona.py is an allowlisted scripts-root entry point.
+    verification_step: 4
+    test_selector: tests/persona_backends/test_package_boundary.py
+    red_green_expectation: red before (absent; then red until the allowlist row lands), green after.
+  - source: docs/contracts/executor-personas.yaml
+    behavior: The six approved blocks, word for word.
+    verification_step: 2
+    test_selector: tests/persona_backends/test_contract.py::test_capability_gate_matches_index
+    red_green_expectation: red before the owning_item moves are placed, green after.
+weakening_dispositions: []
+constraints:
+  - >-
+    Place every sidecar block word for word ({{DATE}} filled with the build date); never edit the sidecar (Decision 246).
+    executor-personas.yaml gets no other edit. If the rebase moves a block's before text, STOP to this planning thread.
+  - >-
+    No code under src/persona_backends/ or scripts/run_persona.py names a registered persona id or contract path while
+    its personas row is pending (implementation_binding; validate_persona_contract_binding); the fixture persona lives
+    under tests/. No personas row changes status.
+  - >-
+    No telemetry row, writer call, AWS call, key read or GitHub API call (Decision 212 cl.3, T4.2 c8/c13); the events
+    file is the only record. Leave scripts/personas/, tests/personas/ and tests/fixtures/persona_verdict/ (the verdict
+    chain plan's) and scripts/llm/ untouched.
+  - >-
+    Every new module stays under 500 SLOC (Decision 128); if litellm_backend.py nears it, split a helper module inside
+    src/persona_backends/ and add its mirror test, never a budget raise.
+  - Public repository (Decision 101) -- fixtures are synthetic; no key, account id or hostname anywhere.
+  - No rescue agents or workaround loops (Decision 55); never skip, disable or quarantine a test (Decision 235).
+context:
+  - >-
+    Decision-scout r2 (2026-11-17): Verdict: NO_FLAGS. Decisions triaged: 216 of 216. Roadmap items intersected: 7;
+    CONFLICT: 0; RELATED: 7. Serves: NS.3 3/5. CITE: 117, 173, 205, 206, 212, 246. r1 FLAGS_FOUND on 163 (no full-tier
+    step) and 131 (CLI test path), both fixed. /mnt/project-files/run-persona-backend/SCOUT-r1.md.
+  - >-
+    Split settled on a blind consult (/mnt/project-files/run-persona-backend/advisor-brief-split/ADVICE.md and
+    ADVICE-followup.md): this backend, then rec-5052 (verdict consistency) and rec-4028 (telemetry producer, which owns
+    definition_sha256, the usage mapping move out of litellm_wire.read_response and the root-session envelope text), then
+    the warehouse_read MCP bridge (follow-on rec). Design advice: advisor-brief-design/ADVICE.md (json_object plus local
+    check, forced tool calls refused on the Claude fallback with thinking at litellm_wire.py:133-136; every attempt a
+    turn; pure events hand-off; backend in src, entry point in scripts).
+  - >-
+    Sign-off: operator "write the plan" 2026-11-17 on /mnt/project-files/run-persona-backend/PRESENTATION.md.
+  - >-
+    UNPROVEN until the fixture-run plan (sessions cannot read inference keys, Decision 256): DeepSeek json_object with
+    thinking and tools, non-empty content, real usage keys, reasoning_content round trip across tool turns
+    (litellm 1.106.2 injects a blank when it is lost) and turn counts against the provisional budgets. max_tokens 32000
+    is a provisional default, re-measured there.
+  - >-
+    The image plan (T7) needs litellm as a hash-locked runtime pin (requirements-dev.txt only today); jsonschema and
+    mcp are in requirements.txt. The verdict chain plan (#2097) runs a probe through scripts/personas/execute.py; the
+    fixture-run plan swaps in `scripts/run_persona.py --contract --input --events`.
+  - >-
+    Shared files with unbuilt plans: config/agent/executor/capabilities.yaml (PLAN-persona-verdict-chain #2097,
+    PLAN-telemetry-content-reader-lock, PLAN-wording-approval-routing), docs/contracts/file-router.yaml
+    (PLAN-work-graph-edge-model); whichever builds second rebases. T4.32's files_in_scope does not list
+    src/persona_backends/ or scripts/run_persona.py; the plan adds no roadmap edit.
+  - >-
+    ports.yaml unchanged: SA-11 already records the layout this backend reads (contracts and rendered prompts under
+    docs/contracts/personas/). The run_persona litellm adapter row stays pending; the producer plan flips it.
+  - >-
+    Red-overlap 2026-11-17 (scripts.ci_rca.red_overlap): blocked, rule slo_breached, on rec-5247 (telemetry reader smoke
+    504) and rec-5248 (telemetry-arrival read deadline), shared paths none. Deferral: neither is repaired here, this plan
+    touches no telemetry reader, writer or verify path, and its build still needs a green full tier (Decision 163).
+  - >-
+    CI Reform's #2071 (open): this plan's only contract edits ride its own sidecar, so its leg P holds.
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:33cd4fb6b4a6157f855bfcf2f54934167a811c1306e69c7b1c9dcff3827af1a4"}
+  - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: "v1:f5732b68ef0d1f4293fa7a42a2bad5d1f94a15c8fee489f61da0fc5ea0064c06"}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Only the plan-cited decision sections (117, 173, 205, 206, 212, 246)
+  - All files in scope located and readable; scripts/llm/litellm_transport.py and litellm_wire.py read for the shapes the fake keeps
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - Read docs/contracts/executor-personas.yaml (run_persona, capability_vocabulary, persona_contract, budget_rules, failure_envelope, rendered_prompt, implementation_binding) and the transport's TransportResult, CallRecord, Attempt and TransportError.
+  - Write tests/persona_backends/fakes.py, the fixture contract and its rendered prompt (compute rendered_prompt_sha256 from the file's bytes).
+  - Write src/persona_backends/contract.py, read_input.py, output.py, events.py, litellm_backend.py and __init__.py with their mirror tests, red first.
+  - Write scripts/run_persona.py and tests/test_run_persona.py.
+  - Place the sidecar's six blocks in docs/contracts/executor-personas.yaml ({{DATE}} = build date).
+  - Edit config/agent/executor/capabilities.yaml, .importlinter and docs/contracts/file-router.yaml (compaction first, measured on main), then tests/persona_backends/test_package_boundary.py.
+  - Run bin/venv-python -m scripts.validate --pre and fix.
+  - Execute Verification Plan -- run each step; loop until pass; on an unrecoverable failure stop and RCA (Decision 55).
+  - 'Report: what was implemented, verification results, and anything UNPROVEN.'
+rollback: >-
+  Revert the build commit: nothing calls run_persona yet (the verdict chain runs only its probe), and no stored row or
+  deployed artifact depends on it.
