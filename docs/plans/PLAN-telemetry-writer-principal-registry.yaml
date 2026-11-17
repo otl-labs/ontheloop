@@ -65,8 +65,11 @@ scope:
       interpolation counts as a wildcard. parse_statements returns no Condition, so the module reads each holder's
       Condition from the statement body itself with validate_invoke_implies_resolve._extract_block. A statement is a
       holder when its actions (lower-cased, fnmatch IAM wildcard semantics) cover lambda:InvokeFunctionUrl,
-      lambda:InvokeFunction or lambda:InvokeAsync and a resource matches either production writer ARN form
-      (function:agent-platform-ducklake-telemetry-writer and :1; the -smoke twin is not the writer), or cover
+      lambda:InvokeFunction or lambda:InvokeAsync and a resource, read as an IAM wildcard pattern, matches the writer
+      ARN unqualified or with any qualifier (function:agent-platform-ducklake-telemetry-writer, :1 or an alias such as
+      :live, probed as the normalised resource against function:agent-platform-ducklake-telemetry-writer(:[^:]+)? anchored
+      at the end; the -smoke twin is not the writer) or is not a literal (a bare reference such as
+      [aws_lambda_function.ducklake_telemetry_writer.arn], a local or a for expression; fail closed), or cover
       execute-api:Invoke and a resource matches */POST/telemetry/writer or is not a literal; a non-literal action list
       counts as covering. Fails, one line per finding naming file and Sid (or file and attribute), when: a holder's
       (file, Sid) is neither a class row's grant nor an exclusion; a declared Sid is absent from its file or appears
@@ -88,12 +91,15 @@ scope:
       source_json, source_policy_documents, override_policy_documents) whose value is not jsonencode(...), a same-root
       data.aws_iam_policy_document.<x>.json or a same-root local holding a jsonencode fails, as does any dynamic
       "statement" block (file(), templatefile() and heredoc JSON are invisible to parse_statements). Grant attachment,
-      by reference closure: start from each class grant's enclosing policy (its data.aws_iam_policy_document, its
-      aws_iam_policy, or the local holding its jsonencode) and follow every reference to it through any policy-bearing
-      attribute, source_policy_documents/override_policy_documents, another local and any aws_iam_policy built from it;
-      every path must end only in attachments to that class's identity.resource (a role/user/group policy's policy =
-      with its role/user, a policy_arn attachment's role/user, or a list-form aws_iam_policy_attachment's
-      roles/users/groups). Non-policy references (lifecycle precondition size checks such as
+      by reference closure: start from the innermost local or document that textually holds each class grant's statement
+      (a data.aws_iam_policy_document, an aws_iam_policy, a local holding a jsonencode, or a statement-list local in any
+      list or concat(...) form, such as agent_session_user.tf's agent_session_ducklake_statements) and follow every
+      reference to it through concat, jsonencode, any policy-bearing attribute, source_policy_documents/
+      override_policy_documents, another local and any aws_iam_policy built from it; every path must end only in
+      attachments to that class's identity.resource (a role/user/group policy's policy = with its role/user, a
+      policy_arn attachment's role/user, or a list-form aws_iam_policy_attachment's roles/users/groups) or in a
+      permissions_boundary attribute of any identity, which caps and grants nothing (Decision 144 cl.1, the reason the
+      ci_apply_boundary exclusion holds). Non-policy references (lifecycle precondition size checks such as
       oidc_persona_verdict_role.tf's and platform_dev_policies.tf's, and the Decision 202 detector) are not attachments.
       The function_url Condition rule reads both shapes: HCL condition { test = "Bool" variable =
       "lambda:InvokedViaFunctionUrl" values = ["true"] } blocks and JSON Condition = { Bool = {...} } objects. Owned elsewhere, said in the module docstring: resource-based grants (an
@@ -123,8 +129,12 @@ scope:
       block (one each); github_ci_branch's data.aws_iam_policy_document attached to aws_iam_role.github_ci_pr; the same
       document composed into another role's document through source_policy_documents; an aws_iam_policy_attachment
       with roles = [...] naming a non-class role; a second aws_iam_policy reusing local.agent_session_ducklake_policy_json
-      attached to another user. The real
-      tree's policy = local.*_json and source_policy_documents = [data....json] forms stay green.
+      attached to another user; local.agent_session_ducklake_statements reused in a jsonencode policy attached to a
+      non-class user; an unregistered role with InvokeFunctionUrl on [aws_lambda_function.ducklake_telemetry_writer.arn];
+      an unregistered role with InvokeFunctionUrl on the writer's :live alias ARN. The real tree's policy = local.*_json
+      and source_policy_documents = [data....json] forms stay green, as does agent_session_user.tf's concat of
+      agent_session_ducklake_statements into agent_session_boundary_policy_json used as aws_iam_user.agent_session's
+      permissions_boundary.
       test_malformed_contract_is_refused: a class missing from principal_classes, an extra class, a duplicated token, an
       unknown key in a row, an unknown path, a used path with no definition and an admitted_by of "Decision two" each
       fail. test_non_holders_stay_green: a role holding only lambda:Get* on the writer, a role invoking only the -smoke
@@ -140,7 +150,7 @@ scope:
       docs/contracts/ducklake_telemetry_writer.yaml, scripts/contracts.py,
       scripts/checks/iam_tf/validate_telemetry_writer_principals.py,
       scripts/checks/iam_tf/validate_secret_parameter_grants.py, scripts/checks/iam_tf/validate_invoke_implies_resolve.py,
-      so a newly added .tf file selects it in --pre.
+      scripts/checks/_common.py, scripts/checks/registry.py (as every gated sibling Entry lists), so a newly added .tf file selects it in --pre.
     new_imports: []
   - file: tests/checks/iam_tf/test__manifest.py
     action: Modify
@@ -365,13 +375,14 @@ context:
   - "Plan-critique round 1 REVISE (6 blocking, 5 nits), dispositions: B1 selection degraded -- the cause is scripts/contracts_schema.py's import closure capping --pre, so the registry moved to its own Class D contract and the schema file left scope (scope change put to the operator; fresh approval run); B2 infrastructure_dependencies names data-pipeline with a no-deploy disposition; B3 the check fails on any non-same-root policy_arn/managed_policy_arns and on the boundary policy by address or literal name outside permissions_boundary, comments stripped, with red cases; B4 Condition read via _extract_block in the new module; B5 TestTelemetryWriterPrincipalsPreGlobs named; B6 VP 4 proves the superseded plan gone, rec-4714 below. Nits: N1 below; N2 492 on main; N3 waiver says why rec-5198's node stays ungraduated; N4 accepted (the new check's identity-name rule covers the dropped mention); N5 below."
   - "rec-4714 (open; owner of writer-side project scope, named by the registry's scope_enforcement_owner) keeps its acceptance unchanged here: it names a test of the retired capture class, so the plan that builds rec-4714 re-grounds it at its own Freshness Gate (Decision 201's closure-time verdict); not re-pointed now because its new acceptance depends on that unwritten design."
   - "Residual (N5): github_ci_persona_verdict declares project_scope_enforcement producer while the persona jobs write nothing yet; the producer half lands with their telemetry (rec-4028), and rec-4714 owns writer-side enforcement."
-  - "T4.32's PLAN-persona-verdict-egress hint on main lists 'telemetry-writer principal records' with Decision 263 cl.4's ports.yaml coupling; this plan does the principal-records part (the ports.yaml row stays with that plan). Agents in GitHub get one log line when the plan PR opens."
+  - "T4.32's PLAN-persona-verdict-egress hint on main lists 'telemetry-writer principal records' with Decision 263 cl.4's ports.yaml coupling; this plan does the principal-records part (the ports.yaml row stays with that plan). Agents in GitHub get one log line when the plan PR opens. Decision 263's Coverage line still reads cl.4 as a verdict-jobs residual; its dated note and the T4.32 hint edit stay deferred to a later roadmap PR (critique r3 N2/N6, r4 N3)."
   - "Decision-scout round 6 FLAGS_FOUND: Decision 168 WARN (a new Class D file may not declare status active, validate_contract_drift) fixed -- the contract is status draft; Decision 144 NOTE (the boundary's literal name also sits in its own Deny statements, its declaration and the Decision 202 detector) fixed -- the rule covers attachment positions only, with a green case for the Deny; advisory c4 lead reworded to 'the writer contract and its principal registry'. dec:168 added to cites. Decisions triaged: 218 of 218. Roadmap items intersected: 6; CONFLICT: 0; RELATED: 5. Serves: NS.5 3/5."
   - "Decision-scout round 7 FLAGS_FOUND: both round-6 flags confirmed fixed; new Decision 144 NOTE (github_ci_apply_policy.tf's inline policy names the boundary as an iam:PermissionsBoundary Condition value) fixed -- an inline policy counts only when its policy = expression references the boundary, Condition values are exempt, with a green case. Decisions triaged: 218 of 218. Roadmap items intersected: 6; CONFLICT: 0; RELATED: 5. Serves: NS.5 3/5."
   - "Plan-critique round 2 REVISE (2 blocking, 7 nits), dispositions: B1 policy-source rule (non-jsonencode/non-document policy attributes and dynamic statement blocks fail, red case each; grep on d98906cb finds none today); B2 grant-attachment rule (a class's policy attaches only to its identity, red case reusing github_ci_branch's document); N1 shards are test_selector; N2 rec-5282's second leg re-pointed in execution step 1; N3 not taken (an amendment_log change_class word would need a fresh approval for no behaviour change); N4 facade fallback stated; N5 resource-based grants named as owned elsewhere in the docstring; N6 and N7 below. No sidecar word changed, so the wording check and approval stand."
   - "Decision 246 cl.4 disposition (round 3): the unbound check grants nothing and is not a hook or permission; shown to the operator as a notice with the approval links on 2026-11-17, and he approved the wording after it (thread record), so the build merges under standing authorisation (2026-11-16 ruling) on review PROCEED and green CI."
   - "VP 1's exact holder-set assertion is a standing guard, not a Decision 244 cl.4 one-time claim: the fast-tier check enforces the same invariant and the registry's procedure makes any grant change update its row in the same PR."
   - "Plan-critique round 3 REVISE (2 blocking, 6 nits), dispositions: B1 the attachment rule is a reference closure through source/override documents, locals, aws_iam_policy reuse and list-form attachments, with three red cases (grep finds 5 source_policy_documents uses today, all same-class); B2 the writer residual keeps the ambient-chain sentence and 'turn capture's read route honours AWS_PROFILE until rec-4707' (rec-4707 open; read_route.py still resolves AWS_PROFILE) -- a sidecar change, so a fresh wording check and approval run; N1 capture.yaml obligation points at the retry-wrapper check that reads the owner; N2 and N6 (T4.32 hint, T3.20 note) go to a later roadmap PR, the log line stands; N3 kept as written; N4 both Condition shapes named; N5 rollback restores the re-pointed acceptances."
+  - "Plan-critique round 4 REVISE (2 blocking, 3 nits), all fixed in plan text (sidecar untouched, so wording check r6 and the approval stand): B1 a Lambda-invoke Allow with a non-literal Resource is a holder (critique probe at c37b228a: no real-tree statement changes status, same nine holders); B2 the attachment closure starts at the innermost holding local including statement-list locals, and a permissions_boundary terminal grants nothing, with the agent_session_user.tf green case and a statement-list reuse red case; N1 pre_globs add _common.py and registry.py; N2 any writer qualifier matches; N3 the Decision 263 Coverage note deferral recorded."
   - "Planning owner: this planning thread (Plan the telemetry writer admission list)."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:0a5cd5ad8b4f91371d012bb8dacf84aa50661a87d48aa6409a740f37043c4f38"}
@@ -390,6 +401,7 @@ gate_rounds:
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 2, nits: 6}
   - {gate: wording-check, round: 5, verdict: PASS, digest: e5ddc5c4719674eeac15ff519af4b15a9a2aefdb8047eed30b95e17a046db8f1, base: d98906cb276ed169bc961da1ae8b9d0ce3a8c9a8, selection: degraded, pending_evaluators: 1}  # pragma: allowlist secret
   - {gate: wording-check, round: 6, verdict: PASS, digest: e5ddc5c4719674eeac15ff519af4b15a9a2aefdb8047eed30b95e17a046db8f1, base: 6924daa0707d49f4f857685869af5d94531b5760, selection: complete, pending_evaluators: 1}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 2, nits: 3}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
