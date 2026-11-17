@@ -25,7 +25,6 @@ phase: >-
   is empty.
 cites: [dec:239, dec:270, dec:249, dec:254, dec:154, dec:125, dec:126, dec:79, dec:238, dec:232, dec:246, dec:267]
 closes_criteria: []
-implementation_declared: true
 amends:
   - dec:249#2
 introduces:
@@ -109,7 +108,10 @@ scope:
           commits since the deployed record (git log --oneline over TELEMETRY_CONTENT_SOURCE_PATHSPECS, read from the
           repo by a stdlib python3 -I one-liner-free helper in the same script's data, or "first deploy"), the waking
           CI run URL, the built digest, the hold state and the deploy_config.json layer pins; then every bundled commit
-          going out over the manifest's paths; then deploy_config.json's diff over the range; then the line "CI
+          going out over the manifest's paths and the build tooling that assembles the zip (scripts/build_lambda.py,
+          scripts/build_lambda_packaging.py, scripts/build_lambda_config.py, scripts/lambda_manifest.py: a tooling
+          change alters the shipped bytes without touching a bundled file, decision-scout r4 NOTE; it does not wake the
+          channel, it is shown on the next approval); then deploy_config.json's diff over the range; then the line "CI
           publishes the layers: a pin proves which bytes run, not who built them (rec-4742)". It prints gate and HEAD
           shas. It reads no credential.
         - deploy: fails unless sha256sum(ZIP) equals CONTENT_SHA256; adds a mask for the STS account; when
@@ -217,6 +219,12 @@ scope:
     purpose: >-
       The workflow and gate-job outputs gain record_sha and record_code_sha256 from steps.resolve. The ducklake and
       prod callers ignore them; nothing else changes.
+  - file: tests/verify_ci_workflow/test_deploy_gate_wiring.py
+    action: Modify
+    purpose: >-
+      test_deploy_gate_is_workflow_call_only_with_outputs_and_manifest also requires the record_sha and
+      record_code_sha256 outputs; the wake and gate-guard tests also read deploy-telemetry-content.yml. Nodes are
+      added or extended, none renamed.
   - file: tests/ci/test_deploy_gate.py
     action: Modify
     purpose: The new channel resolves its function and pathspecs; an unknown channel raises; a single-function channel
@@ -299,7 +307,10 @@ verification_plan:
       tests/ci/test_deploy_gate.py tests/ci/test_telemetry_content_deploy_script.py tests/ci/test_telemetry_content_record.py
       tests/lambdas/ducklake_telemetry_content_reader/test_deploy_config.py
       tests/lambdas/ducklake_telemetry_content_reader/test_packaging.py tests/test_build_lambda.py
-      tests/convergence_health/code_drift/test_ducklake.py tests/checks/misc/test_sensitive_value_detectors.py -q
+      tests/convergence_health/code_drift/test_ducklake.py tests/checks/misc/test_sensitive_value_detectors.py
+      tests/verify_ci_workflow/test_deploy_gate_wiring.py tests/checks/ci_guards/test_validate_ci_rca_taxonomy_accounting.py
+      tests/checks/ops_governance/test_validate_deploy_channel_conformance.py
+      tests/checks/ci_guards/test_validate_actions_evidence.py tests/checks/contracts/test_validate_actions_capacity.py -q
     expected: All pass, and the same files against the unchanged tree fail on the new assertions.
     fix_if: A failure is fixed in the code, never by narrowing an assertion (Decision 235).
     hermetic: true
@@ -513,6 +524,67 @@ test_obligations:
     verification_step: 1
     test_selector: tests/checks/misc/test_sensitive_value_detectors.py
     red_green_expectation: red before, green after
+  - source: .github/workflows/deploy-gate.yml
+    behavior: The shared gate workflow exposes record_sha and record_code_sha256; the content channel wakes on completed CI and dispatch only, behind the shared gate guards.
+    verification_step: 1
+    test_selector: tests/verify_ci_workflow/test_deploy_gate_wiring.py
+    red_green_expectation: red before (the outputs and the content channel file are absent), green after
+  - source: scripts/checks/ci_guards/_manifest.py
+    behavior: The ci_guards manifest registers validate_content_reader_lock in the fast tier.
+    verification_step: 1
+    test_selector: tests/checks/ci_guards/test__manifest.py
+    red_green_expectation: red before (the entry is absent), green after
+  - source: config/ci_rca_taxonomy.yaml
+    behavior: validate_content_reader_lock has a function_to_category row and deploy-telemetry-content a not_a_gate workflows row.
+    verification_step: 1
+    test_selector: tests/checks/ci_guards/test_validate_ci_rca_taxonomy_accounting.py
+    waiver_reason: >-
+      The taxonomy rows are registrations that the standing validate_ci_rca_taxonomy accounting check enforces over the
+      real tree in the fast tier; a new check or workflow without its row is already red there, so a new node would
+      duplicate that gate.
+  - source: .github/CODEOWNERS
+    behavior: The new workflow, deploy script and check are code-owned.
+    verification_step: 1
+    test_selector: tests/checks/misc/test_sensitive_value_detectors.py
+    red_green_expectation: red before (the PROTECTED paths lack an owner), green after
+  - source: config/agent/executor/capabilities.yaml
+    behavior: boundary_patterns name the deploy script and the check.
+    verification_step: 1
+    test_selector: tests/checks/misc/test_sensitive_value_detectors.py
+    red_green_expectation: red before (the PROTECTED paths are outside boundary_patterns), green after
+  - source: docs/contracts/build-lambda.yaml
+    behavior: deploy_channels names telemetry_content_function as operator_gated with its governed channel; cli_flags names --content-reader-only.
+    verification_step: 1
+    test_selector: tests/checks/ops_governance/test_validate_deploy_channel_conformance.py
+    waiver_reason: >-
+      validate_deploy_channel_conformance runs over the real contract in the fast tier and fails on a channel row whose
+      workflow is absent or unnamed; its existing nodes cover the shape, and the row is agent-read mechanism text.
+  - source: docs/contracts/deploy-paths.yaml
+    behavior: deploy_code names the operator-gated content channel and its recovery rows.
+    verification_step: 3
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: >-
+      Agent-read routing prose with no machine consumer of the new rows; the fast tier's contract schema and line-budget
+      checks cover its shape, and critique reads the words.
+  - source: docs/contracts/ducklake_telemetry_content_reader.yaml
+    behavior: The contract names the deploy channel, deploy_config.json and the Decision.
+    verification_step: 1
+    test_selector: tests/lambdas/ducklake_telemetry_content_reader/test_packaging.py
+    red_green_expectation: red before (the contract names no channel and the manifest is a stub), green after
+  - source: docs/contracts/github-actions-evidence.yaml
+    behavior: The deploy and record jobs and the artifact upload are governed rows.
+    verification_step: 1
+    test_selector: tests/checks/ci_guards/test_validate_actions_evidence.py
+    waiver_reason: >-
+      validate_actions_evidence runs over the real workflows in the fast tier and fails on an ungoverned deploy job or
+      upload, so the new workflow without these rows is already red there; a new node would duplicate that gate.
+  - source: docs/contracts/actions-capacity.yaml
+    behavior: The new workflow_run workflow has its deploy-channel capacity row.
+    verification_step: 1
+    test_selector: tests/checks/contracts/test_validate_actions_capacity.py
+    waiver_reason: >-
+      validate_actions_capacity runs over the real workflows in the fast tier and fails on a workflow_run workflow
+      without a row, so the gap is already red there; a new node would duplicate that gate.
 constraints:
   - "No rescue agents or workaround loops (Decision 55). No local Lambda deploy: the channel is the only path (Decision 239 cl.5, Decision 270 cl.3)."
   - "Never write an account id, ARN with an account, ExternalId, key, API id or host into the repo, a PR, a comment or the shared folder (Decision 101). The operator's VP 6 and VP 11 output is pasted with any account id removed."
@@ -522,6 +594,7 @@ constraints:
 context:
   - "Decision-scout r1 FLAGS_FOUND (NOTEs: 249 SPIRIT on the protective-set pathspecs -> the new Decision amends 249 cl.2 for this channel; 232/NS.9 SPIRIT -> the summary leads with intent and evidence). r2 FLAGS_FOUND (NOTEs: Decision 267's lock-available condition fires when this closes rec-4696 -> rec-5323 re-decides 267 cl.5; Decision 181 cl.2 residual owners -> rec-5322 named in the Decision and followon_recs). Spirit flags: none at r2. Decisions triaged: 219 of 219. Roadmap items intersected: 10; CONFLICT: 0; RELATED: 10. Serves: NS.9 4/5. CITE: 239, 270, 249, 254, 154, 125, 126, 79, 238, 232."
   - "Decision-scout r3 FLAGS_FOUND (r1 and r2 flags resolved; one new NOTE: 232 SPIRIT, github_ci_branch can write deploy-records/telemetry-content/, so a forged record could make the approval summary under-list what ships -> the build proves the recorded commit builds the recorded digest and the deploy step proves the live CodeSha256 equals the record before any change, with a rebaseline dispatch as the recovery). Decisions triaged: 219 of 219. Roadmap items intersected: 10; CONFLICT: 0; RELATED: 10. Serves: NS.9 4/5. CITE: 239, 270, 249, 254, 154, 125, 126, 79, 238, 232, 246, 267."
+  - "Decision-scout r4 FLAGS_FOUND (r3 NOTE resolved: a forged record passes the baseline checks only when it matches what is live, and an empty record or rebaseline over-lists, never under-lists; the shared deploy-gate.yml outputs raise no flag). One new NOTE: 239 SPIRIT, the build tooling (build_lambda.py, build_lambda_packaging.py, build_lambda_config.py, lambda_manifest.py) assembles the approved zip but sits outside the manifest paths -> the approval summary also lists every tooling commit going out; it does not wake the channel, consistent with Decision {{N}} cl.1's bundled-files rule. Decisions triaged: 219 of 219. Roadmap items intersected: 10; CONFLICT: 0; RELATED: 10. Serves: NS.9 4/5."
   - "Operator rulings 2026-11-17 (this planning thread): the split into plan A (this) and plan B (rec-5322: protected-path edit hook, golden masked read-back leg); the channel asks only when the protective set changes or on a deliberate dispatch (his words: the daily asks would be ceremony); 'write the plan' 19:47Z. Blind Fable consult: /mnt/project-files/content-reader-lock/advisor-brief-plan2/ (adopted: 249 gate, record via the CI deploy role, pinned layers, no invoke, narrow watched set)."
   - "Live grants read at planning (main 163d90b1): telemetry-content-deploy holds GetFunction/GetFunctionConfiguration/UpdateFunctionCode/UpdateFunctionConfiguration on the function and GetLayerVersion on both layers (terraform/bootstrap/telemetry_content_deploy_role.tf); its trust names deploy-telemetry-content.yml@refs/heads/main and the Environment sub; github_ci_branch's S3ReadWrite (bucket/*) covers the gate's read of deploy-records/telemetry-content/; the execution role already reads the data and blob prefixes and the reader DSN parameter. Whether a run waiting on Environment approval holds the workflow concurrency group is UNPROVEN; VP 9's first run shows it."
   - "Bootstrap apply is red on main since #2076 (Access Analyzer preview, unowned per the coordinator 2026-11-17); this plan changes no bootstrap file. The sandbox apply was green on ddb28a40."
@@ -529,7 +602,7 @@ context:
   - "Reds: rec-5247 and rec-5248 (telemetry read timeouts) are owned by the read-timeouts thread; the content verbs read one row or one session tree, not the 7-day roots read. red_overlap (2026-11-17, base 163d90b1) BLOCKED: rec-5247 slo_breached (20.3 h, product_regression), shared paths none. Deferral rationale (Decision 226): this plan does not repair it, shares no file with it, and its words do not depend on it; the operator ruled 2026-11-17 that builds may proceed past reds that share no files. VP 7 runs red_overlap again before the first commit."
   - "Overlapping open work: #2148 (actions SHA-pinning) and #2071 touch config/ci_rca_taxonomy.yaml and scripts/checks/ci_guards/_manifest.py; whichever lands second rebases. T4.28 c6 also edits capabilities.yaml boundary_patterns (additive)."
   - "Layer pins: the planning and build sessions cannot read Lambda layers (probe 2026-11-17 exit 254), so VP 6 is the operator's read. A layer republish deletes the old version (no skip_destroy in terraform/personal/ducklake_lambdas.tf), so the next approved deploy fails at the pin check until a pin commit; owned by rec-4738, named in deploy-paths.yaml."
-  - "Graduated shards kept, node ids unchanged: dependabot-config-guard-is-pre-tier-on-config-edits (test__manifest.py), deploy-gate-decisions (test_deploy_gate.py), ops-row-rules-wiring, telemetry-writer-packaging and telemetry-writer-smoke-gate (test_ducklake.py), telemetry-writer-stub-handler (test_build_lambda.py). Each of those files gains nodes only; the build renames and deletes none of a shard's named nodes, and VP 1 runs each file."
+  - "Graduated shards kept, node ids unchanged: dependabot-config-guard-is-pre-tier-on-config-edits (test__manifest.py), deploy-gate-decisions (test_deploy_gate.py), ops-row-rules-wiring, telemetry-writer-packaging and telemetry-writer-smoke-gate (test_ducklake.py), telemetry-writer-stub-handler (test_build_lambda.py), deploy-gate-wiring (test_deploy_gate_wiring.py). Each of those files gains nodes only; the build renames and deletes none of a shard's named nodes, and VP 1 runs each file."
   - "Bundled recs' own acceptance probes are UNDECIDABLE per plan_obligations (rec-5246 and rec-4696 carry prose acceptance); this plan's acceptance_criteria and VP 9-12 are the decidable proof, and VP 12 closes both recs citing VP 9 and VP 10's read-backs."
   - "Decision 79: the manifest flip makes the artifact active; VP 9 (deploy and read-back) and VP 10 (the masked read) are its deploy and smoke steps."
   - "Rollback: before the first approval nothing changed in AWS but the IAM line; revert the PR (the sandbox apply removes the prefix). After a deploy, a bad reader is fixed forward through the channel, or the operator re-deploys the previous record's commit by dispatching from it; the placeholder returns only through an operator admin action."
@@ -537,6 +610,7 @@ gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:d9d6ce8b3bc9ccdc230cbe0f7e6d584cd703d11b06713a1c8fb373cc36a8b46b'}  # pragma: allowlist secret
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:a15caee1aad2ff925dc6dd2e60fbf4050840193d8e60116e3643ed878a73e501'}  # pragma: allowlist secret
   - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:ec2261b10f09636dd516264c5eeba11bee9f56ab19231551cf00e29151a3a7d9'}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 4, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:099c7784634ccb9678b37afe86e9c1ecc755c997fb3c457135ca79d77d9d0f14'}  # pragma: allowlist secret
   - {gate: wording-check, round: 1, verdict: FAIL, digest: 042b3d268505bce0bb048131795934e2d1b7420b6aa23bd3c007796f5cd13392, base: 163d90b12426a7e978e3f88fbdd2ee941db973f5, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 2, verdict: PASS, digest: 1f8c2fd943933c49f6049fa0fe80a6c075e850a35e3686d0079f03fe0da906fa, base: 163d90b12426a7e978e3f88fbdd2ee941db973f5, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
