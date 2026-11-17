@@ -138,18 +138,19 @@ verification_plan:
       "aws_profile=" -out="$W/head.bin" > "$W/plan.txt" 2>> "$L"; echo "HEAD_PLAN_EXIT $?"; grep -E '^Plan: '
       "$W/plan.txt"; terraform -chdir="$B" show -json "$W/head.bin" > "$W/plan.json" 2>> "$L"; jq -r '.resource_changes[]
       | select(.change.actions != ["no-op"]) | "\(.change.actions | join(",")) \(.address) ok_before=\(.change.before.ok_actions
-      | length) ok_after=\(.change.after.ok_actions | length) only_ok=\((.change.before | del(.ok_actions)) ==
-      (.change.after | del(.ok_actions)))"' "$W/plan.json" | LC_ALL=C sort; echo "PR_HEAD_SHA $PR_HEAD_SHA" )
+      | length) ok_after=\(.change.after.ok_actions | length) diff=\(. as $r | [(.change.before + .change.after |
+      keys[]) | select(. != "ok_actions" and $r.change.before[.] != $r.change.after[.])] | unique | join(","))"'
+      "$W/plan.json" | LC_ALL=C sort; echo "PR_HEAD_SHA $PR_HEAD_SHA" )
     expected: >-
       SCREEN_OK; HEAD_PLAN_EXIT 2; Plan: 0 to add, 6 to change, 0 to destroy.; exactly six lines, each "update
-      aws_cloudwatch_metric_alarm.platform_security_X ok_before=0 ok_after=1 only_ok=true" for X in agent_session_iam_change,
+      aws_cloudwatch_metric_alarm.platform_security_X ok_before=0 ok_after=1 diff=" (empty diff) for X in agent_session_iam_change,
       alerts_topic_change, denied_iam_write, detector_tamper, ducklake_api_change and platform_role_iam_change; no
       iam_event_heartbeat line; the sha.
     fix_if: >-
       SCREEN_REFUSED: nothing was initialised; if main moved under terraform/ the build rebases and re-posts, else the
       head carries files beyond scope and the build stops. A setup line: the operator reads $HOME/pok-tf.err in
-      CloudShell and re-pastes. only_ok=false on a row: something besides ok_actions differs (provider drift or an edit
-      beyond scope); stop, do not merge, report the address. Any other address or action (another merged-unapplied
+      CloudShell and re-pastes. A non-empty diff= on a row names the other attributes that differ (key names only, never
+      values): provider normalisation or drift, or an edit beyond scope; stop, do not merge, report the address and keys. Any other address or action (another merged-unapplied
       bootstrap change, or drift): stop, do not merge, report to the coordinator.
     hermetic: false
     graduation: not-applicable
@@ -184,11 +185,11 @@ verification_plan:
       -input=false -no-color -var-file="$W/vars.tfvars" -var "account_id=$A" -var "aws_profile=" -out="$W/apply.bin" >
       "$W/plan.txt" 2>> "$L"; S=$(grep -E '^Plan: ' "$W/plan.txt"); echo "$S"; terraform -chdir="$B" show -json
       "$W/apply.bin" > "$W/plan.json" 2>> "$L"; G=$(jq -r '.resource_changes[] | select(.change.actions != ["no-op"]) |
-      .address' "$W/plan.json" | LC_ALL=C sort | tr '\n' ' '); O=$(jq '[.resource_changes[] | select(.change.actions !=
-      ["no-op"]) | select((.change.before | del(.ok_actions)) != (.change.after | del(.ok_actions)))] | length'
-      "$W/plan.json"); [ "$S" = "Plan: 0 to add, 6 to change, 0 to destroy." ] && [ "$O" = 0 ] && [ "$G" =
+      .address' "$W/plan.json" | LC_ALL=C sort | tr '\n' ' '); O=$(jq -r '[.resource_changes[] | select(.change.actions !=
+      ["no-op"]) | . as $r | (.change.before + .change.after | keys[]) | select(. != "ok_actions" and $r.change.before[.]
+      != $r.change.after[.])] | unique | join(",")' "$W/plan.json"); [ "$S" = "Plan: 0 to add, 6 to change, 0 to destroy." ] && [ -z "$O" ] && [ "$G" =
       "aws_cloudwatch_metric_alarm.platform_security_agent_session_iam_change aws_cloudwatch_metric_alarm.platform_security_alerts_topic_change aws_cloudwatch_metric_alarm.platform_security_denied_iam_write aws_cloudwatch_metric_alarm.platform_security_detector_tamper aws_cloudwatch_metric_alarm.platform_security_ducklake_api_change aws_cloudwatch_metric_alarm.platform_security_platform_role_iam_change " ]
-      || { echo APPLY_SKIPPED; exit 1; }; date -u +APPLY_START_%H:%MZ; terraform -chdir="$B" apply -input=false -no-color
+      || { echo "APPLY_SKIPPED${O:+ diff=$O}"; exit 1; }; date -u +APPLY_START_%H:%MZ; terraform -chdir="$B" apply -input=false -no-color
       "$W/apply.bin" > /dev/null 2>> "$L" && echo APPLY_DONE || { echo APPLY_FAILED; exit 1; }; terraform -chdir="$B"
       plan -lock=false -input=false -no-color -detailed-exitcode -var-file="$W/vars.tfvars" -var "account_id=$A" -var
       "aws_profile=" > /dev/null 2>> "$L"; echo "REPLAN_EXIT $?"; aws cloudwatch describe-alarms --alarm-name-prefix
@@ -199,7 +200,7 @@ verification_plan:
       lines, one per platform-security-* alarm, each "1 1 True"; M.
     fix_if: >-
       SCREEN_REFUSED or a setup line: nothing initialised; as VP 5. APPLY_SKIPPED: nothing applied; stop and report the
-      summary. APPLY_FAILED or REPLAN_EXIT 2: report the error class in words; a partial apply is finished by a plan
+      summary and any diff= keys. APPLY_FAILED or REPLAN_EXIT 2: report the error class in words; a partial apply is finished by a plan
       amendment's CloudShell block, never by -target. An ALARM line other than "1 1 True": report it; a forward-fix PR
       or plan amendment follows, never a console edit.
     hermetic: false
@@ -207,19 +208,19 @@ verification_plan:
   - step: 7
     phase: post-deploy
     action: >-
-      Behavioural proof, 30 minutes or more after VP 6's APPLY_START: the detector-tamper alarm the apply fired has
-      returned to OK, read from the build session with the routine profile, and the operator confirms both its ALARM
-      and its OK email arrived after APPLY_START (CloudWatch alarm history is denied to the session user and ages out,
+      Behavioural proof, triggered by the operator's report (in the thread) that the detector-tamper ALARM and then OK
+      emails arrived after VP 6's APPLY_START; on that report the build reads, with the routine profile, that the alarm
+      is OK with a state change after APPLY_START (the build never sleeps or polls for it) (CloudWatch alarm history is denied to the session user and ages out,
       so the emails are the record).
     command: >-
-      aws cloudwatch describe-alarms --profile agent_platform --region "$(tr -d '[:space:]' < config/aws-region)"
+      aws cloudwatch describe-alarms --profile agent_platform --region "$(tr -d '[:space:]' < "$(git rev-parse --show-toplevel)/config/aws-region")"
       --alarm-names platform-security-detector-tamper --query 'MetricAlarms[].[AlarmName, StateValue,
       StateUpdatedTimestamp, length(OKActions)]' --output text
     expected: >-
       One line: platform-security-detector-tamper OK, a StateUpdatedTimestamp after APPLY_START, 1. The operator reports
       a detector-tamper ALARM email and then an OK email, both after APPLY_START.
     fix_if: >-
-      State ALARM after 30 minutes: a write is still matching the tamper filter; triage it as a detector alert before
+      State ALARM when the operator reports: a write is still matching the tamper filter; triage it as a detector alert before
       anything else. State OK but timestamp before APPLY_START: the apply's writes never fired the tamper alarm; record
       it and file a rec on the tamper filter. OK email missing while the state is OK after APPLY_START: the OK action did
       not deliver; report and file a rec, never re-apply by hand.
@@ -249,12 +250,13 @@ context:
   - "CLOUDSHELL_REQUIRED is by design: aws_cloudwatch_metric_alarm is outside CI_TYPES in scripts/ci/terraform_bootstrap_apply_classify.py (read 2026-11-17)."
   - "Live read (2026-11-17, agent_platform): describe-alarms works for the session user; cloudwatch:DescribeAlarmHistory, logs:FilterLogEvents and logs:StartQuery on platform-security-cloudtrail are denied, hence VP 7's email confirmation."
   - "The merge push's preview runs the Access Analyzer step from #2076; that step failed on #2076's own merge run (2026-11-16 23:44Z), owned by the AWS policy checks thread. This plan changes no IAM document, so the step has nothing to check; if it still fails at merge the build cites the owning thread and does not fix it inline."
-  - "Unbuilt PLAN-agent-proxy-signed-access also scopes both files; whichever builds second rebases (plan_obligations, 2026-11-17)."
+  - "PLAN-agent-proxy-signed-access (plan B; plan_obligations 2026-11-17 flags it unbuilt, build state unconfirmed since the agent-session pair it names is already on main) also scopes both files; if it builds, whichever lands second rebases."
   - "Red-overlap 2026-11-17 11:50Z: verdict blocked by rec-5247 (telemetry-reader smoke 504; rule slo_breached, shared none). Deferral rationale: this plan shares no file or path with that red (two detector files in terraform/bootstrap and their text test) and does not repair it, so rec-5247 is deferred to its owning repair, not bundled here."
   - "Approvals at build start: none for the build session. It runs no secret read, admin credential or terraform command; VP 4-6 are the operator's own CloudShell blocks, and VP 7 uses the routine agent_platform profile."
   - "V3 resolution: VP 5's operator-run pre-merge plan at the PR head substitutes for pre-merge post-deploy evidence; behavioural acceptance is VP 6-7, operator-reported in a counts-only PR comment naming the applied sha."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:58b81a62487dc1721fe5b0b4cd8de4e222759a5af028b0d1a61b3cd921ff4259'}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: PROCEED, blocking: 0, nits: 4}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -266,7 +268,7 @@ execution_steps:
   - "Test first (scope row 2), seen red on the unchanged tree; then the Terraform edit. Post: VP 1-2 pass."
   - "Commit; VP 3; push; PR; CI green."
   - "Post VP 4 and VP 5 to the operator with the full head sha in one message; record the lines on the PR; once VP 5 matches, merge (squash) at that head, then post VP 6 at the merge sha in the same sitting and record its lines."
-  - "VP 7 after 30 minutes; record the result on the PR."
+  - "VP 7 when the operator reports the detector-tamper OK email (no sleep or poll); if no report arrives, ask once after an hour; record the result on the PR."
   - "Execute Verification Plan: run each step; loop until pass; on an unrecoverable V3 failure stop and RCA (Decision 55)."
   - "Report: what was implemented, the validation_result --verify-head verdict, VP 5-7's lines and the merge SHA."
 rollback: >-
