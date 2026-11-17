@@ -59,20 +59,29 @@ scope:
     action: Modify
     new_imports: [scripts.checks.contracts._evaluator_coverage]
     purpose: >-
-      resolve_evaluator gains keyword-only live_table: LiveTable | None and coverage: dict[str, CoverageRow] | None
-      (None -> loaded from root; a load error string -> (False, that string)). agent_surface branch, in order: the
+      resolve_evaluator gains keyword-only live_table: LiveTable | None, coverage: dict[str, CoverageRow] | None and
+      body: list[str] | None. The check branch never reads live_table, and reads coverage (None -> loaded from
+      root/docs/contracts/contract-population.yaml) only when body is not None. In the agent_surface branch a None
+      live_table or coverage is loaded from root, and a load error string returns (False, that string). agent_surface branch, in order: the
       existing path-exists-and-contains-basename test; surface_liveness; a coverage row with triggers;
       triggers_resolve; instructed_keys errors. check branch: unchanged resolution, then when the contract's row has
-      asserts, asserts_resolve over the module and one_hop_scripts_imports (the contract's body keys come from a new
-      keyword-only body: list[str] | None; None skips asserts). Detail strings name the failing rule. No other function
-      changes.
+      asserts, asserts_resolve over the module and one_hop_scripts_imports (body None skips asserts). Detail strings
+      name the failing rule. No other function changes.
   - file: scripts/checks/contracts/validate_contract_drift.py
     action: Modify
     purpose: >-
-      Loads the live table and coverage table once per run (an error string -> one failed[] entry "Contract drift
-      (coverage): <error>" and the per-contract coverage reads are skipped, fail closed); passes them and each file's
-      body keys to resolve_evaluator; after the loop appends retired_marker_errors and coverage_table_errors as
-      "Contract drift (coverage): ..." failures; prints one "  Coverage: ..." line per Class D contract that resolved
+      Loads both tables once per run from target_dir (the scanned contracts directory), following the existing
+      precedent that declared_subtrees and the ratchet pins read target_dir/contract-population.yaml: the coverage
+      rows from target_dir/contract-population.yaml evaluator_coverage (file or key absent -> no rows), and the live
+      table from target_dir/instruction-architecture.yaml (absent -> an empty table, so no agent surface is live). A
+      malformed table that is present is one failed[] entry "Contract drift (coverage): <error>" (fail closed). On the
+      real tree both files exist, so a deleted or emptied table turns every agent_surface contract red. It passes both
+      tables and each file's body keys to resolve_evaluator, whose root stays _common.ROOT. After the loop it appends
+      coverage_table_errors (kinds from this run's valid Class D files) and, only when
+      target_dir/instruction-architecture.yaml exists, retired_marker_errors(_common.ROOT, table) (otherwise it prints
+      "  advisory-SKIP: retired-marker guard -- no instruction-architecture.yaml in <dir>"), each as "Contract drift
+      (coverage): ..." failures. The gate-fixture modules under tests/checks/contracts/validate_contract_drift/ write
+      neither file and use only check evaluators, so their assertions are unaffected and none needs editing. It prints one "  Coverage: ..." line per Class D contract that resolved
       (asserted from its row's asserts, instructed from its row's triggers, both empty for a check contract without
       asserts) and one "  Coverage totals: contracts=<n> asserted=<a> instructed=<i> neither=<z>" line (key counts).
       Census, ratchet and Pass 2 untouched.
@@ -145,7 +154,8 @@ scope:
   - file: tests/checks/contracts/test__population.py
     action: Modify
     purpose: >-
-      test_agent_surface_evaluator_must_be_live (rec-5263's acceptance node): with an injected live table and coverage
+      test_agent_surface_evaluator_must_be_live, a module-level function (rec-5263's acceptance node; the existing
+      module-level function at :439 is the placement precedent): with an injected live table and coverage
       row, resolve_evaluator fails a contract whose agent_surface is a retired skill and one whose surface matches no
       glob, and passes the same contract pointed at a live surface with a resolving trigger. Plus
       test_check_evaluator_asserts_need_evidence. Existing agent_surface cases (test_agent_surface_pass_and_fail,
@@ -153,12 +163,11 @@ scope:
   - file: tests/checks/contracts/validate_contract_drift/test_evaluator_resolution.py
     action: Modify
     purpose: >-
-      Fixture trees gain an instruction-architecture.yaml live table and an evaluator_coverage row where they use
-      agent_surface, so their existing assertions keep their meaning; plus one case where the drift gate fails a
-      fixture contract naming a retired surface and prints its Coverage line otherwise.
-  - file: tests/checks/contracts/validate_contract_drift/conftest.py
-    action: Modify
-    purpose: Only if the shared fixture writer needs the live table and coverage files; otherwise untouched.
+      Its direct resolve_evaluator agent_surface cases (:97-:118) pass an injected live table and coverage row, so
+      their existing assertions keep their meaning; plus test_gate_fails_a_retired_surface_and_prints_coverage: a
+      tmp contracts dir holding instruction-architecture.yaml (one retired path) and contract-population.yaml (one
+      evaluator_coverage row) fails a fixture contract naming the retired surface, and prints a Coverage line for it
+      once re-pointed at a live surface.
 bundled_recommendations: [rec-5263]
 followon_recs: [rec-5285]
 infrastructure_dependencies:
@@ -248,8 +257,8 @@ verification_plan:
     hermetic: true
     graduation: waive
     graduation_waiver_reason: >-
-      The liveness rule the gate now enforces (VP 3) refuses a retired or off-table surface on every run; this sweep
-      only proves this build re-pointed all six.
+      The liveness or trigger rule the gate now enforces (VP 3) refuses each old surface on every run (docs/CLAUDE.md
+      is live, so there the trigger rule does it); this sweep only proves this build re-pointed all six.
   - step: 6
     phase: pre-deploy
     action: Full tier on the committed, rebased tree before handoff (handoff_policy).
@@ -257,7 +266,9 @@ verification_plan:
     expected: Exit 0; its verdict read with bin/venv-python -m scripts.checks.validation_result --verify-head.
     fix_if: Any failing check; fix it on the branch, never skip it.
     hermetic: false
-    graduation: not-applicable
+    graduation: waive
+    graduation_waiver_reason: >-
+      recursion_refusal: the graduate partition refuses a step that invokes scripts.validate (vp-red-before.yaml).
   - step: 7
     phase: post-deploy
     action: rec-5263 reads back closed after the squash merge's Resolves trailer.
@@ -314,29 +325,29 @@ test_obligations:
     red_green_expectation: red before (row absent), green after
   - source: docs/contracts/overseer-dispatch.yaml
     behavior: Its evaluator names a live surface holding its trigger.
-    verification_step: 5
-    command: grep -rhE
-    red_green_expectation: red before (old surface named), green after
+    verification_step: 3
+    command: from scripts.checks.contracts.validate_contract_drift import validate_contract_drift as v
+    red_green_expectation: red before (old surface or no row), green after
   - source: docs/contracts/restore-rehearsal.yaml
     behavior: Its evaluator names a live surface holding its trigger.
-    verification_step: 5
-    command: grep -rhE
-    red_green_expectation: red before (old surface named), green after
+    verification_step: 3
+    command: from scripts.checks.contracts.validate_contract_drift import validate_contract_drift as v
+    red_green_expectation: red before (old surface or no row), green after
   - source: docs/contracts/package-registry-reservation.yaml
     behavior: Its evaluator names a live surface holding its trigger.
-    verification_step: 5
-    command: grep -rhE
-    red_green_expectation: red before (old surface named), green after
+    verification_step: 3
+    command: from scripts.checks.contracts.validate_contract_drift import validate_contract_drift as v
+    red_green_expectation: red before (old surface or no row), green after
   - source: docs/contracts/visual-grammar.yaml
     behavior: Its evaluator names a live surface holding its trigger.
-    verification_step: 5
-    command: grep -rhE
-    red_green_expectation: red before (old surface named), green after
+    verification_step: 3
+    command: from scripts.checks.contracts.validate_contract_drift import validate_contract_drift as v
+    red_green_expectation: red before (old surface or no row), green after
   - source: docs/contracts/coordinator.yaml
     behavior: Its evaluator names a live surface holding its trigger.
-    verification_step: 5
-    command: grep -rhE
-    red_green_expectation: red before (old surface named), green after
+    verification_step: 3
+    command: from scripts.checks.contracts.validate_contract_drift import validate_contract_drift as v
+    red_green_expectation: red before (old surface or no row), green after
 constraints:
   - "Decision 168 cl.2 bar: the existing basename and literal evidence rules stay intact; this plan only adds conditions (reversal (a): extend, never bypass)."
   - "Decision 235 cl.5: validate_contract_drift is in the irreducible floor; nothing here relaxes it."
@@ -347,15 +358,17 @@ context:
   - "Decision-scout r2 FLAGS_FOUND (NOTE Decision 244 cl.4: the real-tree test named the overseer path, which Decision 247's file removal would falsify), adopted: the node asserts over the live table. r1 flags (Decision 131 test mirror name; Decision 251 pointer-only row; Decision 247 overseer-only keys) adopted: test__evaluator_coverage.py, the deploy-paths row points without restating, rec-5286 owns the overseer-only sections. CITE: Decision 168, Decision 246, Decision 247, Decision 251. Decisions triaged: 218 of 218. Roadmap items intersected: 3; CONFLICT: 0; RELATED: 2. Serves: NS.4 3/5."
   - "Operator rulings 2026-11-17 (Benjamin, this plan's thread): a contract named as another contract's agent surface is live when that contract's own surface is live (chain from a live surface), capped at one intermediate contract, with loops and self-pointers refused."
   - "Decided with notice: triggers and asserts live in contract-population.yaml evaluator_coverage, not in EvaluatorSpec, because the sidecar's wording check runs on main's code (a new schema field would fail it), and the table follows the layer4_relocation_map precedent in instruction-architecture.yaml (pointers from live surfaces into contracts, a T2.54 seed). EvaluatorSpec is unchanged."
+  - "Residuals recorded on recs: rec-5285 (some trigger rows quote a mention or a header comment, which the gate cannot tell from an instruction); rec-5286 (deleting the overseer files must also remove them from retired_surfaces.paths, governing text that needs its own approved sidecar)."
   - "Planning-time split: rec-5285 declares asserts for the other check-evaluated contracts and makes a row required. Out-of-remit finding filed as rec-5286 (overseer-only sections, Decision 247)."
   - "Graduated shards kept unchanged: contracts-evaluator-must-read-its-contract, evaluator-matcher-rejects-prose-literal (their files gain fixtures only)."
-  - "Unbuilt plans also editing these files (whichever builds second rebases): deploy-paths.yaml -- agent-proxy-signed-access, bootstrap-ci-gated-apply, neon-key-out-of-pr-plans, sit-organization, telemetry-content-reader-lock; coordinator.yaml -- decision-229-subagent-scope, wording-approval-routing; restore-rehearsal.yaml -- sit-restore-spike. deploy-paths has 11 lines of headroom after this build."
+  - "Unbuilt plans also editing these files (whichever builds second rebases): deploy-paths.yaml -- agent-proxy-signed-access, bootstrap-ci-gated-apply, neon-key-out-of-pr-plans, sit-organization, telemetry-content-reader-lock; coordinator.yaml -- decision-229-subagent-scope, persona-check-origin, wording-approval-routing; restore-rehearsal.yaml -- sit-restore-spike; scripts/checks/verification/_manifest.py -- graduated-rerun-plan-readers, merge-race-attestation; scripts/checks/roadmap/_manifest.py -- wording-approval-routing, work-graph-edge-model. deploy-paths has 11 lines of headroom after this build."
   - "CI Reform's wording-approval routing (PR #2071, pending): deploy-paths.yaml admin_out_of_band is a gated key there, so the whole file rides this sidecar; project-alignment.yaml (gated whole) is not edited by this plan."
   - "Red-overlap 2026-11-17 16:50Z: verdict blocked by rec-5247 (telemetry-reader smoke 504 read_deadline_exceeded; rule slo_breached, shared none). Deferral rationale (Decision 226): this plan shares no file or path with that red (contract gate code, contracts and their tests; no telemetry, reader or smoke code) and does not repair it, so rec-5247 is deferred to its owner, Feedback Loop; Benjamin 2026-11-17: plan merges defer to it and proceed, and the build follows normal green-main rules."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:6fcc048181ea5424eb6c1f4ba60c03fa8f8649c3687ac688fbd168bd8205be6b"}
   - {gate: wording-check, round: 1, verdict: PASS, digest: 135fdfe9c52468e7a84dd17ee62c0122f122f13334190c8c65397d901be8febe, base: c37b228aa1b5d0b820c45193d3cc35716f774fe5, selection: complete}  # pragma: allowlist secret
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:63a65a6f319b6280d6ff3127c0c40a5a7beb56171d1ab3b775c4fa1b9675c1e7"}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 6}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
