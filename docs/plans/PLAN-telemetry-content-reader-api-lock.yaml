@@ -59,14 +59,17 @@ scope:
   - file: terraform/bootstrap/telemetry_content_deploy_role.tf
     action: Create
     purpose: Its sidecar block verbatim. Inert until plan 2's workflow exists.
-  - file: terraform/bootstrap/telemetry_content_placeholder.zip
+  - file: terraform/lambda-placeholders/telemetry_content_placeholder.zip
     action: Create
     purpose: >-
       Committed inert placeholder (environment-taxonomy conformance: Terraform reads no build artifact). One member,
       src/lambdas/ducklake_telemetry_content_reader/handler.py, whose handler returns statusCode 503 with body
       {"error": "content_reader_not_deployed"} to every event; written byte-reproducibly (fixed mtime, mode 0644,
       ZIP_DEFLATED) and its sha256 pinned in the IAM test. The sidecar's .gitignore line un-ignores this one path, so
-      validate_terraform_no_build_artifact_reads (rule b) passes: the file is tracked source, not a build output.
+      validate_terraform_no_build_artifact_reads (rule b) passes: the file is tracked source, not a build output. It sits
+      outside every Terraform root because the bootstrap screen (scripts/ci/terraform_hcl_screen.py read_root and
+      tree_rules) refuses any non-.tf or binary file in terraform/bootstrap; telemetry_content_reader.tf reads it as
+      ${path.module}/../lambda-placeholders/telemetry_content_placeholder.zip.
   - file: .gitignore
     action: Modify
     purpose: Its sidecar block verbatim (the placeholder's un-ignore line, directly under *.zip).
@@ -125,9 +128,18 @@ scope:
   - file: terraform/personal/ducklake_telemetry_reader.tf
     action: Modify
     purpose: >-
-      reserved_concurrent_executions 5 -> 3, with a comment naming the content reader: the reader login's CONNECTION
-      LIMIT 10 is summed across both functions (Decision 239 cl.1, Decision 230 cl.3). A non-IAM in-budget update that
-      the sandbox apply applies after merge.
+      reserved_concurrent_executions 5 -> 4, with a comment naming the content reader (1): the reader login's CONNECTION
+      LIMIT 10 is summed across both functions at two slots each (Decision 239 cl.1, Decision 230 cl.3). 4, not 3: the
+      reader's daily peak ConcurrentExecutions over 14 days to 2026-11-17 was 2-5 with zero throttles (critic's
+      CloudWatch read), and its client retries only 502/503/504, so 3 would add a 429 failure class while rec-5247 and
+      rec-5248 are open; the content reader serves one feedback-loop consumer, so 1 suffices until plan 2 measures it.
+      A non-IAM in-budget update that the sandbox apply applies after merge.
+  - file: tests/checks/iam_tf/test_telemetry_reader_and_twin_pins.py
+    action: Modify
+    purpose: >-
+      concurrency_problems sums both functions (2 * (reader + content) <= the login's limit, the content literal read
+      from terraform/bootstrap/telemetry_content_reader.tf), and the red-twin mutation moves from
+      "reserved_concurrent_executions = 5" to "= 4" so it still bites (Decision 235: no case dropped).
   - file: src/lambdas/ducklake_telemetry_content_reader/access_log.py
     action: Modify
     purpose: >-
@@ -146,8 +158,9 @@ scope:
   - file: scripts/telemetry_capture/read_route.py
     action: Modify
     purpose: >-
-      Under OTL_OPS_VERBS_TRANSPORT=execute_api the content reader resolves /agent-platform/ducklake/api_url/telemetry/content
-      as the event reader resolves its route; the function_url transport stays as it is. Its docstring drops "no API route yet".
+      The content reader resolves only /agent-platform/ducklake/api_url/telemetry/content through the API transport (the
+      function has no Function URL); under the function_url transport it raises a clear error naming the API route
+      instead of probing a Function URL that cannot exist. Its docstring drops "no API route yet".
   - file: docs/contracts/ducklake_telemetry_content_reader.yaml
     action: Modify
     purpose: The principal becomes agent-platform-session over the telemetry/content route (no Function URL); the deploy role telemetry-content-deploy is named.
@@ -199,6 +212,11 @@ scope:
   - file: tests/telemetry_capture/test_read_route.py
     action: Modify
     purpose: execute_api resolves the content route parameter; a content verb on the event route still raises WrongRoute.
+  - file: docs/plans/PLAN-telemetry-content-reader-lock.yaml
+    action: Delete
+    purpose: >-
+      The superseded, never-built plan (#1723: Function URL, PlatformDev caller, other role names) is retired by
+      deletion with provenance in git history (docs/CLAUDE.md plans lifecycle), so no worker picks it up and builds it.
 bundled_recommendations: []
 followon_recs: [rec-5246]
 infrastructure_dependencies:
@@ -219,7 +237,8 @@ infrastructure_dependencies:
     Detector email expected from the bootstrap apply: platform-security-detector-tamper (new platform-security-* log
     group, filter and alarms; the trail's selector), platform-security-platform-role-iam-change (the boundary's new
     version), platform-security-agent-session-iam-change (the session user's policy and boundary versions gain the
-    route) and platform-security-ducklake-api-change (the new route, deployment and Lambda permission). All are this
+    route), platform-security-ducklake-api-change (the new route, deployment and Lambda permission) and
+    platform-security-telemetry-content-change (the content function's create and the new roles). All are this
     plan's own writes; the operator is told before VP 7.
   - "Spend: one Lambda with no traffic until plan 2, one log group and three alarms; no new quota."
 acceptance_criteria:
@@ -257,7 +276,8 @@ verification_plan:
       tests/checks/iam_tf/test_telemetry_prefix_fence.py tests/checks/iam_tf/test_bootstrap_ci_roles.py
       tests/checks/iam_tf/test_platform_role_metadata_admin_scope.py tests/checks/iam_tf/test_terraform_github_import_blocks.py
       tests/checks/iam_tf/test_platform_role_iam_change_alarms.py tests/test_terraform_bootstrap_apply_gate.py
-      tests/test_security_detector_probe.py tests/checks/iam_tf/test_iam_invariants.py -q
+      tests/test_security_detector_probe.py tests/checks/iam_tf/test_iam_invariants.py
+      tests/checks/iam_tf/test_telemetry_reader_and_twin_pins.py -q
     expected: >-
       All pass, and the same files against the unchanged tree fail on the new assertions (the IAM test file does not
       exist before).
@@ -304,7 +324,10 @@ verification_plan:
     expected: PASS, naming the sidecar digest that the approval run recorded.
     fix_if: A mismatch is fixed toward the sidecar; a needed word change goes back to the planning session and a new run.
     hermetic: false
-    graduation: not-applicable
+    graduation: waive
+    graduation_waiver_reason: >-
+      Its digest is specific to this sidecar and PR CI's approved-text binding (validate_merge_step) re-checks the same
+      words on every later change, so a standing rerun would duplicate that gate.
   - step: 5
     phase: pre-deploy
     action: >-
@@ -333,7 +356,7 @@ verification_plan:
       refs/o/main HEAD -- terraform/bootstrap config/aws-region config/terraform-version 2>> "$L" | LC_ALL=C sort | tr '\n' ' ');
       X=$(git -C "$W/repo" diff refs/o/main HEAD -- 'terraform/*.tf' 2>> "$L" | grep -E '^\+' | grep -cE 'data
       "(external|http)"|provider "|required_providers|module "|provisioner|local-exec|^\+\s*(data|import|removed|check|terraform)\b');
-      [ "$F" = "terraform/bootstrap/agent_ducklake_api.tf terraform/bootstrap/bootstrap_ci_apply.tf terraform/bootstrap/github_ci_apply_boundary.tf terraform/bootstrap/platform_security_alarms.tf terraform/bootstrap/platform_security_trail.tf terraform/bootstrap/telemetry_content_deploy_role.tf terraform/bootstrap/telemetry_content_placeholder.zip terraform/bootstrap/telemetry_content_reader.tf " ]
+      [ "$F" = "terraform/bootstrap/agent_ducklake_api.tf terraform/bootstrap/bootstrap_ci_apply.tf terraform/bootstrap/github_ci_apply_boundary.tf terraform/bootstrap/platform_security_alarms.tf terraform/bootstrap/platform_security_trail.tf terraform/bootstrap/telemetry_content_deploy_role.tf terraform/bootstrap/telemetry_content_reader.tf " ]
       && [ "$X" = 0 ] || { echo SCREEN_REFUSED; exit 1; }; echo SCREEN_OK; R=$(tr -d '[:space:]' <
       "$W/repo/config/aws-region"); export AWS_REGION="$R" AWS_DEFAULT_REGION="$R"; V=$(tr -d '[:space:]' <
       "$W/repo/config/terraform-version"); case "$(uname -m)" in aarch64) P=linux_arm64 ;; *) P=linux_amd64 ;; esac;
@@ -354,11 +377,14 @@ verification_plan:
       "BOUNDARY_BYTES \(.change.after.policy | fromjson | tojson | length)"' "$W/plan.json"; echo "PR_HEAD_SHA $PR_HEAD_SHA" )
     expected: >-
       SCREEN_OK; HEAD_PLAN_EXIT 2; a Plan line; action lines whose only creates are this plan's new addresses (the
-      execution role, its policy, the log group, the function, the filter, two alarms, the deploy role and its policy,
-      the content route's resource, method, integration, Lambda permission and URL parameter, the new detector filter and
-      alarm), whose only replace is aws_api_gateway_deployment.agent_ducklake[0] (its redeployment trigger hashes the
-      routes), and whose updates are only the boundary, the agent session user's policies and boundary, the API stage,
-      the trail, and bootstrap-preview's and bootstrap-apply's read policies; no other delete; BOUNDARY_BYTES 5427; the sha.
+      execution role, its policy, the log group, the function, the unexpected-caller filter, its two alarms, the deploy
+      role and its policy, the content route's resource, method, integration, Lambda permission and URL parameter, the
+      new detector filter and alarm), whose only replace is aws_api_gateway_deployment.agent_ducklake[0] (its
+      redeployment trigger hashes the routes), and whose updates are exactly aws_iam_policy.github_ci_apply_boundary,
+      aws_iam_policy.agent_session_ducklake, aws_iam_policy.agent_session_boundary, aws_api_gateway_stage.agent_ducklake[0],
+      aws_cloudtrail.platform_security, aws_iam_policy.bootstrap_plan_reads, aws_iam_policy.bootstrap_apply_guard and
+      aws_iam_policy.bootstrap_preview_guard (the last two embed the read list and the protected-role Deny); no other
+      delete; BOUNDARY_BYTES 5427; the sha.
       The build records the exact address list on the PR for VP 7.
     fix_if: >-
       SCREEN_REFUSED: nothing initialised; if main moved under terraform/bootstrap the build rebases and re-posts. A setup
@@ -401,7 +427,7 @@ verification_plan:
       -lock=false -input=false -no-color -detailed-exitcode -var-file="$W/vars.tfvars" -var "account_id=$A" -var
       "aws_profile=" > /dev/null 2>> "$L"; echo "REPLAN_EXIT $?"; FN="arn:aws:lambda:$R:$A:function:agent-platform-ducklake-telemetry-content";
       sim() { aws iam simulate-principal-policy --policy-source-arn "$1" --action-names "$2" --resource-arns "$3"
-      --query 'EvaluationResults[0].EvalDecision' --output text 2>> "$L" | sed "s/^/SIM $4 /" || echo "SIM $4 ERROR"; };
+      --context-entries "ContextKeyName=aws:PrincipalArn,ContextKeyValues=$1,ContextKeyType=string" --query 'EvaluationResults[0].EvalDecision' --output text 2>> "$L" | sed "s/^/SIM $4 /" || echo "SIM $4 ERROR"; };
       sim "arn:aws:iam::$A:role/agent-platform-github-ci-deploy" lambda:UpdateFunctionCode "$FN" ci_deploy_code; sim
       "arn:aws:iam::$A:role/agent-platform-github-ci-apply" lambda:UpdateFunctionConfiguration "$FN" ci_apply_config; sim
       "arn:aws:iam::$A:role/agent-platform-github-ci-apply" iam:PutRolePolicy "arn:aws:iam::$A:role/telemetry-content-deploy"
@@ -410,11 +436,16 @@ verification_plan:
       "arn:aws:iam::$A:role/telemetry-content-deploy" iam:PutRolePolicy "arn:aws:iam::$A:role/telemetry-content-deploy"
       deploy_iam; sim "arn:aws:iam::$A:role/telemetry-content-reader" s3:GetObject
       "arn:aws:s3:::agent-platform-data-lake/ducklake-telemetry/x" reader_data; sim "arn:aws:iam::$A:role/telemetry-content-reader"
-      lambda:UpdateFunctionCode "$FN" reader_code; echo "M $M" )
+      lambda:UpdateFunctionCode "$FN" reader_code; sim "arn:aws:iam::$A:role/bootstrap-preview" lambda:GetFunction "$FN"
+      preview_get; sim "arn:aws:iam::$A:role/bootstrap-preview" lambda:ListVersionsByFunction "$FN" preview_versions; sim
+      "arn:aws:iam::$A:role/bootstrap-preview" lambda:GetRuntimeManagementConfig "$FN" preview_runtime; echo "M $M" )
     expected: >-
       SCREEN_OK; a Plan line; APPLY_DONE; REPLAN_EXIT 0; SIM ci_deploy_code explicitDeny; SIM ci_apply_config
       explicitDeny; SIM ci_apply_deploy_role explicitDeny; SIM bootstrap_code implicitDeny; SIM deploy_code allowed; SIM
-      deploy_iam implicitDeny; SIM reader_data allowed; SIM reader_code implicitDeny; M.
+      deploy_iam implicitDeny; SIM reader_data allowed; SIM reader_code explicitDeny (the execution role carries the
+      boundary, so the lock refuses it too); SIM preview_get allowed; SIM preview_versions allowed; SIM preview_runtime
+      allowed; M. Every sim passes aws:PrincipalArn as context, because the simulator leaves it unset and a negated
+      ArnNotLike over a missing key matches (PLAN-ci-branch-boundary-state-fence).
     fix_if: >-
       APPLY_SKIPPED: nothing applied; stop and report the differing address names. APPLY_FAILED or REPLAN_EXIT 2: report
       the error class in words; a partial apply is finished by a plan amendment's CloudShell block, never by -target. Any
@@ -430,8 +461,9 @@ verification_plan:
       github_repository_environment_deployment_policy.telemetry_content_deploy_main; the operator reads the preview
       (two creates, nothing else) and approves; the build reads the run's conclusion.
     command: >-
-      bin/venv-python -c "print('read the dispatched run with mcp__github__actions_get(method=get_workflow_run) and its
-      apply job log for the two created addresses')"
+      bin/venv-python -c "print('MCP: mcp__github__actions_get(method=get_workflow_run, run_id=<dispatched run>) asserting
+      conclusion == success, then mcp__github__get_job_logs on its apply job asserting the two created addresses and no
+      other change line')"
     expected: The run concluded success and its apply log lists exactly the two created addresses.
     fix_if: >-
       The preview lists any other change: the operator rejects the run and the build reports it; never approve a change
@@ -442,10 +474,18 @@ verification_plan:
     phase: post-deploy
     action: The merge push's terraform-apply-sandbox run applies the telemetry reader's concurrency change alone.
     command: >-
-      bin/venv-python -c "print('read the merge push terraform-apply-sandbox run with mcp__github__actions_list and
-      actions_get; its plan step names only aws_lambda_function.ducklake_telemetry_reader with an in-place update')"
-    expected: The run concluded success and the plan changed only reserved_concurrent_executions on the telemetry reader.
-    fix_if: A red run follows the reconcile row in deploy-paths.yaml; never apply by hand.
+      bin/venv-python -c "print('MCP: mcp__github__actions_list(method=list_workflow_runs, workflow terraform-apply-sandbox,
+      head_sha=<merge sha>) then actions_get asserting conclusion == success and get_job_logs asserting the plan names
+      only aws_lambda_function.ducklake_telemetry_reader, update in-place; then, 24 hours later, aws cloudwatch
+      get-metric-statistics --profile agent_platform --namespace AWS/Lambda --metric-name Throttles --dimensions
+      Name=FunctionName,Value=agent-platform-ducklake-telemetry-reader --period 86400 --statistics Sum over that day')"
+    expected: >-
+      The run concluded success, the plan changed only reserved_concurrent_executions on the telemetry reader, and the
+      reader's Throttles sum for the following 24 hours is 0.
+    fix_if: >-
+      A red run follows the reconcile row in deploy-paths.yaml; never apply by hand. Throttles above 0: file a rec naming
+      the count, and the operator chooses between raising the login's CONNECTION LIMIT through the operator verb and
+      adding 429 to the reader client's retry set.
     hermetic: false
     graduation: not-applicable
   - step: 10
@@ -482,7 +522,7 @@ test_obligations:
     verification_step: 1
     test_selector: tests/checks/iam_tf/test_telemetry_content_reader_iam.py
     red_green_expectation: red before, green after
-  - source: terraform/bootstrap/telemetry_content_placeholder.zip
+  - source: terraform/lambda-placeholders/telemetry_content_placeholder.zip
     behavior: One member whose handler answers 503 content_reader_not_deployed; its sha256 is pinned.
     verification_step: 1
     test_selector: tests/checks/iam_tf/test_telemetry_content_reader_iam.py
@@ -523,7 +563,7 @@ test_obligations:
     test_selector: tests/checks/iam_tf/test_telemetry_content_reader_iam.py
     red_green_expectation: red before, green after
   - source: terraform/personal/ducklake_telemetry_reader.tf
-    behavior: The reader's reserved concurrency is 3, so both functions' slots sum within the login's limit.
+    behavior: The reader's reserved concurrency is 4 and the content reader's is 1, so both functions' slots sum within the login's limit.
     verification_step: 1
     test_selector: tests/checks/iam_tf/test_telemetry_content_reader_iam.py
     red_green_expectation: red before (5), green after
@@ -551,6 +591,7 @@ context:
   - "Decision-scout r3 FLAGS_FOUND at v1:bb89d359 (one WARN, three NOTEs, one SPIRIT NOTE, all folded in): 202 WARN, the access log and alarms in the platform-security-* family now amend 202 cl.3 (amends, new Decision cl.3, a dated note), the tf comment's false 'as amended by Decision 239' is gone, and the filter matches denied calls on errorMessage with a case-insensitive role regex and keys the deploy-role exception on userIdentity.arn; 258 NOTE, 258#3 dropped from amends (cl.3 stands; this is the re-decision it provides for); 257 NOTE, bootstrap-apply's DenyProtectedRoleWrite and the classifier name role/telemetry-content-*; 239 NOTE, the Coverage paragraph says how each identity without the CI boundary is held; cites gain 126 and 235. Decisions triaged: 216 of 216. Roadmap items intersected: 7; CONFLICT: 0; RELATED: 7. Serves: NS.9 4/5."
   - "Decision-scout r4 FLAGS_FOUND at v1:67e3635f: 202 WARN (cl.6, alerts never filtered by actor) resolved by dropping the deploy-role exception, so every gated deploy emails as its own read-back (filter, alarm text, Decision cl.3, fixture event and a no-actor-clause predicate); 246 NOTE handled by the operator's 2026-11-16 ruling (cmsg_01YbaDZWowGfXCn2WtobCVVoNkoksprjGv5Mz9HrYSDG27: no final-diff merge asks once a plan is approved; the build merges on review PROCEED and green CI), with access_log.py, handler.py and the contract's principal text specified in scope and pinned by tests; cites gain 252; acceptance says nine notes; cl.1 names Decision 239 cl.4. Decisions triaged: 216 of 216. Roadmap items intersected: 8; CONFLICT: 0; RELATED: 8. Serves: NS.9 4/5."
   - "Decision-scout r5 CLEAR (NO_FLAGS) at v1:ffeb7193: every r4 fix verified in the sidecar text; the 246 NOTE handling judged adequate (Decision 246 cl.6, coordinator.yaml relaxing_a_rule). Decisions triaged: 216 of 216. Roadmap items intersected: 8; CONFLICT: 0; RELATED: 8. Serves: NS.9 4/5."
+  - "Decision-scout r6 NO_FLAGS at v1:649ccbb0 after critique r1 fixes (placeholder outside the bootstrap root, reader 4 plus content 1 under CONNECTION LIMIT 10, skip_destroy, VP 7 context entries, VP 4 waive, superseded plan deleted). Decisions triaged: 216 of 216. Roadmap items intersected: 8; CONFLICT: 0; RELATED: 8. Serves: NS.9 4/5. Merge: once the operator approves this plan and its approval run, the build PR merges on its gates with no separate final-diff ask (operator ruling 2026-11-16, cmsg_01YbaDZWowGfXCn2WtobCVVoNkoksprjGv5Mz9HrYSDG27)."
   - "SIT (scout r3 SPIRIT, Decision 252): the boundary change renders for SIT too (5,463 B) and SIT declares no content-reader resource. SIT's bootstrap root is admin-tier (252 cl.7, sit-bootstrap-frequent); whether it is live is UNPROVEN at planning. The build asks in VP 5's message: if live, the operator applies it, with its own screened plan, before PROD's VP 7 in the same sitting; if not, it carries the change when it is stood up."
   - "Decision-scout r1 FLAGS_FOUND, r2 FLAGS_FOUND (NOTE only, all folded in: 258#2 and 239#4 in amends, CloudShell route stated, log group and alarms named platform-security-*). Decisions triaged: 216 of 216. Roadmap items intersected: 7; CONFLICT: 0; RELATED: 7. Serves: NS.9 4/5. CITE: 144, 172, 177, 202, 213, 223, 230, 236, 237, 238, 239, 246, 248, 255, 256, 257, 258."
   - "Operator rulings 2026-11-16 (this planning thread): 23:02Z the Environment is made by Terraform, not in Settings; 23:30Z decision cards: the lock in the shared boundary with prefix-named URL-only Denies (his re-decision under Decision 258 cl.3) and the split into two plans; 23:30Z 'write the plan'. The session consumer 'the feedback loop's masked reads, as agent-platform-session' was put to him at sign-off with notice and not corrected."
@@ -558,23 +599,25 @@ context:
   - "Boundary bytes measured at planning on main 177c8f37 with terraform console over the boundary locals (placeholder account id): today 5,696; this plan 5,427 PROD, 5,463 SIT; the rejected re-anchor 5,946. A boundary change merged before the build moves the figure: then the build stops and the planning session amends the sidecar."
   - "Advisor (fresh-context consult, 2026-11-16): prefix names safe (only the two verb functions match writer*/reader*); keep telemetry-* in all three Denies; preview refresh reads needed; layers and S3-swap risks are plan 2's (rec-4742, ZipFile deploy). Declined with notice: CODEOWNERS and the edit hook stay in plan 2, since nothing can deploy the function before plan 2."
   - "Residual, cited not closed (Decision 239 cl.6): a boundary carrier can pass the bounded telemetry reader role to a new function; the session user's boundary refuses Lambda writes by absence of any grant."
-  - "bootstrap_ci_apply.tf is at its 500-line budget: its edit is token-only on existing lines. PLAN-bootstrap-iam-analyzer-checks also edits it; whichever lands second re-applies its tokens."
+  - "bootstrap_ci_apply.tf is at its 500-line budget: its edit is token-only on existing lines. PLAN-bootstrap-ci-gated-apply also scopes it; whichever lands second re-applies its tokens."
   - "Detector liveness: from merge until VP 7's apply the probe (security-detector-liveness.yml) expects an alarm that does not exist yet; VP 7 runs in the merge sitting, so a probe run in between that files a security_detector_stale rec is closed on VP 7's read-back."
   - "Telemetry hold (validate_reconcile_pending_gate --telemetry-hold) gates production telemetry reader and writer deploys; plan 1 deploys no reader code, so it does not wait on it. Plan 2 does."
   - "V3 resolution: VP 6's operator-run pre-merge plan at the PR head substitutes for pre-merge post-deploy evidence; behavioural acceptance is VP 7's simulation and VP 10's placeholder read."
   - "Wording approval routing (#2065, #2071): this plan carries its own sidecar, so its gated edits are bound by it."
   - "Graduated shards kept, node ids unchanged: telemetry-content-reader-access-log, telemetry-content-reader-every-byte-masked, telemetry-prefix-fence, telemetry-read-route-by-deploy-output, telemetry-reads-gated-on-the-telemetry-reader, url-only-invoke-guard, platform-admin-absent-from-ci-write-patterns, terraform-github-import-blocks. The build may add signed caller fields to test_handler.py's fixtures (the handler now refuses a request without them) but renames no named test; VP 1 runs each shard's file."
-  - "Planning-time checks: plan_obligations 0 unmet after the kept-shard line, decision_drafts 1 drafted 0 findings; red_overlap (2026-11-17, base e2160ab8) BLOCKED: rec-5247 (telemetry-reader smoke 504 read_deadline_exceeded) disjoint, rec-5248 (telemetry-arrival ReadDeadlineExceededError on the 7-day roots read) overlapping only through the transitive test selection (shared paths are tests under tests/checks/; no source file of this plan is in its red). Deferral rationale (Decision 226): this plan does not repair either red and its words do not depend on them; the build re-runs red_overlap before its first commit and waits while it reports blocked. The reader concurrency change (5 -> 3) caps parallel invocations, not statement time, so it does not bear on either deadline red; the build reads both recs' state before VP 9. No boundary, environments or content-reader change landed on main between 177c8f37 and e2160ab8; #2076 (bootstrap IAM analyzer checks) added config/iam-invariants.json and changed the apply classifier, both now in scope and bound, and the boundary measurement is unaffected."
+  - "Planning-time checks: plan_obligations 0 unmet after the kept-shard line, decision_drafts 1 drafted 0 findings; red_overlap (2026-11-17, base 21adb770) BLOCKED: rec-5247 (telemetry-reader smoke 504 read_deadline_exceeded) disjoint, rec-5248 (telemetry-arrival ReadDeadlineExceededError on the 7-day roots read) overlapping only through the transitive test selection (shared paths are tests under tests/checks/; no source file of this plan is in its red). Deferral rationale (Decision 226): this plan does not repair either red and its words do not depend on them; the build re-runs red_overlap before its first commit and waits while it reports blocked. The reader concurrency change (5 -> 4) caps parallel invocations, not statement time, so it does not bear on either deadline red; the build reads both recs' state before VP 9. No boundary, environments or content-reader change landed on main between 177c8f37 and 21adb770 (#2092-#2095 touch terraform/personal OIDC and scheduled-dispatch files, none of this plan's); #2076 (bootstrap IAM analyzer checks) added config/iam-invariants.json and changed the apply classifier, both now in scope and bound, and the boundary measurement is unaffected."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:81e979d194d052519bb0089d7b77ca477012781e52207f95c79d16f24ceb4037'}  # pragma: allowlist secret
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:e86bbcf3e9bf7002dc5f432774fca2d8413f74883dab12a2fe6d514ed6735496'}  # pragma: allowlist secret
   - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:bb89d359abd93ab57091a8ea2ad0e57217a6baf4a1e70ca6c10cb01a594e7f60'}  # pragma: allowlist secret
   - {gate: decision-scout, round: 4, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:67e3635fad5ba5ae4a63104705fbd74ffdd65f55850d79109c06d00a1718facd'}  # pragma: allowlist secret
   - {gate: decision-scout, round: 5, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:ffeb7193ed681c80baad6db66b8ca74c7843391ae81ffb139267ccba06fb7508'}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 6, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:649ccbb0cfebb5fd9c1e379b333a9ab502ef9f4027b316000e5ad25e418d6bb1'}  # pragma: allowlist secret
   - {gate: wording-check, round: 1, verdict: FAIL, digest: 82091d27fb4a4a557601057513721cf137b969c1feb9a50de7d25c32ec0ebeec, base: fc61e31992640a5f1fd3cfc7204a4258ef954be7, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 2, verdict: FAIL, digest: 8c9b985610d167488b4adb59a3824e9839880553f9ec3656b5baabde4572b7c8, base: fc61e31992640a5f1fd3cfc7204a4258ef954be7, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 3, verdict: PASS, digest: 9cc40fe1ba3dc424c7dee2b92f2377ca7dee8ed775764c511645983667815d55, base: e2160ab8db8e9dbddcfb5da555927f0a76d8bd8b, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 4, verdict: PASS, digest: 60d024dbcd12bae8eaa2692209e40c7cd511671f3907c9d8fe6a4d3ea2db9e39, base: e2160ab8db8e9dbddcfb5da555927f0a76d8bd8b, selection: complete}  # pragma: allowlist secret
+  - {gate: wording-check, round: 5, verdict: PASS, digest: e6e9a7f81eacc9444d9f3ed04c66ce8d4bc43c5294b2e946adb99c853b54a2c3, base: 21adb770af3802517b221df34787a26b9f552e1f, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -584,12 +627,15 @@ pre_implementation_checklist:
   - "Start condition: this plan merged, its approval run approved, no other bootstrap change merged and unapplied, and the boundary still renders 5,696 B on main."
 execution_steps:
   - "Tests first (scope test rows), seen red on the unchanged tree. Post: they fail on the new assertions."
-  - "Apply each sidecar block verbatim with {{N}} the next free Decision number and {{DATE}} the build date; write the placeholder zip and the token edits; the remaining source edits. Post: VP 1, 2 and 4 pass."
+  - "Apply each sidecar block verbatim with {{N}} the next free Decision number and {{DATE}} the build date; write the placeholder zip at terraform/lambda-placeholders/ (byte-reproducible) and the token edits; the remaining source edits. Post: VP 1, 2 and 4 pass."
+  - "Measure tests/checks/iam_tf/test_platform_role_metadata_admin_scope.py's SLOC after its sidecar block: it lands at 500 of 500; record that in the PR body so the next plan scoping it (PLAN-agent-proxy-signed-access, PLAN-bootstrap-ci-gated-apply) decomposes it first. Over 500: stop and return to planning (the words are bound)."
   - "Commit, VP 3, push, PR, CI green. The squash body carries no Resolves trailer (rec-4696 closes with plan 2)."
   - "Post VP 5 and VP 6 to the operator with the full head sha and the detector-email notice; record the address list on the PR; merge on the plan's gates (operator's standing rule) once VP 6 matches; the operator runs VP 7 in the same sitting."
   - "VP 8, VP 9 and VP 10; tell the coordinator plan 2 (rec-5246) may be planned."
   - "Execute Verification Plan: run each step; loop until pass; on an unrecoverable V3 failure stop and RCA (Decision 55)."
   - "Report: what was implemented, the validation_result --verify-head verdict, VP 6-10's lines and the merge SHA."
 rollback: >-
-  Before plan 2 nothing serves content: revert the PR and have the operator apply the revert from CloudShell; the log
-  group's prevent_destroy keeps the access log, which the revert's plan must show untouched.
+  Before plan 2 nothing serves content: revert the PR and have the operator apply the revert from CloudShell. A revert
+  removes the resource blocks, and prevent_destroy goes with them, so the access log is kept by skip_destroy (the log
+  group leaves state, the AWS object stays) and the revert's plan must show it as a state-only removal; the GitHub
+  Environment's revert is a separate gated terraform-github-apply dispatch the operator approves.
