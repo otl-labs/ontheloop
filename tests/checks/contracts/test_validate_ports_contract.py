@@ -51,6 +51,9 @@ def root(tmp_path: Path) -> Path:
         for adapter in port["adapters"]:
             if adapter.get("location"):
                 _touch(tmp_path, adapter["location"])
+        suite = port.get("conformance_suite") or {}
+        if suite.get("status") == "present":
+            _touch(tmp_path, suite["path"])
     for row in data["coupling_findings"] + data["structural_assumptions"]:
         if not row["location"].startswith("dec-"):
             _touch(tmp_path, row["location"])
@@ -148,7 +151,7 @@ def test_rejects_present_suite_with_missing_path(root: Path, capsys: pytest.Capt
     _mutate(
         root, lambda d: _port(d, "ops_verbs").update(conformance_suite={"status": "present", "path": "tests/absent_suite"})
     )
-    _expect_failure(root, capsys, "suite path")
+    _expect_failure(root, capsys, "port ops_verbs: suite path")
 
 
 def test_rejects_coupling_finding_naming_undeclared_port(root: Path, capsys: pytest.CaptureFixture[str]) -> None:
