@@ -162,7 +162,8 @@ EXPECTED: dict[str, Any] = json.loads(
                         "arn:aws:iam::{account}:role/bootstrap-*",
                         "arn:aws:iam::{account}:role/github-settings-*",
                         "arn:aws:iam::{account}:role/platform-security-*",
-                        "arn:aws:iam::{account}:role/ducklake-api-*"
+                        "arn:aws:iam::{account}:role/ducklake-api-*",
+                        "arn:aws:iam::{account}:role/telemetry-content-*"
                     ]
                 },
                 {

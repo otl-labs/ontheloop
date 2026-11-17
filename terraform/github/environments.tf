@@ -145,6 +145,40 @@ resource "github_repository_environment_deployment_policy" "approved_text_main" 
   branch_pattern = "main"
 }
 
+# GitHub Environment: telemetry-content-deploy (Decision 239 cl.5 as amended by Decision 270; rec-4696).
+#
+# The change lock's approval gate: a deploy-telemetry-content.yml deploy job waits here for a required reviewer, and
+# only a job in this Environment at main may assume telemetry-content-deploy (terraform/bootstrap). Required
+# reviewers from var.gated_apply_reviewer_user_ids, no admin bypass, the explicit main-only policy (rec-4651). No
+# Environment secret or variable. Created by the first approved terraform-github-apply.yml dispatch naming both
+# addresses in gate_change (Decision 248), with no UI step and no import block. Destroying it fails open for the
+# same reason as tf_gated_apply.
+resource "github_repository_environment" "telemetry_content_deploy" {
+  repository          = github_repository.this.name
+  environment         = "telemetry-content-deploy"
+  prevent_self_review = false
+  can_admins_bypass   = false
+
+  reviewers {
+    users = var.gated_apply_reviewer_user_ids
+  }
+
+  deployment_branch_policy {
+    protected_branches     = false
+    custom_branch_policies = true
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "github_repository_environment_deployment_policy" "telemetry_content_deploy_main" {
+  repository     = github_repository.this.name
+  environment    = github_repository_environment.telemetry_content_deploy.environment
+  branch_pattern = "main"
+}
+
 # GitHub Environment: tf-github-apply (Decision 248 cl.7).
 #
 # The dedicated gate for terraform-github-apply.yml's apply job; rec-4965 moves the job and the

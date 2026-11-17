@@ -280,23 +280,12 @@ def test_the_read_clients_import_where_fcntl_is_absent() -> None:
 CONTENT_VERB = sorted(read_route.CONTENT_VERBS)[0]
 
 
-def test_content_route_resolves_env_then_ssm_then_the_function_url(aws: Aws, monkeypatch: pytest.MonkeyPatch) -> None:
-    reader = read_route.content_reader("a-profile")
-    assert aws.calls == []
-    monkeypatch.setenv(read_route.CONTENT_READER_URL_ENV, "https://env.example/")
-    assert reader._reader_url() == "https://env.example" and aws.calls == []
-    monkeypatch.delenv(read_route.CONTENT_READER_URL_ENV)
-    aws.answers[("ssm", read_route.CONTENT_READER_URL_PARAMETER)] = "https://ssm.example/\n"
-    assert reader._reader_url() == "https://ssm.example"
-    aws.answers[("ssm", read_route.CONTENT_READER_URL_PARAMETER)] = None
-    aws.answers[("lambda", read_route.CONTENT_READER_FUNCTION)] = "https://fn.example/"
-    assert reader._reader_url() == "https://fn.example"
-
-
-def test_content_route_errors_name_a_source_never_a_value(aws: Aws) -> None:
+def test_content_route_has_no_function_url_and_names_the_api_route(aws: Aws, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OTL_OPS_VERBS_TRANSPORT", raising=False)
     with pytest.raises(RuntimeError) as raised:
-        read_route.content_reader()._reader_url()
-    assert read_route.CONTENT_READER_URL_ENV in str(raised.value) and DENIED not in str(raised.value)
+        read_route.content_reader("a-profile")._reader_url()
+    assert read_route.CONTENT_ROUTE_PARAMETER in str(raised.value) and DENIED not in str(raised.value)
+    assert aws.calls == []
 
 
 def test_content_and_event_verbs_never_cross_routes(aws: Aws, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -356,13 +345,15 @@ def test_telemetry_reader_uses_the_api_route_parameter(monkeypatch: pytest.Monke
     assert fake.profiles == ["agent_platform"] and fake.services == ["ssm"]
 
 
-def test_content_reader_has_no_api_route(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_content_reader_uses_the_api_route_parameter(monkeypatch: pytest.MonkeyPatch) -> None:
     import boto3
 
-    fake = _ApiSession("https://never.example")
+    fake = _ApiSession("https://abc.execute-api.eu-west-2.amazonaws.com/v1/telemetry/content/")
     monkeypatch.setattr(boto3, "Session", fake)
-    monkeypatch.delenv(read_route.CONTENT_READER_URL_ENV, raising=False)
+    for name in ("AWS_PROFILE", "AWS_ACCESS_KEY_ID", "AWS_LAMBDA_FUNCTION_NAME"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("OTL_OPS_VERBS_TRANSPORT", "execute_api")
-    with pytest.raises(RuntimeError, match="the telemetry content reader has no API route"):
-        read_route.content_reader("a-profile")._reader_url()
-    assert fake.names == [] and fake.profiles == [] and fake.services == []
+    reader = read_route.content_reader(profile=None)
+    assert reader._reader_url() == "https://abc.execute-api.eu-west-2.amazonaws.com/v1/telemetry/content"
+    assert fake.names == ["/agent-platform/ducklake/api_url/telemetry/content"]
+    assert fake.profiles == ["agent_platform"] and fake.services == ["ssm"]
