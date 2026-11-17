@@ -1,0 +1,230 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: merge-annotate-contract-reader
+intent: >-
+  Make telemetry_sessions ready to hold one merge-to-session link row (event_kind annotate) per (session, merge), written
+  later by the ci_annotate producer (PLAN-merge-annotate-producer, rec-5270). Three changes: an annotate row is a post-close
+  fact and never counts as activity in any last-event read (session idleness, the tree's last event in the root-session,
+  orphan-count and usage verbs) on both the reader and its independent verification oracle, so a merge neither keeps a
+  finished session reading running nor makes the verification monitor re-read or mark an old tree moved; coverage_after's
+  annotate requirement is waived until rec-4599 produces coverage, so a link row can be written; the annotate row's
+  external_ref and event_timestamp are defined.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-merge-annotate-contract-reader.yaml
+phase: >-
+  T3.4 prerequisite capture (c1, "telemetry delta proves fix"): the fix-attempt stamp and the shadow verdict key a fix's
+  merge to the sessions that produced it. Closes no exit criterion, so closes_criteria is empty.
+closes_criteria: []
+cites: [dec:166, dec:199, dec:207, dec:210, dec:228]
+scope:
+  - file: docs/contracts/telemetry_sessions.yaml
+    action: Modify
+    purpose: >-
+      (1) state's formula and semantics: idle = as_of minus the latest event_timestamp over this session's rows in the four
+      tables, telemetry_sessions annotate rows excluded (post-close facts, never activity); the same exclusion for every
+      last-event read. (2) coverage_after: required_when {event_kind: [annotate]} stays (the mark) and gains write_time_exemptions
+      {required_when: {class: temporary, reason: no producer measures coverage yet, owner: rec-4599,
+      review_by: 2027-02-17}}; rec-4599 removes the exemption with its producer; the amendment row is semantic_break true, as the rule ratchet requires. Link rows written before that removal keep
+      coverage_after null: a declared residual on the field (rec-4599 decides any exclude_before), never back-filled. pr_url and ci_outcome keep required_when annotate (the producer writes both). (3)
+      Governance: an annotate row's external_ref is "<root entity_ref>:merge:<squash sha>#0/annotate" (one row per root
+      session and merge, so two roots sharing a harness key stay apart; the write boundary hashes it into event_id). It is
+      written once, only with final values (a concluded CI result, fixed diff stats), so an identical re-send collapses;
+      a differing re-send is a GrainConflict by design (Decision 207), its event_timestamp is the squash commit's
+      committer time, and its session_started_at and entity_ref are the root's. (4) The merge link columns' meaning (their
+      populated_by stays held until PLAN-merge-annotate-producer): rec_ids from Resolves trailers, pr_url from the squash
+      subject's "(#N)", files_changed / lines_added / lines_removed from the squash merge's numstat (no longer named a
+      close-row fact), and ci_outcome as attempt 1 of the commit's own CI push run, cancelled included, with Decision 254's
+      range verdict deferred to rec-5295. (5) amendment_log rows, each field's old prose rows folded in. The exact words are
+      docs/plans/approved/merge-annotate-contract-reader.yaml. The file is at
+      500 of 500 effective lines: pay for every added line by compacting older amendment_log rows (contracts-class relief
+      valve, Decision 166), never a raise or split.
+    new_imports: []
+  - file: config/lambda/ducklake/field_semantics.yaml
+    action: Modify
+    purpose: >-
+      Regenerated projection (bin/venv-python -m scripts.schema_to_field_semantics), never hand-edited: coverage_after gains
+      the write_time_exemptions entry the writer reads, so the writer waives required_when while the contract keeps the rule.
+    new_imports: []
+  - file: docs/contracts/ducklake_reader.yaml
+    action: Modify
+    purpose: >-
+      The verification-verbs line: telemetry_root_sessions' last_event_timestamp and telemetry_orphan_counts' quiescence
+      read the tree's last activity, annotate rows excluded. Paid for by compaction if the file is near its cap.
+    new_imports: []
+  - file: src/common/ducklake_event_read_sql.py
+    action: Modify
+    purpose: >-
+      One shared fragment for "telemetry_sessions rows that are activity" (event_kind <> 'annotate') used by the four
+      last-event reads: STATE_CTES last_ev, ORPHAN_COUNTS_SQL tl, ROOT_SESSIONS_SQL tl and _USAGE_TREE tl. lc already
+      excludes annotate; no other CTE changes. Headroom 29 SLOC.
+    new_imports: []
+  - file: scripts/telemetry_verify/derive.py
+    action: Modify
+    purpose: "_last_event skips telemetry_sessions annotate rows, so the oracle state and last_event_timestamp match the reader."
+    new_imports: []
+  - file: scripts/telemetry_verify/monitor.py
+    action: Modify
+    purpose: >-
+      _last_event (the tree's newest row compared with the root's last_event_timestamp) skips annotate rows, so a tree
+      with a link row is compared, not reported moved.
+    new_imports: []
+  - file: scripts/telemetry_verify/derive_usage.py
+    action: Modify
+    purpose: "The per-tree last_event skips annotate rows, matching _USAGE_TREE tl."
+    new_imports: []
+  - file: tests/telemetry/fixtures/derivation_cases.yaml
+    action: Modify
+    purpose: >-
+      Shared golden cases (replayed against both the reader and the oracle). c05: last_event_timestamp expectation moves
+      from the annotate row's time to the close's (declared assertion change, the contract it encodes changes). New case
+      c05b_annotate_row_is_not_activity: a root with an open and a success turn close at 10:30 and an annotate row at 20:00
+      the same day reads success with last_event_timestamp 10:30 at as_of 10:30:01 the next day (today: running, 20:00).
+    new_imports: []
+  - file: tests/telemetry_verify/test_monitor.py
+    action: Modify
+    purpose: "Additive test_a_link_row_never_reads_as_moved -- a quiet tree gains an annotate row; the run compares it (tree_moved 0)."
+    new_imports: []
+  - file: tests/common/test_ducklake_event_verification_verbs.py
+    action: Modify
+    purpose: >-
+      Additive test_a_link_row_leaves_the_tree_last_event: adding an annotate row to a golden tree leaves
+      telemetry_root_sessions' last_event_timestamp and telemetry_orphan_counts unchanged and equal to the oracle.
+    new_imports: []
+  - file: tests/common/test_ducklake_model_usage_rollup.py
+    action: Modify
+    purpose: "Additive test_a_link_row_leaves_usage_last_event -- the verb equals the derive_usage oracle with a link row added."
+    new_imports: []
+  - file: tests/telemetry/test_annotate_link_row_write.py
+    action: Create
+    purpose: >-
+      Writer-level proof of acceptance 4: an annotate row with pr_url and ci_outcome set and coverage_after null passes the
+      write boundary's prepare (src/telemetry/append.py, the pure half, no SQL); the same row with ci_outcome null is
+      rejected (required_when still binds); a temporary exemption without review_by fails the contract rule check.
+    new_imports: []
+bundled_recommendations: []
+followon_recs: [rec-5295]
+infrastructure_dependencies:
+  - "None: no IAM or Terraform edit, no DDL (the merge sha lives in external_ref)."
+acceptance_criteria:
+  - "A session whose only row after its last turn is an annotate row reads its turn outcome once idle, never running."
+  - "The reader and the verification oracle agree on every golden case, including the two annotate cases."
+  - "A tree with a link row is compared by the verification monitor, never reported moved."
+  - "The writer accepts an annotate row with pr_url and ci_outcome set and coverage_after null."
+  - "The reader and writer deploy through their governed channels once the telemetry hold allows it."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: Golden cases on the reader and the oracle, including the annotate cases.
+    command: >-
+      bin/venv-python -m pytest tests/common/test_ducklake_event_read_verbs.py::test_session_state_golden_cases
+      tests/telemetry_verify/test_derive.py::test_oracle_matches_every_committed_derivation_case -q
+    expected: exit 0; red before on c05b (reads running) and c05 (last event 15:00).
+    fix_if: the annotate filter missed a last-event read, or the oracle and reader disagree
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: annotate-row-not-session-activity
+  - step: 2
+    phase: pre-deploy
+    action: Tree-level reads and the monitor ignore link rows.
+    command: >-
+      bin/venv-python -m pytest tests/telemetry_verify/test_monitor.py::test_a_link_row_never_reads_as_moved
+      tests/common/test_ducklake_event_verification_verbs.py::test_a_link_row_leaves_the_tree_last_event
+      tests/common/test_ducklake_model_usage_rollup.py::test_a_link_row_leaves_usage_last_event -q
+    expected: exit 0; each red before.
+    fix_if: one of the tree last-event reads still includes annotate rows
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: annotate-row-not-tree-activity
+  - step: 3
+    phase: pre-deploy
+    action: The writer accepts a link row without coverage_after and still requires pr_url and ci_outcome.
+    command: >-
+      bin/venv-python -m pytest tests/telemetry/test_annotate_link_row_write.py
+      tests/checks/contracts/test_write_time_enforcement_conformance.py -q
+    expected: exit 0; the new file red before (coverage_after null is rejected).
+    fix_if: the exemption shape does not match data-modeling-standard.yaml write_time_exemptions
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: annotate-link-row-write-rules
+  - step: 4
+    phase: pre-deploy
+    action: Full tier, then HEAD attestation, after the build commit and rebase and before the push (handoff_policy); start it from the top-level session, backgrounded with a 2 h limit, and read only the attestation.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: the full tier exits 0 and the validation result attests the current HEAD's tree
+    fix_if: any failure; fix and rerun the full tier from the start
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion), and the earlier steps carry the durable regressions.
+  - step: 5
+    phase: post-deploy
+    action: The governed telemetry deploys ship the reader and writer, once the telemetry hold allows.
+    command: bin/venv-python -m scripts.checks.validate_reconcile_pending_gate --telemetry-hold
+    expected: exit 0, then the next deploy-ducklake-lambdas run's deploy-telemetry and telemetry-smoke jobs succeed.
+    fix_if: the hold is still on; wait, never bypass it
+    hermetic: false
+test_obligations:
+  - source: src/common/ducklake_event_read_sql.py
+    behavior: annotate rows are excluded from every last-event read
+    verification_step: 1
+    test_selector: tests/common/test_ducklake_event_read_verbs.py::test_session_state_golden_cases
+    red_green_expectation: red before (c05b running), green after
+  - source: scripts/telemetry_verify/derive.py
+    behavior: the oracle's last event skips annotate rows
+    verification_step: 1
+    test_selector: tests/telemetry_verify/test_derive.py::test_oracle_matches_every_committed_derivation_case
+    red_green_expectation: red before, green after
+  - source: scripts/telemetry_verify/monitor.py
+    behavior: a tree with a link row is compared, not moved
+    verification_step: 2
+    test_selector: tests/telemetry_verify/test_monitor.py::test_a_link_row_never_reads_as_moved
+    red_green_expectation: red before (tree_moved 1), green after
+  - source: scripts/telemetry_verify/derive_usage.py
+    behavior: usage last event skips annotate rows
+    verification_step: 2
+    test_selector: tests/common/test_ducklake_model_usage_rollup.py::test_a_link_row_leaves_usage_last_event
+    red_green_expectation: red before, green after
+  - source: docs/contracts/telemetry_sessions.yaml
+    behavior: coverage_after is waived for annotate rows until rec-4599
+    verification_step: 3
+    test_selector: tests/telemetry/test_annotate_link_row_write.py
+    red_green_expectation: red before (coverage_after null rejected on annotate), green after
+  - source: config/lambda/ducklake/field_semantics.yaml
+    behavior: the regenerated projection carries the exemption the writer reads
+    verification_step: 3
+    test_selector: tests/checks/contracts/test_write_time_enforcement_conformance.py
+    red_green_expectation: red before (contract waives, writer enforces), green after regeneration
+  - source: docs/contracts/ducklake_reader.yaml
+    behavior: the reader contract's orphan quiescence and root last-event wording names the annotate exclusion
+    verification_step: 4
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: Prose that describes the verb SQL; steps 1 and 2 test the SQL it describes, and the wording is bound by the approved-text sidecar.
+constraints:
+  - "Sequenced after rec-5248's read-timeout fix and the telemetry deploy hold."
+  - "Every edit to telemetry_sessions.yaml, ducklake_reader.yaml and field_semantics.yaml is bound word for word by docs/plans/approved/merge-annotate-contract-reader.yaml (Decision 246); the build places those words and nothing else in those files."
+  - "No DDL: the merge sha lives in external_ref, so no catalog provision is needed."
+  - "Contracts stay at or under 500 effective lines by relief, never a raise or split (Decision 166)."
+  - "c05's last_event_timestamp expectation moves because the contract formula it encodes changes: a planned change (Decision 235), recorded in weakening_dispositions with the detector's exact candidate string at build, citing acceptance_criteria[0]."
+  - "Reader and oracle change together: the oracle is independent code, never an import of the reader SQL."
+context:
+  - >-
+    Decision-scout r3: FLAGS_FOUND. CITE 166, 199, 207, 210, 228. NOTE 254 (ci_outcome's range-verdict deferral had no
+    owner; answered: rec-5295, named in the contract wording and followon_recs). Earlier rounds' NOTE 199, NOTE 207 and
+    SPIRIT 210 answered in scope. RELATED 246, 235, 244, 189, 163, 79, 125, 249, 126, 236, 213, 222, 84, 88, 95, 97,
+    200, 250, 181, 247, 221, 118. Decisions triaged: 218 of 218. Roadmap items intersected: 8; CONFLICT: 0; RELATED: 8.
+    Serves: NS.6 3/5.
+  - "Operator fork 2026-11-17 14:52Z (card cmsg_01YbaDZWowGfXCn2WtobCVVoYEgzHgSQbfPr5wWYGqo99B): ignore links in activity checks, chosen over letting them count."
+  - "Kept graduated shards (assertions additive only): telemetry-orphan-counts-verb-agrees, telemetry-root-sessions-verb, telemetry-tree-rows-verb-exact, telemetry-verify-monitor-rederivation."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:6eb0e9f436db75e1deb56eaaf528ff91733ef64cc4c836398ef81dd175dd2797"}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: "v1:c173f5da4b5439d4a874a84e4b4daecf31f88606de5a0f3b1e0ea68d21891912"}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:a053d47df83462a773cae50d2e298af63411caeaf934d5dd0fcdff0c7324ce18"}  # pragma: allowlist secret
+  - {gate: wording-check, round: 1, verdict: PASS, digest: 127924884ce46aca9d6b8f378b82deeaee5429ac5236982f6fef5129d654249b, base: ba444e834563d8d98ceb74305cd6a3a156ad4582, selection: complete}  # pragma: allowlist secret
+pre_implementation_checklist:
+  - Branch confirmed not on main
+execution_steps:
+  - "Contracts (with relief) and the regenerated projection, reader SQL, oracle (derive, monitor, derive_usage), golden cases and tests; VP 1-3, then the full tier (VP 4)."
+rollback: Revert; annotate rows would again count as activity (none exist before PLAN-merge-annotate-producer).
