@@ -18,7 +18,7 @@ intent: >-
   with golden vectors per provider re-run at the pinned LiteLLM (1.106.2 today), and the transport calls it instead of
   computing its own.
   Bundles rec-5112: a response with no usage block, one global lock across the cold-start probe, max_attempts below
-  1, and the smoke test's load order. Serves NS.3/NS.6: verdict runs on GitHub are measured from their first run.
+  1, and the smoke test's load order. Serves NS.6: verdict runs on GitHub are measured from their first run.
 plan_type: IMPLEMENTATION
 verification_tier: V2
 plan_path: docs/plans/PLAN-litellm-call-record.yaml
@@ -51,8 +51,9 @@ scope:
         guaranteed (e.g. default's prompt_tokens_details.cached_tokens) reads 0 and is not named.
       - A structural 0 is never named. A difference below 0 is 0, and its class is named.
       - reasoning_tokens is the provider's count (deepseek) or None, never LiteLLM's local estimate.
-      - Each split value is None when absent, and None when above tokens_cache_creation (the at_most guard
-        src/turn_capture/usage.py _split already applies).
+      - Each split value is None when absent, and None when above tokens_cache_creation, by calling
+        src/turn_capture/usage.py's existing at_most guard (_split, or a public helper split out of it in the same
+        module if its signature does not fit), so the 1h/5m rule has one implementation in src/turn_capture.
       - Only int values count; a bool or other type is treated as missing.
   - file: scripts/llm/litellm_wire.py
     action: Modify
@@ -135,7 +136,9 @@ scope:
         to litellm.completion(model, messages, api_key, num_retries=0) offline, gives a response whose usage
         model_dump, None values stripped and projected onto the keys the vector's row reads plus iterations, equals the
         same projection of the recorded dump (the full dump stays recorded), and Anthropic's response id differs from the
-        wire id. So an additive LiteLLM Usage field does not redden a grouped bump; a changed key a row reads does. litellm comes from
+        wire id. So an additive LiteLLM Usage field does not redden a grouped bump; a changed key a row reads does. It
+        also asserts map_usage(prefix, live_dump) equals expected, which covers the missing-usage rule's keys
+        (prompt_tokens, completion_tokens, total_tokens) on the live dump. litellm comes from
         scripts.llm.litellm_wire.load_litellm() after cap.reset(monkeypatch), which keeps the local cost map (no
         importorskip, no module-top import).
       - test_difference_equals_wire_uncached: for each vector whose row derives tokens_input as a difference, expected
@@ -185,7 +188,7 @@ scope:
   - file: tests/test_llm_litellm_cold_start.py
     action: Modify
     purpose: >-
-      TestGates asserts fresh True on the probing call and False on the cached return. Planned re-specification (AC4):
+      TestGates asserts fresh True on the probing call and False on the cached return. Planned re-specification (rec-5112 and the cold-start scope row):
       the `first is again` identity asserts (about :92 and :109) become equality on every field but fresh, since the
       cached return is now a replaced copy. TestColdStartLock (rec-5112): two cache keys probe concurrently without
       waiting on each other, and one key probes once, sync and async. Deterministic: the first key's probe blocks on a
@@ -207,11 +210,26 @@ scope:
   - file: tests/persona_backends/fakes.py
     action: Modify
     purpose: The fakes keep the real shapes. attempt() and record() fill the new fields, and the result and error fakes can carry probe_record.
+  - file: config/persona_image.yaml
+    action: Modify
+    purpose: >-
+      Conditional: only if PLAN-persona-image-twin has merged at build time (the file exists on origin/main). This plan
+      puts src/turn_capture/litellm_usage.py into the static import closure of scripts/run_persona.py (run_persona ->
+      litellm_transport -> litellm_wire -> litellm_usage), and that plan's validate_persona_github_agnosticism fails on a
+      closure module build.copy does not hold. build.copy gains src/turn_capture/__init__.py and
+      src/turn_capture/litellm_usage.py, measured from the closure. No other key changes. If the plan has not merged,
+      skip this row and the two below: that plan measures build.copy from the closure when it builds.
+  - file: docker/persona/Dockerfile
+    action: Modify
+    purpose: Conditional, as config/persona_image.yaml above. One COPY per new build.copy entry, to /app/<same path>, so validate_persona_image_digest's COPY-equals-build.copy rule holds.
+  - file: docker/persona/Dockerfile.dockerignore
+    action: Modify
+    purpose: Conditional, as config/persona_image.yaml above. One "!<path>" per new build.copy entry, so the allow-list equals build.copy plus the lock.
 bundled_recommendations: [rec-5112]
 followon_recs: [rec-4028, rec-5318]
 infrastructure_dependencies: []
 acceptance_criteria:
-  - map_usage maps every golden vector's LiteLLM dump to its expected columns, each wire body served to litellm.completion at the pinned LiteLLM gives that recorded dump, and each difference-derived tokens_input equals the wire body's uncached count.
+  - map_usage maps every golden vector's recorded dump and live dump to its expected columns, each wire body served to litellm.completion at the pinned LiteLLM gives a dump whose projection onto the keys its row reads equals the recorded dump's, and each difference-derived tokens_input equals the wire body's uncached count.
   - USAGE_TABLE equals inference-provider.yaml usage_mapping.rows and drives map_usage. The contract names no LiteLLM version, and a change to requirements-dev.txt selects the golden-vector test pre-merge. The persona image's own litellm lock re-running the vectors is rec-5318 (T7 image line), not this plan.
   - read_response computes no token class itself. A response with no usage block, or LiteLLM's all-zero usage, gives a record whose usage_absent names every non-structural class of its row (four for anthropic, three for deepseek and default), never an exception.
   - Every Attempt the transport returns or raises carries provider, billing_shape and started_at_ms. A call that ran a fresh cold-start probe, through the fail-over gate or the direct warm_fetched_escape_hatch role, carries that probe's CallRecord on its result or error, and a cached assertion carries none.
@@ -392,6 +410,10 @@ constraints:
     Golden vectors run only through litellm.completion, never a provider SDK (Decision 173 clause 1). Every id and
     value in them is synthetic (Decision 101).
   - Every module stays under 500 SLOC (Decision 128); split, never raise.
+  - >-
+    If PLAN-persona-image-twin has merged, the three conditional image rows apply and the PR runs the image conformance
+    build. If config/persona_image.yaml then carries a non-null digest, or the image checks fail for any reason other than
+    the new src/turn_capture entries, STOP to this planning thread; never edit another image key.
   - No rescue agents or workaround loops (Decision 55); never skip, disable or quarantine a test (Decision 235).
 context:
   - >-
@@ -429,7 +451,9 @@ context:
     tools_sha256 must hash the full tool list once MCP tools join it). inference-provider.yaml is also scoped by unbuilt
     PLAN-billing-shape-local and PLAN-retire-github-pat-secret. Whichever builds second rebases. PLAN-persona-image-twin
     (T7, building) gives the persona image its own litellm lock that Dependabot bumps apart from requirements-dev.txt;
-    re-running these vectors at that lock's version is rec-5318 (filed 2026-11-17, owner the T7 image planning line). Also for 3b: the probe's
+    re-running these vectors at that lock's version is rec-5318 (filed 2026-11-17, owner the T7 image planning line). That plan's
+    build.copy is measured from run_persona's closure, which this plan widens to src/turn_capture/litellm_usage.py, hence
+    the three conditional image scope rows when it builds first (critique r4 B1). Also for 3b: the probe's
     CallRecord persona is the contract's first persona (litellm_cold_start.py about :56-58), not the running persona;
     a probe that got a response but is not_asserted (no choices) or spent may be billed yet carries no record;
     litellm_backend.py (about :191, :211) counts probe_turn 1 on any fail-over, including a cached assertion whose turn
@@ -456,6 +480,7 @@ gate_rounds:
   - {gate: decision-scout, round: 4, verdict: NO_FLAGS, scout_input_fingerprint: "v1:00863cf182bbe2fdc7020fd36bd1465e3934d5e62787b71b07df888d40c77fd2"}
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 6}
   - {gate: wording-check, round: 4, verdict: PASS, digest: ceb9bc98ae024a0951d42c87a76d21bb89e2ffd519082b81d03f464a15d6fd7f, base: ddb28a40c5dc5d3b382ea45fa403772f8c833edf, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 6}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -488,7 +513,10 @@ execution_steps:
     - Run bin/venv-python -m scripts.session.github_readiness.
     - Run /implement's Verification Graduation walk, which writes the registry shards
       litellm-usage-mapping-conformance, litellm-call-record-transport and litellm-call-record-events.
-    - Set implementation_declared: true in this plan.
+    - Record weakening_dispositions as planned-change, citing rec-5112 and this plan's scope rows, for each candidate
+      validate_weakening_candidates lists, expected: tests/test_smoke_test_inference_credentials.py::TestRun::test_missing_row,
+      the two `first is again` asserts in tests/test_llm_litellm_cold_start.py::TestGates, and the deepseek expectations
+      in tests/test_llm_litellm_wire.py::TestRecords. Then set implementation_declared: true in this plan.
     - Commit (feat(litellm-call-record): ...) with the trailer `Resolves: rec-5112` in the commit body.
     - git fetch origin main && git rebase origin/main.
     - Run VP step 7 on that committed, rebased tree.
