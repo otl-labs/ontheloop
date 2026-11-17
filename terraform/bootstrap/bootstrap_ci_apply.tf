@@ -54,7 +54,7 @@ locals {
     "ssm:ListTagsForResource",
     "ssm:DescribeParameters",
     "apigateway:GET",
-    "lambda:GetPolicy",
+    "lambda:GetPolicy", "lambda:GetFunction*", "lambda:GetRuntimeManagementConfig", "lambda:ListVersionsByFunction",
     "servicequotas:Get*",
     "servicequotas:List*",
   ]
@@ -148,7 +148,7 @@ locals {
       {
         Sid      = "LambdaPolicyRead"
         Effect   = "Allow"
-        Action   = ["lambda:GetPolicy"]
+        Action   = ["lambda:GetPolicy", "lambda:GetFunction*", "lambda:GetRuntimeManagementConfig", "lambda:ListVersionsByFunction"]
         Resource = ["arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-*"]
       },
       {
@@ -261,7 +261,7 @@ locals {
           "arn:aws:iam::${var.account_id}:role/github-settings-*",
           "arn:aws:iam::${var.account_id}:role/bootstrap-*",
           "arn:aws:iam::${var.account_id}:role/platform-security-*",
-          "arn:aws:iam::${var.account_id}:role/ducklake-api-*",
+          "arn:aws:iam::${var.account_id}:role/ducklake-api-*", "arn:aws:iam::${var.account_id}:role/telemetry-content-*",
         ]
       },
       {

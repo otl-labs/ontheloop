@@ -43,7 +43,12 @@ def test_manifest_is_a_stub_bundling_the_content_closure() -> None:
     assert manifest["status"] == "stub" and manifest["handlers"] == [_HANDLER]
     assert manifest["artifact"] == "ducklake-telemetry-content-reader.zip"
     assert manifest["functions"] == ["agent-platform-ducklake-telemetry-content"]
-    assert manifest["runtime_config"] == ["/agent-platform/ducklake/telemetry_content_reader_url"]
+    assert manifest["runtime_config"] == ["/agent-platform/ducklake/api_url/telemetry/content"]
+
+
+def test_contract_names_the_api_principal() -> None:
+    contract = yaml.safe_load((_ROOT / "docs/contracts/ducklake_telemetry_content_reader.yaml").read_text(encoding="utf-8"))
+    assert contract["contract"]["governance"]["principal_classes"] == ["agent-platform-session"]
 
 
 def test_the_telemetry_reader_still_bundles_none_of_it() -> None:
