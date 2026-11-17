@@ -28,6 +28,7 @@ APP = "github-actions"
 PERSONA_CLASSES = {"code_reviewer": "code", "decision_scout": "plan", "plan_critic": "plan"}
 READY_HEAD_PERSONAS = frozenset({"plan_critic"})
 SOURCES = ("in_session", "actions")
+VERDICT_APP_ROW = "gates.verdict_app.app_id"
 _ROW_ID = re.compile(r"^gates\.([A-Za-z0-9_]+)\.verdict_source$")
 
 
@@ -59,7 +60,19 @@ def _state(run: Mapping[str, object]) -> str | None:
     return f"concluded {run.get('conclusion') or 'with no conclusion'}"
 
 
-def verdict(required: Iterable[str] | None, runs: Iterable[Mapping[str, object]], total_count: int | None) -> Verdict:
+def _app_id(run: Mapping[str, object]) -> int | None:
+    app = run.get("app")
+    ident = app.get("id") if isinstance(app, Mapping) else None
+    return ident if isinstance(ident, int) and not isinstance(ident, bool) else None
+
+
+def verdict(
+    required: Iterable[str] | None,
+    runs: Iterable[Mapping[str, object]],
+    total_count: int | None,
+    *,
+    pins: Mapping[str, int | None] | None = None,
+) -> Verdict:
     names = sorted(set(required)) if required is not None else []
     if not names:
         return Verdict(UNAVAILABLE, ("no required status checks were found for main",))
@@ -68,10 +81,20 @@ def verdict(required: Iterable[str] | None, runs: Iterable[Mapping[str, object]]
         return Verdict(UNAVAILABLE, (f"partial check-run read ({len(listed)} of {total_count})",))
     reasons: list[str] = []
     for name in names:
-        mine = [r for r in listed if r.get("name") == name and _slug(r) == APP]
-        if not mine:
-            reasons.append(f"{name} has no {APP} run")
-            continue
+        if pins is not None and name in pins:
+            pin = pins[name]
+            if pin is None:
+                reasons.append(f"{name} has no verdict App: {VERDICT_APP_ROW} is empty on origin/main")
+                continue
+            mine = [r for r in listed if r.get("name") == name and _app_id(r) == pin]
+            if not mine:
+                reasons.append(f"{name} has no run by the verdict App (app id {pin})")
+                continue
+        else:
+            mine = [r for r in listed if r.get("name") == name and _slug(r) == APP]
+            if not mine:
+                reasons.append(f"{name} has no {APP} run")
+                continue
         problem = _state(max(mine, key=_newest_key))
         if problem is not None:
             reasons.append(f"{name} {problem}")
@@ -128,3 +151,41 @@ def persona_checks(sources: Mapping[str, str], klass: str) -> list[str]:
 
 def switch_backs(base_sources: Mapping[str, str], head_sources: Mapping[str, str]) -> list[str]:
     return sorted(p for p, v in base_sources.items() if v == "actions" and head_sources.get(p) == "in_session")
+
+
+def _positive_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def verdict_app_id(config_text: str) -> int | None | str:
+    """The gates.verdict_app.app_id row's id (a positive int), None (no row or null), or a reason string."""
+    try:
+        data = yaml.safe_load(config_text)
+    except yaml.YAMLError as exc:
+        return "the configuration does not parse: " + (str(exc).splitlines() or ["unreadable"])[0]
+    settings = data.get("settings") if isinstance(data, dict) else None
+    if not isinstance(settings, list):
+        return "the configuration has no settings list"
+    rows = [r.get("defaults") for r in settings if isinstance(r, dict) and r.get("id") == VERDICT_APP_ROW]
+    if not rows:
+        return None
+    if len(rows) > 1:
+        return f"{VERDICT_APP_ROW} appears more than once"
+    defaults = rows[0] if isinstance(rows[0], dict) else {}
+    local, cloud = defaults.get("local"), defaults.get("cloud")
+    if local != cloud or type(local) is not type(cloud):
+        return f"{VERDICT_APP_ROW} defaults.local differs from defaults.cloud"
+    if local is None:
+        return None
+    if not _positive_int(local):
+        return f"{VERDICT_APP_ROW} is not a positive integer or null"
+    return int(local)
+
+
+def app_id_changed(base: int | None, head: int | None) -> bool:
+    return base != head
+
+
+def persona_pins(names: Iterable[str], app: int | None) -> dict[str, int | None]:
+    persona_names = {persona_check_name(p) for p in PERSONA_CLASSES}
+    return {n: app for n in names if n in persona_names}
