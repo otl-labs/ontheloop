@@ -86,13 +86,15 @@ scope:
       timeouts, unredirected token header, single-image-manifest shape rule and RecordError failures; the digest is
       the registry's Docker-Content-Digest header, checked equal to the sha256 of the manifest bytes read (and to the
       reference when it is a digest). read_image raises RecordError on any absence (NAME_UNKNOWN, MANIFEST_UNKNOWN,
-      DENIED), so rule (e) and verify fail closed; read_record maps those absences back to None as today. read_record becomes a wrapper returning read_image(image, "main", ...).revision
+      DENIED) as RecordAbsent, a RecordError subclass, so rule (e) and verify fail closed; read_record catches only
+      RecordAbsent and maps it back to None as today (any other RecordError still raises). read_record becomes a wrapper returning read_image(image, "main", ...).revision
       with its None-on-absent and first_publish behaviour unchanged. Stays stdlib (test_module_imports_only_stdlib).
   - file: tests/ci/test_registry_record.py
     action: Modify
     purpose: >-
       New nodes only: read_image by tag and by digest returns digest and label; a digest header that disagrees with the
-      manifest bytes or the requested digest -> RecordError; existing read_record nodes unchanged and green.
+      manifest bytes or the requested digest -> RecordError (not RecordAbsent); read_record returns None only on
+      RecordAbsent; existing read_record nodes unchanged and green.
   - file: .github/workflows/ci.yml
     action: Modify
     purpose: >-
@@ -102,7 +104,8 @@ scope:
       run python -m scripts.ci.persona_image_pin verify --base "$BASE_SHA". No permission is added: the job keeps
       contents: read and actions: read (the package and the attestations of a public repository read anonymously,
       UNPROVEN for gh's token until VP 6), except the pre-approved attestations: read fallback (constraints). The run text names neither run_persona nor persona_compute_host
-      (validate_persona_trigger_policy). The job's timeout-minutes 45 -> 50 (Decision 153 cl.3 re-derivation below).
+      (validate_persona_trigger_policy). A workflow step, not a scripts.validate check: gh needs the job's token, and
+      the fast tier gives a token only to its dedicated approved-text step. The job's timeout-minutes 45 -> 50 (Decision 153 cl.3 re-derivation below).
   - file: tests/ci/test_persona_image_changed.py
     action: Modify
     purpose: >-
@@ -154,8 +157,9 @@ scope:
     action: Modify
     purpose: >-
       The first pin: digest and source_commit written by persona_image_pin update from the published main tag. The one
-      other change: if the twin's header comment says pin PRs come from the publish channel, it is corrected to say an
-      agent session opens them with persona_image_pin update and the operator merges them. No other line changes.
+      other change: the twin's header comment ("written by the publish channel's pin PRs", PLAN-persona-image-twin's
+      scope row) is corrected to say an agent session opens pin PRs with persona_image_pin update and the operator
+      merges them; comment lines only. No other line changes (VP 4 asserts it).
   - file: docs/ROADMAP-PLATFORM.yaml
     action: Modify
     purpose: >-
@@ -231,10 +235,13 @@ verification_plan:
     command: >-
       git fetch -q origin main && bin/venv-python -m scripts.ci.persona_image_pin update &&
       bin/venv-python -m scripts.ci.persona_image_pin check | grep -x 'PERSONA-IMAGE-PIN current' &&
-      test "$(git diff --numstat origin/main -- config/persona_image.yaml | cut -f1,2)" = "$(printf '2\t2')"
+      test "$(git diff -U0 origin/main -- config/persona_image.yaml | grep -vE '^(\+\+\+|---) ' | grep -E '^[+-]' |
+      grep -vE '^[+-][[:space:]]*(#|$)' | sed -E 's/^([+-])[[:space:]]*([a-z_]+):.*/\1\2/' | LC_ALL=C sort | tr '\n' ' ')" =
+      "+digest +source_commit -digest -source_commit "
     expected: >-
-      update exits 0, check prints the current line, and the pin file differs from origin/main in exactly two lines
-      (numstat 2 2), before and after the pin is committed. A re-run (closure step) that rewrites the pin because a
+      update exits 0, check prints the current line, and among the pin file's non-comment, non-blank lines only the
+      digest and source_commit lines differ from origin/main (the header-comment correction is a comment line, so it
+      passes), before and after the pin and the comment correction are committed. A re-run (closure step) that rewrites the pin because a
       newer publish landed is committed before VP 5.
     fix_if: >-
       DENIED means the package is still private (channel plan step A2, the operator's); a rule failure names it; a
@@ -262,11 +269,13 @@ verification_plan:
       job=[j for j in g('actions/runs/%d/jobs'%run['id'])['jobs'] if j['name']=='pr-validate'][0];
       st={s['name']:s['conclusion'] for s in job['steps']};p=st.get('Persona image pin verification');print('pr-validate:',job['conclusion'],'pin:',p,'job',job['id']);assert job['conclusion']=='success' and p=='success'" &&
       J=$(gh api "repos/otl-labs/ontheloop/actions/workflows/ci.yml/runs?head_sha=$(git rev-parse HEAD)&event=pull_request" --jq '.workflow_runs[0].id' | xargs -I{} gh api repos/otl-labs/ontheloop/actions/runs/{}/jobs --jq '.jobs[]|select(.name=="pr-validate").id') && test -n "$J" &&
-      gh api "repos/otl-labs/ontheloop/actions/jobs/$J/logs" | grep -m1 'PERSONA-IMAGE-PIN verified digest='
+      P=$(bin/venv-python -c "from pathlib import Path;from src.persona_hosts import load_pin;p=load_pin(Path('.'));print(f'digest={p.digest} source_commit={p.source_commit}')") &&
+      gh api "repos/otl-labs/ontheloop/actions/jobs/$J/logs" | grep -m1 -F "PERSONA-IMAGE-PIN verified $P"
     expected: >-
       pr-validate success and the pin step success, then the job log's PERSONA-IMAGE-PIN verified line naming VP 4's
-      digest and source commit (a skip line fails the grep). If gh cannot read logs in the session, read them with
-      mcp__github__get_job_logs on the printed job id. Record both and
+      digest and source commit exactly, read from the committed pin (a skip line or another digest fails the grep). gh
+      is attempted first; if gh's session auth is refused, read the logs with mcp__github__get_job_logs on the printed
+      job id and check the same exact line. Record both and
       the working gh flags in the PR body.
     fix_if: >-
       An unknown gh flag: use the working invocation PLAN-persona-image-channel's handoff records (its VP 8 does not
@@ -450,6 +459,7 @@ gate_rounds:
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 5}
   - {gate: decision-scout, round: 4, verdict: NO_FLAGS, scout_input_fingerprint: "v1:baece64ac3b7c2bbf8af08f67efe367a3b1570db986994ccc60e7ca337436b41"}
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 6}
+  - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 4}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -470,7 +480,7 @@ execution_steps:
     ci.yml's pin step and job timeout; test_persona_image_changed.py's timeout node; selection_budget.py's comment; the
     body-baseline entry; CODEOWNERS.
   - Place sidecar blocks e01-e05 verbatim (actions-capacity, deploy-paths with the e05 relief); approved_text verify runs once e06 is placed too.
-  - VP 4 (the first pin through the helper), then place sidecar block e06 (T4.32 c2 met and re-grounded); then approved_text verify (VP 2).
+  - VP 4 (the first pin through the helper), then the pin file's header-comment correction (scope row; comment lines only), then VP 4 again, then place sidecar block e06 (T4.32 c2 met and re-grounded); then approved_text verify (VP 2).
   - Execute Verification Plan pre-deploy steps 1-6 -- loop until pass; on unrecoverable failure stop and RCA (Decision 55).
   - >-
     CLOSURE, each outcome reported separately (implement skill Commit Flows; docs/contracts/git-ops.yaml
