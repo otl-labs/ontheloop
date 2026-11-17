@@ -12,7 +12,7 @@ plan_type: IMPLEMENTATION
 verification_tier: V2
 plan_path: docs/plans/PLAN-rec-writer-session-tripwire.yaml
 phase: >-
-  ad_hoc_rec (soft-warn exception category; no tier_item claimed, so the Tier Item Freshness Gate is skipped). Plan F
+  user_explicit_out_of_scope (soft-warn exception category; the operator asked for it and no rec tracks it; no tier_item claimed, so the Tier Item Freshness Gate is skipped). Plan F
   of the rec write-path series that followed the 2026-11-12 rec read/write audit (plans A #2077 and B #2085 merged).
   No Lambda-packaged file changes (compute_affected_artifacts over the scope is empty), so V2.
 cites: [dec:143, dec:210, dec:246, dec:255, dec:256, dec:269]
@@ -21,11 +21,11 @@ scope:
     action: Create
     purpose: >-
       Pure classifier, no I/O. classify(command) -> Hit(shape, token) | None. Token tuples live here: HTTP_CLIENTS
-      (curl, wget, xh, http, https); ROUTE_TOKENS (ops/writer, /ducklake/writer_url, DUCKLAKE_WRITER_URL; never a bare writer_url, which also matches the telemetry writer's /agent-platform/ducklake/telemetry_writer_url); TRANSPORT_CALL regexes
+      (curl, wget, xh, http, https, awscurl); ROUTE_TOKENS (ops/writer, /ducklake/writer_url, DUCKLAKE_WRITER_URL; never a bare writer_url, which also matches the telemetry writer's /agent-platform/ducklake/telemetry_writer_url); TRANSPORT_CALL regexes
       (_ducklake_write\s*\(, _resolve_writer_url\s*\(, an import of scripts.ops_portal.writer_transport or of
       writer_transport from scripts.ops_portal); HTTP_LIB regexes (requests.post/put/request call, urllib.request,
       httpx., http.client, AWSRequest\s*\(); LAMBDA_OPS (invoke, invoke-async, invoke-with-response-stream); WRITER_FN regex
-      (^|[:/])agent-platform-ducklake-writer(:[^:\s]+)?$, so a qualifier such as :live still matches). Fast path: a command containing none of ops/writer, /ducklake/writer_url,
+      (^|[:/=])agent-platform-ducklake-writer(:[^:\s]+)?$, so a qualifier such as :live still matches). Fast path: a command containing none of ops/writer, /ducklake/writer_url,
       DUCKLAKE_WRITER_URL, _ducklake_write, _resolve_writer_url, writer_transport, ducklake-writer returns None unparsed.
       Otherwise parse with protected_action_shell.walk(command, HTTP_CLIENTS) (the client names as stop words, so a
       wrapper such as timeout or env still yields the client as the command word). Portal exemption, checked first and
@@ -35,7 +35,7 @@ scope:
       word is its first word after any leading shell reserved words (do, then, else, elif, if, while, until, !, {).
       Then trip on the first of: A http_client -- some simple command's client word basename is in HTTP_CLIENTS and any word of any simple command in the
       parse contains a ROUTE_TOKEN (catches a URL read by $(aws ssm ...) in the same command); B inline_code -- an
-      inline code string (Walk.inline) that matches a TRANSPORT_CALL regex or contains ops/writer and matches an HTTP_LIB regex; C lambda_invoke -- an aws simple command with lambda, an op
+      inline code string (Walk.inline) that matches a TRANSPORT_CALL regex or contains a ROUTE_TOKEN and matches an HTTP_LIB regex; C lambda_invoke -- an aws simple command with lambda, an op
       in LAMBDA_OPS and a word matching WRITER_FN. A lexer ValueError propagates (the hook fails open on it). Imports
       protected_action_shell read-only; never edits it.
     new_imports: [scripts.session.protected_action_shell]
@@ -58,7 +58,8 @@ scope:
   - file: .claude/settings.json
     action: Modify
     purpose: >-
-      Append one PreToolUse group: matcher "^(Bash|Monitor)$", one command hook
+      Insert one PreToolUse group immediately before the protected_action_gate.sh group (which stays last): matcher
+      "^(Bash|Monitor)$", one command hook
       "\"$CLAUDE_PROJECT_DIR/bin/venv-python\" \"$CLAUDE_PROJECT_DIR/.claude/hooks/rec_writer_tripwire.py\"" (no
       timeout key, not async). Every other group stays unchanged.
   - file: .claude/hooks/hooks.json
@@ -73,6 +74,14 @@ scope:
       audit_invariants line stating the tripwire's authority (none), its fail-open and indirection limits and that the
       writer's schema and row rules bind; one governance_note_add amendment_log row. No contract_version change
       (semantic_break false).
+  - file: tests/hooks/test_protected_action_gate.py
+    action: Modify
+    purpose: >-
+      test_registered_rendered_and_code_owned pins the PreToolUse group count: change `assert len(groups) == 4` to
+      `assert len(groups) == 5` and nothing else. Still an exact count, and groups[-1] stays the gate group because
+      the new group is inserted before it, so no assertion is loosened (Decision 235). Not a gate module
+      (protected-actions.yaml gate.modules); no open PR touches it. Named in the PR body as a test edit. Graduated
+      shard protected-action-gate-hook (a different node of this file) is kept unchanged.
   - file: tests/test_session_rec_writer_match.py
     action: Create
     purpose: >-
@@ -139,7 +148,7 @@ verification_plan:
     phase: pre-deploy
     action: Run every classifier and hook node (deny table, allow table, fail-open, registration, transport names).
     command: bin/venv-python -m pytest tests/test_session_rec_writer_match.py tests/hooks/test_rec_writer_tripwire.py -q
-    expected: exit 0, no failures; 34 nodes (twelve refused, twelve passing, two single classifier nodes; two subprocess, six fail-open, one registration hook nodes).
+    expected: exit 0, no failures; 35 nodes (twelve refused, twelve passing, two single classifier nodes; two subprocess, six fail-open, one registration hook nodes).
     fix_if: >-
       an allow-table command is refused (narrow the match, never drop the case); a deny-table command passes (widen the
       parse, e.g. a missing stop word); a fail-open case exits 2 or prints
@@ -167,10 +176,11 @@ verification_plan:
       the standing guard.
   - step: 4
     phase: pre-deploy
-    action: Re-run the standing guards on the files this plan edits (plugin render parity, capture registration, settings denies, contract schema).
+    action: Re-run the standing guards on the files this plan edits (plugin render parity, capture registration, settings denies, the two gates' registration pins, contract schema).
     command: >-
       bin/venv-python -m pytest tests/hooks/test_plugin_hooks.py tests/hooks/test_capture_hook_registration.py
-      tests/hooks/test_settings_tool_denies.py -q && bin/venv-python -c "from scripts.contracts import load_contract;
+      tests/hooks/test_settings_tool_denies.py tests/hooks/test_protected_action_gate.py
+      tests/hooks/test_handoff_evidence_gate.py -q && bin/venv-python -c "from scripts.contracts import load_contract;
       print(type(load_contract('docs/contracts/ducklake_writer.yaml')).__name__)"
     expected: exit 0, no failures; then prints ContractDocument
     fix_if: >-
@@ -228,15 +238,27 @@ test_obligations:
     test_selector: tests/test_session_rec_writer_match.py::test_ordinary_commands_pass
     red_green_expectation: red before (module and test absent), green after.
   - source: .claude/hooks/rec_writer_tripwire.py
-    behavior: Exits 2 with the portal pointer on a hit and exits 0 with no output on every other path.
+    behavior: Exits 2 with the portal pointer on a hit.
     verification_step: 1
     test_selector: tests/hooks/test_rec_writer_tripwire.py::test_hook_refuses_direct_writer_call_with_portal_pointer
+    red_green_expectation: red before (hook absent), green after.
+  - source: .claude/hooks/rec_writer_tripwire.py
+    behavior: Exits 0 with no output on every other path (malformed input, other tools, missing command, lexer and internal errors).
+    verification_step: 2
+    test_selector: tests/hooks/test_rec_writer_tripwire.py::test_hook_fails_open
     red_green_expectation: red before (hook absent), green after.
   - source: .claude/settings.json
     behavior: Registers the hook for Bash and Monitor in the settings and the plugin render.
     verification_step: 2
     test_selector: tests/hooks/test_rec_writer_tripwire.py::test_hook_registered_for_bash_and_monitor
     red_green_expectation: red before (no registration), green after.
+  - source: tests/hooks/test_protected_action_gate.py
+    behavior: Keeps pinning the exact PreToolUse group count and the gate group as the last group.
+    verification_step: 4
+    test_selector: tests/hooks/test_protected_action_gate.py::test_registered_rendered_and_code_owned
+    waiver_reason: >-
+      A test file, not behaviour: the count edit is red against the pre-change settings (4 groups) only after the new
+      group lands, which the registration node already proves; it carries no new behaviour of its own.
   - source: .claude/hooks/hooks.json
     behavior: Equals the render of .claude/settings.json.
     verification_step: 4
@@ -266,7 +288,7 @@ context:
   - "Walker gotcha (probed 2026-11-17): protected_action_shell.walk drops `timeout 30 curl ...` and `env A=1 curl ...` entirely unless the client names are passed as walk()'s stop words; with them it yields curl as the command word."
   - "Command-level portal exemption: rec text fed to the portal (argument, heredoc, or inline portal code) may name every token (ci-rca files such recs and its claude -p runs load .claude/settings.json, with no operator to help); a refused portal call costs more than a missed bypass that also runs the portal."
   - "Deliberately absent: no CODEOWNERS line, no PROTECTED ratchet or capabilities.yaml boundary_patterns entry (Decision 117), so token tweaks stay cheap."
-  - "Not covered (contract line lists them): variables and aliases, script files written then run, other languages, tools other than Bash and Monitor, wrappers after a reserved word (do timeout 5 curl ...), checkouts that predate the hook. Accepted false positive: shape A reads every simple command, so ops/writer named anywhere beside an unrelated curl trips (the price of catching a $(...) URL read)."
+  - "Not covered (contract line lists them): variables and aliases, script files written then run, other languages, tools other than Bash and Monitor, wrappers after a reserved word (do timeout 5 curl ...), checkouts that predate the hook. Accepted false positives: inline code that only imports writer_transport or calls _resolve_writer_url( to read the URL (shape B is a regex over the code text); shape A reads every simple command, so ops/writer named anywhere beside an unrelated curl trips (the price of catching a $(...) URL read)."
   - "Overlaps (plan_obligations): unbuilt PLAN-hook-canary-evidence and PLAN-telemetry-content-reader-lock also scope .claude/settings.json and hooks.json; whichever builds second rebases and re-renders. CI Reform's open #2071 edits scripts/ops_portal/writer_transport.py, which this plan only reads."
   - "Follow-up not filed here: separate writer identities per caller (rec write-path brief, consult Q4) would let the writer tell the portal apart; out of this plan's scope."
   - "red_overlap at plan write (2026-11-17): blocked. Deferral: rec-5247 (telemetry-reader smoke 504; slo_breached, no shared files) and rec-5276 (telemetry arrival red; overlap only through shared test modules such as tests/hooks/test_plugin_hooks.py and test_capture_hook_registration.py, none of its fix files) are owned and being repaired by the Feedback Loop project; this plan edits nothing they repair. The build re-runs red_overlap and proceeds under the same deferral or waits for the operator's ruling."
@@ -276,6 +298,7 @@ gate_rounds:
   - {gate: wording-check, round: 1, verdict: PASS, digest: 67989ca649f9920fed235e783833ad7cca093e0c583465362db4b6d428382d3f, base: d98906cb276ed169bc961da1ae8b9d0ce3a8c9a8, selection: complete}  # pragma: allowlist secret
   - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: "v1:d856c9d9fe7865b381251c2f2b61d8cdc320dd100a3fea89e9355bb029c91b00"}
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 4, nits: 7}  # B1-B4 fixed; N1 N3 N5 N6 fixed; N4 accepted cost (context); N2 declined: HB-1 names four hooks in a Feedback Loop telemetry surface; N7 declined: follow-up is the series brief's, outside this plan
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 7}  # B1 count pin (new group before the gate, count 4->5, no loosening) and B2 fail-open obligation fixed; N1 N3 N4 N5 N6 N7 fixed; N2 accepted as a listed false positive
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -283,11 +306,12 @@ pre_implementation_checklist:
   - All files in scope located and readable
   - Acceptance criteria understood and verifiable
 execution_steps:
-  - "Create scripts/session/rec_writer_match.py per its scope row. Pre: none. Post: steps 2's deny and allow tables pass."
+  - "Create both test files per their scope rows first; run them red (module and hook absent)."
+  - "Create scripts/session/rec_writer_match.py per its scope row. Pre: the tests exist and are red. Post: steps 2's deny and allow tables pass."
   - "Create .claude/hooks/rec_writer_tripwire.py per its scope row. Post: step 3 prints the refusal with rc=2 and rc=0."
   - "Modify .claude/settings.json (append the group), then run bin/venv-python .claude/hooks/plugin_hooks.py render. Post: step 4's render parity passes."
   - "Place sidecar block writer-tripwire-invariant in docs/contracts/ducklake_writer.yaml. Post: step 5 exits 0."
-  - "Create both test files per their scope rows; confirm each is red against the tree without the source files, then green."
+  - "Change tests/hooks/test_protected_action_gate.py's group count per its scope row. Post: step 4 passes."
   - Execute Verification Plan -- run each pre-deploy step; loop until pass; on unrecoverable failure stop and RCA (Decision 55)
-  - "CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; commit; git fetch origin main && git rebase origin/main (re-render hooks.json if a sibling plan changed settings.json); re-run red_overlap (deferral as in context, or wait for the operator); VP 1-5; VP 6 (--pre, then the full tier backgrounded from the top-level session, then --verify-head; a timeout is BLOCKED, nothing is pushed); push; open the PR (body names the sidecar run and that the hook is a tripwire, never a control); subscribe; code review in a fresh context; merge by squash on code review PROCEED and green CI under the merge rule the handoff note states (hook code is a final-diff class in coordinator.yaml standing_authorisation; the note records the operator's ruling on it); then VP 7, reporting PR number, CI run ids and the read-back merge SHA."
+  - "CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; commit; git fetch origin main && git rebase origin/main (re-render hooks.json if a sibling plan changed settings.json); re-run red_overlap (deferral as in context, or wait for the operator); VP 1-5; VP 6 (--pre, then the full tier backgrounded from the top-level session, then --verify-head; a timeout is BLOCKED, nothing is pushed); push; open the PR (body names the sidecar run and that the hook is a tripwire, never a control); subscribe; code review in a fresh context; merge by squash on code review PROCEED and green CI; hook code is a final-diff class in coordinator.yaml standing_authorisation, so the build asks the operator's word on the final diff unless the handoff note records his ruling that waives it; then VP 7, reporting PR number, CI run ids and the read-back merge SHA."
   - "Report: what was implemented, verification results"
