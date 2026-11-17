@@ -32,7 +32,9 @@ scope:
       covering every shape: when any simple command in the parse runs the portal (a -m word followed by
       scripts.ops_data_portal) or any inline code string names ops_data_portal, return None for the whole command
       (rec text fed to the portal by argument, heredoc or bash -c-shaped prose is data). A simple command's client
-      word is its first word after any leading shell reserved words (do, then, else, elif, if, while, until, !, {).
+      word is its first word after any leading shell reserved words (do, then, else, elif, if, while, until, !, {);
+      when that word is in protected_action_shell.WRAPPERS, the first later word whose basename is in HTTP_CLIENTS
+      (so do timeout 5 curl ... in a Monitor loop still trips).
       Then trip on the first of: A http_client -- some simple command's client word basename is in HTTP_CLIENTS and any word of any simple command in the
       parse contains a ROUTE_TOKEN (catches a URL read by $(aws ssm ...) in the same command); B inline_code -- an
       inline code string (Walk.inline) that matches a TRANSPORT_CALL regex or contains a ROUTE_TOKEN and matches an HTTP_LIB regex; C lambda_invoke -- an aws simple command with lambda, an op
@@ -85,7 +87,7 @@ scope:
   - file: tests/test_session_rec_writer_match.py
     action: Create
     purpose: >-
-      Classifier nodes. test_direct_writer_calls_are_refused, parametrised over exactly these twelve commands (host
+      Classifier nodes. test_direct_writer_calls_are_refused, parametrised over exactly these thirteen commands (host
       example.invalid, never a real API host, Decision 101/255), each asserting the named shape: A1 curl -X POST
       https://example.invalid/prod/ops/writer -d @rec.json; A2 timeout 30 curl -sS https://example.invalid/prod/ops/writer;
       A3 env A=1 /usr/bin/curl https://example.invalid/prod/ops/writer; A4 bash -c "curl
@@ -95,7 +97,8 @@ scope:
       import _ducklake_write; _ducklake_write('ops_recommendations', {}, action='file_ops')"; B2 the same call as a
       bin/venv-python heredoc importing writer_transport from scripts.ops_portal; B3 python3 -c "import requests;
       requests.post(BASE + '/ops/writer', data='{}')"; A7 for u in a; do curl -sS
-      https://example.invalid/prod/ops/writer; done; C1 aws lambda invoke --function-name
+      https://example.invalid/prod/ops/writer; done; A8 while true; do timeout 5 curl -sS
+      https://example.invalid/prod/ops/writer; sleep 30; done; C1 aws lambda invoke --function-name
       agent-platform-ducklake-writer --payload file://p.json out.json; C2 aws lambda invoke --function-name
       agent-platform-ducklake-writer:live out.json. test_ordinary_commands_pass, parametrised over exactly these
       twelve: grep -rn ops/writer scripts/; cat scripts/ops_portal/writer_transport.py; bin/venv-python -m pytest
@@ -115,8 +118,8 @@ scope:
   - file: tests/hooks/test_rec_writer_tripwire.py
     action: Create
     purpose: >-
-      Hook nodes. test_hook_refuses_direct_writer_call_with_portal_pointer (subprocess with the real interpreter and a
-      Bash payload carrying A1: exit 2, stderr starts "rec-writer-tripwire: refused." and names
+      Hook nodes. test_hook_refuses_direct_writer_call_with_portal_pointer, parametrised over tool_name Bash and Monitor
+      (subprocess with the real interpreter and a payload carrying A1: exit 2, stderr starts "rec-writer-tripwire: refused." and names
       scripts.ops_data_portal, stdout empty). test_hook_passes_ordinary_command (subprocess, grep payload: exit 0, no
       output). test_hook_fails_open, parametrised in-process over: invalid JSON, a JSON list, a Bash payload with no
       command, an Edit payload whose content names ops/writer, classify raising ValueError, classify raising
@@ -138,17 +141,17 @@ verification_plan:
     phase: pre-deploy
     action: Run the hook's refusal node through the real interpreter.
     command: bin/venv-python -m pytest tests/hooks/test_rec_writer_tripwire.py::test_hook_refuses_direct_writer_call_with_portal_pointer -q
-    expected: exit 0, 1 passed. Red before (file absent, exit 4), green after.
+    expected: exit 0, 2 passed (Bash and Monitor). Red before (file absent, exit 4), green after.
     fix_if: exit 4 (node missing); exit code other than 2, or stderr lacking the refusal line or the portal pointer
     hermetic: true
-    expected_literals: ["1 passed"]
+    expected_literals: ["2 passed"]
     graduation: graduate
     graduation_check_id: rec-writer-session-tripwire
   - step: 2
     phase: pre-deploy
     action: Run every classifier and hook node (deny table, allow table, fail-open, registration, transport names).
     command: bin/venv-python -m pytest tests/test_session_rec_writer_match.py tests/hooks/test_rec_writer_tripwire.py -q
-    expected: exit 0, no failures; 35 nodes (twelve refused, twelve passing, two single classifier nodes; two subprocess, six fail-open, one registration hook nodes).
+    expected: exit 0, no failures; 37 nodes (thirteen refused, twelve passing, two single classifier nodes; two refusal, one pass, six fail-open, one registration hook nodes).
     fix_if: >-
       an allow-table command is refused (narrow the match, never drop the case); a deny-table command passes (widen the
       parse, e.g. a missing stop word); a fail-open case exits 2 or prints
@@ -180,7 +183,8 @@ verification_plan:
     command: >-
       bin/venv-python -m pytest tests/hooks/test_plugin_hooks.py tests/hooks/test_capture_hook_registration.py
       tests/hooks/test_settings_tool_denies.py tests/hooks/test_protected_action_gate.py
-      tests/hooks/test_handoff_evidence_gate.py -q && bin/venv-python -c "from scripts.contracts import load_contract;
+      tests/hooks/test_handoff_evidence_gate.py tests/hooks/test_merge_gate_shim.py
+      tests/telemetry/test_process_event_name_rule.py -q && bin/venv-python -c "from scripts.contracts import load_contract;
       print(type(load_contract('docs/contracts/ducklake_writer.yaml')).__name__)"
     expected: exit 0, no failures; then prints ContractDocument
     fix_if: >-
@@ -228,7 +232,7 @@ verification_plan:
     hermetic: false
 test_obligations:
   - source: scripts/session/rec_writer_match.py
-    behavior: Refuses the twelve direct-call commands.
+    behavior: Refuses the thirteen direct-call commands.
     verification_step: 2
     test_selector: tests/test_session_rec_writer_match.py::test_direct_writer_calls_are_refused
     red_green_expectation: red before (module and test absent), green after.
@@ -284,11 +288,11 @@ context:
   - "Decision-scout verdict NO_FLAGS (rounds 1 to 3). CITE: Decisions 143, 210, 246, 255, 256, 269. Decisions triaged: 218 of 218. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2. Serves: NS.5 3/5."
   - "Why not a protected-actions class (blind consult /mnt/project-files/rec-write-path-hook/advisor-brief/ADVICE.md): that gate fails closed on its COARSE words, so a portal call whose rec text names the writer would be refused whenever the gate cannot run; and its classes need a binding control, which this has none of."
   - "Decision 203 differs: a fail-closed refusal authority with no override, hence a Decision. This hook is fail-open with authority none, so no numbered Decision (decision-entry.yaml significance routing_rule: no reversal-relevant authority); the contract line records it (Decision 181 cl.2: it states what it does not enforce)."
-  - "Prototype probe (2026-11-17, critique r1 fixes): a scratch classifier built to the scope row refused all twelve deny rows and passed all twelve allow rows."
+  - "Prototype probe (2026-11-17, critique r1 fixes): a scratch classifier built to the scope row refused all twelve original deny rows and passed all twelve allow rows; critique r3 reproduced it."
   - "Walker gotcha (probed 2026-11-17): protected_action_shell.walk drops `timeout 30 curl ...` and `env A=1 curl ...` entirely unless the client names are passed as walk()'s stop words; with them it yields curl as the command word."
   - "Command-level portal exemption: rec text fed to the portal (argument, heredoc, or inline portal code) may name every token (ci-rca files such recs and its claude -p runs load .claude/settings.json, with no operator to help); a refused portal call costs more than a missed bypass that also runs the portal."
   - "Deliberately absent: no CODEOWNERS line, no PROTECTED ratchet or capabilities.yaml boundary_patterns entry (Decision 117), so token tweaks stay cheap."
-  - "Not covered (contract line lists them): variables and aliases, script files written then run, other languages, tools other than Bash and Monitor, wrappers after a reserved word (do timeout 5 curl ...), checkouts that predate the hook. Accepted false positives: inline code that only imports writer_transport or calls _resolve_writer_url( to read the URL (shape B is a regex over the code text); shape A reads every simple command, so ops/writer named anywhere beside an unrelated curl trips (the price of catching a $(...) URL read)."
+  - "Not covered (contract line lists them): variables and aliases, script files written then run, other languages, tools other than Bash and Monitor, checkouts that predate the hook. Accepted false positives: inline code that only imports writer_transport or calls _resolve_writer_url( to read the URL (shape B is a regex over the code text); shape A reads every simple command, so ops/writer named anywhere beside an unrelated curl trips (the price of catching a $(...) URL read)."
   - "Overlaps (plan_obligations): unbuilt PLAN-hook-canary-evidence and PLAN-telemetry-content-reader-lock also scope .claude/settings.json and hooks.json; whichever builds second rebases and re-renders. CI Reform's open #2071 edits scripts/ops_portal/writer_transport.py, which this plan only reads."
   - "Follow-up not filed here: separate writer identities per caller (rec write-path brief, consult Q4) would let the writer tell the portal apart; out of this plan's scope."
   - "red_overlap at plan write (2026-11-17): blocked. Deferral: rec-5247 (telemetry-reader smoke 504; slo_breached, no shared files) and rec-5276 (telemetry arrival red; overlap only through shared test modules such as tests/hooks/test_plugin_hooks.py and test_capture_hook_registration.py, none of its fix files) are owned and being repaired by the Feedback Loop project; this plan edits nothing they repair. The build re-runs red_overlap and proceeds under the same deferral or waits for the operator's ruling."
@@ -300,6 +304,7 @@ gate_rounds:
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 4, nits: 7}  # B1-B4 fixed; N1 N3 N5 N6 fixed; N4 accepted cost (context); N2 declined: HB-1 names four hooks in a Feedback Loop telemetry surface; N7 declined: follow-up is the series brief's, outside this plan
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 7}  # B1 count pin (new group before the gate, count 4->5, no loosening) and B2 fail-open obligation fixed; N1 N3 N4 N5 N6 N7 fixed; N2 accepted as a listed false positive
   - {gate: decision-scout, round: 3, verdict: NO_FLAGS, scout_input_fingerprint: "v1:b47ea1c263924584fea663a5781b8e04f53a2153dd387b0e667493d0c4f76c0f"}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 4}  # B1 four-fact closure evidence added; N1 insert-before wording, N2 two more guards in VP 4, N3 Monitor refusal node, N4 wrapper after reserved word (A8 row) all fixed
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -310,9 +315,9 @@ execution_steps:
   - "Create both test files per their scope rows first; run them red (module and hook absent)."
   - "Create scripts/session/rec_writer_match.py per its scope row. Pre: the tests exist and are red. Post: steps 2's deny and allow tables pass."
   - "Create .claude/hooks/rec_writer_tripwire.py per its scope row. Post: step 3 prints the refusal with rc=2 and rc=0."
-  - "Modify .claude/settings.json (append the group), then run bin/venv-python .claude/hooks/plugin_hooks.py render. Post: step 4's render parity passes."
+  - "Modify .claude/settings.json (insert the group immediately before the protected_action_gate.sh group, which stays last), then run bin/venv-python .claude/hooks/plugin_hooks.py render. Post: step 4's render parity passes."
   - "Place sidecar block writer-tripwire-invariant in docs/contracts/ducklake_writer.yaml. Post: step 5 exits 0."
   - "Change tests/hooks/test_protected_action_gate.py's group count per its scope row. Post: step 4 passes."
   - Execute Verification Plan -- run each pre-deploy step; loop until pass; on unrecoverable failure stop and RCA (Decision 55)
-  - "CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; commit; git fetch origin main && git rebase origin/main (re-render hooks.json if a sibling plan changed settings.json); re-run red_overlap (deferral as in context, or wait for the operator); VP 1-5; VP 6 (--pre, then the full tier backgrounded from the top-level session, then --verify-head; a timeout is BLOCKED, nothing is pushed); push; open the PR (body names the sidecar run and that the hook is a tripwire, never a control); subscribe; code review in a fresh context; merge by squash on code review PROCEED and green CI; hook code is a final-diff class in coordinator.yaml standing_authorisation, so the build asks the operator's word on the final diff unless the handoff note records his ruling that waives it; then VP 7, reporting PR number, CI run ids and the read-back merge SHA."
+  - "CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; commit; git fetch origin main && git rebase origin/main (re-render hooks.json if a sibling plan changed settings.json); re-run red_overlap (deferral as in context, or wait for the operator); VP 1-5; VP 6 (--pre, then the full tier backgrounded from the top-level session, then --verify-head; a timeout is BLOCKED, nothing is pushed); push; open the PR (body names the sidecar run and that the hook is a tripwire, never a control); subscribe; code review in a fresh context; merge by squash on code review PROCEED and green CI; hook code is a final-diff class in coordinator.yaml standing_authorisation, so the build asks the operator's word on the final diff unless the handoff note records his ruling that waives it; then VP 7, reporting PR number, CI run ids and the read-back merge SHA. Closure evidence, recorded as four SEPARATE facts (implement skill Commit Flows): GitHub readiness state (scripts.session.github_readiness); parent validator evidence (VP 6 plus --verify-head for the pushed HEAD); structured postflight evidence (bin/venv-python -m scripts.session.postflight --evidence /tmp/implementation-retrospective.json); the real outcome (push, PR, CI green by event-driven wake, merge SHA read-back)."
   - "Report: what was implemented, verification results"
