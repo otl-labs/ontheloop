@@ -1,8 +1,14 @@
 import asyncio
 import dataclasses
 import json
+import os
+import shutil
+import sys
+from pathlib import Path
 
 import pytest
+import yaml
+from mcp.client.stdio import StdioServerParameters
 
 from src.persona_backends import RunAborted, RunRefused
 from tests.persona_backends import fakes
@@ -209,3 +215,196 @@ def test_opening_message_lists_blobs():
     user = t.calls[0]["messages"][1]["content"]
     assert "notes: 3 lines" in user and "change_id: c1" in user
     assert json.dumps(t.calls[0]["messages"][0]["content"])
+
+
+ROOT = Path(__file__).resolve().parents[2]
+VERB = {"verb": "fake_rows"}
+
+
+def _contract(tmp_path, capabilities=("read_input:notes", "warehouse_read:fake_rows"), seconds=None):
+    root = tmp_path / "w"
+    (root / "rendered").mkdir(parents=True, exist_ok=True)
+    data = yaml.safe_load(fakes.FIXTURE.read_text(encoding="utf-8"))
+    data["capabilities"] = list(capabilities)
+    if seconds is not None:
+        data["budget"]["max_wall_clock_seconds"] = seconds
+    (root / "fixture_persona.yaml").write_text(yaml.safe_dump(data), encoding="utf-8")
+    shutil.copy(fakes.FIXTURE.parent / "rendered" / "fixture_persona.txt", root / "rendered" / "fixture_persona.txt")
+    return root / "fixture_persona.yaml"
+
+
+def _server(mode="ok", env=None):
+    def factory():
+        return StdioServerParameters(
+            command=sys.executable, args=["-m", "tests.persona_backends.fake_mcp_server", mode], cwd=ROOT, env=env
+        )
+
+    return factory
+
+
+def _warehouse(tmp_path, script, mode="ok", contract=None, **kw):
+    return drive(
+        T(script) if isinstance(script, list) else script,
+        contract=contract or _contract(tmp_path),
+        mcp_server=_server(mode),
+        **kw,
+    )
+
+
+def test_warehouse_tool_turn_returns_server_text(tmp_path):
+    t = T([tool({"limit": 1}, name="fake_rows"), final()])
+    result, events = _warehouse(tmp_path, t)
+    assert result["outcome"] == "success"
+    message = t.calls[1]["messages"][-1]
+    assert message["role"] == "tool" and "synthetic row" in message["content"]
+    turn = events[1]
+    assert turn["tool_calls"] == ["fake_rows"] and turn["tool_result_bytes"] == [len(message["content"].encode())]
+    assert events[-1]["turns_used"] == 2
+
+
+def test_offered_tools_are_read_input_then_named_verbs(tmp_path):
+    t = T([final()])
+    _warehouse(tmp_path, t)
+    assert [spec["function"]["name"] for spec in t.calls[0]["tools"]] == ["read_input", "fake_rows"]
+
+
+def test_contract_without_read_input_blob_offers_no_read_input_tool(tmp_path):
+    t = T([final()])
+    _warehouse(tmp_path, t, contract=_contract(tmp_path, ("warehouse_read:fake_rows",)))
+    assert [spec["function"]["name"] for spec in t.calls[0]["tools"]] == ["fake_rows"]
+    assert "read_input" not in t.calls[0]["messages"][1]["content"] and "notes:" not in t.calls[0]["messages"][1]["content"]
+
+
+def test_contract_naming_no_tools_sends_none(tmp_path):
+    t = T([final()])
+    drive(t, contract=_contract(tmp_path, ()))
+    assert t.calls[0]["tools"] is None
+
+
+def test_non_warehouse_run_starts_no_server():
+    def boom():
+        raise AssertionError("factory called")
+
+    result, _ = drive(T([final()]), mcp_server=boom)
+    assert result["outcome"] == "success"
+
+
+def test_warehouse_without_server_is_refused(tmp_path):
+    with pytest.raises(RunRefused, match="MCP server"):
+        drive(T([final()]), contract=_contract(tmp_path))
+
+
+def test_input_incomplete_starts_no_server(tmp_path):
+    def boom():
+        raise AssertionError("factory called")
+
+    result, _ = drive(T([]), {"change_id": "c1", "head_sha": fakes.SHA}, contract=_contract(tmp_path), mcp_server=boom)
+    assert result["failure"] == "input_incomplete"
+
+
+def _recording_devnull(monkeypatch):
+    opened = []
+    real = os.devnull
+
+    def helper():
+        handle = open(real, "w", encoding="utf-8")
+        opened.append(handle)
+        return handle
+
+    monkeypatch.setattr("src.persona_backends.litellm_backend._open_devnull", helper)
+    return opened
+
+
+def test_unavailable_server_aborts_before_any_call(tmp_path, monkeypatch):
+    opened = _recording_devnull(monkeypatch)
+    t = T([])
+    with pytest.raises(RunAborted) as info:
+        _warehouse(tmp_path, t, mode="crash")
+    assert info.value.kind == "tool_server_unavailable" and not t.calls
+    assert info.value.events[-1]["outcome"] == "aborted" and len(opened) == 1 and opened[0].closed
+
+
+def test_factory_failure_aborts_unavailable(tmp_path, monkeypatch):
+    opened = _recording_devnull(monkeypatch)
+
+    def factory():
+        raise ImportError("no mcp")
+
+    with pytest.raises(RunAborted) as info:
+        drive(T([]), contract=_contract(tmp_path), mcp_server=factory)
+    assert info.value.kind == "tool_server_unavailable" and info.value.detail == "ImportError"
+    assert info.value.events[-1]["error"] == "tool_server_unavailable" and not opened
+
+
+def test_errlog_devnull_closed_after_run(tmp_path, monkeypatch):
+    opened = _recording_devnull(monkeypatch)
+    _warehouse(tmp_path, [final()])
+    assert len(opened) == 1 and opened[0].closed
+
+
+def test_supplied_errlog_is_left_open(tmp_path):
+    with (tmp_path / "err.txt").open("w", encoding="utf-8") as log:
+        _warehouse(tmp_path, [final()], mcp_errlog=log)
+        assert not log.closed
+
+
+def test_server_failure_mid_run_aborts(tmp_path):
+    t = T([tool({}, name="fake_rows"), final()])
+    with pytest.raises(RunAborted) as info:
+        _warehouse(tmp_path, t, mode="die")
+    assert info.value.kind == "tool_server_error" and len(t.calls) == 1
+    events = info.value.events
+    assert events[1]["tool_calls"] == ["fake_rows"] and events[1]["tool_result_bytes"] == []
+    assert events[-1]["outcome"] == "aborted" and events[-1]["turns_used"] == 1
+
+
+def test_tool_turn_ended_at_is_transport_return(tmp_path, monkeypatch):
+    now = [1000.0]
+
+    def wall():
+        return now[0]
+
+    from src.persona_backends import mcp_bridge
+
+    real = mcp_bridge.Bridge.call
+
+    async def advancing(self, name, arguments_json):
+        now[0] += 50.0
+        return await real(self, name, arguments_json)
+
+    monkeypatch.setattr(mcp_bridge.Bridge, "call", advancing)
+    _, events = _warehouse(tmp_path, [tool({}, name="fake_rows"), final()], wall=wall)
+    assert events[1]["ended_at_ms"] == 1000000 and events[-1]["ended_at_ms"] == 1050000
+
+
+def test_startup_hang_returns_budget_exhausted(tmp_path):
+    t = T([final()])
+    result, events = _warehouse(tmp_path, t, mode="hang", contract=_contract(tmp_path, seconds=1))
+    assert result["failure"] == "budget_exhausted" and "started" in result["detail"] and not t.calls
+    assert events[-1]["outcome"] == "failure"
+
+
+def test_warehouse_call_past_deadline_returns_budget_exhausted(tmp_path, monkeypatch):
+    real = asyncio.wait_for
+
+    async def short(coro, limit):
+        return await real(coro, 0.01 if limit < 3000 else limit)
+
+    monkeypatch.setattr(asyncio, "wait_for", short)
+    t = T([tool({}, name="fake_rows"), final()])
+    result, events = _warehouse(tmp_path, t, mode="slow", contract=_contract(tmp_path, seconds=2000))
+    assert result["failure"] == "budget_exhausted" and "started" not in result["detail"] and len(t.calls) == 1
+    assert events[1]["tool_calls"] == ["fake_rows"] and events[-1]["outcome"] == "failure"
+
+
+def test_transport_outage_with_bridge_open_aborts(tmp_path):
+    t = T([error("outage", (attempt(outcome="outage"),))])
+    with pytest.raises(RunAborted) as info:
+        _warehouse(tmp_path, t)
+    assert type(info.value) is RunAborted and info.value.kind == "outage"
+
+
+def test_unlisted_tool_name_with_bridge_open_gets_error_text(tmp_path):
+    t = T([tool({}, name="fake_by_ids"), final()])
+    _warehouse(tmp_path, t)
+    assert t.calls[1]["messages"][-1]["content"] == "error: unknown tool"

@@ -9,7 +9,7 @@ from typing import Any
 
 import yaml
 
-BUILT = frozenset({"read_input"})
+BUILT = frozenset({"read_input", "warehouse_read"})
 _BUDGET_KEYS = ("max_turns", "max_wall_clock_seconds", "max_revisions")
 
 
@@ -31,6 +31,7 @@ class LoadedContract:
     prompt: str
     prompt_sha256: str
     blob_names: tuple[str, ...]
+    warehouse_verbs: tuple[str, ...] = ()
     verdict_consistency: dict[str, Any] | None = None
 
 
@@ -68,6 +69,25 @@ def _rule_malformed(rule: Any) -> bool:
     return not (isinstance(cases, list) and bool(cases) and all(case_ok(c) for c in cases))
 
 
+def _split_capabilities(capabilities: tuple[str, ...], properties: dict[str, Any]) -> tuple[list[str], list[str]]:
+    blobs: list[str] = []
+    verbs: list[str] = []
+    for capability in capabilities:
+        base, _, parameter = capability.partition(":")
+        if base not in BUILT:
+            raise RunRefused(f"capability {capability} is not built by the litellm backend")
+        if base == "warehouse_read":
+            if not parameter or parameter == "read_input":
+                raise RunRefused(f"capability {capability} names no named read")
+            if parameter not in verbs:
+                verbs.append(parameter)
+            continue
+        if not parameter or parameter not in properties:
+            raise RunRefused(f"capability {capability} names no blob of input_schema")
+        blobs.append(parameter)
+    return blobs, verbs
+
+
 def load(contract_path: Path) -> LoadedContract:
     try:
         data = yaml.safe_load(Path(contract_path).read_text(encoding="utf-8"))
@@ -84,15 +104,8 @@ def load(contract_path: Path) -> LoadedContract:
     if digest != data.get("rendered_prompt_sha256"):
         raise RunRefused("rendered prompt does not match rendered_prompt_sha256")
     capabilities = tuple(str(item) for item in data.get("capabilities") or [])
-    blobs: list[str] = []
     properties = (data.get("input_schema") or {}).get("properties") or {}
-    for capability in capabilities:
-        base, _, parameter = capability.partition(":")
-        if base not in BUILT:
-            raise RunRefused(f"capability {capability} is not built by the litellm backend")
-        if not parameter or parameter not in properties:
-            raise RunRefused(f"capability {capability} names no blob of input_schema")
-        blobs.append(parameter)
+    blobs, verbs = _split_capabilities(capabilities, properties)
     budget = data.get("budget") or {}
     values = {key: _integer(budget, key) for key in _BUDGET_KEYS}
     failure_ids = tuple(str(row["id"]) for row in data.get("failure_outputs") or [] if isinstance(row, dict) and "id" in row)
@@ -112,5 +125,6 @@ def load(contract_path: Path) -> LoadedContract:
         prompt=prompt_bytes.decode("utf-8"),
         prompt_sha256=digest,
         blob_names=tuple(blobs),
+        warehouse_verbs=tuple(verbs),
         verdict_consistency=rule,
     )
