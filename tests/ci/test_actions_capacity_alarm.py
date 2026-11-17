@@ -172,7 +172,7 @@ def test_reader_failure_is_read_failed_and_writes_nothing() -> None:
 
 
 def test_build_fields_pass_the_portal_write_gate() -> None:
-    from scripts.ops_portal.write_validators import gate_write
+    from tests.fixtures.portal_gate import assert_portal_gate_clean
 
     for cls in ("capacity_breach", "gauge_blind"):
         ok, why = lint_acceptance_command(alarm.acceptance_for(cls), require_discrimination=True)
@@ -180,4 +180,4 @@ def test_build_fields_pass_the_portal_write_gate() -> None:
         ctx = alarm._context(cls, ["2026-11-11T11:00:00Z"], breach_table(), CONTRACT, URL)
         fields = alarm._fields(cls, ctx)
         assert fields["automatable"] is False and len(fields["title"]) >= 10
-        gate_write("ops_recommendations", fields, insert=True)
+        assert_portal_gate_clean("ops_recommendations", fields, insert=True)

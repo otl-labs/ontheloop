@@ -185,3 +185,9 @@ def test_switch_backs() -> None:
     assert mc.switch_backs(actions, plain) == ["code_reviewer"]
     assert mc.switch_backs(plain, actions) == []
     assert mc.switch_backs(actions, actions) == []
+
+
+def test_ready_head_personas_are_plan_class_personas() -> None:
+    assert mc.READY_HEAD_PERSONAS
+    assert mc.READY_HEAD_PERSONAS <= set(mc.PERSONA_CLASSES)
+    assert all(mc.PERSONA_CLASSES[p] == "plan" for p in mc.READY_HEAD_PERSONAS)

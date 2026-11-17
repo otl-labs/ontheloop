@@ -104,6 +104,15 @@ def test_coverage_sentence_and_decision_annotation_name_the_conformance_check() 
     )
 
 
+def test_advisory_leg_names_its_amending_decision() -> None:
+    _, rule, decisions_text = _load()
+    statement = _norm(rule["statement"])
+    match = re.search(r"advisory: true, runs it and reports each finding without refusing \(decision (\d+)\)", statement)
+    assert match, "the rule statement must name the amending Decision for advisory legs"
+    section = _norm(_section(decisions_text, match.group(1)))
+    assert "amends: [240, 210]" in section
+
+
 def test_dependency_lookup_names_its_amending_decision() -> None:
     _, rule, decisions_text = _load()
     statement = " ".join(rule["statement"].split())

@@ -255,7 +255,12 @@ def test_decomposition_hints_resolve_to_one_parent(items):
             "PLAN-persona-trigger-policy",
             "PLAN-run-persona-litellm-backend",
             "PLAN-persona-image-channel",
-            "PLAN-persona-verdict-jobs",
+            "PLAN-persona-verdict-chain",
+            "PLAN-persona-verdict-wake",
+            "PLAN-persona-verdict-override",
+            "PLAN-persona-verdict-egress",
+            "PLAN-persona-verdict-fixture-run",
+            "PLAN-persona-verdict-rescout",
             "PLAN-gate-consumers-flag-aware",
         },
     }
