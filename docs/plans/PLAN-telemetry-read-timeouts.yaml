@@ -28,10 +28,10 @@ cites:
 scope:
 - file: terraform/personal/ducklake_maintenance_telemetry.tf
   action: Modify
-  purpose: The telemetry merge rule's schedule_expression becomes cron(50 * * * ? *) (hourly at :50; the singleton's other minutes :15,
-    :30, Sun 03:00, 03:45 and 04:05 stay distinct). Its description, the header cadence comment and the merge-liveness alarm's alarm_description
-    say hourly. Every alarm's period, evaluation_periods and threshold is unchanged (each stays correct with more datapoints per period).
-    No IAM, target or permission change.
+  purpose: The telemetry merge rule's schedule_expression becomes cron(50 * * * ? *) (hourly at :50) and its description says hourly;
+    the header cadence comment says hourly and names the new Sunday 03:50 pass five minutes after the 03:45 ops gc_ops (VP 12 proves
+    it is not throttled). Every alarm block, including the merge-liveness alarm's description (its 6-hourly lookback stays true), is
+    unchanged. No IAM, target or permission change.
   new_imports: []
 - file: tests/checks/iam_tf/test_telemetry_production_maintenance_tf.py
   action: Modify
@@ -53,17 +53,24 @@ scope:
 - file: scripts/telemetry_verify/session_presence.py
   action: Modify
   purpose: '_walk: a roots_for call that raises ReadDeadlineExceededError (imported from src.common.ducklake_reader_client, as scripts/telemetry_usage.py
-    does) is never retried as is; the window splits into two halves, newer half first, each read the same way, down to one day; a one-day
-    window that still answers read_deadline_exceeded raises Unreadable("ReadDeadlineExceededError"). Every other exception keeps today''s
-    one retry then Unreadable. windows_read counts each window read successfully. The ARRIVAL line format is unchanged.'
+    does) is never retried as is. The window [first..last] splits with telemetry_usage''s rule (older half first..first+((days+1)//2-1),
+    newer half the rest) and the NEWER half is read first, each half read the same way down to one day; after each successful read,
+    if remaining is empty the walk stops and skips the unread halves. A one-day window that still answers read_deadline_exceeded raises
+    Unreadable(''ReadDeadlineExceededError''). A module constant MAX_DEADLINE_HITS = 4 caps deadline-hit reads per run (about 4 x 111
+    s, well inside the 30-minute job timeout); the fifth raises Unreadable(''ReadBudgetExceeded''), so the ARRIVAL line and junit are
+    still written. Every other exception keeps today''s one retry then Unreadable. windows_read counts each successful read. The ARRIVAL
+    line format is unchanged. The module docstring''s ''Imports only the standard library and yaml'' gains the reader client''s error
+    class.'
   new_imports:
   - src.common.ducklake_reader_client
 - file: tests/telemetry_verify/test_session_presence.py
   action: Modify
-  purpose: 'New node test_walk_halves_window_on_read_deadline (rec-5248''s acceptance): a fake roots_for that raises ReadDeadlineExceededError
-    for any window over 3 days, and answers otherwise, ends green with every key found and reads 7 -> 3+4 -> ... halves newest first;
-    plus test_a_one_day_read_deadline_is_unreadable: a one-day window that still raises ends unreadable with cause ReadDeadlineExceededError
-    after exactly one call for that day. Existing nodes unchanged.'
+  purpose: 'Three new nodes, existing nodes unchanged. test_walk_halves_window_on_read_deadline (rec-5248''s acceptance): newest day
+    N, window_days 7, a fake roots_for raising ReadDeadlineExceededError for any window over 3 days, the only key present on day N-5:
+    the walk ends green and roots.calls equals [(N-6,N), (N-2,N), (N-6,N-3), (N-4,N-3), (N-6,N-5)] in ISO dates, windows_read 3. test_a_one_day_read_deadline_is_unreadable:
+    a fake raising for every window ends unreadable with cause ReadDeadlineExceededError once the newest one-day leaf (N,N) fails, with
+    that leaf called exactly once. test_read_deadline_cap_ends_unreadable: a fake raising for every window over 1 day while the key
+    is never found ends unreadable with cause ReadBudgetExceeded after exactly MAX_DEADLINE_HITS + 1 deadline-hit calls.'
   new_imports: []
 bundled_recommendations:
 - rec-5247
@@ -79,19 +86,22 @@ acceptance_criteria:
 - Decision 236 clause 5 and docs/contracts/ducklake_maintenance.yaml say hourly for the telemetry catalog, in the operator-approved
   words.
 - The arrival check narrows a window that answers read_deadline_exceeded down to one day instead of going red, still judges every merged
-  session, and is unreadable when a one-day window still times out.
-- After the apply, the telemetry merge runs hourly, the telemetry reader's maximum Duration stays below 100 s and every telemetry-arrival
-  run is green for 24 hours, and rec-5247 and rec-5248 are closed.
-- Seven days after the apply, the extra maintenance compute and the telemetry catalog's metadata size are read and recorded against
-  the 3 to 12 US dollar estimate.
+  session, is unreadable when a one-day window still times out, and stops at four deadline hits per run so the job always writes its
+  ARRIVAL line.
+- After the apply, the telemetry merge runs hourly; for 24 hours the telemetry reader's maximum Duration stays below 100 s, every telemetry-arrival
+  run concludes success and the writer's OccRetryCount does not rise; the first Sunday shows no maintenance throttle; rec-5247 and rec-5248
+  are closed.
+- Seven days after the apply, the extra maintenance compute and the telemetry catalog's file column stats rows are read and recorded
+  against the 3 to 12 US dollar estimate.
 verification_plan:
 - step: 1
   phase: pre-deploy
   action: The arrival walk halves a window on read_deadline_exceeded (rec-5248's acceptance node).
   command: bin/venv-python -m pytest "tests/telemetry_verify/test_session_presence.py::test_walk_halves_window_on_read_deadline" "tests/telemetry_verify/test_session_presence.py::test_a_one_day_read_deadline_is_unreadable"
-    -q
+    "tests/telemetry_verify/test_session_presence.py::test_read_deadline_cap_ends_unreadable" -q
   expected: exit 0; red before (the first window fails twice and the walk is unreadable).
-  fix_if: the walk retries the same window, skips days, or reads older halves first
+  fix_if: the walk retries the same window, skips days, reads the older half first, reads past an empty remaining, or runs past the
+    cap
   hermetic: true
   expected_literals:
   - ' passed'
@@ -125,7 +135,8 @@ verification_plan:
   expected: exit 0
   fix_if: run terraform fmt on the file
   hermetic: false
-  graduation: not-applicable
+  graduation: waive
+  graduation_waiver_reason: The required terraform-validate CI job already enforces fmt on every terraform/** change.
 - step: 5
   phase: pre-deploy
   action: The DECISIONS.md and contract edits equal the approved sidecar word for word.
@@ -133,7 +144,9 @@ verification_plan:
   expected: exit 0
   fix_if: any word differs from the sidecar's after text; fix the edit, never the sidecar
   hermetic: false
-  graduation: not-applicable
+  graduation: waive
+  graduation_waiver_reason: PR-relative to origin/main, so vacuous once merged; validate_merge_step's approved-text leg enforces the
+    same binding on the PR.
 - step: 6
   phase: pre-deploy
   action: Full tier, then HEAD attestation, after the build commit and rebase and before the push; start it backgrounded from the top-level
@@ -155,15 +168,17 @@ verification_plan:
   hermetic: false
 - step: 8
   phase: post-deploy
-  action: Reads fit the deadline for a day, and arrival stays green (read 24 h after the apply).
-  command: aws --profile agent_platform cloudwatch get-metric-statistics --namespace AWS/Lambda --metric-name Duration --dimensions
-    Name=FunctionName,Value=agent-platform-ducklake-telemetry-reader --start-time "$(date -u -d '-24 hours' +%Y-%m-%dT%H:00:00Z)" --end-time
-    "$(date -u +%Y-%m-%dT%H:%M:00Z)" --period 3600 --statistics Maximum --query 'max(Datapoints[].Maximum)'
-  expected: below 100000 (ms); and every telemetry-arrival run in the same 24 h concluded success (list them from the workflow's runs;
-    record the count and the maximum).
-  fix_if: 'a maximum at or above 100000 means the hourly tail is still too heavy at peak; record the hour and its writer invocations
-    on rec-4474 (the durable owner: reader parallelism) and report to the coordinator; do not raise the reader timeout or widen anything
-    in this plan'
+  action: Reads fit the deadline for a day and merges do not crowd the writer (read 24 h after the apply).
+  command: for spec in 'AWS/Lambda Duration FunctionName agent-platform-ducklake-telemetry-reader Maximum' 'DuckLakeTelemetryWriter
+    OccRetryCount MetaSchema ducklake_telemetry Sum'; do set -- $spec; aws --profile agent_platform cloudwatch get-metric-statistics
+    --namespace $1 --metric-name $2 --dimensions Name=$3,Value=$4 --start-time "$(date -u -d '-24 hours' +%Y-%m-%dT%H:00:00Z)" --end-time
+    "$(date -u +%Y-%m-%dT%H:%M:00Z)" --period 3600 --statistics $5 --query "[max(Datapoints[].$5), sum(Datapoints[].$5)]" --output text;
+    done
+  expected: reader Duration maximum below 100000 (ms); writer OccRetryCount sum no higher than the 24 h before the apply (0 on every
+    day 2026-11-10..17); record both lines.
+  fix_if: 'a Duration maximum at or above 100000 means the hourly tail is still too heavy at peak: record the hour and its writer invocations
+    on rec-4474 (reader parallelism) and report to the coordinator; a rising OccRetryCount is reported to the coordinator; nothing is
+    widened or raised in this plan'
   hermetic: false
 - step: 9
   phase: post-deploy
@@ -176,21 +191,61 @@ verification_plan:
   hermetic: false
 - step: 10
   phase: post-deploy
+  action: Every telemetry-arrival run in the 24 h after the apply concluded success.
+  command: 'gh api "repos/otl-labs/ontheloop/actions/workflows/telemetry-arrival.yml/runs?per_page=100&created=>=$(date -u -d ''-24
+    hours'' +%Y-%m-%dT%H:%M:%SZ)" --jq ''[.workflow_runs[] | select(.status == "completed") | .conclusion] | group_by(.) | map({(.[0]):
+    length}) | add'''
+  expected: 'only success counts (for example {"success": 20}); record the line.'
+  fix_if: a failure is read for its ARRIVAL line first; ARRIVAL_UNREADABLE with cause ReadBudgetExceeded or ReadDeadlineExceededError
+    goes to rec-4474 and the coordinator
+  hermetic: false
+- step: 11
+  phase: post-deploy
+  action: 'rec-5247''s failing call, live: a one-day sessions_window at about :45 past the hour, the end of an hourly cycle.'
+  command: AWS_PROFILE=agent_platform bin/venv-python -c "import time, datetime as t; from scripts.telemetry_capture import read_route;
+    d = t.datetime.now(t.timezone.utc); s = time.monotonic(); r = read_route.make_routed_reader().named('sessions_window', day_from=d.date().isoformat(),
+    day_to=d.date().isoformat(), as_of=d.isoformat()); print('rows', len(r), 'elapsed_s', round(time.monotonic() - s, 1))"
+  expected: prints rows and an elapsed_s below 100; record the line and the minute it ran.
+  fix_if: a ReadDeadlineExceededError is recorded on rec-4474 and reported to the coordinator
+  hermetic: false
+- step: 12
+  phase: post-deploy
+  action: 'First Sunday after the apply: the 03:50 telemetry merge after the 03:45 ops gc_ops ran unthrottled.'
+  command: SUN=$(date -u -d 'last sunday' +%Y-%m-%d); aws --profile agent_platform cloudwatch get-metric-statistics --namespace AWS/Lambda
+    --metric-name Throttles --dimensions Name=FunctionName,Value=agent-platform-ducklake-maintenance --start-time ${SUN}T03:00:00Z --end-time
+    ${SUN}T05:00:00Z --period 3600 --statistics Sum --output text; aws --profile agent_platform cloudwatch get-metric-statistics --namespace
+    DuckLakeMaintenance --metric-name MergeOpsTablesCount --dimensions Name=MetaSchema,Value=ducklake_telemetry --start-time ${SUN}T03:00:00Z
+    --end-time ${SUN}T04:00:00Z --period 3600 --statistics SampleCount --output text
+  expected: Throttles sum 0 in both hours and one MergeOpsTablesCount datapoint in the 03:00 hour; run on the Monday after the first
+    post-apply Sunday.
+  fix_if: 'a throttle or a missing 03:00 datapoint means the singleton collided: report to the coordinator for a follow-on rec moving
+    the telemetry minute (a new sidecar), never a local change'
+  hermetic: false
+- step: 13
+  phase: post-deploy
   action: Spend reading against the estimate (Decision 88), 7 days after the apply.
-  command: for m in MergeOpsDurationMs CatalogMetadataBytes; do aws --profile agent_platform cloudwatch get-metric-statistics --namespace
-    DuckLakeMaintenance --metric-name $m --dimensions Name=MetaSchema,Value=ducklake_telemetry --start-time "$(date -u -d '-14 days'
-    +%Y-%m-%dT00:00:00Z)" --end-time "$(date -u +%Y-%m-%dT00:00:00Z)" --period 86400 --statistics Sum Maximum --output text; done
-  expected: daily MergeOpsDurationMs sums for the 7 days before and after the apply, and the CatalogMetadataBytes maximum for each day;
-    the report converts the duration delta to Lambda GB-seconds at 1536 MB and records it beside the estimate, and states that Neon
-    compute is not readable from the session, so the coordinator asks the operator for one reading of Neon usage.
-  fix_if: a daily merge duration sum above 2 h, or CatalogMetadataBytes growing faster than before the apply, is reported to the coordinator
-    for the operator; nothing is changed in this plan
+  command: for m in MergeOpsDurationMs CatalogFileColumnStatsRows; do aws --profile agent_platform cloudwatch get-metric-statistics
+    --namespace DuckLakeMaintenance --metric-name $m --dimensions Name=MetaSchema,Value=ducklake_telemetry --start-time "$(date -u -d
+    '-14 days' +%Y-%m-%dT00:00:00Z)" --end-time "$(date -u +%Y-%m-%dT00:00:00Z)" --period 86400 --statistics Sum Maximum --output text;
+    done
+  expected: daily MergeOpsDurationMs sums and CatalogFileColumnStatsRows maxima for the 7 days before and after the apply (CatalogMetadataBytes
+    has no telemetry series); the report converts the duration delta to Lambda GB-seconds at 1536 MB and records it beside the estimate
+    and Decision 214's capped-bill trigger, and states that Neon compute is not readable from the session, so the coordinator asks the
+    operator for one reading of Neon usage.
+  fix_if: a daily merge duration sum above 2 h, or stats rows growing faster than before the apply, is reported to the coordinator for
+    the operator; nothing is changed in this plan
   hermetic: false
 test_obligations:
 - source: scripts/telemetry_verify/session_presence.py
-  behavior: a deadline-hit window is halved down to one day, newest half first, never retried as is
+  behavior: a deadline-hit window is halved down to one day, newer half first, never retried as is, stopping early and capped at four
+    deadline hits
   verification_step: 1
   test_selector: tests/telemetry_verify/test_session_presence.py::test_walk_halves_window_on_read_deadline
+  red_green_expectation: red before, green after
+- source: scripts/telemetry_verify/session_presence.py
+  behavior: the fifth deadline-hit read ends unreadable with ReadBudgetExceeded
+  verification_step: 1
+  test_selector: tests/telemetry_verify/test_session_presence.py::test_read_deadline_cap_ends_unreadable
   red_green_expectation: red before, green after
 - source: terraform/personal/ducklake_maintenance_telemetry.tf
   behavior: the telemetry merge rule is hourly at :50 and still targets the production telemetry catalog
@@ -219,33 +274,36 @@ constraints:
 - No existing assertion is loosened and the reader smoke gate is unchanged (Decision 235); the cron pin's literal change is a planned
   change citing acceptance_criteria[0].
 context:
-- 'Decision-scout verdict NO_FLAGS (round 3, after the sidecar landed; FLAGS_FOUND rounds 1-2). CITE: 236 (cl.5 retuned; growth-alarm-recurs not fired, ingestion shape untouched),
-  88 (cl.1(iii) cadence sized to write rate; cl.2 measured by VP 10), 246 (sidecar binds the DECISIONS.md line and contract prose),
-  226 (cl.3 bundled reds never block; cl.4 forward-fix, as amended by 254), 250 (cl.2 unreadable is red, kept for a one-day timeout;
-  false-reds reversal counts rec-5248), 186 (fix-bound closure artifacts), 201 (verdict on the re-keyed acceptance), 235 (smoke unchanged;
-  halving keeps the same oracle over the same days). CONTRADICT: round 1 WARN 235 resolved by dropping the smoke split; round 1 WARN
-  246 resolved by binding the contract prose in the sidecar; round 2 NOTE 246 cl.4 (spend and deploy unbound by the sidecar) resolved
-  by citing the operator''s 2026-11-16 no-final-diff ruling id beside his 13:42Z approval (Spend item below). SPIRIT: none (round 1
-  NOTE 88 resolved by VP 10). RELATED: 177, 81, 143, 191, 192, 188, 193, 266, 214, 253, 230, 213, 199, 239, 126, 77, 92, 119, 252, 265,
-  128, 166, 181, 189, 244, 163, 254, 84, 210, 184, 55, 72, 73, 101. Decisions triaged: 217 of 217. Roadmap items intersected: 5; CONFLICT:
-  0; RELATED: 5. Serves: NS.5 2/5 -- The fix restores the telemetry reader''s named verbs to answering within their deadline, and callers
-  narrow windows instead of retrying. It is an operational repair, not an advance of the principle.'
+- 'Decision-scout verdict NO_FLAGS (round 3, after the sidecar landed; FLAGS_FOUND rounds 1-2). CITE: 236 (cl.5 retuned; growth-alarm-recurs
+  not fired, ingestion shape untouched), 88 (cl.1(iii) cadence sized to write rate; cl.2 measured by VP 13), 246 (sidecar binds the
+  DECISIONS.md line and contract prose), 226 (cl.3 bundled reds never block; cl.4 forward-fix, as amended by 254), 250 (cl.2 unreadable
+  is red, kept for a one-day timeout; false-reds reversal counts rec-5248), 186 (fix-bound closure artifacts), 201 (verdict on the re-keyed
+  acceptance), 235 (smoke unchanged; halving keeps the same oracle over the same days). CONTRADICT: round 1 WARN 235 resolved by dropping
+  the smoke split; round 1 WARN 246 resolved by binding the contract prose in the sidecar; round 2 NOTE 246 cl.4 (spend and deploy unbound
+  by the sidecar) resolved by citing the operator''s 2026-11-16 no-final-diff ruling id beside his 13:42Z approval (Spend item below).
+  SPIRIT: none (round 1 NOTE 88 resolved by VP 13). RELATED: 177, 81, 143, 191, 192, 188, 193, 266, 214, 253, 230, 213, 199, 239, 126,
+  77, 92, 119, 252, 265, 128, 166, 181, 189, 244, 163, 254, 84, 210, 184, 55, 72, 73, 101. Decisions triaged: 217 of 217. Roadmap items
+  intersected: 5; CONFLICT: 0; RELATED: 5. Serves: NS.5 2/5 -- The fix restores the telemetry reader''s named verbs to answering within
+  their deadline, and callers narrow windows instead of retrying. It is an operational repair, not an advance of the principle.'
 - 'Evidence (read-only, 2026-11-17; the build''s PR body carries the detail): arrival failed just before the 00:50Z and 12:50Z merges
   and passed after each; reader Duration max ~110 s from 2026-11-16 15:00Z; writer invocations 2,712 on 2026-11-16; MergeOpsPassFailed
   0 and files after merge 109-153 all week; a 7-day root read soon after a merge took 23 s.'
 - rec-4474 (ours) owns cold serial small-file reads; its acceptance is not met here, so it stays open and unbundled.
 - 'Spend and deploy (always_ask, Decision 246 cl.4): UNPROVEN estimate 3-12 USD/month, likely 2-4 (extra maintenance runs plus Neon
-  compute in quiet hours); VP 10 measures the Lambda side and is read beside Decision 214''s capped-bill trigger. Operator approved
+  compute in quiet hours); VP 13 measures the Lambda side and is read beside Decision 214''s capped-bill trigger. Operator approved
   the cost and plan 2026-11-17 13:42Z (cmsg_01YbaDZWowGfXCn2WtobCVVoKpnBtpzKCtWVuXmbAr3AZB). His 2026-11-16 ruling (cmsg_01YbaDZWowGfXCn2WtobCVVoNkoksprjGv5Mz9HrYSDG27):
   once he has approved a plan, its build merges on review PROCEED and green CI with no final-diff word; anything the plan did not cover
   is still asked.'
-- Singleton minutes stay distinct at hourly :50 (terraform header map); the telemetry merge's longest pass this week was 155 s.
+- 'Singleton (reserved concurrency 1): hourly :50 adds a Sunday 03:50 telemetry merge 5 min after the 03:45 ops gc_ops, whose last three
+  Sunday maxima were 244, 206 and 163 s (about 56 s worst-case margin, critique round 1); VP 12 reads the first Sunday''s throttles.
+  Other minutes (:15, :30, Sun 03:00, 04:05) keep wider gaps; the telemetry merge''s longest pass this week was 155 s.'
 - 'Precedent for halving: scripts/telemetry_usage.py _Reads.read (PLAN-telemetry-usage-reader-verbs) splits on ReadDeadlineExceededError;
   the reader contract''s read_deadline_exceeded row says never retried, narrow the window.'
 - 'Ruling 2026-11-05 (terraform/personal PRs hold during the Environment tidy''s post-merge proof; tidy now CI Reform''s): the build
   checks the coordinator log before merging.'
-- 'Graduated shards kept unchanged: telemetry-maintenance-schedule-pins, telemetry-gc-enablement-baseline, telemetry-reader-deploy-gate,
-  telemetry-reader-smoke-covers-verification-verbs, telemetry-reads-gated-on-the-telemetry-reader.'
+- 'Graduated shards kept unchanged: telemetry-maintenance-schedule-pins, telemetry-gc-enablement-baseline, telemetry-arrival-oracle,
+  session-presence-normalise-key, arrival-config-excuses-rec-5004-key, arrival-config-excuses-rec-5194-session, arrival-config-excuses-reopened-rec-5055-session,
+  arrival-config-records-rec-5055-lost-window, arrival-config-records-rec-5144-lost-window.'
 - 'docs/contracts/ducklake_maintenance.yaml is NEAR_CAP (489 of 500): only the amendment_log row adds a line; if main has used the headroom,
   stop and report, never a raise (Decision 128). PLAN-sit-restore-spike and 15 unbuilt plans share it or DECISIONS.md; whichever builds
   second rebases.'
@@ -264,11 +322,15 @@ context:
   yes | persisted: docs/DECISIONS.md'
 - 'fork: arrival read on a deadline | chosen: split into halves down to one day, never retried as is | class: consistency-only | precedent:
   docs/contracts/ducklake_telemetry_reader.yaml | precedent_kind: contract | reversible: yes | persisted: scripts/telemetry_verify/session_presence.py'
+- PR body cites both operator message ids in the Spend item, so the no-final-diff merge stays auditable (critique N4).
+- 'Critique round 1 N2 disputed: ducklake_maintenance.yaml line 430 names only ducklake_ops (still every 6h), and line 25''s sentence
+  continues into the bound line 26 edit, which qualifies it.'
 gate_rounds:
 - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:bbecdb2cc425383e79ab02d877c6c1051a236256a2986ef867386f15dc801559"}  # pragma: allowlist secret
 - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:7c3c0b80124d39f81788fb8b17428d6b7eca2d402a12896dad9800c6f1111f71"}  # pragma: allowlist secret
 - {gate: decision-scout, round: 3, verdict: NO_FLAGS, scout_input_fingerprint: "v1:c012beb78f3bb5bd93cc1a8ed048545e3c6fdf4489fa9722f095cea0f4889cb2"}  # pragma: allowlist secret
 - {gate: wording-check, round: 1, verdict: PASS, digest: 10aeeffa4e761c7c2615ba8a6ffcaa7e3ec1c66855158e0129908f968384490d, base: 56de98884df85d742b71ed8199431e2c7b4ccd90, selection: complete}  # pragma: allowlist secret
+- {gate: plan-critique, round: 1, verdict: REVISE, blocking: 5, nits: 7}
 pre_implementation_checklist:
 - Branch confirmed not on main
 - docs/PROJECT_CONTEXT.md read
@@ -276,13 +338,14 @@ pre_implementation_checklist:
 - All files in scope located and readable
 - Acceptance criteria understood and verifiable
 execution_steps:
-- session_presence.py and its tests; VP 1.
+- session_presence.py (halving, cap, docstring) and its three tests; VP 1.
 - ducklake_maintenance_telemetry.tf and the pin test; VP 2, VP 4.
 - ducklake_maintenance.yaml and DECISIONS.md from the sidecar; VP 5.
 - Graduated shard for VP 1; the closure_artifact stamps on rec-5247 and rec-5248 (Decision 186).
 - 'CLOSURE: set implementation_declared: true; commit with Resolves: rec-5247, rec-5248; rebase onto origin/main; VP 3; VP 6; check
-  the coordinator log for a running terraform/personal post-merge proof; push; PR; subscribe; fresh-context code review; merge on review
-  PROCEED and green CI.'
-- 'After merge: VP 7 at +7 h, VP 8 at +24 h, VP 9, VP 10 at +7 days.'
+  the coordinator log for a running terraform/personal post-merge proof; push; PR citing both operator message ids; subscribe; fresh-context
+  code review; merge on review PROCEED and green CI.'
+- 'After merge: VP 7 at +7 h; VP 8, VP 10 and VP 11 at +24 h (VP 11 at about :45); VP 9; VP 12 the Monday after the first Sunday; VP
+  13 at +7 days.'
 - 'Report: what was implemented, verification results'
 rollback: Revert the build PR; CI re-applies the every-6h cron and the reads go back to failing late in busy cycles.
