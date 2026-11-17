@@ -126,13 +126,13 @@ class TestIngestBudgetBreaches:
     def test_rec_fields_pass_the_real_acceptance_linter_and_write_time_validators(self) -> None:
         from scripts.executor.acceptance_lint import lint_acceptance_command
         from scripts.ops_portal.risk_scoring import _derive_computed_fields
-        from scripts.ops_portal.write_validators import gate_write
+        from tests.fixtures.portal_gate import assert_portal_gate_clean
 
         captured: dict[str, Any] = {}
         _ingest_one(portal_caller=lambda action, fields: captured.update(fields))
         assert lint_acceptance_command(captured["acceptance"]) == (True, None)
         _derive_computed_fields(captured)
-        gate_write("ops_recommendations", captured, insert=True)
+        assert_portal_gate_clean("ops_recommendations", captured, insert=True)
 
     def test_title_and_context_name_the_outcome_and_the_run(self) -> None:
         captured: dict[str, Any] = {}

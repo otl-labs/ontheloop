@@ -39,7 +39,13 @@ from src.common.ducklake_scd2_schema import (
     resolve_table_spec,
     schema_gate,
 )
-from src.common.ducklake_write_rules import RowRuleViolationError, check_write, existing_row_select, rules_for
+from src.common.ducklake_write_rules import (
+    RowRuleViolationError,
+    check_references,
+    check_write,
+    existing_row_select,
+    rules_for,
+)
 
 # ---------------------------------------------------------------------------
 # OCC retry budget (CD.33): bounded application-level retry with backoff + jitter, loud-fail on
@@ -204,6 +210,7 @@ def write_scd2(
                     else (created_override if created_override is not None else identity.timestamp)
                 )
             check_write(spec, rules, record, created_ts, identity.timestamp, identity.ulid, prior)
+            check_references(con, spec, record, prior)
             params = _write_params(spec, record, identity, created_ts)
             con.execute(merge_history_sql, params)
             if merge_current_sql is not None:
@@ -366,7 +373,8 @@ def file_scd2(
     placeholder = {**record, spec.merge_key: f"{spec.entity_id_prefix or 'x-'}0"}
     schema_gate(placeholder, semantics, table=table)
     identity = identity if identity is not None else mint_write_identity()
-    check_write(spec, rules_for(spec), placeholder, identity.timestamp, identity.timestamp, identity.ulid, None)
+    rules = rules_for(spec)
+    check_write(spec, rules, placeholder, identity.timestamp, identity.timestamp, identity.ulid, None)
 
     merge_history_sql = _build_merge_history_sql(spec)
     merge_current_sql = _build_merge_current_sql(spec)
@@ -397,6 +405,7 @@ def file_scd2(
                     created_timestamp=replay[0][1],
                     last_updated_timestamp=identity.timestamp,
                 )
+            check_references(con, spec, record, None)
             key = _allocate_entity_id(con, spec)
             existing = con.execute(select_existing_sql, [key]).fetchall()
             if existing:

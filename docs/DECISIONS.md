@@ -2,6 +2,226 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 270: The telemetry content reader is reached through a fifth DuckLake API route, and its change lock lives in the CI apply boundary, paid for by prefix-named URL-only Denies (amends Decisions 144, 202, 213, 230, 239, 255, 256, 257 and 258) (Decided)
+
+```yaml
+number: 270
+status: Decided
+decided_date: "2026-11-17"
+kind:
+  value: direction
+  justification: >-
+    Yes: it sets where the content reader's lock and its fence live (clauses 2-4), who may reach the reader and by
+    which path (clause 1), and the boundary size at which the operator re-decides (clause 5), each a standing rule.
+amends: [144, 202, 213, 230, 239, 255, 256, 257, 258]
+serves: [NS.9]
+significance:
+  value: numbered_decision
+  justification: >-
+    Yes: it amends nine Decisions about one boundary and one function, and clause 5 is the re-decision Decision
+    258 cl.3 requires; dated notes alone (amendment_forms, considered) would split one ruling into nine, and no
+    contract holds boundary placement (deploy-paths.yaml, considered, holds channels, not fences).
+```
+
+**Status:** Decided
+**Date:** 2026-11-17
+**Warehouse ID:** dec-270 (per Decision 84 backfill)
+
+**Problem:** Decision 239 planned the content reader on a Function URL invoked by PlatformDev. Since Decisions 255
+and 256 agents reach DuckLake verbs only through the signed REST API as agent-platform-session, and the CI apply
+boundary is at 5,696 bytes, Decision 258's trigger, so the lock's Deny needs the operator's re-decision (258 cl.3).
+
+**Intent:** Agents read masked production transcript text through the same signed path as every other verb, and
+only the operator-approved deploy can change the reader, with every fence still in the one boundary.
+
+**Decision:**
+1. **Path and consumer (amends 239 cl.1 and cl.4, 255 cl.1, 256 cl.2).** Agents read production transcript text
+   only through agent-platform-ducklake-telemetry-content on the DuckLake API's fifth route, telemetry/content; it
+   has no Function URL. Its consumer is the feedback loop's masked reads, as agent-platform-session, whose grant
+   gains the route. Decision 239 cl.4's access line names the caller from the delivering path's event shape.
+2. **Roles (amends 144 cl.3, 239 cl.7, 257 cl.3).** The execution role telemetry-content-reader carries the CI
+   apply boundary and is excepted by its exact ARN from Decision 230 cl.5's fence. The deploy role
+   telemetry-content-deploy is boundary-free by explicit exclusion, since clause 3's Deny must not refuse it; it may
+   only change the function's code and configuration and read layers, and only deploy-telemetry-content.yml at main
+   in the reviewer-gated telemetry-content-deploy Environment may assume it (Decision 238 cl.2). Both are named
+   telemetry-content-*, outside agent-platform-*, so no CI IAM grant reaches them; the boundary's protected-role
+   Deny names that prefix, and both join Decision 257 cl.3's protected set.
+3. **Lock (Decision 239 cl.5; amends 202 cl.3).** The boundary's DenyTelemetryContentChange refuses every carrier
+   every Lambda create, delete, publish, put, tag and update on the function and its qualifiers; the URL-only Denies
+   keep refusing direct invoke and permission edits. A Decision 202 filter pages on any IAM write naming a
+   telemetry-content-* role and any Lambda write on the function, the deploy role's included (202 cl.6: never
+   filtered by actor), denied attempts included. The reader's access log, that filter and its alarms join the platform-security-* family, so
+   the detector's Denies and tamper alarm cover them.
+4. **Prefix names (amends 213 cl.1, 230 cl.5).** The three URL-only Denies name the writer and reader by prefix,
+   writer* and reader*, beside telemetry-*, account wildcarded and region kept. Each prefix covers its function and
+   every qualifier, and widens a Deny only to a future function of that prefix.
+5. **Re-decision (amends 258 cl.2).** On 2026-11-16 the operator re-decided where the fences live: every fence
+   stays in the boundary, and clause 4's names pay for clause 3's Deny. Decisions 230 and 239's headroom
+   conditions fire when the minified PROD rendering passes 5427 bytes, its size with this entry's changes as the
+   landing build measures it; SIT's fires on the same growth. 258 cl.1 and cl.3 stand for every later change.
+
+**Rationale:** The fifth route reuses Decision 255's signed path, access log and detector instead of a transport
+agents cannot reach. Prefix names cost a Deny nothing and free more bytes than the lock uses. Rejected: a 5,946-byte
+trigger without them (198 bytes left under the 6,144-byte limit); a Deny on each CI role (a role CI creates would
+lack it); a service control policy (an organisation redesign); deferring (no forensic read for the feedback loop).
+
+**Coverage (Decision 181 cl.2):** tests/checks/iam_tf/test_telemetry_content_reader_iam.py pins clauses 5, 3, 2
+and 1; test_url_only_invoke_guard.py pins clause 4's cover of every identity-trusting function and qualifier; the
+filter is clause 3's alarm. Identities without the CI boundary: agent-platform-session and bootstrap-preview hold no
+Lambda write, bootstrap-apply none on the function plus its protected-role Deny (test_bootstrap_ci_roles.py), and
+PlatformAdmin is the operator's admin tier, watched by clause 3's alarm. Residuals: clause 1's consumer naming is
+unenforced (the scout reads it); a carrier may still pass the bounded telemetry reader role to a new function
+(Decision 239 cl.6).
+
+```yaml reversal-conditions
+decision: 270
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: boundary-size
+    kind: manual
+    description: "The boundary's minified PROD rendering passes clause 5's size: re-decide where the fences live."
+  - id: prefix-collision
+    kind: manual
+    description: "A function named agent-platform-ducklake-writer* or -reader* besides the two verb functions is planned: re-decide clause 4."
+```
+
+**Related:** Decisions 101, 126, 143, 154, 172, 177, 181, 202, 223, 236, 237, 238, 246, 248.
+
+---
+
+## Decision 269: The rec portal reports glossary findings on rec text instead of refusing the write, and a repository-state rule may be declared advisory (amends Decisions 240 clause 5 and 210) (Decided)
+
+```yaml
+number: 269
+status: Decided
+decided_date: "2026-11-16"
+kind:
+  value: mechanism
+  justification: >-
+    Only the means: Decision 240 cl.3's house-style rule and its scope are unchanged; clause 1 moves its check on rec
+    text from a refusal at the portal to a report plus a scheduled re-run, so undoing it changes no goal or human gate.
+amends: [240, 210]
+significance:
+  value: numbered_decision
+  justification: >-
+    It re-assigns Decision 240 cl.5's portal leg and Coverage line and qualifies Decision 210's 2026-10-04 and
+    2026-10-15 amendments; a dated amendment_forms note (considered) cannot re-assign a ratified clause (Decision 210's
+    own envelope), and docs/contracts/data-modeling-standard.yaml (considered) carries the operational rule text, not
+    which clauses the Decisions sanction.
+```
+
+**Status:** Decided
+**Date:** 2026-11-16
+**Warehouse ID:** dec-269 (per Decision 84 backfill)
+
+**Problem:** Only the rec portal checks rec title, context and verification against the glossary, by refusing the
+write. No write can decide that rule (it reads this repository's glossary), so the writer cannot run it, and any
+session can call the writer route directly under the one shared session identity (Decision 256): the refusal guards
+portal writes only, while Decision 240 cl.5 and the contract read as a guarantee. The refusal also holds a filing over
+wording alone.
+
+**Intent:** Rec wording is checked and reported on every portal write and re-checked on a schedule, and no text
+claims a write-time guarantee the writer cannot give.
+
+**Decision:**
+1. **Report, never refuse.** On rec title, context and verification the portal runs glossary_lint on every file_rec
+   and update_rec and reports each finding with its fix; a finding, or a glossary the lint cannot load, never refuses
+   the write. The contract marks those legs advisory: true. get_rec_write_guidance still carries the glossary, so an
+   author sees it first; the rest of cl.5 holds.
+2. **Advisory repository-state rules.** Decision 210's 2026-10-04 amendment reads: a repository_state exemption names
+   its producer, which enforces the rule or, on a leg the contract declares advisory: true, runs it and reports
+   without refusing. A declared advisory leg is run and reported, not enforced (the 2026-10-15 amendment). Cl.4 does
+   not reach such a rule, which no write can decide; its detection is a DQ monitor under cl.2.
+3. **Acceptance unchanged.** acceptance_lint keeps refusing a probe that does not discriminate: trailer closure
+   (Decision 201) checks only that a probe is decidable, so the portal is the only shape gate. It becomes advisory
+   only through a later plan, once rec-5239's scheduled re-run is live, that re-checks this closure path.
+
+**Coverage (Decision 181 cl.2):** cl.1 -- the portal's advisory glossary_lint report, and rec-5239's scheduled
+re-run of both lints over recent writes, an unenforced residual owned by rec-5239 until it runs; cl.2 --
+data-modeling-standard.yaml rule write-time-enforcement and validate_ops_rule_source's grammar and ratchet; cl.3 --
+the portal's acceptance_lint refusal.
+
+```yaml reversal-conditions
+decision: 269
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: findings-ignored
+    kind: manual
+    description: "rec-5239's re-run finds glossary findings on more than a tenth of the recs written in a month: re-decide cl.1 (refuse again, or move the check)."
+```
+
+**Related:** Decisions 240 (amended), 210 (amended), 201, 181, 211, 66, 256; rec-5239, rec-4768.
+
+---
+
+## Decision 268: The ops writer checks, inside its own transaction, that every rec a dependencies list names exists -- one point lookup by merge key on the same table's current projection is write-decidable (amends Decision 210 clause 2(a)) (Decided)
+
+```yaml
+number: 268
+status: Decided
+decided_date: "2026-11-16"
+kind:
+  value: mechanism
+  justification: >-
+    Only the means: clauses 1-3 move where an existing rule (each dependencies element names an existing rec, rec-3307)
+    is enforced, from the portal's pre-check to the writer, so undoing them changes no goal, human gate or data
+    commitment.
+amends: [210]
+significance:
+  value: numbered_decision
+  justification: >-
+    It widens Decision 210 cl.2(a)'s test and re-assigns a rule from its DQ owner (rec-4166) to the writer, under
+    reversal conditions; a dated amendment_forms note (considered) cannot re-assign a ratified clause (Decision 210's
+    own envelope; Decisions 216 and 254 for a ratified scope), and docs/contracts/data-modeling-standard.yaml
+    (considered) carries the operational rule text, not which clauses the Decisions sanction.
+```
+
+**Status:** Decided
+**Date:** 2026-11-16
+**Warehouse ID:** dec-268 (per Decision 84 backfill)
+
+**Problem:** Each element of ops_recommendations.dependencies must name an existing rec, but only the portal checks it,
+by a reader round-trip before the write. Any session can call the writer route directly under the one shared session
+identity (Decisions 255 and 256), so a dangling dependency can land unseen; Decision 210 cl.2(a) keeps the check out of
+the writer because the lookup reads outside the batch's partitions, and the DQ monitor named as its owner (rec-4166)
+was never built. A 2026-11-16 census found 2 of 390 rows with dependencies dangling (rec-610 and rec-613, both naming
+rec-608, deleted under Decision 70).
+
+**Intent:** No route to the writer can store a dangling dependency.
+
+**Decision:**
+1. **Test.** Decision 210 cl.2(a) also admits one point lookup by merge key on the same table's current projection,
+   inside the write's own transaction. Cl.2(b) holds for such a lookup while the key set only grows: ids are
+   writer-allocated (Decision 84 I-2), so a rec can be named only after it commits, and a rec leaves only by a
+   Decision 70 exceptional deletion (cl.3's backstop covers it). Decision 207's grain lookup is not widened; it
+   stays bounded to the batch's partitions.
+2. **Enforcement.** The ops writer enforces array_element_reference on ops_recommendations.dependencies on every write
+   verb: on an insert, and on an update or upsert that changes the column, it reads the named ids in one statement
+   (Decision 88) and, if any is absent, rejects the request naming the rule and writes nothing, never retried
+   (Decision 207 reject semantics). An unchanged stored value is not re-read, so older rows stay updatable. The
+   portal's lookup stays a derived pre-check, never authoritative (Decision 210 cl.5).
+3. **Backstop.** rec-4166's monitor no longer owns the rule; it is a backstop for rows written before this Decision and
+   for any deletion.
+
+```yaml reversal-conditions
+decision: 268
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: lookup-cost
+    kind: manual
+    description: "The writer's per-invocation wall p95 (Decision 214 cl.4's signal; commit latency is attribution) rises by more than a fifth over the 7 days before the lookup shipped: re-decide the lookup's shape or return the rule to a DQ owner."
+  - id: keyspace-shrinks
+    kind: manual
+    description: "Recs become deletable other than by a Decision 70 exceptional deletion: cl.2(b) no longer holds for the lookup; re-decide."
+```
+
+**Related:** Decision 210 (amended), 81 cl.8, 84 I-2, 207, 88, 214 cl.4, 70, 103, 255, 256; rec-4166, rec-3307.
+
+---
+
 ## Decision 267: An AWS clock dispatches the three hourly loops through a dedicated GitHub App held inside the agent merge loop -- an accepted residual against Decision 143 clause 1 (Decided)
 
 ```yaml
@@ -444,6 +664,8 @@ conditions:
 
 **Related:** Decisions 230, 239, 181, 126.
 
+> **Amended by Decision 270 (2026-11-17):** The operator re-decided under clause 3: every fence stays in the boundary, the URL-only Denies use prefix names, and clause 2's trigger size becomes 5427 bytes. Clauses 1 and 3 stand.
+
 ---
 
 ## Decision 257: terraform/bootstrap is CI-applied behind one operator approval; its protected set and root of trust stay the operator's (amends Decisions 92, 126, 144, 223, 225 and 238) (Decided)
@@ -559,6 +781,8 @@ conditions:
 > policies (the API route, App key and trail policies) and policy blocks inside a role are not checked; a trust is
 > checked for public access only.
 
+> **Amended by Decision 270 (2026-11-17):** Clause 3's protected set gains the telemetry-content-* roles and their policies: bootstrap-apply's DenyProtectedRoleWrite and the apply classifier name role/telemetry-content-*, and bootstrap-apply holds no Lambda write on the content function.
+
 ---
 
 ## Decision 256: Agent sessions reach AWS only as a proxy-held IAM user that signs each call itself -- no session assumes a role or holds an AWS key, and admin authority stays out of agent environments (amends Decisions 113, 202, 223, 248 and 252) (Decided)
@@ -648,6 +872,8 @@ conditions:
 
 **Related:** Decisions 84, 93, 126, 143, 144, 180, 181, 200, 212, 213, 225, 229, 237, 238, 239; rec-4043,
 rec-4206, rec-4420.
+
+> **Amended by Decision 270 (2026-11-17):** Clause 2's routes add the telemetry content reader's telemetry/content route; its session consumer is the feedback loop's masked reads.
 
 ---
 
@@ -741,6 +967,8 @@ conditions:
 ```
 
 **Related:** Decision 213 (amended), 84 (amended), 101, 126, 143, 144, 181 cl.2, 184 cl.2, 200 cl.1, 202, 212, 214, 215 cl.6, 223, 230, 237.
+
+> **Amended by Decision 270 (2026-11-17):** Clause 1's API fronts a fifth function, the telemetry content reader, on POST telemetry/content.
 
 ---
 
@@ -1890,6 +2118,8 @@ conditions:
 
 > **Update (2026-11-02):** clause 4's older text is now the records: the files glossary.yaml's read_as.records lists (Decision bodies older than this entry, plans, audit prompts, the roadmap below its header, the two archives), amendment_log rows, and recs filed before this entry. Records keep their wording and read through the read_as rows. PLAN-glossary-sweep (rec-4676) rewrote the rest to glossary names, README.md and the roadmap's header included; no other clause's meaning changes. Coverage: the reads-through note on each Decision in read_as.noted_decisions -- validate_glossary's note leg; clause 3's other files -- its whole-file leg; records -- the read_as rows. The reversal stanza's read-as-misread was re-armed to match.
 
+> **Amended by Decision 269 (2026-11-16):** Clause 5's portal leg reports, never refuses: the rec portal runs glossary_lint on a rec title, context or verification and reports each finding while the write proceeds; the Coverage line's "the portal's glossary_lint rule" reads as that report plus rec-5239's scheduled re-run, an unenforced residual until it runs (Decision 269 cl.1).
+
 ---
 
 ## Decision 239: Agents read production transcript text masked, through a dedicated content reader whose code only the operator can deploy (amends Decisions 236, 230, 126, 81 and 91) (Decided)
@@ -1982,6 +2212,8 @@ conditions:
 ```
 
 **Related:** Decisions 236, 230, 126, 81, 91 (amended), 143, 154, 181, 199, 213, 235, 238, 101.
+
+> **Amended by Decision 270 (2026-11-17):** Clause 1's reader is reached on the DuckLake API's telemetry/content route by agent-platform-session, with no Function URL; clause 4's line names the caller from the delivering path; clause 5's lock is DenyTelemetryContentChange with a boundary-free deploy role; clause 7's fence exception is the execution role telemetry-content-reader.
 ---
 
 ## Decision 238: No agent-controlled identity reads Terraform state or saved plans -- the speculative plan runs from main's workflow on pull_request_target under a dedicated environment- and workflow-bound role and shows names only (amends Decisions 92 and 144) (Decided)
@@ -2625,6 +2857,8 @@ conditions:
 [Amendment 2026-10-27, Decision 237: cl.4 logins live in /secret/.]
 
 [Amendment 2026-10-29, Decision 239: cl.3's telemetry reader login is shared with the content reader, its connection limit summed across both; cl.5's fence exceptions add the content reader's role.]
+
+[Amendment 2026-11-17, Decision 270: cl.5's fence names the shared writer and reader by prefix, and its exception for the content reader is role telemetry-content-reader.]
 
 ---
 
@@ -3794,6 +4028,8 @@ conditions:
 
 [Amendment 2026-11-13, Decision 255: cl.1's invariant reads "every path other than the Function URL and the function's named API route is closed"; the API path's control points are Decision 255 cl.2, and for that path cl.4's caller record is the API access log.]
 
+[Amendment 2026-11-17, Decision 270: cl.1's Denies name each function by ARN or by a prefix that covers it and every qualifier (writer*, reader*, telemetry-*).]
+
 ---
 
 ## Decision 212: Port independence and conformance -- one conformance suite per port against a credential-free oracle, cross-port coupling is a defect, the ops store is three ports, one file declares the bundle (amends Decision 184 clause 2 and Decision 197 clause 2) (Decided)
@@ -3964,7 +4200,11 @@ producer. Detail: data-modeling-standard.yaml.]
 (validate_write_time_enforcement_conformance); a declared rule is enforced, so the enforced key is retired; value removal and
 new exemptions ratchet. Detail: data-modeling-standard.yaml.]
 
+> **Amended by Decision 269 (2026-11-16):** The 2026-10-04 amendment's repository_state exemption names its producer, which enforces the rule or, on a leg the contract declares advisory: true, runs it and reports without refusing; the 2026-10-15 amendment's declared rule is run and reported, not enforced, on such a leg; cl.4 does not reach it, and its detection is a DQ monitor under cl.2 (Decision 269 cl.2).
+
 > **Update (2026-10-18):** the Coverage line's rec-4101 residual is enforced by telemetry_orphan_counts and telemetry-verification workflow; rec-4439 owns the rest. No clause changes.
+
+> **Amended by Decision 268 (2026-11-16):** Clause 2(a) also admits one point lookup by merge key on the same table's current projection inside the write's own transaction; under it the ops writer enforces ops_recommendations.dependencies existence on an insert and on a change to the column, and the rec-4166 monitor (data-modeling-standard.yaml COVERAGE) is a backstop (Decision 268 cl.1-3).
 
 ---
 
@@ -4545,6 +4785,8 @@ Roadmap refs: rec-4044, rec-4049, rec-4067.
 > **Amended by Decision 252 (2026-11-10):** Reversal condition (a)'s organisation trail arrives with the Organization, not at live_full; its rule stands: re-point the detector at its log delivery, retire this trail, never run both (Decision 252 cl.8).
 
 > **Amended by Decision 256 (2026-11-13):** Clause 1's "applied only by PlatformAdmin under the human-gated admin tier" reads "applied by PlatformAdmin or by the operator from an agent-prepared CloudShell block under the operator's own sign-in, still human-gated": PlatformAdmin's trust names only the retiring agent user. The detector stays outside the reach of the principals it watches, and a further alarm pair watches the agent-platform-session user and its policies.
+
+> **Amended by Decision 270 (2026-11-17):** Clause 3's family also holds the telemetry content reader's access log group, its change filter and its alarms, so the detector's Denies and tamper alarm cover them.
 
 ---
 
@@ -8703,6 +8945,8 @@ post-merge, never written directly).
 > **Amended by Decision 252 (2026-11-10):** Clause 6's live_full gate on Organizations, the organisation trail and SCPs is lifted: the Organization is stood up now. SCPs add to the permissions boundary and never replace it, so the Reversal's supersession of this boundary does not fire (Decision 252 cl.1 and cl.8).
 
 > **Amended by Decision 257 (2026-11-14):** Clause 3's one explicit exclusion becomes three: bootstrap-apply and bootstrap-preview are boundary-free by name, outside agent-platform-*, and held by explicit Denies instead (Decision 257 cl.3). Clause 4's admin-create path for bootstrap-tier roles stays for the protected set; a boundary-carrying agent-platform-* role declared in terraform/bootstrap is created by that workflow's approved apply.
+
+> **Amended by Decision 270 (2026-11-17):** Clause 3 gains a fourth exclusion: telemetry-content-deploy is boundary-free by name, outside agent-platform-*, so the boundary's lock on the content reader never refuses the one role it admits.
 
 ---
 

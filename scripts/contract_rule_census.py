@@ -13,12 +13,13 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from scripts.contract_rules import DeclaredRule, declared_rules
 from scripts.data_quality_execute import run_checks
 from scripts.data_quality_models import Check, dq_request
+from src.row_rules.rules import WRITER_REFERENCE_KINDS, WRITER_SHAPE_KINDS
 
 TABLES = ("ops_recommendations", "ops_decisions")
 EXIT_OK, EXIT_VIOLATIONS, EXIT_UNCLEAN = 0, 1, 2
@@ -64,13 +65,27 @@ class Plan:
     checks: list[Check]
     exempt: list[DeclaredRule]
     declared_non_exempt: int
+    writer_lookup: list[DeclaredRule] = field(default_factory=list)
+    writer_shape: list[DeclaredRule] = field(default_factory=list)
+
+
+def is_writer_lookup(rule: DeclaredRule) -> bool:
+    """A non-exempt reference rule: the writer enforces it per write, so the census compiles no check for it."""
+    return rule.kind in WRITER_REFERENCE_KINDS and rule.exemption is None
+
+
+def is_writer_shape(rule: DeclaredRule) -> bool:
+    """A non-exempt json_object rule: the writer binds it per write and the reader has no JSON check kind."""
+    return rule.kind in WRITER_SHAPE_KINDS and rule.exemption is None
 
 
 def build_plan(table: str) -> Plan:
     rules = declared_rules(table)
     exempt = [r for r in rules if r.exemption]
-    live = [r for r in rules if not r.exemption]
-    return Plan(table, [compile_rule(r) for r in live], exempt, len(live))
+    lookup = [r for r in rules if is_writer_lookup(r)]
+    shape = [r for r in rules if is_writer_shape(r)]
+    live = [r for r in rules if not r.exemption and not is_writer_lookup(r) and not is_writer_shape(r)]
+    return Plan(table, [compile_rule(r) for r in live], exempt, len(live), lookup, shape)
 
 
 def _describe(result: Any) -> dict[str, Any]:
@@ -90,6 +105,10 @@ def census(tables: tuple[str, ...], *, dry_run: bool = False) -> tuple[int, list
     lines: list[str] = []
     rows: list[dict[str, Any]] = []
     for plan in plans:
+        for rule in plan.writer_lookup:
+            lines.append(f"WRITER-LOOKUP  {rule.table}.{rule.column} {rule.kind} (enforced by the writer per write)")
+        for rule in plan.writer_shape:
+            lines.append(f"WRITER-SHAPE {rule.table}.{rule.column} {rule.kind} (enforced by the writer per write)")
         for rule in plan.exempt:
             lines.append(f"EXEMPT  {rule.table}.{rule.column} {rule.kind} class={(rule.exemption or {}).get('class')}")
     if dry_run:

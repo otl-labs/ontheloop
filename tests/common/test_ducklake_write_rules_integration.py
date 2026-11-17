@@ -71,6 +71,7 @@ def _seed(con: Any, ulid: str, created: datetime, **fields: Any) -> None:
 
 
 def test_a_rule_clean_file_scd2_lands(con: Any) -> None:
+    _seed(con, "01ULIDSEED7", OLD, id="rec-7")  # the dependency must exist (Decision 268)
     before = _state(con)
     result = rt.file_scd2(con, ops_rec_fields(tags=["good-tag"], dependencies=["rec-7"]), table=TABLE)
     assert result.rec_id == "rec-001"
@@ -121,6 +122,33 @@ def test_an_older_row_with_a_pre_date_violation_stays_updatable(con: Any) -> Non
     assert con.execute(f"SELECT context, tags FROM {CURRENT} WHERE id = 'rec-50'").fetchone() == ("e" * 120, ["good-tag"])
 
 
+def test_a_dangling_dependency_is_rejected_on_every_write_verb(con: Any) -> None:
+    _seed(con, "01ULIDDEP1", OLD, id="rec-70")
+    before = _state(con)
+    with pytest.raises(RowRuleViolationError) as raised:
+        rt.file_scd2(con, ops_rec_fields(dependencies=["rec-70", "rec-999999999"]), table=TABLE)
+    assert (raised.value.rule, raised.value.column) == ("array_element_reference", "dependencies")
+    assert _state(con) == before  # history, current and the counter unchanged
+    with pytest.raises(RowRuleViolationError):  # write_ops, a caller-keyed new-key insert
+        rt.write_scd2(con, ops_rec_record(id="rec-901", dependencies=["rec-999999999"]), table=TABLE)
+    assert _state(con) == before
+    ok = rt.file_scd2(con, ops_rec_fields(dependencies=["rec-70"]), table=TABLE)
+    assert con.execute(f"SELECT dependencies FROM {CURRENT} WHERE id = ?", [ok.rec_id]).fetchone()[0] == ["rec-70"]
+
+
+def test_update_keeps_a_stored_dangling_value_and_rejects_a_change_to_one(con: Any) -> None:
+    _seed(con, "01ULIDLEG1", OLD, id="rec-80", dependencies=["rec-608"])  # a legacy dangling value (rec-610's shape)
+    _seed(con, "01ULIDLEG2", OLD, id="rec-81")
+    unchanged = ops_rec_record(id="rec-80", status="closed", dependencies=["rec-608"])
+    rt.write_scd2(con, unchanged, table=TABLE, require_exists=True)
+    assert con.execute(f"SELECT status FROM {CURRENT} WHERE id = 'rec-80'").fetchone()[0] == "closed"
+    state = _state(con)
+    with pytest.raises(RowRuleViolationError):
+        rt.write_scd2(con, {**unchanged, "dependencies": ["rec-608", "rec-999999999"]}, table=TABLE, require_exists=True)
+    assert _state(con) == state
+    rt.write_scd2(con, {**unchanged, "dependencies": ["rec-81"]}, table=TABLE, require_exists=True)
+
+
 def _engine_ids(con: Any, rule: Any) -> set[str]:
     spec = rt.resolve_table_spec(TABLE)
     columns = {name: {"nullable": True} for name in spec.fields}
@@ -150,7 +178,7 @@ def test_the_census_sql_and_the_engine_agree_row_for_row(con: Any) -> None:
         _seed(con, f"01ULID{ulid}", created, **fields)
     compared = 0
     for rule in declared_rules(TABLE):
-        if rule.exemption is not None:
+        if rule.exemption is not None or census.is_writer_lookup(rule):
             continue
         params = census.compile_rule(rule).params
         fragment, binds = dq.row_predicate(rule.kind, rule.table, rule.column, params)
@@ -160,3 +188,47 @@ def test_the_census_sql_and_the_engine_agree_row_for_row(con: Any) -> None:
         assert census_ids == _engine_ids(con, rule), (rule.column, rule.kind)
         compared += 1
     assert compared >= 25
+
+
+_JSON_LEG = {
+    "max_bytes": 200,
+    "versions": {1: {"required": {"schema_version": "integer", "writer": "string"}, "optional": {"n": "number?"}}},
+}
+
+
+@pytest.fixture
+def json_leg() -> Any:
+    import copy  # noqa: PLC0415
+
+    import src.common.ducklake_scd2_schema as schema  # noqa: PLC0415
+    import src.common.ducklake_writes as writes  # noqa: PLC0415
+
+    semantics = copy.deepcopy(schema.load_field_semantics())
+    column = semantics["ops_tables"][TABLE]["columns"]["context_v2_json"]
+    column.update({"json_object": _JSON_LEG, "per_write": True})
+    with (
+        patch.object(schema, "load_field_semantics", return_value=semantics),
+        patch.object(writes, "load_field_semantics", return_value=semantics),
+    ):
+        yield
+
+
+def test_a_malformed_json_object_is_rejected_on_every_write_verb(con: Any, json_leg: Any) -> None:
+    good = '{"schema_version": 1, "writer": "w", "n": 1.5}'
+    _seed(con, "01ULIDJSON1", OLD, id="rec-60")
+    before = _state(con)
+    with pytest.raises(RowRuleViolationError) as raised:
+        rt.file_scd2(con, ops_rec_fields(context_v2_json="not json"), table=TABLE)  # file_ops
+    assert (raised.value.rule, raised.value.column) == ("json_object", "context_v2_json")
+    assert _state(con) == before  # history, current and the counter unchanged
+    with pytest.raises(RowRuleViolationError):  # write_ops, a caller-keyed new-key insert
+        rt.write_scd2(con, ops_rec_record(id="rec-902", context_v2_json='{"schema_version": 2}'), table=TABLE)
+    with pytest.raises(RowRuleViolationError):  # update_ops, undated leg binds an existing row
+        rt.write_scd2(
+            con, ops_rec_record(id="rec-60", context_v2_json='{"schema_version": 1}'), table=TABLE, require_exists=True
+        )
+    assert _state(con) == before
+    ok = rt.file_scd2(con, ops_rec_fields(context_v2_json=good), table=TABLE)
+    assert con.execute(f"SELECT context_v2_json FROM {CURRENT} WHERE id = ?", [ok.rec_id]).fetchone()[0] == good
+    rt.write_scd2(con, ops_rec_record(id="rec-60", status="closed"), table=TABLE, require_exists=True)  # absent -> NULL
+    assert con.execute(f"SELECT context_v2_json FROM {CURRENT} WHERE id = 'rec-60'").fetchone()[0] is None

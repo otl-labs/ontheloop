@@ -10,7 +10,7 @@ import pytest
 import yaml
 
 from scripts.checks.contracts import _rule_grammar as grammar
-from src.row_rules.rules import EXEMPTABLE_LEGS, PRODUCER_SIDE_KINDS, WAIVABLE_KINDS
+from src.row_rules.rules import EXEMPTABLE_LEGS, PRODUCER_SIDE_KINDS, WAIVABLE_KINDS, WRITER_REFERENCE_KINDS
 
 _ROOT = Path(__file__).resolve().parents[3]
 _WHY = {"class": "temporary", "reason": "staged", "owner": "rec-1", "review_by": "2027-01-31"}
@@ -153,8 +153,18 @@ def test_exemption_grammar() -> None:
 
 
 def test_a_producer_side_rule_needs_its_exemption() -> None:
-    for kind in sorted(PRODUCER_SIDE_KINDS):
+    for kind in sorted(PRODUCER_SIDE_KINDS - WRITER_REFERENCE_KINDS):
         assert any("needs a write_time_exemptions entry" in e for e in _errors({kind: {}})), kind
+
+
+def test_scd2_reference_leg_needs_no_exemption() -> None:
+    assert _errors({"array_element_reference": {}}) == []
+
+
+def test_event_reference_leg_outside_event_vocabulary() -> None:
+    errors = _errors({"array_element_reference": {}}, cls="event")
+    assert any("outside the event vocabulary" in e for e in errors), errors
+    assert grammar.PRODUCER_CLASS["array_element_reference"] == "cross_row"  # class binding unchanged
 
 
 def test_class_is_bound_to_the_exempted_kind() -> None:
@@ -193,3 +203,48 @@ def test_table_class_and_read_table(tmp_path: Path) -> None:
     _write(tmp_path, "demo", {"governance": {"table_class": "event"}, "fields": {"c": {"dq_intent": {"not_null": True}}}})
     fields, intents, cls = grammar.read_table("demo", tmp_path, tmp_path)
     assert (cls, intents, list(fields)) == ("event", {"c": {"not_null": True}}, ["c"])
+
+
+def test_advisory_only_true_on_repository_state_kinds() -> None:
+    path = "scripts/checks/contracts/_rule_grammar.py"
+    repo_state = {"class": "repository_state", "reason": "r", "owner": path}
+    for kind in ("glossary_lint", "acceptance_lint"):
+        ok = {kind: {"advisory": True}, "write_time_exemptions": {kind: repo_state}}
+        assert _errors(ok) == [], kind
+        for bad in (False, "true"):
+            errors = _errors({kind: {"advisory": bad}, "write_time_exemptions": {kind: repo_state}})
+            assert any("advisory must be true" in e for e in errors), (kind, bad)
+        temp = _errors({kind: {"advisory": True}, "write_time_exemptions": {kind: _WHY}})
+        assert any("advisory is only legal" in e and kind in e for e in temp), kind
+        none = _errors({kind: {"advisory": True}})
+        assert any("advisory is only legal" in e for e in none), kind
+    cross = {"class": "cross_row", "reason": "r", "owner": "rec-1"}
+    errors = _errors(
+        {"array_element_reference": {"advisory": True}, "write_time_exemptions": {"array_element_reference": cross}}
+    )
+    assert any("unknown sub-key" in e and "advisory" in e for e in errors)
+
+
+_JSON_LEG = {"max_bytes": 64, "versions": {1: {"required": {"schema_version": "integer"}}}}
+
+
+def test_scd2_json_object_leg_accepted() -> None:
+    assert _errors({"json_object": _JSON_LEG}) == []
+    assert _errors({"json_object": {**_JSON_LEG, "exclude_before": "2026-12-01"}}) == []
+
+
+def test_json_object_leg_malformed_params_refused() -> None:
+    errors = _errors({"json_object": {"max_bytes": 0, "versions": {}}})
+    assert any("json_object" in e and "max_bytes must be an integer" in e for e in errors), errors
+    errors = _errors({"json_object": {**_JSON_LEG, "bogus": 1}})
+    assert any("unknown sub-key" in e for e in errors), errors
+    assert any("must be a mapping" in e for e in _errors({"json_object": "x"}))
+
+
+def test_event_json_object_leg_outside_event_vocabulary() -> None:
+    errors = _errors({"json_object": _JSON_LEG}, cls="event")
+    assert any("outside the event vocabulary" in e for e in errors), errors
+
+
+def test_json_object_temporary_exemption_accepted() -> None:
+    assert _errors({"json_object": _JSON_LEG, "write_time_exemptions": {"json_object": _WHY}}) == []
