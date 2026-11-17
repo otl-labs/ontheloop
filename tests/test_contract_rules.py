@@ -94,13 +94,8 @@ def test_ops_recommendations_declares_its_rule_list() -> None:
     for column in ("title", "context", "verification"):
         assert cols[column]["glossary_lint"].exemption["class"] == "repository_state"
         assert cols[column]["glossary_lint"].exemption["owner"] == "scripts/ops_portal/write_validators.py"
-    assert cols["dependencies"]["array_element_reference"].exemption["class"] == "cross_row"
-    assert cols["dependencies"]["array_element_reference"].exemption["owner"] == "rec-4166"
     assert all(
-        r.exemption is None
-        for c in cols.values()
-        for k, r in c.items()
-        if k not in ("acceptance_lint", "array_element_reference", "glossary_lint")
+        r.exemption is None for c in cols.values() for k, r in c.items() if k not in ("acceptance_lint", "glossary_lint")
     )
 
 
@@ -293,3 +288,9 @@ def test_not_null_presence_and_legacy_spelling_read_alike(tmp_path: Path) -> Non
     )
     (rule,) = declared_rules("fx", contracts_dir=tmp_path, repo_root=tmp_path)
     assert dict(rule.params) == {"values": ["a"]}
+
+
+def test_dependencies_reference_leg_is_not_exempt() -> None:
+    leg = declared_rules("ops_recommendations")
+    reference = [r for r in leg if (r.column, r.kind) == ("dependencies", "array_element_reference")]
+    assert len(reference) == 1 and reference[0].exemption is None
