@@ -164,6 +164,12 @@ def _stale_exemption(doc: dict) -> None:
     }
 
 
+def _cross_row_owner(doc: dict) -> None:
+    _fields(doc)["dependencies"]["dq_intent"]["write_time_exemptions"] = {
+        "array_element_reference": {"class": "cross_row", "reason": "r", "owner": "someone"}
+    }
+
+
 _DEFECTS: list[tuple[str, Callable[[dict], None], str]] = [
     ("vocabulary", _set("title", "mystery", 1), "outside the scd2 vocabulary"),
     ("subkey", _bad_leg("title", "min_length", bogus=1), "unknown sub-key"),
@@ -179,7 +185,7 @@ _DEFECTS: list[tuple[str, Callable[[dict], None], str]] = [
     ("exemption-class", _exemption("acceptance", "acceptance_lint", **{"class": "whenever"}), "is not one of"),
     ("exemption-reason", _exemption("acceptance", "acceptance_lint", reason=" "), "needs a reason"),
     ("exemption-owner-missing", _exemption("acceptance", "acceptance_lint", owner=""), "needs an owner"),
-    ("cross-row-owner", _exemption("dependencies", "array_element_reference", owner="someone"), "must be a rec id"),
+    ("cross-row-owner", _cross_row_owner, "must be a rec id"),
     (
         "repository-state-owner",
         _exemption("acceptance", "acceptance_lint", owner="scripts/no_such_file.py"),

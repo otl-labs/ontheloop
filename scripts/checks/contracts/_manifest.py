@@ -196,6 +196,7 @@ ENTRIES: tuple[Entry, ...] = (
             "src/common/ducklake_named_reads.py",
             "src/common/ducklake_partition_spec.py",
             "src/common/ducklake_scd2_schema.py",
+            "src/common/ducklake_write_rules.py",
             "src/common/ducklake_write_verbs.py",
             "scripts/checks/contracts/**",
             "scripts/checks/_common.py",

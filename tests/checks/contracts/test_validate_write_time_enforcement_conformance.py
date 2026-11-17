@@ -328,3 +328,24 @@ def test_the_registered_check_reports_its_accounting_and_unreadable_inputs(
     assert any("inputs unreadable" in f for f in failed)
     assert declaration is not None and declaration.count == 0
     assert "FAIL" in capsys.readouterr().out
+
+
+def test_references_mismatch_fails(tmp_path: Path) -> None:
+    world = copy.deepcopy(_world())
+    world["contracts"]["demo_scd2"]["fields"]["deps"] = {"nullable": True, "dq_intent": {"array_element_reference": {}}}
+    _scd2(world)["columns"]["deps"] = _col()
+    errors, _ = _run(tmp_path, world)
+    assert any("demo_scd2.deps: array_element_reference declared but not enforced" in e for e in errors), errors
+    _scd2(world)["columns"]["deps"] = _col(array_element_reference=True)
+    errors, _ = _run(tmp_path, world)
+    assert errors == []
+    world["contracts"]["demo_scd2"]["fields"]["deps"]["dq_intent"].clear()
+    errors, _ = _run(tmp_path, world)
+    assert any("demo_scd2.deps: array_element_reference enforced but not declared" in e for e in errors), errors
+
+
+def test_event_reference_without_exemption_fails_closed(tmp_path: Path) -> None:
+    world = copy.deepcopy(_world())
+    world["contracts"]["demo_events"]["fields"]["note"]["dq_intent"]["array_element_reference"] = {}
+    errors, _ = _run(tmp_path, world)
+    assert any("demo_events.note: array_element_reference declared but not enforced" in e for e in errors), errors
