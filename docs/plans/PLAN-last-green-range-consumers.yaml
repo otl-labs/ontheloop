@@ -18,7 +18,7 @@ phase: >-
   rec-4874 (ad_hoc_rec; no tier_item names it). Build plan 2a of rec-4874's design (#1946); build plan 1 merged as #1998
   (Decision 254). Closes no exit criterion. rec-5106 stays open for build plan 2b, which closes it.
 closes_criteria: []
-cites: [dec:142, dec:159, dec:162, dec:168, dec:246, dec:249, dec:254]
+cites: [dec:142, dec:159, dec:162, dec:168, dec:181, dec:186, dec:246, dec:249, dec:254]
 scope:
   - file: scripts/ci/last_green.py
     action: Create
@@ -35,7 +35,8 @@ scope:
       commit's ci.yml main-validate runs (push or dispatch), read at its latest attempt, has a main-validate job that
       started the full-tier step (a runner assigned and the step executed or executing) and did not conclude timed_out
       or cancelled, a job still in progress included; "skipped" when such a job exists and its full-tier step was
-      skipped (plans-only, fast tier alone); else "absent". (5) resolve_prev(api, git, head) -> str | None: the nearest
+      skipped (plans-only, fast tier alone); else "absent" (no such run, or a running job whose full-tier step is still
+      queued or pending: it has not started, so Decision 254 cl.1 passes over it). (5) resolve_prev(api, git, head) -> str | None: the nearest
       first-parent ancestor of head (head excluded) whose full_tier_state is "started"; the walk is capped at the same
       limit and returns None past it. No module-level I/O; the api and git objects are the deploy_gate seams, injected.
   - file: scripts/checks/_common.py
@@ -43,7 +44,7 @@ scope:
     purpose: >-
       push_context_base, inside push context only (the existing detection, unchanged; outside it the function returns
       None as today, Decision 159 cl.1): when FULL_TIER_PREV is set and non-empty, return it if it names a commit
-      present locally that is an ancestor of HEAD (git merge-base --is-ancestor, cwd as today); else
+      present locally that is a strict ancestor of HEAD (git merge-base --is-ancestor, cwd as today, and not HEAD itself, which would recreate Decision 159's base == HEAD no-op); else
       FULL_TIER_LAST_GREEN under the same test; else raise RuntimeError naming both values, so the calling check goes
       red. Never HEAD~1 on this branch, and no API call (Decision 254's note on Decision 159 cl.1: the job passes prev
       in). When FULL_TIER_PREV is unset or empty, today's code path runs unchanged (GITHUB_EVENT_BEFORE, then HEAD~1,
@@ -55,7 +56,7 @@ scope:
       An autouse fixture deletes FULL_TIER_PREV and FULL_TIER_LAST_GREEN from the environment (so the existing cases
       keep their meaning once rec-5107 sets them in the full-tier step); add the FULL_TIER_PREV cases on a real temp git
       repo in push context: an ancestor prev is returned (even when it is HEAD~3); a non-ancestor or absent prev falls
-      to a qualifying FULL_TIER_LAST_GREEN; neither qualifying raises; outside push context a set FULL_TIER_PREV still
+      to a qualifying FULL_TIER_LAST_GREEN; FULL_TIER_PREV equal to HEAD does not qualify; neither qualifying raises; outside push context a set FULL_TIER_PREV still
       returns None; an unset variable keeps today's GITHUB_EVENT_BEFORE then HEAD~1 results (existing tests unchanged).
   - file: scripts/ci_rca/range_context.py
     action: Create
@@ -71,22 +72,29 @@ scope:
       $GITHUB_OUTPUT): range_status; diff_base = prev for a resolved, widened or recorded ci range, empty for an
       unresolved ci range, and the literal HEAD^ for every other slug (so vacuous_pass diffs HEAD^..HEAD there exactly as
       today); prompt_note = one sentence naming /tmp/ci-rca-range.json and its pull requests for slug ci, else empty.
-      Any other slug: {head, prev: null, range_status: head_only, commits: [head]}, as today. A failing API read
-      degrades to range_status unresolved, never a red ci-rca job. Subcommand probe --ref REF --depth N (read-only, a
-      live check for the build): prints each of REF's first N first-parent commits with its full_tier_state, then
-      resolve_prev(REF), and exits 0 printing "probe=ok skipped=K" only when resolve_prev returned the nearest
-      "started" commit and passed over every "skipped" one before it, else "probe=fail" and exit 1. GH_TOKEN is
-      optional (public reads, about two per commit).
+      It also logs "range_status=... diff_base=..." to stderr for the run log. Any other slug: {head, prev: null,
+      range_status: head_only, commits: [head]}, as today. A failing API read degrades to range_status unresolved,
+      never a red ci-rca job. Subcommand probe --ref REF --depth N (read-only, a live check for the build): for each of
+      REF's first N first-parent commits prints its full_tier_state and an independent oracle,
+      scripts.ci.push_scope.confined_to_plans over git diff --name-only sha^ sha; exits 0 printing "probe=ok skipped=K"
+      only when every "skipped" commit is plans-only and every "started" one is not, resolve_prev(REF) returned the
+      nearest "started" commit, and K is above 0; else "probe=fail <reason>" and exit 1. Subcommand observe --since ISO
+      (read-only): pages ci-rca.yml runs created at or after ISO with status completed (per_page
+      100), drops runs whose rca job was skipped (a green upstream run), takes the oldest remaining, and prints
+      "observe=<run id> range_step=<conclusion>" (exit 0 when the "Resolve run range" step succeeded, 1 otherwise) or
+      "observe=none-yet" (exit 0) when no run qualifies. GH_TOKEN is optional (public reads).
   - file: tests/ci_rca/test_range_context.py
     action: Create
     purpose: >-
       Fake api/git fixtures: parent ran the full tier -> prev is HEAD^ and commits == [head] (the neutrality case);
       plans-only parent (full-tier step skipped) -> prev is HEAD^^ and commits holds both; timed_out parent passed
-      over; in-progress parent counts; recorded range wins over resolve_prev; non-ancestor prev widens to the
+      over; in-progress parent counts; a running parent whose full-tier step is still queued is passed over; recorded
+      range wins over resolve_prev; a non-ancestor prev (injected through the recorded-range path) widens to the
       last-green sha read at ref=head; nothing resolves -> unresolved, head alone and an empty diff_base; a non-CI slug
       returns head_only with diff_base HEAD^ and an empty prompt_note; an API error returns unresolved; one PR per
-      commit; probe prints probe=ok over a fake chain with a skipped commit and probe=fail when resolve_prev stops on
-      it.
+      commit; probe prints probe=ok over a fake chain with a skipped plans-only commit, and probe=fail when
+      resolve_prev stops on it, when the oracle disagrees, or when K is 0; observe skips skipped-rca runs, takes the
+      oldest remaining, and prints none-yet on an empty page.
   - file: tests/ci/test_last_green.py
     action: Create
     purpose: >-
@@ -98,13 +106,16 @@ scope:
   - file: .github/workflows/ci-rca.yml
     action: Modify
     purpose: >-
-      (1) A new step "Resolve run range" (id range) after "Resolve run metadata", with continue-on-error: true (the job
-      checks out the failing commit, which may predate scripts/ci_rca/range_context.py) and env GH_TOKEN: fetch the run
-      JSON (gh api, already the meta step's source) and run bin/venv-python -m scripts.ci_rca.range_context resolve,
-      writing /tmp/ci-rca-range.json and step outputs range_status, diff_base and prompt_note. (2) "Generate evidence
-      bundle" gains env CI_RCA_RANGE_PREV: ${{ steps.range.outcome != 'success' && 'HEAD^' || steps.range.outputs.diff_base }},
-      so a failed or absent range step keeps today's HEAD^ diff, an unresolved ci range passes empty, and every other
-      slug passes HEAD^. (3) The agent step gains env RANGE_NOTE from steps.range.outputs.prompt_note, appended at the
+      (1) A new step "Resolve run range" (id range) after "Resolve run metadata", with continue-on-error: true and env
+      GH_TOKEN. Its body is one if/else and no VAR=$(...) assignment (validate_masked_errexit_steps): when the slug is
+      ci and scripts/ci_rca/range_context.py exists in the checkout (the job checks out the failing commit, which may
+      predate it), fetch the run JSON (gh api to a file, the meta step's source) and run bin/venv-python -m
+      scripts.ci_rca.range_context resolve, appending its outputs (range_status, diff_base, prompt_note) to
+      $GITHUB_OUTPUT and writing /tmp/ci-rca-range.json; otherwise write diff_base=HEAD^ and range_status=head_only.
+      (2) "Generate evidence bundle" gains env CI_RCA_RANGE_PREV: ${{ steps.range.outputs.diff_base }}. So every
+      non-ci slug and a ci checkout that predates the module pass HEAD^ (today's diff), a resolved ci range passes its
+      prev, and an unresolved ci range or a ci range step that crashed passes empty, so vacuous_pass abstains (Decision
+      254 cl.4: never a HEAD^ diff standing in for a range). (3) The agent step gains env RANGE_NOTE from steps.range.outputs.prompt_note, appended at the
       end of its existing PROMPT= line (no new body line). (4) Unchanged: the meta step's anchor, the selection-manifest
       step (the head commit's PR until rec-5107's culprit job names one; Decision 142 cl.5, Decision 186), the
       commit-status dedup (keyed on the run head) and every other step. No existing inline body grows: each
@@ -119,8 +130,9 @@ scope:
     action: Create
     purpose: >-
       Structural pins on ci-rca.yml: the range step runs scripts.ci_rca.range_context resolve after the meta step and
-      before the evidence step, with continue-on-error true and GH_TOKEN in its env; the evidence step's
-      CI_RCA_RANGE_PREV is exactly the outcome-guarded expression with the HEAD^ fallback; the agent step's PROMPT= line
+      before the evidence step, with continue-on-error true and GH_TOKEN in its env, guarded on the ci slug and the
+      module's presence, with the HEAD^ fallback in its else branch; the evidence step's CI_RCA_RANGE_PREV is exactly
+      steps.range.outputs.diff_base; the agent step's PROMPT= line
       ends with ${RANGE_NOTE}; the selection-manifest step still resolves the PR from the anchor sha (unchanged); the
       dedup step still keys on steps.meta.outputs.anchor_sha.
   - file: scripts/ci_rca/vacuous_pass.py
@@ -144,7 +156,8 @@ scope:
       sibling. decide() keeps one entry per bundle; an entry is a str (as today, so
       dedup-probe.yml and the existing tests are unchanged) or that bundle's list: the finder is tried over the whole
       list first and the first open match is bumped once; only if none matches is the closed-head resolver tried over
-      the list. main() passes each bundle's list and writes them to <bundles-dir>/sibling-fingerprints.txt (one line
+      the list, and the bundle is dropped only when at least one entry reads "drop" and none reads "regression" (any
+      regression, or no closed head at all, runs the agent: fail closed, Decision 55). main() passes each bundle's list and writes them to <bundles-dir>/sibling-fingerprints.txt (one line
       per bundle: its own fingerprint, then its siblings, space-separated; not a .json name, so no bundle reader sees
       it), the handoff the write-time backstop reads. So a Main Canary red of a cause already open from main-validate bumps
       that rec instead of filing a second. Bundles carry workflow_name, failure_category and error_signature today
@@ -154,11 +167,12 @@ scope:
     purpose: >-
       Write-time backstop (Decision 142 cl.3): find_open_ci_rca_rec_by_fingerprint keeps its signature and both call
       sites (scripts/ops_data_portal.py file_rec and scripts/ops_portal/cli.py), which are not edited, and gains no
-      import: it expands its fingerprint to the line of $CI_RCA_BUNDLE_EMIT_DIR/sibling-fingerprints.txt that starts
+      first-party import (os from the standard library only): it expands its fingerprint to the line of $CI_RCA_BUNDLE_EMIT_DIR/sibling-fingerprints.txt that starts
       with it (the agent step sets that variable to the fp_dedup step's /tmp/ci-rca-bundles; with the variable unset, the
       file absent or no such line the list is the fingerprint alone, as today) and matches any of the list from the SAME
       single current_state read (no extra reader call; Decision 88, 215). Its fail-open behaviour is unchanged. Net SLOC
       growth at most 15; past 500, decompose (Decision 128), never raise.
+    new_imports: []
   - file: tests/test_ci_rca_cross_workflow_dedup.py
     action: Create
     purpose: >-
@@ -166,7 +180,8 @@ scope:
       an open ci rec of the same failure_category and error_signature -> decide() dedupes and bumps the ci rec, and
       the write-time backstop returns the same rec id; plus red cases: a different signature still runs the agent; a
       non-sibling slug (terraform-apply-sandbox) never matches a ci rec; a sibling's CLOSED head goes through
-      classify_closed_head as its own slug's would. test_backstop_matches_sibling_fingerprint: with dedup's
+      classify_closed_head as its own slug's would; one sibling reading "drop" and another "regression" runs the
+      agent. test_backstop_matches_sibling_fingerprint: with dedup's
       sibling-fingerprints.txt written to a tmp CI_RCA_BUNDLE_EMIT_DIR and a fake reader, find_open_ci_rca_rec_by_
       fingerprint(<main_canary fingerprint>) returns the open ci rec from one current_state call; without the file it
       matches the own fingerprint only.
@@ -212,7 +227,7 @@ acceptance_criteria:
   - "rec-4900's acceptance passes: one full-tier failure seen by main-validate and Main Canary files one rec."
   - "scripts/ci/last_green.py answers last_green_sha (push or dispatch, any attempt), covered, full_tier_state and resolve_prev, each unit-tested, and imports only the standard library and scripts.ci.deploy_gate; scripts/ci/deploy_gate.py is not edited and tests/ci/test_deploy_gate.py passes unchanged."
   - "push_context_base in push context with FULL_TIER_PREV set returns an ancestor prev, else a qualifying FULL_TIER_LAST_GREEN, else fails; unset, or outside push context, every existing push_context_base test passes unchanged."
-  - "ci-rca computes a CI run's range through range_context.py; when HEAD^ ran the full tier the range is the head commit alone (behaviour unchanged); after a plans-only parent it holds both commits; vacuous_pass diffs the range and abstains when it is unresolved; every other watched workflow, and a ci-rca run whose range step fails, still diffs HEAD^..HEAD; resolve_prev passes over a live plans-only main commit (VP 10)."
+  - "ci-rca computes a CI run's range through range_context.py; when HEAD^ ran the full tier the range is the head commit alone (behaviour unchanged); after a plans-only parent it holds both commits; vacuous_pass diffs the range and abstains when it is unresolved; every other watched workflow, and a ci-rca run whose checkout predates range_context.py, still diffs HEAD^..HEAD; resolve_prev passes over a live plans-only main commit (VP 10)."
   - "docs/contracts/full-tier-range.yaml matches its approved sidecar word for word, and validate_full_tier_range is green on the tree and red on each drift fixture."
 verification_plan:
   - step: 1
@@ -298,7 +313,7 @@ verification_plan:
   - step: 9
     phase: pre-deploy
     action: Every remaining new or touched test file and the size budgets.
-    command: bin/venv-python -m pytest tests/ci_rca/test_range_context.py tests/ci/test_last_green.py tests/test_ci_rca_cross_workflow_dedup.py tests/test_ci_rca_dedup.py tests/ops_data_portal/test_ci_rca_fingerprint.py tests/checks/_common/test_push_context_base.py tests/test_ci_rca_vacuous_pass.py tests/verify_ci_workflow/test_ci_rca_range_step.py tests/checks/ci_guards/test__manifest.py tests/checks/ci_guards/test_validate_composite_action_shell_bodies.py tests/checks/ci_guards/test_validate_ci_rca_taxonomy.py -q && bin/venv-python -c "from scripts.checks.sloc.sloc_limits import validate_sloc_limits as a; from scripts.checks.structural.size_limits import validate_structural_size_limits as b; f=[]; a(f); b(f); raise SystemExit(1 if f else 0)"
+    command: bin/venv-python -m pytest tests/ci_rca/test_range_context.py tests/ci/test_last_green.py tests/test_ci_rca_cross_workflow_dedup.py tests/test_ci_rca_dedup.py tests/ops_data_portal/test_ci_rca_fingerprint.py tests/checks/_common/test_push_context_base.py tests/test_ci_rca_vacuous_pass.py tests/verify_ci_workflow/test_ci_rca_range_step.py tests/checks/ci_guards/test__manifest.py tests/checks/ci_guards/test_validate_composite_action_shell_bodies.py tests/checks/ci_guards/test_validate_ci_rca_taxonomy.py tests/checks/ci_guards/test_validate_masked_errexit_steps.py -q && bin/venv-python -c "from scripts.checks.sloc.sloc_limits import validate_sloc_limits as a; from scripts.checks.structural.size_limits import validate_structural_size_limits as b; f=[]; a(f); b(f); raise SystemExit(1 if f else 0)"
     expected: exit 0
     fix_if: an existing dedup or fingerprint test changes result, or a file crosses its budget (decompose, never raise)
     hermetic: false
@@ -308,9 +323,9 @@ verification_plan:
   - step: 10
     phase: pre-deploy
     action: resolve_prev against live GitHub passes over plans-only main commits (the jobs-API assumption, proven live).
-    command: bin/venv-python -m scripts.ci_rca.range_context probe --ref origin/main --depth 15
-    expected: exit 0 and a line "probe=ok skipped=K" (probe=ok is the pass literal); K above 0 shows a plans-only commit was passed over (plan PRs merge often; with K 0 rerun with --depth 30).
-    fix_if: probe=fail, or the jobs API reports a skipped or started full-tier step differently from the fixtures; fix full_tier_state and its fixtures to the live shape, never the probe
+    command: bin/venv-python -m scripts.ci_rca.range_context probe --ref origin/main --depth 20
+    expected: exit 0 and a line "probe=ok skipped=K" with K above 0; push_scope's plans-only rule agrees with every skipped and started commit. About 40 public reads, inside the unauthenticated hourly limit; export GH_TOKEN where one is available.
+    fix_if: probe=fail on an oracle disagreement means full_tier_state misreads the live jobs API; fix it and its fixtures to the live shape, never the probe. probe=fail with K 0 means no plans-only merge in the window; rerun after the next plan PR merges
     hermetic: false
     graduation: waive
     graduation_waiver_reason: >-
@@ -326,15 +341,10 @@ verification_plan:
     graduation: not-applicable
   - step: 12
     phase: post-deploy
-    action: The first ci-rca run after merge runs the range step to success (observation only; no red is induced).
-    command: >-
-      MERGED_AT=<merge time, ISO 8601 UTC> bin/venv-python -c "import os; from scripts.ci.deploy_gate import GithubApi;
-      a=GithubApi(); t=os.environ['MERGED_AT']; rs=[r for r in a.get('actions/workflows/ci-rca.yml/runs?per_page=30')['workflow_runs']
-      if r['created_at']>t and r['status']=='completed']; r=rs[-1]; js=a.get('actions/runs/%s/jobs' % r['id'])['jobs'];
-      st=[x for j in js for x in j['steps'] if x['name']=='Resolve run range']; print(r['id'], st and st[0]['conclusion']);
-      raise SystemExit(0 if st and st[0]['conclusion']=='success' else 1)"
-    expected: exit 0 on the oldest completed ci-rca run created after the merge; it prints that run's id and success. No such run yet means no CI red since the merge; read it on the first one.
-    fix_if: the step is missing or did not succeed; read that run's log for range_status and prev, and file a rec against this plan (forward fix)
+    action: The first failing-upstream ci-rca run after merge runs the range step to success (observation only; no red is induced).
+    command: bin/venv-python -m scripts.ci_rca.range_context observe --since <merge time, ISO 8601 UTC>
+    expected: exit 0 with "observe=<run id> range_step=success" on the oldest ci-rca run after the merge whose rca job ran, or "observe=none-yet" (rerun on the next CI red). On a ci-slug run its log line shows range_status and diff_base.
+    fix_if: range_step is not success; read that run's log for range_status and diff_base, and file a rec against this plan (forward fix)
     hermetic: false
     graduation: not-applicable
   - step: 13
@@ -407,7 +417,7 @@ test_obligations:
     test_selector: tests/checks/ci_guards/test_validate_ci_rca_taxonomy.py
     red_green_expectation: red before (the registered check has no row), green after
 constraints:
-  - "Behaviour-neutral where HEAD^'s main-validate ran the full tier: ci-rca's range is the head alone, vacuous_pass diffs HEAD^..HEAD, and nothing sets FULL_TIER_PREV, so push_context_base runs today's path. Every non-CI watched workflow, and any ci-rca run whose range step fails (e.g. a failing commit that predates range_context.py), keeps the HEAD^ diff."
+  - "Behaviour-neutral where HEAD^'s main-validate ran the full tier: ci-rca's range is the head alone, vacuous_pass diffs HEAD^..HEAD, and nothing sets FULL_TIER_PREV, so push_context_base runs today's path. Every non-CI watched workflow, and a ci-rca run whose checkout predates range_context.py, keeps the HEAD^ diff; a ci range step that crashes passes an empty range (abstain), never HEAD^."
   - "scripts/ci/deploy_gate.py is not edited: it keeps newest_green_sha (push, latest attempt; Decision 249 cl.2) and its stdlib-only import test until rec-5108; last_green.py imports from it, and last_green_sha is not wired into any deploy channel here."
   - "Validate makes no GitHub API call: push_context_base reads only the two variables; resolving and widening prev are the job's (rec-5107) or ci-rca's."
   - "The v2 fingerprint is unchanged (Decision 142 cl.1); no open rec is migrated or re-keyed."
@@ -417,7 +427,7 @@ constraints:
   - "Out of scope, build plan 2b (rec-5106): the trailer census, junit verdict and closure over a range, scripts/rec_trailer_acceptance*.py, scripts/session/merge_step.py and git-ops.yaml. Out of scope, rec-5107: ci.yml main-validate (concurrency, the prev step that sets FULL_TIER_PREV and FULL_TIER_LAST_GREEN, the recorded range)."
   - "No rescue agents or workaround loops (Decision 55)."
 context:
-  - "Decision-scout round 1 (draft): FLAGS_FOUND, 217 of 217 triaged; CITE 254, 249, 159, 142, 168; WARN 254 (a) push_context_base skipped the last-green widening -> folded (FULL_TIER_LAST_GREEN), (b) the moved resolver was not cl.2's -> folded (last_green_sha beside an unchanged newest_green_sha). Round 2: FLAGS_FOUND (NOTEs), 217 of 217 triaged, Roadmap items intersected: 6; CONFLICT: 0; RELATED: 6; NOTE 254 unresolved range must not diff HEAD^ -> folded (vacuous_pass abstains), cl.4's main-validate leg dormant until rec-5107 -> recorded below; NOTE 162 inline bodies -> folded, dec:162 cited. RELATED 72, 73, 135, 186, 226, 170, 169, 128, 165, 210, 215, 84, 88, 181, 205, 212, 234, 100. Serves: NS.6 3/5. Round 3 (after the wording check): FLAGS_FOUND, 218 of 218 triaged, Roadmap items intersected: 6, CONFLICT: 0; NOTE 254 cl.4's anchor and selection-manifest leg stays on the head until rec-5107 -> folded into the deferral line; CITE 246 -> cited. Evidence /mnt/project-files/rec-4874-build-plan-2/SCOUT-r1.md, SCOUT-r2.md."
+  - "Decision-scout round 1 (draft): FLAGS_FOUND, 217 of 217 triaged; CITE 254, 249, 159, 142, 168; WARN 254 (a) push_context_base skipped the last-green widening -> folded (FULL_TIER_LAST_GREEN), (b) the moved resolver was not cl.2's -> folded (last_green_sha beside an unchanged newest_green_sha). Round 2: FLAGS_FOUND (NOTEs), 217 of 217 triaged, Roadmap items intersected: 6; CONFLICT: 0; RELATED: 6; NOTE 254 unresolved range must not diff HEAD^ -> folded (vacuous_pass abstains), cl.4's main-validate leg dormant until rec-5107 -> recorded below; NOTE 162 inline bodies -> folded, dec:162 cited. RELATED 72, 73, 135, 186, 226, 170, 169, 128, 165, 210, 215, 84, 88, 181, 205, 212, 234, 100. Serves: NS.6 3/5. Round 3 (after the wording check): FLAGS_FOUND, 218 of 218 triaged, Roadmap items intersected: 6, CONFLICT: 0; NOTE 254 cl.4's anchor and selection-manifest leg stays on the head until rec-5107 -> folded into the deferral line; CITE 246 -> cited. Round 4 (after plan-critique round 1): FLAGS_FOUND, 218 of 218 triaged, Roadmap items intersected: 6; CONFLICT: 0; RELATED: 6; NOTE 254 cl.4 a crashed ci range step must not fall back to HEAD^ -> folded (HEAD^ only for non-ci slugs and a checkout that predates the module; a crash passes empty and abstains); CITE 181 -> cited (and 186, from critique round 2). Evidence /mnt/project-files/rec-4874-build-plan-2/SCOUT-r1.md, SCOUT-r2.md."
   - "Design: blind Fable consult /mnt/project-files/rec-4874-build-plan-2/advisor-brief/ADVICE.md; presentation PRESENTATION.md beside it. Operator sign-off 'write the plan' 2026-11-17 15:01 UTC."
   - "Premise corrected by the consult and re-read (ci.yml:114-120, 165-189): plans-only pushes skip the full tier, so prev is already HEAD^^ after a plans-only merge; the full-tier step sets no GITHUB_EVENT_BEFORE, so it takes push_context_base's HEAD~1 branch today. Neutrality therefore holds where HEAD^ ran the full tier, and the wider range after a plans-only parent is the correct one."
   - "fork: split | chosen: 2a (this plan) then 2b (trailer census, junit binding over a range, merge_step readback window, git-ops.yaml; closes rec-5106) | class: consistency-only | precedent: Decision 247; coordinator split_rule | precedent_kind: decision | reversible: yes | persisted: followon_recs"
@@ -437,6 +447,9 @@ gate_rounds:
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:ca65999e5d58206118707448d24b2679e39f91ed79c21582dc03cbcfbe2c9eb7"}  # pragma: allowlist secret
   - {gate: wording-check, round: 1, verdict: PASS, digest: d60d950f14b494fa918f7b1b882fe2f40c7910d93418029a238ea36375982dca, base: d98906cb276ed169bc961da1ae8b9d0ce3a8c9a8, selection: complete, pending_evaluators: 1}  # pragma: allowlist secret
   - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:1b55f60d4d3327acbbc21894d12577dbd8adbe525728a70428dd8bcfc00ee1d9"}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 8, nits: 12}
+  - {gate: decision-scout, round: 4, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:2c94fc3b0812642a93c56ae956c5563cb9cd2795614d745c406ec1ba4d3c05aa"}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 10}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -445,8 +458,8 @@ pre_implementation_checklist:
   - All files in scope located and readable
   - Acceptance criteria understood and verifiable
 execution_steps:
-  - "Ownership record (Decision 181 cl.2): read rec-5107 through recs_by_ids; if it is closed or its text already names both legs, note that and go on. Else call get_rec_write_guidance(), then update_rec on rec-5107 (scripts.ops_data_portal) appending to its context and acceptance that it also owns Decision 254 cl.4's two legs this plan leaves dormant: push_context_base anchors on prev once its prev step sets FULL_TIER_PREV and FULL_TIER_LAST_GREEN, and ci-rca's anchor, pull-request lookup and selection manifest move to its recorded range and culprit job (docs/contracts/full-tier-range.yaml dormant_until_rec_5107). Read rec-5107 back and cite the returned text in the build report. A write that fails stops the build (Decision 84 I-4)."
-  - "Contract: place sidecar block c01 (bin/venv-python -m scripts.roadmap.approved_text apply, or by hand word for word, {{DATE}} filled with the build date); VP 8."
+  - "Ownership record (Decision 181 cl.2): read rec-5107 through recs_by_ids; if it is closed or its text already names both legs, note that and go on. Else call get_rec_write_guidance(), then update_rec on rec-5107 (scripts.ops_data_portal) appending to its CONTEXT only (its acceptance is one runnable pytest node and stays untouched) that it also owns Decision 254 cl.4's two legs this plan leaves dormant: push_context_base anchors on prev once its prev step sets FULL_TIER_PREV and FULL_TIER_LAST_GREEN, and ci-rca's anchor, pull-request lookup and selection manifest move to its recorded range and culprit job (docs/contracts/full-tier-range.yaml dormant_until_rec_5107). Read rec-5107 back and cite the returned text in the build report. A write that fails stops the build (Decision 84 I-4)."
+  - "Contract: place sidecar block c01 by hand word for word ({{DATE}} filled with the build date; the approved_text CLI has only record and verify); VP 8."
   - "Resolver: create scripts/ci/last_green.py importing from the unedited scripts/ci/deploy_gate.py; tests/ci/test_last_green.py; VP 4."
   - "push_context_base and its tests (autouse delenv first); VP 5."
   - "range_context.py (resolve and probe), the ci-rca.yml step and env, the baseline row, vacuous_pass and their tests; VP 2, 3, 6."
