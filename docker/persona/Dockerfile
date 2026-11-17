@@ -14,6 +14,8 @@ COPY scripts/llm/litellm_wire.py /app/scripts/llm/litellm_wire.py
 COPY scripts/llm/tier_selection.py /app/scripts/llm/tier_selection.py
 COPY src/__init__.py /app/src/__init__.py
 COPY src/persona_backends/ /app/src/persona_backends/
+COPY src/turn_capture/__init__.py /app/src/turn_capture/__init__.py
+COPY src/turn_capture/litellm_usage.py /app/src/turn_capture/litellm_usage.py
 COPY docs/contracts/personas/ /app/docs/contracts/personas/
 COPY docs/contracts/inference-provider.yaml /app/docs/contracts/inference-provider.yaml
 COPY docs/contracts/project-configuration.yaml /app/docs/contracts/project-configuration.yaml

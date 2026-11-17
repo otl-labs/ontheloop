@@ -16,19 +16,16 @@ LABEL = "Actions capacity contract"
 REAL = Path(__file__).resolve().parents[3]
 
 
-def _tree(tmp_path: Path, edit: Callable[[dict[str, Any]], None] | None = None, workflows: bool = True) -> Path:
+def _tree(tmp_path: Path, edit: Callable[[dict[str, Any]], None] | None = None) -> Path:
     for rel in (
         "docs/ROADMAP-PLATFORM.yaml",
         "docs/ROADMAP-PLATFORM-ARCHIVE.yaml",
         "config/agent/data_quality/source_registry.yaml",
-        ".github/workflows/ci.yml",
-        ".github/workflows/deploy-ducklake-lambdas.yml",
-        ".github/workflows/deploy-prod-lambdas.yml",
-        ".github/workflows/terraform-apply-sandbox.yml",
     ):
         dest = tmp_path / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(REAL / rel, dest)
+    shutil.copytree(REAL / ".github/workflows", tmp_path / ".github/workflows", dirs_exist_ok=True)
     raw = yaml.safe_load((REAL / "docs/contracts/actions-capacity.yaml").read_text(encoding="utf-8"))
     if edit:
         edit(raw)
@@ -36,6 +33,11 @@ def _tree(tmp_path: Path, edit: Callable[[dict[str, Any]], None] | None = None, 
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(yaml.safe_dump(raw), encoding="utf-8")
     return tmp_path
+
+
+def _real_row_count() -> int:
+    raw = yaml.safe_load((REAL / "docs/contracts/actions-capacity.yaml").read_text(encoding="utf-8"))
+    return len(raw["ledger"]["rows"])
 
 
 def _run(root: Path) -> list[str]:
@@ -47,7 +49,11 @@ def _run(root: Path) -> list[str]:
 def test_real_contract_passes_and_declares_examined(tmp_path: Path) -> None:
     failed: list[str] = []
     validate_actions_capacity(failed)
-    assert failed == [] and registry._CURRENT_DECLARATION.kind == "examined" and registry._CURRENT_DECLARATION.count == 4
+    assert (
+        failed == []
+        and registry._CURRENT_DECLARATION.kind == "examined"
+        and registry._CURRENT_DECLARATION.count == _real_row_count()
+    )
     assert _run(_tree(tmp_path)) == []
 
 
@@ -112,3 +118,22 @@ def test_unloadable_contract_fails_and_declares_skipped(tmp_path: Path) -> None:
     (root / "docs/contracts/actions-capacity.yaml").write_text("cap: {surprise: 1}\n", encoding="utf-8")
     assert _run(root) == [LABEL]
     assert registry._CURRENT_DECLARATION.kind == "skipped"
+
+
+def test_added_ledger_row_passes_and_is_counted(tmp_path: Path) -> None:
+    text = (REAL / "docs/contracts/actions-capacity.yaml").read_text(encoding="utf-8")
+    picked = next((f for f in sorted((REAL / ".github/workflows").glob("*.yml")) if f.name not in text), None)
+    assert picked is not None, "no workflow left that the contract does not already name"
+    base = _real_row_count()
+    row = {
+        "id": "growth-probe",
+        "items": ["rec-5294"],
+        "unit": "per_merge",
+        "source": "assumed",
+        "job_minutes_per_unit": 1.0,
+        "basis": "growth probe",
+        "live_signal": {"workflow": f".github/workflows/{picked.name}", "job": "*"},
+    }
+    root = _tree(tmp_path, lambda r: r["ledger"]["rows"].append(row))
+    assert _run(root) == []
+    assert registry._CURRENT_DECLARATION.kind == "examined" and registry._CURRENT_DECLARATION.count == base + 1

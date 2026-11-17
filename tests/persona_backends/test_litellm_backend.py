@@ -209,3 +209,25 @@ def test_opening_message_lists_blobs():
     user = t.calls[0]["messages"][1]["content"]
     assert "notes: 3 lines" in user and "change_id: c1" in user
     assert json.dumps(t.calls[0]["messages"][0]["content"])
+
+
+def test_fail_over_turn_carries_probe_record():
+    probe = fakes.record(FB)
+    failed = dataclasses.replace(
+        final(),
+        attempts=(attempt(outcome="outage"), attempt(outcome="outage", n=2), attempt(FB)),
+        failed_over=True,
+        probe_record=probe,
+    )
+    _, events = drive(T([failed]))
+    assert events[1]["probe_record"] == dataclasses.asdict(probe) and events[1]["failed_over"] is True
+    _, events = drive(T([error("empty_output", (attempt(FB, "empty_output"),), probe), final()]))
+    assert events[1]["probe_record"] == dataclasses.asdict(probe)
+
+
+def test_header_tools_sha256_matches_tools_sent():
+    from src.persona_backends import events as ev
+
+    t = T([final()])
+    _, events = drive(t)
+    assert events[0]["tools_sha256"] == ev.tools_sha256(t.calls[0]["tools"])
