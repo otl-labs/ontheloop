@@ -297,6 +297,7 @@ PROD_SOURCE_PATHSPECS: tuple[str, ...] = (
 _PROD_FUNCTION_NAMES: tuple[str, ...] = (
     "agent-platform-scheduled-agent-dispatcher",
     "agent-platform-findings-processor",
+    "agent-platform-workflow-dispatcher",
 )
 
 
