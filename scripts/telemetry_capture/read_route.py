@@ -6,12 +6,13 @@ reader URL): ducklake_telemetry's events are served by the telemetry reader's ow
 event reader since slice 2c's cleanup (the shared reader serves no event verb), so an event read on that route raises
 NoEventReaderOnSmoke before any call. Ops reads always use the shared reader. Nothing resolves at construction, so a
 failure raises at the first use, inside the caller's own handler. Errors name a source, never a value, a URL or an AWS
-error text (Decision 101). The content route (Decision 239) is a further function_url client for the telemetry content reader:
-a content verb on the event route, or an event verb on the content route, raises WrongRoute before any call.
+error text (Decision 101). The content route (Decision 239, amended by Decision 270) is a further client for the
+telemetry content reader, reached only through its DuckLake API route: a content verb on the event route, or an event
+verb on the content route, raises WrongRoute before any call.
 
 Two transports (PLAN-agent-proxy-signed-access, OTL_OPS_VERBS_TRANSPORT): function_url (unset, today's chain) and execute_api,
-under which the event reader resolves plan A's API route parameter and the content reader, which has no API route yet
-(rec-4696 owns it), raises before any call.
+under which the event reader and the content reader resolve their API route parameters. The content reader has no
+Function URL, so under function_url it raises before any call.
 """
 
 from __future__ import annotations
@@ -31,9 +32,8 @@ READER_URL_ENV = "DUCKLAKE_TELEMETRY_READER_URL"
 READER_URL_PARAMETER = "/agent-platform/ducklake/telemetry_reader_url"
 READER_FUNCTION = "agent-platform-ducklake-telemetry-reader"
 SHARED_READER_FUNCTION = "agent-platform-ducklake-reader"
-CONTENT_READER_URL_ENV = "DUCKLAKE_TELEMETRY_CONTENT_READER_URL"
-CONTENT_READER_URL_PARAMETER = "/agent-platform/ducklake/telemetry_content_reader_url"
-CONTENT_READER_FUNCTION = "agent-platform-ducklake-telemetry-content"
+CONTENT_ROUTE = "telemetry/content"
+CONTENT_ROUTE_PARAMETER = "/agent-platform/ducklake/api_url/" + CONTENT_ROUTE
 REGION = "eu-west-2"
 EVENT_VERBS = frozenset(EVENT_READS)
 CONTENT_VERBS = frozenset(CONTENT_READS)
@@ -110,22 +110,15 @@ class TelemetryReader(DuckLakeReader):
 
 
 class ContentReader(DuckLakeReader):
-    """The telemetry content reader's Function URL behind the shared reader client; serves the content verbs only."""
+    """The telemetry content reader behind the shared reader client, through its API route only; serves the content verbs."""
 
     def _reader_url(self) -> str:
-        if api_transport():
-            raise RuntimeError("the telemetry content reader has no API route")
-        url = (
-            os.environ.get(CONTENT_READER_URL_ENV)
-            or _parameter(CONTENT_READER_URL_PARAMETER, self._profile, self._region)
-            or _function_url(CONTENT_READER_FUNCTION, self._profile, self._region)
-        )
-        if url:
-            return url.rstrip("/")
-        raise RuntimeError(
-            f"{CONTENT_READER_URL_ENV} not set, SSM {CONTENT_READER_URL_PARAMETER!r} unavailable and "
-            f"lambda:GetFunctionUrlConfig on {CONTENT_READER_FUNCTION!r} failed -- cannot reach the telemetry content reader"
-        )
+        if not api_transport():
+            raise RuntimeError(
+                f"the telemetry content reader has no Function URL; set OTL_OPS_VERBS_TRANSPORT=execute_api to reach "
+                f"SSM {CONTENT_ROUTE_PARAMETER!r}"
+            )
+        return api_route_url(CONTENT_ROUTE, self._profile, self._region)
 
     def named(self, verb: str, **params: Any) -> list[dict[str, Any]]:
         if verb not in CONTENT_VERBS:

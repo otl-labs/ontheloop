@@ -86,7 +86,8 @@ resource "aws_lambda_function" "ducklake_telemetry_reader" {
 
   # A literal: one telemetry slot and no ops slot per container, against the reader login's CONNECTION LIMIT 10
   # (catalog_logins.LOGINS), keeping the 2 x reserved-concurrency headroom recorded at ducklake_telemetry_writer_role.sql.
-  reserved_concurrent_executions = 5
+  # The content reader (terraform/bootstrap/telemetry_content_reader.tf, 1) shares that login: 2 x (4 + 1) <= 10 (Decisions 230 cl.3, 239 cl.1).
+  reserved_concurrent_executions = 4
 
   s3_bucket = aws_s3_bucket.data_lake.id
   s3_key    = "lambda-packages/ducklake-telemetry-reader.zip"

@@ -6,6 +6,7 @@ ARN or account id appears here, and no output may carry an ARN or a twelve-digit
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import re
 from pathlib import Path
@@ -97,6 +98,16 @@ def test_new_boundary_role_is_ci_writable() -> None:
 )
 def test_roles_outside_the_agent_prefix_or_session_are_protected(name: str) -> None:
     assert "name" in reasons(plan(role_row(name)))
+
+
+@pytest.mark.parametrize("name", ["telemetry-content-reader", "telemetry-content-deploy"])
+def test_telemetry_content_roles_are_cloudshell_required_by_their_protected_pattern(name: str) -> None:
+    matched = {pat for pat in cls.PROTECTED_NAME_PATTERNS if fnmatch.fnmatchcase(f"role/{name}", pat)}
+    assert matched == {"role/telemetry-content-*"}
+    created = plan(role_row(name))
+    assert all(r["protected"] for r in rows_of(created)) and gate.verdict_of(rows_of(created)) == "CLOUDSHELL_REQUIRED"
+    updated = plan(policy_row("aws_iam_role_policy", name, doc(), doc(allow("lambda:UpdateFunctionCode", "*"))))
+    assert gate.verdict_of(rows_of(updated)) == "CLOUDSHELL_REQUIRED"
 
 
 def test_boundary_policy_user_and_alarm_are_protected() -> None:
