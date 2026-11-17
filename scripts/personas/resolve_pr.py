@@ -77,7 +77,7 @@ def resolve_override(run: dict[str, Any], repo: str, token: str | None) -> dict[
 
     head_sha = str(run.get("head_sha") or "")
     try:
-        run_id = int(run.get("id"))
+        run_id = int(str(run.get("id")))
         proven = override.approval(repo, token, run_id)
     except (TypeError, ValueError, override.Refused):
         return _unresolved(head_sha, "the override run is not proven")

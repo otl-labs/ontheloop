@@ -154,7 +154,7 @@ def _post_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str, std
     (work / "prepared" / "resolution.json").write_text(json.dumps(res))
     (work / "results" / f"{route}.json").write_text(json.dumps(_result(route, stdout)))
     bodies: list[Any] = []
-    monkeypatch.setattr(resolve_pr, "request", lambda m, u, t, b=None, accept="": bodies.append((m, b)) or (201, b"{}"))
+    monkeypatch.setattr(resolve_pr, "request", lambda m, u, t, b=None, accept="": (bodies.append((m, b)), (201, b"{}"))[1])
     monkeypatch.setenv("GITHUB_RUN_ID", "900")
     monkeypatch.setattr(post_verdict.override, "lookup", lambda *a: None)
     return work, bodies
@@ -234,7 +234,7 @@ def test_the_override_resolution_posts_one_new_success_run_and_never_patches(
     }
     monkeypatch.setattr(post_verdict.override, "origin", lambda *a: (rec, ""))
     calls: list[Any] = []
-    monkeypatch.setattr(resolve_pr, "request", lambda m, u, t, b=None, accept="": calls.append((m, u, b)) or (201, b"{}"))
+    monkeypatch.setattr(resolve_pr, "request", lambda m, u, t, b=None, accept="": (calls.append((m, u, b)), (201, b"{}"))[1])
     assert post_verdict.post_all(ROOT, work, "o/r", "t") == [f"persona-verdict/{BLOCK}"]
     assert [c[0] for c in calls] == ["POST"] and calls[0][1] == "/repos/o/r/check-runs"
     body = calls[0][2]

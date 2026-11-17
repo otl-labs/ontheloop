@@ -77,7 +77,7 @@ def post_check(
     sleep: Callable[[float], None] = time.sleep,
     text: str | None = None,
 ) -> None:
-    body = {
+    body: dict[str, Any] = {
         "name": name,
         "head_sha": head_sha,
         "status": "completed",
