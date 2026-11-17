@@ -23,6 +23,16 @@ amendment_log:
     semantic_break: false
     change_class: field_add
     summary: >-
+      PLAN-deploy-event-record (rec-5269): deploy_record.shape gains schema_version, run_id, run_attempt, trigger and
+      workflow; the new deploy_record.history declares each record's version list (current and noncurrent) as the
+      append-only deploy history and names the test that keeps lifecycle rules off deploy-records/.
+    migration_story: >-
+      scripts/build_lambda_deploy.py writes the five keys beside the four it wrote; existing readers ignore them, and
+      records written before the change stay readable as version 1.
+  - date: "2026-11-17"
+    semantic_break: false
+    change_class: field_add
+    summary: >-
       PLAN-scheduled-workflow-dispatch (rec-4233) PR 4: deploy_targets.prod_functions gains
       agent-platform-workflow-dispatcher, the third prod-class function (data-pipeline.zip); deploy_channels.prod_functions.root
       names scheduled_workflow_dispatch.tf beside prod_lambdas.tf.
@@ -174,6 +184,11 @@ deploy_record:
     code_sha256: "str -- CodeSha256 from the update-function-code response"
     source_git_sha: "str | null -- LAMBDA_ARTIFACT_SHA (the commit the deploy gate chose), else GITHUB_SHA, at deploy time; null for a break-glass local deploy (neither set)"
     deployed_at: "str -- ISO8601 UTC timestamp of the deploy"
+    schema_version: "int -- 2 for a record carrying the four keys below; a record without it is version 1 (the four keys above only)"
+    run_id: "str | null -- GITHUB_RUN_ID of the deploying workflow run; null for a break-glass local deploy"
+    run_attempt: "str | null -- GITHUB_RUN_ATTEMPT of that run; null for a break-glass local deploy"
+    trigger: "str -- GITHUB_EVENT_NAME of that run (e.g. workflow_run, workflow_dispatch); break_glass when unset"
+    workflow: "str | null -- GITHUB_WORKFLOW of that run; null for a break-glass local deploy"
   freshness_semantics: >-
     Freshness is REACHABILITY against the newest green commit (Decision 249): the sensor's target is the newest main
     commit whose full tier passed and whose CI run settled 45 minutes ago (scripts.ci.deploy_gate.newest_green_sha). A
@@ -187,6 +202,26 @@ deploy_record:
     --deploy run outside CI with neither LAMBDA_ARTIFACT_SHA nor GITHUB_SHA set) is deliberately treated as STALE, never
     fresh -- fail closed on uncertainty. write_deploy_record never fabricates a sha: it records LAMBDA_ARTIFACT_SHA, then
     GITHUB_SHA (Decision 249; under workflow_run GITHUB_SHA is main HEAD and cannot be overridden), else null.
+  history: >-
+    The data_lake bucket's versioning (terraform/personal/main.tf aws_s3_bucket_versioning.data_lake, Enabled) keeps
+    every overwritten record as a noncurrent version, so a record's version list is the append-only deploy history,
+    keyed by channel and function in the record's key (deploy-records/<channel>/<function>.json): one version per write,
+    and the governed channels write one per successful function deploy (grain: function x deploy; a failed update writes
+    no record and stays in its run's log). Other principals that can write the bucket could add a version, so the run
+    facts are self-asserted: a schema_version 2 version a governed run writes names that run (run_id, run_attempt,
+    workflow), which a reader confirms against the Actions run before trusting the version, and a break-glass version
+    carries trigger break_glass and null run facts. Versions written before schema_version 2 carry only the four
+    original keys; on 2026-11-17 the earliest surviving version was dated 2026-07-13. Append-only holds while no
+    lifecycle rule expires noncurrent versions under deploy-records/ and no principal deletes object versions there (no
+    IAM deny enforces the second yet); no lifecycle rule may expire them
+    (tests/checks/iam_tf/test_ducklake_maintenance_tf_invariants.py::TestDataLakeLifecycleGoverned::test_no_rule_reclaims_deploy_record_history).
+    Consumer: the fix-proof effective day of the fix-attempt stamp (rec-5078), the earliest version per function whose
+    source_git_sha has the fix commit as an ancestor; source_git_sha is evidence of what shipped, never the last-green
+    authority (Decision 254 cl.2). Readers list versions with a role that can list them: the deploy role is
+    PutObject-only on deploy-records/ and agent sessions have no S3 read (Decision 256), so no named verb serves the
+    history until a journal load copies it (rec-5077 designs that journal's writer). The history is per account: when
+    SIT stands, the effective day re-keys to the SIT deploy (Decision 252 cl.6, Decision 254 sit-stood-up; rec-5028,
+    rec-5033), and replicating deploy-records/ into SIT is out of scope here.
 
 # Flag DEFAULTS (--profile: $AWS_PROFILE else agent_platform via scripts.aws_profile.resolve_aws_profile; --region=eu-west-2) are OUT of registry scope.
 # The equivalence test compares flag-name sets only.
