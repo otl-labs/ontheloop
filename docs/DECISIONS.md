@@ -6696,25 +6696,38 @@ scripts/preflight/decision_conditions.py, surfaced from its review date; not pro
 
 ```yaml reversal-conditions
 decision: 179
-review_by: 2026-12-01
-on_trigger: "re-decide via /plan: bound the index read, or re-mint a stock guard"
+review_by: 2027-03-01
+on_trigger: "re-decide via /plan: bound the decision-scout's whole read further, or tighten the significance bar; re-minting a stock guard needs its own Decision"
 conditions:
   - id: index-read-context-cost
-    kind: manual
-    description: "The every-/plan index read becomes a measured context-budget problem before T2.56 c1 or T1.5 c1 lands."
-  - id: inflow-unguarded
-    kind: manual
-    description: "Inflow rises materially with no stock guard -- rec-3243 metering and a stricter significance bar first."
+    kind: repo_state
+    predicate: null   # manual until rec-5264 registers it
+    params: {max_bytes: 110608}
+    description: "At review, the bytes of the decision index one decision-scout round loads whole (docs/decisions-index.json today, the slim rows that replace it once rec-3250 lands; docs/contracts/north-star.yaml, which the scout's step 0 reads in full, is outside this measure) exceed max_bytes, the 2026-08-07 figure (187,040 on 2026-11-17, which rec-3250 owns bringing under it) -> bound the read further; never raise this figure to fit."
+  - id: inflow-per-plan
+    kind: repo_state
+    predicate: null   # manual until rec-5264 registers it
+    params: {window_days: 90, max_entries_per_plan: 0.30}
+    description: "Over the window before review, new entries per new plan file exceed max_entries_per_plan, above every period measured to 2026-11-17 (0.262, 0.191, 0.221) -> tighten the significance bar first (decision-entry.yaml routing rows; rec-3023, rec-5260); a stock guard is not the remedy."
   - id: t15-portal-read
     kind: manual
     description: "T1.5 c1 portal/verb read supersedes the index mechanism entirely."
-    note: "Decision 196 clause 1 forecloses this trigger -- decisions stay git-stored in every tier, so no portal read replaces the index mechanism; retained for the record."
+    note: "Not foreclosed (corrected 2026-11-17): Decision 196 clause 1 keeps the git corpus authoritative, but T1.5 c1 still plans a decisions read portal beside it that decision-scout would read instead of the index; the earlier note read clause 1 as foreclosing that."
 ```
 
 **Related:** Decision 134 cl.2 and Decision 160 pt.4 amended, pt.9 resolved; Decision 166 pt.9
 amended, (g) elected; Decision 176 precedent/mechanism; Decisions 167/150 retained levers; Decision
 145 warning discharged; Decision 114 parity ended here; Decisions 146/149 levers exhausted; Decision
 163 recorded downgrade. Refs: T2.56 c2/c1, T1.5 c1, rec-3243.
+
+> **Update (2026-11-17, PLAN-condition-reviews-167-177-179, rec-5255):** Reversal review due 2026-12-01
+> (audits/contract-first-retrospective-177c8f37.yaml, condition_reviews). inflow-unguarded fired (new entries a day
+> rose from 0.583 to 1.169; per new plan file from 0.191 to 0.221) and is re-decided: bound the read, no stock guard
+> returns, clauses 1 to 4 stand. Clause 5(i)'s residual is bounded first by rec-3250 (T2.56 c1 is met; T1.5 c1's
+> read portal stays its eventual owner); rec-3243's metering landed, and the stricter significance bar is rec-3023's
+> and rec-5260's. inflow-per-plan replaces inflow-unguarded; index-read-context-cost, whose window closed
+> 2026-09-12, is re-armed on a byte figure; t15-portal-read is kept, its note corrected. review_by moves from
+> 2026-12-01 to 2027-03-01.
 
 ---
 
@@ -6907,16 +6920,12 @@ That strictness is affordable precisely because the dialect absorbs every legiti
 
 ```yaml reversal-conditions
 decision: 177
-review_by: 2026-11-25
+review_by: 2027-05-25
 on_trigger: "re-decide via /plan whether the exact-line rule still fits the corpus's authoring reality; update or re-arm this stanza"
 conditions:
   - id: legitimate-shape-blocked-twice
     kind: manual
-    description: "Two or more legitimate corrections cannot be expressed in the post-lock dialect without contorting the entry -> widen the dialect at decision-entry.yaml's amendment_forms, never add a waiver route to the guard."
-  - id: t15-portal-cutover-retires-the-surface
-    kind: manual
-    description: "T1.5's portal cutover moves the corpus off docs/DECISIONS.md to warehouse-verb storage -> this file-diff guard loses its subject and retires with it; the invariant re-homes onto the warehouse's own append-only SCD2 versioning (Decision 167 condition (c) precedent)."
-    note: "Decision 196 clause 1 forecloses this trigger -- storage stays git in every tier, so this portal cutover will not occur; retained for the record, not armed toward a portal migration."
+    description: "Two or more legitimate corrections cannot be expressed in the post-lock dialect without contorting the entry -> widen the dialect at decision-entry.yaml's amendment_forms; never give the append-only policy, or any guard that re-lands it, a waiver route."
 ```
 
 **Related:** Decision 151 (amended -- clause 3(v)'s convention-only stance narrowed to a
@@ -6929,6 +6938,12 @@ Decision 163 (the exception-path anti-pattern the no-waiver posture avoids), Dec
 rec-3249 (resolved by this wave), rec-3264 / rec-3265 (drift flow-control, out of scope).
 
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
+> **Update (2026-11-17, PLAN-condition-reviews-167-177-179, rec-5255):** Reversal review due 2026-11-25
+> (audits/contract-first-retrospective-177c8f37.yaml, condition_reviews). legitimate-shape-blocked-twice did not fire
+> and is re-armed; its remedy no longer names the guard Decision 178 retired, and review_by moves from 2026-11-25 to
+> 2027-05-25. t15-portal-cutover-retires-the-surface is retired from the stanza: Decision 196 clause 1 keeps
+> decisions in git, so the cutover it waited for will not occur. No clause changes.
 
 ---
 
@@ -7501,15 +7516,26 @@ significance:
 
 ```yaml reversal-conditions
 decision: 167
-review_by: 2026-11-17
-on_trigger: "re-decide via /plan whether the deterministic subset still suffices or the f2 routing-consistency lint should be reconsidered; update or re-arm this stanza"
+review_by: 2027-02-17
+on_trigger: "re-decide via /plan whether the deterministic subset still suffices, weighing a routing row in decision-entry.yaml's significance.routing against the rejected f2 routing-consistency lint; update or re-arm this stanza"
 conditions:
   - id: mis-routed-past-both-gates
     kind: manual
-    description: "A post-167 entry is demonstrated mis-routed past BOTH the decision-entry conformance check and the plan-critique category-consistency verdict (.claude/skills/plan-critique/SKILL.md section 12p) -> the deterministic-subset-only control proved insufficient; re-open the routing-consistency-lint question with the new failure instance as evidence."
+    description: "At review, 2 or more of the newest 12 entries, read by the content_partition method of docs/audit-prompts/AUDIT-contract-first-retrospective.md (applied in audits/contract-first-retrospective-177c8f37.yaml), have bar_test routable-elsewhere or a non-empty routable_row (a bar met only through an amends edge passes); or, once rec-5261 records plan-critique's step 12p verdict for each drafted entry, an entry that verdict passed is later shown mis-routed -> the deterministic subset proved insufficient; route the gap to a routing row (rec-3023, rec-5260)."
+  - id: same-pr-split-to-evade-cap
+    kind: manual
+    description: "Prose condition (b): two or more new entries land in one PR as one decision split to stay under the per-entry cap. Screen: two new entries in one PR that cite each other; a reviewer confirms the split, since a cited pair can be two rulings (Decisions 199 and 200) -> close the loophole at the check, never by raising the cap."
 ```
 
 **Related:** Decision 150 (the Significance bar enforced machine-readably), Decision 160 (point 11's accrual-rate lever, installed here at WARN tier only), Decision 134 (the two stock size ceilings this norm sits alongside), Decision 145 (the never-raise-to-fit precedent), Decision 149 (the compacted-stub exemption), Decision 84 (warehouse-safety boundary keeping `significance` index-only), Decision 153 (the shared, memoized baseline read). Roadmap refs: audits/contract-first-governance-33c8667.yaml findings CFG-01/CFG-03/CFG-07 (closed), rec-2934 (resolved by `per_entry_size_norm`), tier_item T2.56 (eventual owner of this corpus's shape; closes none of its criteria here).
+
+> **Update (2026-11-17, PLAN-condition-reviews-167-177-179, rec-5255):** Reversal review due 2026-11-17
+> (audits/contract-first-retrospective-177c8f37.yaml, condition_reviews). Condition (a) is retired: its set, the first
+> ten entries under the cap (Decisions 170 to 179), is closed, and none of the ten is on record as unable to fit; whether the cap squeezes rationale is
+> rec-3682's and rec-5260's. Condition (b) did not fire and is kept; the stanza now watches it as
+> same-pr-split-to-evade-cap. Condition (d) is discharged: the cap has failed builds since #895 (2026-08-13). The
+> stanza's mis-routed-past-both-gates did not fire and is re-armed with wording a review can check; review_by moves
+> from 2026-11-17 to 2027-02-17. No clause changes.
 
 ---
 
