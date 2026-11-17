@@ -14,6 +14,7 @@ branch went untested again.
 from __future__ import annotations
 
 import pathlib
+import re
 from unittest.mock import patch
 
 from scripts.checks import registry
@@ -134,12 +135,14 @@ class TestAcceptanceGateAssertions:
 
     def test_evaluator_job_fails_when_it_gains_id_token(self) -> None:
         sources = _real_sources()
-        sources[_CI_WORKFLOW_PATH] = sources[_CI_WORKFLOW_PATH].replace(
-            "timeout-minutes: 30\n    permissions:\n      contents: read\n    steps:\n      - uses: actions/checkout@v7\n"
-            "        with:\n          persist-credentials: false",
-            "timeout-minutes: 30\n    permissions:\n      contents: read\n      id-token: write\n    steps:\n"
-            "      - uses: actions/checkout@v7\n        with:\n          persist-credentials: false",
+        sources[_CI_WORKFLOW_PATH], count = re.subn(
+            r"(timeout-minutes: 30\n    permissions:\n      contents: read\n)"
+            r"(    steps:\n      - uses: actions/checkout@\S+[^\n]*\n"
+            r"        with:\n          persist-credentials: false)",
+            r"\1      id-token: write\n\2",
+            sources[_CI_WORKFLOW_PATH],
         )
+        assert count == 1
         failed = _run(sources)
         assert any("not credential-free" in item for item in failed), failed
 
