@@ -180,7 +180,7 @@ SCENARIOS: dict[str, list[dict[str, Any]]] = {
             entity_ref="a#2/run",
             host_run_ref="gha:1/1/rca/1",
         ),  # fmt: skip
-        _event("a#3", event_kind="open", agent_type="manual", trigger="subagent_sync"),
+        _event("a#3", event_kind="open", agent_type="code-review", trigger="subagent_sync", definition_sha256="0" * 64),
     ],
 }
 

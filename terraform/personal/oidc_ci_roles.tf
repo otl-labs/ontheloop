@@ -238,6 +238,7 @@ data "aws_iam_policy_document" "github_ci_branch" {
     resources = [
       "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.scheduled_agent_dispatcher_function}",
       "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.findings_processor_function}",
+      "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:${local.workflow_dispatcher_function}",
     ]
   }
 
