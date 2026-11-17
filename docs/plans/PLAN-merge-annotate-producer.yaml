@@ -25,8 +25,9 @@ scope:
       Pure build_links(commits, roots, ci_conclusions, diffstats) -> rows, plus a CLI (python -m
       scripts.telemetry_capture.merge_annotate [--days N] [--as-of SHA] [--dry-run] [--junit-xml PATH]; an empty --days
       value means 7 and an empty --as-of means origin/main, because a scheduled run passes the dispatch inputs empty;
-      arguments are parsed inside the junit try/finally, so even a usage error writes the testcase, and the CLI creates
-      the junit file's parent directory). Merges: the
+      --junit-xml is pre-scanned with parse_known_args, then the full parse runs inside the junit try/finally, so even a
+      usage error writes the testcase, and the CLI creates the junit file's parent directory; --as-of must be a 7-40
+      character hex sha and --days an integer 1-120, else a usage error). Merges: the
       first-parent commits of origin/main (or of --as-of) committed within N days before that ref's own committer time
       (default 7, at most 120; relative to the ref, not the wall clock, so paired runs pinned to one --as-of select the
       same merges), read with session_presence.git_commits; keys from the commit body by session_presence._keys_in (the
@@ -38,8 +39,9 @@ scope:
       envelope's held-root-key handoff; a decode failure skips that root) is at or before the squash committer time gives
       one row; a root started after the merge cannot have produced it and gives none (the writer's event_timestamp
       not_before session_started_at rule). The two times come from different clocks (GitHub's committer time and the
-      root id's time prefix), and the producer declares a zero skew allowance (telemetry-event-envelope.yaml's
-      event_timestamp rule): it filters with the very comparison the writer enforces, so no row is refused for skew, and
+      root id's time prefix), and the producer declares a zero skew allowance in merge_annotate.py's module docstring (telemetry-event-envelope.yaml's
+      event_timestamp rule): rows are dropped before send by the very comparison the writer enforces, so the writer's
+      exact rule never refuses one, and
       a root a few seconds after its merge is dropped, which loses no link a session could have produced. Each row carries exactly: event_kind annotate, event_timestamp the squash
       committer time, session_started_at and entity_ref the root's, source_ordinal 0, external_ref
       "<root entity_ref>:merge:<squash sha>#0/annotate", producer ci_annotate, producer_version the module's
@@ -51,9 +53,10 @@ scope:
       is read only for a merge that has at least one eligible root (bounding the backfill's GitHub reads to merges since
       production capture began, a few hundred): one GET of
       actions/workflows/ci.yml/runs?event=push&branch=main&head_sha=<sha> with GITHUB_TOKEN, one retry on a 5xx or network
-      error, after which the merge counts under skipped_no_ci; a 429, or a 403 whose x-ratelimit-remaining is 0 or that carries retry-after (the secondary limit), stops all
+      error, after which the merge counts under skipped_no_ci; a 429, or a 403 whose x-ratelimit-remaining is 0, that carries retry-after, or whose message contains "rate limit"
+      (the secondary limit; the repository's precedent at scripts/ci/terraform_github_apply_gate.py), stops all
       further GitHub reads for the run and counts the rest under skipped_no_ci (a later run picks them up); any other 403,
-      or a 404, is an unreadable source and fails the run (a missing actions: read permission never reads green); a run with run_attempt 1
+      or a 404, is an unreadable source and fails the run (a missing actions: read permission never reads green); the lowest run id in that list is the commit's run (a sha can have more than one push run); a run with run_attempt 1
       gives its conclusion; a re-run (run_attempt > 1) gives the conclusion of runs/{id}/attempts/1; cancelled included;
       no concluded attempt 1 gives no row this run (attempt 1, so a re-run never changes a re-sent row; the commit's own
       run, not Decision 254's batch range verdict, deferred to rec-5295). Roots: the telemetry_root_sessions named verb
@@ -219,8 +222,8 @@ infrastructure_dependencies:
   - "None expected: github_ci_branch already invokes the telemetry writer and reader and reads /agent-platform/* parameters (oidc_ci_roles.tf, oidc.tf ci_ssm_refresh_read), and it is already an admitted writer principal. The build re-checks the writer invoke grant before relying on it; a missing grant stops for a Terraform PR, never a local apply."
 acceptance_criteria:
   - "bin/venv-python -m pytest tests/telemetry_capture/test_merge_annotate.py -q passes (rec-5270's acceptance)."
-  - "After the backfill dispatch, a second dispatch with the same link_days and as_of inserts no row the first sent: its inserted is at most its submitted minus the first run's submitted (every row the first run sent is stored after it, whether that run or an earlier scheduled one inserted it), with rejected 0."
-  - "Link writes happen only on the schedule and dispatch: at most one writer call per chunk per run, plus one resend after a row refusal, and no describe call."
+  - "After the backfill dispatch, a second dispatch with the same link_days and as_of inserts no row the first sent: its inserted is at most its submitted minus the first run's submitted (every row the first run sent is stored after it, whether that run or an earlier scheduled one inserted it), with rejected 0 and skipped_no_ci 0 on both runs (no deferred CI read, so the second run submits every row the first did)."
+  - "Link writes happen only on the schedule and dispatch: at most one WriterClient.invoke call per chunk per run (its own internal 429/503 retries are not counted), plus one resend after a row refusal, and no describe call."
   - "Declared residual: a root started more than 56 days before its merge is not linked in steady state (the 10-window walk reaches 63 days before the ref, so a merge up to 7 days old still sees 56 days of roots); a backfill dispatch with a larger link_days links it."
 verification_plan:
   - step: 1
@@ -253,32 +256,39 @@ verification_plan:
       P="$(gh api 'repos/otl-labs/ontheloop/actions/workflows/telemetry-merge-links.yml/runs?event=workflow_dispatch&per_page=1' --jq '.workflow_runs[0].id // 0')" &&
       gh api -X POST repos/otl-labs/ontheloop/actions/workflows/telemetry-merge-links.yml/dispatches -f ref=main -f "inputs[link_days]=120" -f "inputs[as_of]=$A" &&
       R="$P" && for i in $(seq 90); do sleep 10; R="$(gh api 'repos/otl-labs/ontheloop/actions/workflows/telemetry-merge-links.yml/runs?event=workflow_dispatch&per_page=1' --jq '.workflow_runs[0].id // 0')"; [ -n "$R" ] && [ "$R" != "$P" ] && break; done &&
-      [ -n "$R" ] && [ "$R" != "$P" ] && S="""" && for i in $(seq 120); do S="$(gh api "repos/otl-labs/ontheloop/actions/runs/$R" --jq .status)"; [ "$S" = completed ] && break; sleep 30; done &&
+      [ -n "$R" ] && [ "$R" != "$P" ] && S="" && for i in $(seq 120); do S="$(gh api "repos/otl-labs/ontheloop/actions/runs/$R" --jq .status)"; [ "$S" = completed ] && break; sleep 30; done &&
       [ "$S" = completed ] &&
       [ "$(gh api "repos/otl-labs/ontheloop/actions/runs/$R" --jq .conclusion)" = success ] &&
       gh run view "$R" --repo otl-labs/ontheloop --log | grep -o 'merge_annotate summary: .*' | head -1 > /tmp/ma_run1 &&
-      grep -q ' rejected=0 ' /tmp/ma_run1 &&
+      grep -q ' rejected=0 ' /tmp/ma_run1 && grep -q ' skipped_no_ci=0 ' /tmp/ma_run1 &&
       [ "$(grep -o 'inserted=[0-9]*' /tmp/ma_run1 | cut -d= -f2)" -gt 0 ] && echo BACKFILL_OK
-    expected: BACKFILL_OK (the run concluded success, rejected=0, inserted > 0).
-    fix_if: a GrainConflict or writer refusal (the junit testcase names it); rejected > 0 (the run log's "merge_annotate rejected" lines name the rule and column)
+    expected: BACKFILL_OK (the run concluded success, rejected=0, skipped_no_ci=0 so no CI read was deferred, inserted > 0).
+    fix_if: >-
+      skipped_no_ci > 0 (GitHub's hourly token budget ran out): wait an hour and run this step again with the same
+      /tmp/ma_asof (the scheduled 7-day run never revisits older merges); a cancelled conclusion (a queued run was
+      replaced in the concurrency group): run it again; a GrainConflict or writer refusal (the junit testcase names it); rejected > 0 (the run log's "merge_annotate rejected" lines name the rule and column)
     hermetic: false
   - step: 4
     phase: post-deploy
-    action: A replay with the same link_days and as_of inserts nothing the first run sent.
+    action: >-
+      A replay with the same link_days and as_of inserts nothing the first run sent. Start it at least 60 minutes after
+      step 3 completed, so the backfill's GitHub reads have left the hourly token budget.
     command: >-
       A="$(cat /tmp/ma_asof)" &&
       P="$(gh api 'repos/otl-labs/ontheloop/actions/workflows/telemetry-merge-links.yml/runs?event=workflow_dispatch&per_page=1' --jq '.workflow_runs[0].id // 0')" &&
       gh api -X POST repos/otl-labs/ontheloop/actions/workflows/telemetry-merge-links.yml/dispatches -f ref=main -f "inputs[link_days]=120" -f "inputs[as_of]=$A" &&
       R="$P" && for i in $(seq 90); do sleep 10; R="$(gh api 'repos/otl-labs/ontheloop/actions/workflows/telemetry-merge-links.yml/runs?event=workflow_dispatch&per_page=1' --jq '.workflow_runs[0].id // 0')"; [ -n "$R" ] && [ "$R" != "$P" ] && break; done &&
-      [ -n "$R" ] && [ "$R" != "$P" ] && S="""" && for i in $(seq 120); do S="$(gh api "repos/otl-labs/ontheloop/actions/runs/$R" --jq .status)"; [ "$S" = completed ] && break; sleep 30; done &&
+      [ -n "$R" ] && [ "$R" != "$P" ] && S="" && for i in $(seq 120); do S="$(gh api "repos/otl-labs/ontheloop/actions/runs/$R" --jq .status)"; [ "$S" = completed ] && break; sleep 30; done &&
       [ "$S" = completed ] &&
       [ "$(gh api "repos/otl-labs/ontheloop/actions/runs/$R" --jq .conclusion)" = success ] &&
       gh run view "$R" --repo otl-labs/ontheloop --log | grep -o 'merge_annotate summary: .*' | head -1 > /tmp/ma_run2 &&
-      grep -q ' rejected=0 ' /tmp/ma_run2 &&
+      grep -q ' rejected=0 ' /tmp/ma_run2 && grep -q ' skipped_no_ci=0 ' /tmp/ma_run2 &&
       S1="$(grep -o 'submitted=[0-9]*' /tmp/ma_run1 | cut -d= -f2)" && S2="$(grep -o 'submitted=[0-9]*' /tmp/ma_run2 | cut -d= -f2)" &&
       I2="$(grep -o 'inserted=[0-9]*' /tmp/ma_run2 | cut -d= -f2)" && [ "$I2" -le "$((S2 - S1))" ] && echo REPLAY_STABLE
     expected: REPLAY_STABLE (rows that arrived or concluded between the runs may insert; nothing the first run sent does).
-    fix_if: a GrainConflict (a row field is not stable across runs) or the inequality fails
+    fix_if: >-
+      skipped_no_ci > 0 or a cancelled conclusion: wait an hour and run this step again (the bound needs run 2 to submit
+      every row run 1 did); a GrainConflict (a row field is not stable across runs) or the inequality fails
     hermetic: false
   - step: 5
     phase: post-deploy
@@ -370,6 +380,7 @@ context:
   - "Critique r2 (REVISE) folded: no scripts import of src.telemetry.append (B1), evidence amendment row (B2), rec-5270 and rec-5295 acceptance made node-id decidable via update_rec 2026-11-17 (B3), realization test copy (B4), full-floor walk (B5), normalised key join (B6), CI reads only for linkable merges with rate-limit handling (B7), run-id-pinned VPs (B8), nits N1-N13."
   - "Critique r3 (REVISE) folded: 422 row_rule handled with schema_gate, a 422 without a row fails (B1); 10 steady-state windows to the ref - 63 floor (B2); value-free rejected lines, RowsRejected junit type, non-rate-limit 403/404 fail, bounded VP waits, env-only dispatch inputs, rec_ids null and fixed pr_url slug, the manifest pre_globs row, rec-5248 adoption rule, AC3 reworded (N1-N9)."
   - "Critique r4 (REVISE) folded: an empty --days/--as-of (the schedule) means the defaults, arguments parsed inside the junit try (B1); replay bound S2 - S1, constraint wording, SA-07 names the fixed slug, secondary-limit 403, zero skew allowance declared, empty-run-id guard, junit directory, headroom fallbacks (N1-N8)."
+  - "Critique r5 (REVISE) folded: the backfill and replay require skipped_no_ci=0, the replay starts an hour after the backfill, and a deferred run is re-run (B1); argv pre-scan for --junit-xml, rate-limit message 403, docstring skew declaration, input validation, lowest run id, re-dispatch on cancel, invoke-count wording (N1-N4, N6-N9). N5 (test file size): the build keeps the one test file under 500 lines with parametrised case tables."
   - "Critique r1 (REVISE) folded: ci-rca filter (B1), golden case files (B2), rec-5270 bundled (B3), replay VP (B4), bounded walk and residual (B5), later-root drop and per-row prepare (B6), SA-07 instead of PC-09 (B7, B8), junit attribution (B9), nits N1-N11."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:dc78229ac43a2a44447ed77ebfb0b322842dd52ba18e4528148ea8ec0595c07f"}  # pragma: allowlist secret
@@ -387,6 +398,7 @@ gate_rounds:
   - {gate: wording-check, round: 4, verdict: PASS, digest: 4cca40ab02a6deca31a92b8625cce641370d96f837e01f3e17d2bed289a81540, base: eed2f6e47ca5a81c4098731ba4545c5d3c49293b, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 9}
   - {gate: wording-check, round: 5, verdict: PASS, digest: a994c8879aff3dce9de152ab6b873828c7cab1b392546e5bfe213b2fe75e8dd5, base: eed2f6e47ca5a81c4098731ba4545c5d3c49293b, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 9}
 pre_implementation_checklist:
   - Branch confirmed not on main
 execution_steps:
