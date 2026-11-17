@@ -530,13 +530,11 @@ class TestRealRepoIntegration:
         assert gate._write_mode("ops_decisions", sidecar) == "scd2"
 
     def test_pending_reconcile_map_real(self) -> None:
-        """ops_decisions.intent was reconciled (VP step 10, 2026-07-26): pending_reconcile is
-        empty and _blocking_tables reports no reconcile_scope=ducklake table as blocked."""
+        """ops_recommendations.provenance_json is pending (C2): it alone blocks until reconciled."""
         sidecar = gate._load_sidecar(gate._common.ROOT)
         pending = gate._pending_reconcile_map(sidecar)
-        assert pending["ops_decisions"]["history"] == []
-        assert pending["ops_decisions"]["current"] == []
-        assert gate._blocking_tables(sidecar) == []
+        assert pending["ops_recommendations"] == {"history": ["provenance_json"], "current": ["provenance_json"]}
+        assert gate._blocking_tables(sidecar) == ["ops_recommendations"]
 
     def test_diff_added_columns_real_repo_returns_dict_or_none(self) -> None:
         result = gate._diff_added_columns(gate._common.ROOT)

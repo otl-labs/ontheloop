@@ -196,6 +196,32 @@ resource "aws_cloudwatch_metric_alarm" "ducklake_telemetry_reader_errors" {
   }
 }
 
+resource "aws_cloudwatch_metric_alarm" "ducklake_telemetry_reader_slow" {
+  alarm_name          = "ducklake-telemetry-reader-slow"
+  alarm_description   = "DuckLake telemetry reader: a call ran close to the reader's read deadline (unmerged small-file backlog; PLAN-telemetry-read-timeouts, rec-5247/rec-5248)."
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 4
+  datapoints_to_alarm = 2
+  metric_name         = "Duration"
+  namespace           = "AWS/Lambda"
+  period              = 900
+  statistic           = "Maximum"
+  threshold           = 100000
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    FunctionName = aws_lambda_function.ducklake_telemetry_reader.function_name
+  }
+
+  alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
+
+  tags = {
+    Name    = "DuckLake Telemetry Reader Slow Alarm"
+    Purpose = "PLAN-telemetry-read-timeouts reader duration alert"
+  }
+}
+
 output "ducklake_telemetry_reader_function_url" {
   description = "AWS_IAM Function URL for the ducklake telemetry reader."
   value       = aws_lambda_function_url.ducklake_telemetry_reader.function_url
