@@ -145,3 +145,8 @@ def test_array_only_rule_is_accepted(tree: Path) -> None:
     rule = {"cases": [{"verdict": "REVISE", "any": [{"array": "findings"}]}], "otherwise": "PROCEED"}
     edit_contract(tree, lambda c: c.__setitem__("verdict_consistency", rule), rerender=True)
     assert _run(tree) == []
+
+
+def test_verdict_contract_without_rule_is_refused(tree: Path) -> None:
+    edit_contract(tree, lambda c: c.pop("verdict_consistency"), rerender=True)
+    assert any("missing required field(s)" in f for f in _run(tree))
