@@ -25,15 +25,22 @@ PR_TYPES = ["opened", "ready_for_review", "reopened", "synchronize"]
 PINNED = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 MKDIR = 'mkdir -p "$RUNNER_TEMP/work"'
 RUN_PREFIX = 'python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" '
-VERBS = frozenset({"resolve", "route", "fetch", "materialise", "execute", "post"})
+VERBS = frozenset({"resolve", "route", "fetch", "materialise", "execute", "post", "wake"})
 SNAPSHOT = "${{ runner.temp }}/snapshot"
 WORKDIR = "${{ runner.temp }}/work"
-PIP_SETS = {"prepare": "pyyaml", "run": "jsonschema", "post": "pyyaml jsonschema"}
+PIP_SETS = {"prepare": "pyyaml", "run": "jsonschema", "post": "pyyaml jsonschema", "wake": "pyyaml"}
 JOB_PERMISSIONS: dict[str, dict[str, str]] = {
     "prepare": {"contents": "read", "pull-requests": "read"},
     "run": {"contents": "read"},
     "post": {"checks": "write", "contents": "read", "actions": "read"},
+    "wake": {"contents": "read", "actions": "read", "checks": "read", "pull-requests": "write"},
 }
+WAKE_ENV = {
+    "GH_TOKEN": "${{ github.token }}",
+    "PERSONA_SNAPSHOT": "${{ runner.temp }}/snapshot",
+    "POST_RESULT": "${{ needs.post.result }}",
+}
+WAKE_NEEDS = ["prepare", "post"]
 ARTIFACT_DIRS = {"persona-verdict-prepared": "prepared", "persona-verdict-results": "results"}
 RUN_CONDITION = "!cancelled() && needs.prepare.result == 'success'"
 POST_CONDITION = "!cancelled()"
@@ -131,13 +138,40 @@ def _python_steps(job: dict[str, Any]) -> list[dict[str, Any]]:
     return [s for s in _steps(job) if PYTHON_CMD.search(str(s.get("run", ""))) and "pip install" not in str(s.get("run", ""))]
 
 
+def _python_step_problems(name: str, step: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    run = str(step.get("run", "")).strip()
+    verb = run[len(RUN_PREFIX) :] if run.startswith(RUN_PREFIX) else ""
+    env = _map(step.get("env"))
+    if verb not in VERBS:
+        out.append(f"{VERDICT}: job {name} python step {run!r} is not the pinned run.py argv")
+    if env.get("PERSONA_SNAPSHOT") != SNAPSHOT:
+        out.append(f"{VERDICT}: job {name} python step {run!r} lacks PERSONA_SNAPSHOT: {SNAPSHOT}")
+    if step.get("working-directory") != WORKDIR:
+        out.append(f"{VERDICT}: job {name} python step {run!r} working-directory is not {WORKDIR}")
+    if name == "run" and verb != "execute":
+        out.append(f"{VERDICT}: the run job runs {verb or run!r}, not only the execute verb")
+    if name == "wake" and verb != "wake":
+        out.append(f"{VERDICT}: the wake job runs {verb or run!r}, not only the wake verb")
+    if name != "wake" and verb == "wake":
+        out.append(f"{VERDICT}: the wake verb runs in job {name}, not only in wake")
+    if name == "wake" and env != WAKE_ENV:
+        out.append(f"{VERDICT}: the wake step env is not exactly {sorted(WAKE_ENV)} with their pinned values")
+    if name == "wake" and "continue-on-error" in step:
+        out.append(f"{VERDICT}: the wake step has continue-on-error")
+    return out
+
+
 def _job_problems(name: str, job: dict[str, Any]) -> list[str]:
     out: list[str] = []
     steps = _steps(job)
     if job.get("permissions") != JOB_PERMISSIONS[name]:
         out.append(f"{VERDICT}: job {name} permissions differ from {JOB_PERMISSIONS[name]}")
-    if name != "post" and isinstance(job.get("permissions"), dict) and job["permissions"].get("checks") == "write":
+    perms = job.get("permissions")
+    if name != "post" and isinstance(perms, dict) and perms.get("checks") == "write":
         out.append(f"{VERDICT}: job {name} holds checks: write")
+    if name != "wake" and isinstance(perms, dict) and perms.get("pull-requests") == "write":
+        out.append(f"{VERDICT}: job {name} holds pull-requests: write")
     for step in steps:
         run = str(step.get("run", ""))
         if "pip install" in run:
@@ -146,17 +180,7 @@ def _job_problems(name: str, job: dict[str, Any]) -> list[str]:
                 out.append(f"{VERDICT}: job {name} pip line is not exactly {want!r}")
     py = _python_steps(job)
     for step in py:
-        run = str(step.get("run", "")).strip()
-        verb = run[len(RUN_PREFIX) :] if run.startswith(RUN_PREFIX) else ""
-        env = _map(step.get("env"))
-        if verb not in VERBS:
-            out.append(f"{VERDICT}: job {name} python step {run!r} is not the pinned run.py argv")
-        if env.get("PERSONA_SNAPSHOT") != SNAPSHOT:
-            out.append(f"{VERDICT}: job {name} python step {run!r} lacks PERSONA_SNAPSHOT: {SNAPSHOT}")
-        if step.get("working-directory") != WORKDIR:
-            out.append(f"{VERDICT}: job {name} python step {run!r} working-directory is not {WORKDIR}")
-        if name == "run" and verb != "execute":
-            out.append(f"{VERDICT}: the run job runs {verb or run!r}, not only the execute verb")
+        out.extend(_python_step_problems(name, step))
     if py:
         first_python = steps.index(py[0])
         if not any(str(s.get("run", "")).strip() == MKDIR for s in steps[:first_python]):
@@ -187,7 +211,7 @@ def _artifact_problems(jobs: dict[str, Any], evidence: dict[str, Any] | None) ->
             if action == "actions/download-artifact":
                 if with_.get("path") != f"{WORKDIR}/{ARTIFACT_DIRS.get(artifact, '?')}":
                     out.append(f"{VERDICT}: download {artifact} path is not its upload directory")
-                if name == "post" and step.get("continue-on-error") is not True:
+                if name in ("post", "wake") and step.get("continue-on-error") is not True:
                     out.append(f"{VERDICT}: post download {artifact} lacks continue-on-error: true")
     declared = {(str(r.get("job")), str(r.get("step")), str(r.get("artifact"))) for r in rows}
     if declared != seen:
@@ -213,7 +237,7 @@ def verdict_problems(doc: dict[str, Any], evidence: dict[str, Any] | None) -> li
         out.append(f"{VERDICT}: top-level permissions are not {{}}")
     jobs = _jobs(doc)
     if set(jobs) != set(JOB_PERMISSIONS):
-        out.append(f"{VERDICT}: jobs are not exactly prepare, run and post")
+        out.append(f"{VERDICT}: jobs are not exactly prepare, run, post and wake")
     for name in sorted(set(jobs) & set(JOB_PERMISSIONS)):
         out.extend(_job_problems(name, jobs[name]))
     for name, job in jobs.items():
@@ -223,10 +247,24 @@ def verdict_problems(doc: dict[str, Any], evidence: dict[str, Any] | None) -> li
         out.append(f"{VERDICT}: the run job condition is not {RUN_CONDITION}")
     if "post" in jobs and _unwrap(jobs["post"].get("if", "")) != POST_CONDITION:
         out.append(f"{VERDICT}: the post job condition is not {POST_CONDITION}")
+    if "wake" in jobs:
+        if jobs["wake"].get("needs") != WAKE_NEEDS:
+            out.append(f"{VERDICT}: the wake job needs are not exactly {WAKE_NEEDS}")
+        if _unwrap(jobs["wake"].get("if", "")) != POST_CONDITION:
+            out.append(f"{VERDICT}: the wake job condition is not {POST_CONDITION}")
+        out.extend(_wake_download_problems(jobs["wake"]))
     out.extend(_prepare_problems(jobs.get("prepare")))
     out.extend(_token_problems(doc, jobs))
     out.extend(_artifact_problems(jobs, evidence))
     return out
+
+
+def _wake_download_problems(job: dict[str, Any]) -> list[str]:
+    downloads = [s for s in _steps(job) if _action(s) == "actions/download-artifact"]
+    names = sorted(str(_map(s.get("with")).get("name", "")) for s in downloads)
+    if names != ["persona-verdict-prepared"]:
+        return [f"{VERDICT}: the wake job downloads {names}, not exactly persona-verdict-prepared"]
+    return []
 
 
 def _prepare_problems(job: Any) -> list[str]:

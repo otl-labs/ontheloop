@@ -19,6 +19,7 @@ ALLOWED = {
     "materialise": {"yaml"},
     "execute": {"jsonschema"},
     "post_verdict": {"yaml", "jsonschema"},
+    "wake": {"yaml"},
 }
 
 
