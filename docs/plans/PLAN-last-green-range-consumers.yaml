@@ -82,17 +82,24 @@ scope:
       $GITHUB_OUTPUT): range_status; diff_base = prev for a resolved, widened or recorded ci range, empty for an
       unresolved ci range, and the literal HEAD^ for every other slug (so vacuous_pass diffs HEAD^..HEAD there exactly as
       today); prompt_note = one sentence naming /tmp/ci-rca-range.json and its pull requests for slug ci, else empty.
-      It also logs "range_status=... diff_base=..." to stderr for the run log. Any other slug: {head, prev: null,
+      As its last act, after the outputs are written, it prints the workflow annotation "::notice
+      title=ci-rca-range::range_status=<s> diff_base=<b>" (the proof that resolve completed; a continue-on-error step's
+      conclusion reads success whatever its outcome, validate_oidc_failopen_guards.py:20-22). Any other slug: {head, prev: null,
       range_status: head_only, commits: [head]}, as today. A failing API read degrades to range_status unresolved,
       never a red ci-rca job. Subcommand probe --ref REF --depth N (read-only, a live check for the build): for each of
-      REF's first N first-parent commits prints its full_tier_state and an independent oracle,
-      scripts.ci.push_scope.confined_to_plans over git diff --name-only sha^ sha; exits 0 printing "probe=ok skipped=K"
-      only when every "skipped" commit is plans-only and every "started" one is not, resolve_prev(REF) returned the
+      REF's first N first-parent commits prints its full_tier_state, whether the job's fast-tier step ran, and an
+      independent oracle, scripts.ci.push_scope.confined_to_plans over git diff --name-only sha^ sha; the oracle is
+      compared only where the fast-tier step ran (a job that failed or was cancelled before it is listed as excluded:
+      resolve_prev still passes over it, Decision 254 cl.1); exits 0 printing "probe=ok skipped=K" only when every
+      compared "skipped" commit is plans-only and every "started" one is not, resolve_prev(REF) returned the
       nearest "started" commit, and K is above 0; else "probe=fail <reason>" and exit 1. Subcommand observe --merge-sha SHA
       (read-only): takes the merge commit's committer time from git, pages ci-rca.yml runs created at or after it with
-      status completed (per_page 100), drops runs whose conclusion is skipped before reading any jobs, keeps runs whose "Resolve run range" step ran (not skipped: the rca job ran and
-      the slug was ci), takes the oldest, and prints "observe=<run id> slug=ci range_step=<conclusion>" (exit 0 when
-      that step succeeded, 1 otherwise) or "observe=none-yet" (exit 0) when no run qualifies. GH_TOKEN is optional (public reads).
+      status completed (per_page 100), drops runs whose conclusion is skipped before reading any jobs, keeps runs whose "Resolve run range" step was not skipped (the rca job ran, the
+      slug was ci and the checkout had the module), takes the oldest, reads its rca job's check-run annotations
+      (check-runs/{job id}/annotations, public), and prints "observe=<run id> slug=ci resolve=completed
+      range_status=<s>" (exit 0) when the ci-rca-range notice is present, "observe=<run id> slug=ci
+      resolve=incomplete" (exit 1) when it is absent (the step's conclusion is never the proof), or "observe=none-yet"
+      (exit 0) when no run qualifies. GH_TOKEN is optional (public reads).
   - file: tests/ci_rca/test_range_context.py
     action: Create
     purpose: >-
@@ -103,8 +110,10 @@ scope:
       last-green sha read at ref=head; nothing resolves -> unresolved, head alone and an empty diff_base; a non-CI slug
       returns head_only with diff_base HEAD^ and an empty prompt_note; an API error returns unresolved; one PR per
       commit; probe prints probe=ok over a fake chain with a skipped plans-only commit, and probe=fail when
-      resolve_prev stops on it, when the oracle disagrees, or when K is 0; observe skips runs whose range step was
-      skipped, takes the oldest remaining, and prints none-yet on an empty page.
+      resolve_prev stops on it, when the oracle disagrees, or when K is 0; a commit whose job failed before the fast
+      tier is excluded from the oracle; observe skips runs whose range step was skipped, takes the oldest remaining,
+      reads completed from the notice, reads incomplete when the step's conclusion is success but the notice is
+      absent, and prints none-yet on an empty page.
   - file: tests/ci/test_last_green.py
     action: Create
     purpose: >-
@@ -122,9 +131,9 @@ scope:
       VAR=$(...) assignment (validate_masked_errexit_steps): fetch the run JSON (gh api to a file, the meta step's
       source) and run bin/venv-python -m scripts.ci_rca.range_context resolve, appending its outputs (range_status,
       diff_base, prompt_note) to $GITHUB_OUTPUT and writing /tmp/ci-rca-range.json. "Range fallback" (id
-      range_fallback; if: the slug is not ci || that hashFiles is ''): writes diff_base=HEAD^. So "the range step ran"
-      implies resolve ran. A hang hits the timeout and,
-      through continue-on-error, abstains. (2) "Generate evidence bundle" gains env CI_RCA_RANGE_PREV: ${{
+      range_fallback; if: the slug is not ci || that hashFiles is ''): writes diff_base=HEAD^. Under bash -e a failed
+      fetch stops the body before resolve, so the run abstains (empty diff_base); a hang hits the timeout and, through
+      continue-on-error, abstains too. Only resolve's closing ci-rca-range notice proves it completed. (2) "Generate evidence bundle" gains env CI_RCA_RANGE_PREV: ${{
       steps.range.outputs.diff_base || steps.range_fallback.outputs.diff_base }} (at most one of the two ran; an empty
       ci value stays empty). So every
       non-ci slug and a ci checkout that predates the module pass HEAD^ (today's diff), a resolved ci range passes its
@@ -342,7 +351,7 @@ verification_plan:
     action: resolve_prev against live GitHub passes over plans-only main commits (the jobs-API assumption, proven live).
     command: bin/venv-python -m scripts.ci_rca.range_context probe --ref origin/main --depth 20
     expected: exit 0 and a line "probe=ok skipped=K" with K above 0; push_scope's plans-only rule agrees with every skipped and started commit. About 40 public reads, inside the unauthenticated hourly limit; export GH_TOKEN where one is available.
-    fix_if: probe=fail on an oracle disagreement means full_tier_state misreads the live jobs API; fix it and its fixtures to the live shape, never the probe. probe=fail with K 0 means no plans-only merge in the window; rerun after the next plan PR merges
+    fix_if: probe=fail on an oracle disagreement over a compared commit (fast-tier step ran) means full_tier_state misreads the live jobs API; fix it and its fixtures to the live shape, never the probe. probe=fail with K 0 means no plans-only merge in the window; rerun after the next plan PR merges
     hermetic: false
     graduation: waive
     graduation_waiver_reason: >-
@@ -360,8 +369,8 @@ verification_plan:
     phase: post-deploy
     action: The first failing-upstream ci-rca run after merge runs the range step to success (observation only; no red is induced).
     command: bin/venv-python -m scripts.ci_rca.range_context observe --merge-sha "$(git rev-parse origin/main)"
-    expected: run with the build's merge commit still origin/main's tip, or pass its SHA in place of the rev-parse; exit 0 with "observe=<run id> slug=ci range_step=success" on the oldest ci-rca run after the merge whose range step ran, or "observe=none-yet" (rerun on the next CI red). On a ci-slug run its log line shows range_status and diff_base.
-    fix_if: range_step is not success; read that run's log for range_status and diff_base, and file a rec against this plan (forward fix)
+    expected: run with the build's merge commit still origin/main's tip, or pass its SHA in place of the rev-parse; exit 0 with "observe=<run id> slug=ci resolve=completed range_status=<s>" on the oldest ci-rca run after the merge whose range step ran, or "observe=none-yet" (rerun on the next CI red).
+    fix_if: "resolve=incomplete (the step ran but its notice is absent: a crash, a failed fetch or the timeout); read that run's log, and file a rec against this plan (forward fix)"
     hermetic: false
     graduation: not-applicable
   - step: 13
@@ -478,6 +487,7 @@ gate_rounds:
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 9}
   - {gate: decision-scout, round: 6, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:bdb4699c23550d14c0687e483069dfc09377280238f2b955cf895c98becdc86a"}  # pragma: allowlist secret
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 4}
+  - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 2}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
