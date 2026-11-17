@@ -111,6 +111,7 @@ _LAMBDA_SCRIPTS = [
 _LAMBDA_FUNCTION_NAMES = [
     "agent-platform-scheduled-agent-dispatcher",
     "agent-platform-findings-processor",
+    "agent-platform-workflow-dispatcher",
 ]
 
 # ---------------------------------------------------------------------------

@@ -29,6 +29,7 @@ from .conftest import GitRunnerStub, _FakeDeployRecordsS3, _RecordingS3
 _ALL_PROD_FUNCTIONS = {
     "agent-platform-scheduled-agent-dispatcher",
     "agent-platform-findings-processor",
+    "agent-platform-workflow-dispatcher",
 }
 
 

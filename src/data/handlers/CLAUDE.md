@@ -3,10 +3,10 @@
 Loaded automatically when Claude reads or edits files in this directory. Universal rules in repo-root `CLAUDE.md` still apply.
 
 ## Lambda packaging contract
-Files here are bundled into Lambda zip artefacts via `scripts/build_lambda.py`. Plans modifying any handler must include the build, deploy, and post-deploy verification sequence — not just code edits. The dispatcher and findings-processor are the two Lambda functions whose code is updated.
+Files here are bundled into Lambda zip artefacts via `scripts/build_lambda.py`. Plans modifying any handler must include the build, deploy, and post-deploy verification sequence. The dispatcher, findings-processor and workflow dispatcher are the three functions whose code is updated.
 
-**Deploy channel class (Decision 125/126, T2.43):** the dispatcher and findings-processor
-are `terraform/personal`-managed (`terraform/personal/prod_lambdas.tf`, the
+**Deploy channel class (Decision 125/126, T2.43):** the three functions
+are `terraform/personal`-managed (`prod_lambdas.tf`, `scheduled_workflow_dispatch.tf`, the
 `decoupled_build_pipeline` class) but code/infra-DECOUPLED from day one via
 `lifecycle { ignore_changes = [source_code_hash] }` — distinct from the four
 `terraform/personal`-managed DuckLake Lambdas (`ducklake_writer`/`ducklake_reader`/
