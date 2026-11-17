@@ -23,7 +23,10 @@ scope:
     action: Create
     purpose: >-
       Pure build_links(commits, roots, ci_conclusions, diffstats) -> rows, plus a CLI (python -m
-      scripts.telemetry_capture.merge_annotate [--days N] [--as-of SHA] [--dry-run] [--junit-xml PATH]). Merges: the
+      scripts.telemetry_capture.merge_annotate [--days N] [--as-of SHA] [--dry-run] [--junit-xml PATH]; an empty --days
+      value means 7 and an empty --as-of means origin/main, because a scheduled run passes the dispatch inputs empty;
+      arguments are parsed inside the junit try/finally, so even a usage error writes the testcase, and the CLI creates
+      the junit file's parent directory). Merges: the
       first-parent commits of origin/main (or of --as-of) committed within N days before that ref's own committer time
       (default 7, at most 120; relative to the ref, not the wall clock, so paired runs pinned to one --as-of select the
       same merges), read with session_presence.git_commits; keys from the commit body by session_presence._keys_in (the
@@ -34,18 +37,21 @@ scope:
       prefix; the trailer key is already normalised) and whose session_started_at (decoded from the root session_id with identity.decode_time_prefix, the
       envelope's held-root-key handoff; a decode failure skips that root) is at or before the squash committer time gives
       one row; a root started after the merge cannot have produced it and gives none (the writer's event_timestamp
-      not_before session_started_at rule). Each row carries exactly: event_kind annotate, event_timestamp the squash
+      not_before session_started_at rule). The two times come from different clocks (GitHub's committer time and the
+      root id's time prefix), and the producer declares a zero skew allowance (telemetry-event-envelope.yaml's
+      event_timestamp rule): it filters with the very comparison the writer enforces, so no row is refused for skew, and
+      a root a few seconds after its merge is dropped, which loses no link a session could have produced. Each row carries exactly: event_kind annotate, event_timestamp the squash
       committer time, session_started_at and entity_ref the root's, source_ordinal 0, external_ref
       "<root entity_ref>:merge:<squash sha>#0/annotate", producer ci_annotate, producer_version the module's
       PRODUCER_VERSION "1", parser_version PARSER_VERSION 1, rec_ids, pr_url
       https://github.com/<repo>/pull/<N>, <repo> the fixed slug session_presence.DEFAULT_REPO, never GITHUB_REPOSITORY, so a
-      slug change cannot alter a re-sent row (a merge with no "(#N)" gives no row: pr_url is required on annotate),
+      slug change cannot alter a re-sent row; the Actions reads below target the same slug (a merge with no "(#N)" gives no row: pr_url is required on annotate),
       files_changed / lines_added / lines_removed from `git diff --numstat --no-renames --diff-algorithm=myers <sha>^1 <sha>` (a binary file
       counts as a file with zero lines; both flags pinned so git config cannot change the counts), and ci_outcome. ci_outcome
       is read only for a merge that has at least one eligible root (bounding the backfill's GitHub reads to merges since
       production capture began, a few hundred): one GET of
       actions/workflows/ci.yml/runs?event=push&branch=main&head_sha=<sha> with GITHUB_TOKEN, one retry on a 5xx or network
-      error, after which the merge counts under skipped_no_ci; a 429, or a 403 whose x-ratelimit-remaining is 0, stops all
+      error, after which the merge counts under skipped_no_ci; a 429, or a 403 whose x-ratelimit-remaining is 0 or that carries retry-after (the secondary limit), stops all
       further GitHub reads for the run and counts the rest under skipped_no_ci (a later run picks them up); any other 403,
       or a 404, is an unreadable source and fails the run (a missing actions: read permission never reads green); a run with run_attempt 1
       gives its conclusion; a re-run (run_attempt > 1) gives the conclusion of runs/{id}/attempts/1; cancelled included;
@@ -96,7 +102,8 @@ scope:
       retried once then counted skipped_no_ci; a 429 or an exhausted-quota 403 stops further GitHub reads; another 403 or a 404 fails the run; a 422 schema_gate
       naming a row and a 422 row_rule naming a row each drop it, print the rejected line, count it rejected, resend once
       and exit non-zero after the resend (junit type RowsRejected); a 422 with no row fails the run without a resend; a
-      merge with no Resolves trailer gives rec_ids null; pr_url uses DEFAULT_REPO with GITHUB_REPOSITORY set otherwise; a run whose rows fit one chunk makes exactly one WriterClient invoke and no
+      merge with no Resolves trailer gives rec_ids null; pr_url uses DEFAULT_REPO with GITHUB_REPOSITORY set otherwise; a scheduled invocation (--days "" --as-of "") runs with 7 days on origin/main; a usage error still writes the junit
+      testcase; a 403 with retry-after defers like a 429; a run whose rows fit one chunk makes exactly one WriterClient invoke and no
       describe; no rows makes none; a steady-state run reads exactly 10 windows and its oldest window's end date is at or after ref - 63 days; --dry-run sends nothing; the junit
       testcase names the module file and fails on any non-zero exit. Workflow structure test of telemetry-merge-links.yml: schedule and workflow_dispatch
       triggers only, the dispatcher-bot and fork-safe job guard, cron_period_seconds classifies its cron, checkout
@@ -130,7 +137,7 @@ scope:
       cron pinned to '47 */12 * * *' (a shape the sensor-liveness sweep's cron_period_seconds accepts, Decision 250 cl.3,
       minute apart from telemetry-arrival's 17), plus workflow_dispatch (inputs link_days, default 7, at most 120; as_of,
       optional sha), passed to the CLI only through env (LINK_DAYS, AS_OF), never as a ${{ }} expression inside the run
-      body; concurrency group telemetry-merge-links, cancel-in-progress false; timeout-minutes 30. The same
+      body, as --days "$LINK_DAYS" --as-of "$AS_OF" (both empty on the schedule, which the CLI reads as the defaults); concurrency group telemetry-merge-links, cancel-in-progress false; timeout-minutes 30. The same
       job-level guard as telemetry-arrival (refuses the dispatcher bot, fork-safe), OIDC
       github_ci_branch role (its ci_ssm_refresh_read covers both URL parameters; it already invokes the telemetry reader
       and writer), permissions contents read, actions read, id-token write; checkout fetch-depth 0; the venv install as
@@ -143,7 +150,8 @@ scope:
     action: Modify
     purpose: >-
       Row telemetry-merge-links: {tier: not_a_gate, ci_rca: watched, owner: platform, rationale: "ci_annotate merge link
-      producer (rec-5270); junit names merge_annotate.py; files no rec itself."}. 8 lines of headroom: one row fits.
+      producer (rec-5270); junit names merge_annotate.py; files no rec itself."}. 8 lines of headroom at planning; if a
+      plan landing first leaves none, compact existing rows (the config-class relief, Decision 166), never a raise.
     new_imports: []
   - file: .github/workflows/ci-rca.yml
     action: Modify
@@ -161,7 +169,8 @@ scope:
       One artifact_uploads row for the new pytest-junit upload (workflow .github/workflows/telemetry-merge-links.yml, its
       job, the upload step's name, artifact pytest-junit, retention_class ordinary_ci), the shape telemetry-arrival's row
       has, plus one new amendment_log entry (field_add, semantic_break false, naming the upload row; Class D contract);
-      each written flow-style on one line (492 of 500 effective lines becomes 494).
+      each written flow-style on one line (492 of 500 effective lines becomes 494; if a plan landing first leaves under
+      two lines, compact the amendment_log per the contracts-class relief valve, Decision 166, never a raise).
     new_imports: []
   - file: tests/checks/contracts/test_validate_telemetry_field_realization.py
     action: Modify
@@ -173,7 +182,7 @@ scope:
     action: Modify
     purpose: >-
       structural_assumptions SA-07 (the arrival check's history, trailer and "(#N)" assumptions) extends to the producer,
-      which imports those parsers, and to its Actions runs read for ci_outcome; one amendment_log row. PC-09 already
+      which imports those parsers, and to its Actions runs read for ci_outcome and its fixed default slug; one amendment_log row. PC-09 already
       records telemetry_sessions.pr_url as a GitHub pull-request pointer, so it is not edited. The placed file is 500 of
       500 effective lines; no compaction is bound, so a ports.yaml edit landing first means re-placing and re-approving.
     new_imports: []
@@ -210,7 +219,7 @@ infrastructure_dependencies:
   - "None expected: github_ci_branch already invokes the telemetry writer and reader and reads /agent-platform/* parameters (oidc_ci_roles.tf, oidc.tf ci_ssm_refresh_read), and it is already an admitted writer principal. The build re-checks the writer invoke grant before relying on it; a missing grant stops for a Terraform PR, never a local apply."
 acceptance_criteria:
   - "bin/venv-python -m pytest tests/telemetry_capture/test_merge_annotate.py -q passes (rec-5270's acceptance)."
-  - "After the backfill dispatch, a second dispatch with the same link_days and as_of inserts no row the first sent: its inserted is at most its submitted minus the first run's inserted, with rejected 0."
+  - "After the backfill dispatch, a second dispatch with the same link_days and as_of inserts no row the first sent: its inserted is at most its submitted minus the first run's submitted (every row the first run sent is stored after it, whether that run or an earlier scheduled one inserted it), with rejected 0."
   - "Link writes happen only on the schedule and dispatch: at most one writer call per chunk per run, plus one resend after a row refusal, and no describe call."
   - "Declared residual: a root started more than 56 days before its merge is not linked in steady state (the 10-window walk reaches 63 days before the ref, so a merge up to 7 days old still sees 56 days of roots); a backfill dispatch with a larger link_days links it."
 verification_plan:
@@ -243,8 +252,8 @@ verification_plan:
       git fetch -q origin main && A="$(git rev-parse origin/main)" && echo "$A" > /tmp/ma_asof &&
       P="$(gh api 'repos/otl-labs/ontheloop/actions/workflows/telemetry-merge-links.yml/runs?event=workflow_dispatch&per_page=1' --jq '.workflow_runs[0].id // 0')" &&
       gh api -X POST repos/otl-labs/ontheloop/actions/workflows/telemetry-merge-links.yml/dispatches -f ref=main -f "inputs[link_days]=120" -f "inputs[as_of]=$A" &&
-      R="$P" && for i in $(seq 90); do sleep 10; R="$(gh api 'repos/otl-labs/ontheloop/actions/workflows/telemetry-merge-links.yml/runs?event=workflow_dispatch&per_page=1' --jq '.workflow_runs[0].id // 0')"; [ "$R" != "$P" ] && break; done &&
-      [ "$R" != "$P" ] && S="" && for i in $(seq 120); do S="$(gh api "repos/otl-labs/ontheloop/actions/runs/$R" --jq .status)"; [ "$S" = completed ] && break; sleep 30; done &&
+      R="$P" && for i in $(seq 90); do sleep 10; R="$(gh api 'repos/otl-labs/ontheloop/actions/workflows/telemetry-merge-links.yml/runs?event=workflow_dispatch&per_page=1' --jq '.workflow_runs[0].id // 0')"; [ -n "$R" ] && [ "$R" != "$P" ] && break; done &&
+      [ -n "$R" ] && [ "$R" != "$P" ] && S="""" && for i in $(seq 120); do S="$(gh api "repos/otl-labs/ontheloop/actions/runs/$R" --jq .status)"; [ "$S" = completed ] && break; sleep 30; done &&
       [ "$S" = completed ] &&
       [ "$(gh api "repos/otl-labs/ontheloop/actions/runs/$R" --jq .conclusion)" = success ] &&
       gh run view "$R" --repo otl-labs/ontheloop --log | grep -o 'merge_annotate summary: .*' | head -1 > /tmp/ma_run1 &&
@@ -260,14 +269,14 @@ verification_plan:
       A="$(cat /tmp/ma_asof)" &&
       P="$(gh api 'repos/otl-labs/ontheloop/actions/workflows/telemetry-merge-links.yml/runs?event=workflow_dispatch&per_page=1' --jq '.workflow_runs[0].id // 0')" &&
       gh api -X POST repos/otl-labs/ontheloop/actions/workflows/telemetry-merge-links.yml/dispatches -f ref=main -f "inputs[link_days]=120" -f "inputs[as_of]=$A" &&
-      R="$P" && for i in $(seq 90); do sleep 10; R="$(gh api 'repos/otl-labs/ontheloop/actions/workflows/telemetry-merge-links.yml/runs?event=workflow_dispatch&per_page=1' --jq '.workflow_runs[0].id // 0')"; [ "$R" != "$P" ] && break; done &&
-      [ "$R" != "$P" ] && S="" && for i in $(seq 120); do S="$(gh api "repos/otl-labs/ontheloop/actions/runs/$R" --jq .status)"; [ "$S" = completed ] && break; sleep 30; done &&
+      R="$P" && for i in $(seq 90); do sleep 10; R="$(gh api 'repos/otl-labs/ontheloop/actions/workflows/telemetry-merge-links.yml/runs?event=workflow_dispatch&per_page=1' --jq '.workflow_runs[0].id // 0')"; [ -n "$R" ] && [ "$R" != "$P" ] && break; done &&
+      [ -n "$R" ] && [ "$R" != "$P" ] && S="""" && for i in $(seq 120); do S="$(gh api "repos/otl-labs/ontheloop/actions/runs/$R" --jq .status)"; [ "$S" = completed ] && break; sleep 30; done &&
       [ "$S" = completed ] &&
       [ "$(gh api "repos/otl-labs/ontheloop/actions/runs/$R" --jq .conclusion)" = success ] &&
       gh run view "$R" --repo otl-labs/ontheloop --log | grep -o 'merge_annotate summary: .*' | head -1 > /tmp/ma_run2 &&
       grep -q ' rejected=0 ' /tmp/ma_run2 &&
-      I1="$(grep -o 'inserted=[0-9]*' /tmp/ma_run1 | cut -d= -f2)" && S2="$(grep -o 'submitted=[0-9]*' /tmp/ma_run2 | cut -d= -f2)" &&
-      I2="$(grep -o 'inserted=[0-9]*' /tmp/ma_run2 | cut -d= -f2)" && [ "$I2" -le "$((S2 - I1))" ] && echo REPLAY_STABLE
+      S1="$(grep -o 'submitted=[0-9]*' /tmp/ma_run1 | cut -d= -f2)" && S2="$(grep -o 'submitted=[0-9]*' /tmp/ma_run2 | cut -d= -f2)" &&
+      I2="$(grep -o 'inserted=[0-9]*' /tmp/ma_run2 | cut -d= -f2)" && [ "$I2" -le "$((S2 - S1))" ] && echo REPLAY_STABLE
     expected: REPLAY_STABLE (rows that arrived or concluded between the runs may insert; nothing the first run sent does).
     fix_if: a GrainConflict (a row field is not stable across runs) or the inequality fails
     hermetic: false
@@ -342,7 +351,7 @@ test_obligations:
     waiver_reason: validate_telemetry_field_realization R1 and R8 fail --pre when populated_by and realization.produced disagree with the registry.
 constraints:
   - "Build after PLAN-merge-annotate-contract-reader is deployed (an annotate row must not count as activity, and coverage_after must be waived), after rec-5248's read-timeout fix (it has no plan yet; the read-timeouts thread owns it), and after the telemetry deploy hold lifts."
-  - "No new read shape: the telemetry_root_sessions named verb in the arrival check's window size and lookback bound (10 windows a run, twice a day); the backfill dispatch is the one run that walks further (26 windows)."
+  - "No new read shape: the telemetry_root_sessions named verb at the arrival check's 7-day window size, walked to a 63-day floor (10 windows a run, twice a day, with no early stop, one window more than the arrival check's 56-day bound); the backfill dispatch is the one run that walks further (26 windows)."
   - "ports.yaml's edit is bound word for word by docs/plans/approved/merge-annotate-producer.yaml (Decision 246); telemetry_sessions.yaml's edits here are the exact populated_by string and realization list above, the forms validate_telemetry_field_realization R1 and R8 fix, with no other prose."
   - "Public repository (Decision 101): logs print counts and shas only; fixtures synthetic."
   - "The trailer join in session_presence.py stays the arrival check; this producer imports its parsers and never changes its verdict or edits that file."
@@ -360,6 +369,7 @@ context:
   - "Kept graduated shards (assertions additive only): telemetry-field-realization."
   - "Critique r2 (REVISE) folded: no scripts import of src.telemetry.append (B1), evidence amendment row (B2), rec-5270 and rec-5295 acceptance made node-id decidable via update_rec 2026-11-17 (B3), realization test copy (B4), full-floor walk (B5), normalised key join (B6), CI reads only for linkable merges with rate-limit handling (B7), run-id-pinned VPs (B8), nits N1-N13."
   - "Critique r3 (REVISE) folded: 422 row_rule handled with schema_gate, a 422 without a row fails (B1); 10 steady-state windows to the ref - 63 floor (B2); value-free rejected lines, RowsRejected junit type, non-rate-limit 403/404 fail, bounded VP waits, env-only dispatch inputs, rec_ids null and fixed pr_url slug, the manifest pre_globs row, rec-5248 adoption rule, AC3 reworded (N1-N9)."
+  - "Critique r4 (REVISE) folded: an empty --days/--as-of (the schedule) means the defaults, arguments parsed inside the junit try (B1); replay bound S2 - S1, constraint wording, SA-07 names the fixed slug, secondary-limit 403, zero skew allowance declared, empty-run-id guard, junit directory, headroom fallbacks (N1-N8)."
   - "Critique r1 (REVISE) folded: ci-rca filter (B1), golden case files (B2), rec-5270 bundled (B3), replay VP (B4), bounded walk and residual (B5), later-root drop and per-row prepare (B6), SA-07 instead of PC-09 (B7, B8), junit attribution (B9), nits N1-N11."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:dc78229ac43a2a44447ed77ebfb0b322842dd52ba18e4528148ea8ec0595c07f"}  # pragma: allowlist secret
@@ -375,6 +385,8 @@ gate_rounds:
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 2, nits: 9}
   - {gate: decision-scout, round: 6, verdict: NO_FLAGS, scout_input_fingerprint: "v1:9548f4a493ec0b294be6490c9371fe52fb459e1b8a3218cde7cbeba89cb58ce6"}  # pragma: allowlist secret
   - {gate: wording-check, round: 4, verdict: PASS, digest: 4cca40ab02a6deca31a92b8625cce641370d96f837e01f3e17d2bed289a81540, base: eed2f6e47ca5a81c4098731ba4545c5d3c49293b, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 9}
+  - {gate: wording-check, round: 5, verdict: PASS, digest: a994c8879aff3dce9de152ab6b873828c7cab1b392546e5bfe213b2fe75e8dd5, base: eed2f6e47ca5a81c4098731ba4545c5d3c49293b, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
 execution_steps:
