@@ -2,10 +2,10 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
-## Decision 270: A persona verdict check counts only when the dedicated verdict GitHub App posted it -- the merge gate pins persona checks to the App id read from origin/main and ignores same-named runs from any other source (amends Decisions 264 and 205) (Decided)
+## Decision 271: A persona verdict check counts only when the dedicated verdict GitHub App posted it -- the merge gate pins persona checks to the App id read from origin/main and ignores same-named runs from any other source (amends Decisions 264 and 205) (Decided)
 
 ```yaml
-number: 270
+number: 271
 status: Decided
 decided_date: "2026-11-17"
 kind:
@@ -25,7 +25,7 @@ significance:
 
 **Status:** Decided
 **Date:** 2026-11-17
-**Warehouse ID:** dec-270 (per Decision 84 backfill)
+**Warehouse ID:** dec-271 (per Decision 84 backfill)
 
 **Problem:** Decision 264 clauses 1 and 4 accept a persona check as the newest check run by the GitHub Actions app. Any workflow on an in-repo branch whose token holds checks: write runs as that app and can post a run with a persona's name and conclusion success on any head (rec-5241), so once a persona's row reads actions an agent could pass the persona leg without the persona running. The verdict chain posts its check through the Checks API from a workflow_run run whose own check suite is on main's commit, so nothing about a check run's suite ties it to the chain.
 
@@ -41,7 +41,7 @@ significance:
 **Rationale:** A dedicated App rather than a pointer the gate verifies: only the App's key can create its check runs, the pin costs no read at merge time, and the ruleset can later require the same App, which also covers operator UI merges. Rejected: rec-5241's check-suite predicate (the chain's suite is on main's commit, so it would refuse every genuine verdict); a check run naming its workflow run, verified through public run data (about two more reads per persona, a redesign of the post job, nothing for the ruleset); signed attestations (a signature verifier inside a fail-closed hook); refusing any foreign same-named run (a free wedge on agent merges for anyone who can push a branch).
 
 ```yaml reversal-conditions
-decision: 270
+decision: 271
 review_by: 2027-05-31
 on_trigger: "re-decide via /plan; never add an agent override"
 conditions:
@@ -542,7 +542,7 @@ conditions:
 
 **Related:** Decisions 73, 76, 83, 89, 100, 163, 181, 203, 205, 212, 217, 224, 229, 234, 245, 246; T4.32; rec-2827, rec-4080, rec-4085, rec-4087, rec-4624, rec-4874, rec-4891.
 
-> **Amended by Decision 270 (2026-11-17):** Clauses 1 and 4 count a persona check only from the verdict App that gates.verdict_app.app_id names on origin/main, ignoring same-named runs from any other source, and an agent merge changing that row is refused. Clause 6's residual for a workflow posting a run named like a persona check narrows to custody of the App's key.
+> **Amended by Decision 271 (2026-11-17):** Clauses 1 and 4 count a persona check only from the verdict App that gates.verdict_app.app_id names on origin/main, ignoring same-named runs from any other source, and an agent merge changing that row is refused. Clause 6's residual for a workflow posting a run named like a persona check narrows to custody of the App's key.
 
 ---
 
@@ -4593,7 +4593,7 @@ conditions:
 
 > **Amended by Decision 254 (2026-11-12):** Clause 5's plans-only test reads the batch range prev..head, never the head commit alone, so a batch holding any non-plans commit runs the full tier (Decision 254 cl.1).
 
-> **Amended by Decision 270 (2026-11-17):** Clause 2's verdict identity on Actions is the dedicated verdict App, not the job's GITHUB_TOKEN; the merge gate counts a persona check only from that App (Decision 270 cl.1, cl.4).
+> **Amended by Decision 271 (2026-11-17):** Clause 2's verdict identity on Actions is the dedicated verdict App, not the job's GITHUB_TOKEN; the merge gate counts a persona check only from that App (Decision 271 cl.1, cl.4).
 
 ---
 

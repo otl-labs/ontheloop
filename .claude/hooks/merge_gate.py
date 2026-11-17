@@ -9,7 +9,7 @@ Actions run to have succeeded on the exact head, under one 40 s deadline (rec-48
 Decision 264 cl.4-5) adds each persona-verdict/<persona> check that an actions gates.<persona>.verdict_source row on
 origin/main selects for the PR's class to that required set, and refuses an agent merge that returns a row from actions
 to in_session. A persona-named check counts only from the verdict GitHub App that gates.verdict_app.app_id names on
-origin/main (rec-5241, Decision 270), and an agent merge changing that row is refused. Later predicates (rec-4755,
+origin/main (rec-5241, Decision 271), and an agent merge changing that row is refused. Later predicates (rec-4755,
 rec-4451) extend this seam.
 Fails closed: exit 2 on overlap, an attribution mismatch, a red or unknown check, an unavailable verdict, a failed
 fetch, a spent deadline, malformed input. No override exists.
@@ -339,7 +339,7 @@ def _persona_leg_app(root: Path, head: str, merge_base: str, dl: _Deadline) -> t
                 None,
                 (
                     f"verdict-source: REFUSE: this PR changes {merge_checks.VERDICT_APP_ROW}; "
-                    "the operator merges it in the GitHub UI (Decision 270 cl.3)"
+                    "the operator merges it in the GitHub UI (Decision 271 cl.3)"
                 ),
             )
     app = merge_checks.verdict_app_id(text) if text is not None else None

@@ -1,4 +1,4 @@
-"""rec-5241 acceptance (Decision 270): the merge gate counts a persona check only from the verdict GitHub App that
+"""rec-5241 acceptance (Decision 271): the merge gate counts a persona check only from the verdict GitHub App that
 gates.verdict_app.app_id names on origin/main, through the shim as the harness runs it."""
 
 from __future__ import annotations
