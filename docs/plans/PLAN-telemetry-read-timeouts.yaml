@@ -1,0 +1,287 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: telemetry-read-timeouts
+intent: 'Stop telemetry reads timing out late in each compaction cycle. Every telemetry write lands as its own small file and the production
+  telemetry catalog is merged only every 6 hours, so a cold reader that reads the newest days fetches every unmerged file one at a time
+  and, on a busy day, hits its 110 s read deadline: the post-deploy reader smoke (rec-5247) and the post-merge arrival check (rec-5248)
+  went red. The plan merges the telemetry catalog hourly (the fix for both), and teaches the arrival check to narrow a window that answers
+  read_deadline_exceeded, as the reader contract and the usage client already do.'
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-telemetry-read-timeouts.yaml
+phase: 'ci_rca (soft-warn exception category): repairs Critical reds rec-5247 and rec-5248 under docs/contracts/red-main-recovery.yaml
+  (Decision 226). No tier_item is targeted and no exit criterion is closed. The cold small-file read cost stays owned by rec-4474.'
+closes_criteria: []
+amends:
+- dec:236#5
+cites:
+- dec:236
+- dec:88
+- dec:246
+- dec:226
+- dec:250
+- dec:186
+- dec:201
+- dec:235
+scope:
+- file: terraform/personal/ducklake_maintenance_telemetry.tf
+  action: Modify
+  purpose: The telemetry merge rule's schedule_expression becomes cron(50 * * * ? *) (hourly at :50; the singleton's other minutes :15,
+    :30, Sun 03:00, 03:45 and 04:05 stay distinct). Its description, the header cadence comment and the merge-liveness alarm's alarm_description
+    say hourly. Every alarm's period, evaluation_periods and threshold is unchanged (each stays correct with more datapoints per period).
+    No IAM, target or permission change.
+  new_imports: []
+- file: tests/checks/iam_tf/test_telemetry_production_maintenance_tf.py
+  action: Modify
+  purpose: test_rules_target_the_production_telemetry_catalog pins the merge cron to "50 * * * ? *" (planned change citing acceptance_criteria[0]);
+    the gc pin is unchanged.
+  new_imports: []
+- file: docs/contracts/ducklake_maintenance.yaml
+  action: Modify
+  purpose: The description and governance auth_type sentences name the telemetry catalog's merge_ops as hourly (cron(50 * * * ? *));
+    the ops catalog's every-6h cadence and the historical amendment_log rows are unchanged. One new amendment_log row. All three edits
+    are bound word for word by the approved-text sidecar.
+  new_imports: []
+- file: docs/DECISIONS.md
+  action: Modify
+  purpose: 'Decision 236 gains one trailing_bracket amendment line after its existing 2026-10-29 amendment: clause 5''s cadence is retuned
+    to the write rate under Decision 88 cl.1(iii), so the telemetry merge_ops runs hourly. Bound word for word by the approved-text
+    sidecar docs/plans/approved/telemetry-read-timeouts.yaml (Decision 246).'
+  new_imports: []
+- file: scripts/telemetry_verify/session_presence.py
+  action: Modify
+  purpose: '_walk: a roots_for call that raises ReadDeadlineExceededError (imported from src.common.ducklake_reader_client, as scripts/telemetry_usage.py
+    does) is never retried as is; the window splits into two halves, newer half first, each read the same way, down to one day; a one-day
+    window that still answers read_deadline_exceeded raises Unreadable("ReadDeadlineExceededError"). Every other exception keeps today''s
+    one retry then Unreadable. windows_read counts each window read successfully. The ARRIVAL line format is unchanged.'
+  new_imports:
+  - src.common.ducklake_reader_client
+- file: tests/telemetry_verify/test_session_presence.py
+  action: Modify
+  purpose: 'New node test_walk_halves_window_on_read_deadline (rec-5248''s acceptance): a fake roots_for that raises ReadDeadlineExceededError
+    for any window over 3 days, and answers otherwise, ends green with every key found and reads 7 -> 3+4 -> ... halves newest first;
+    plus test_a_one_day_read_deadline_is_unreadable: a one-day window that still raises ends unreadable with cause ReadDeadlineExceededError
+    after exactly one call for that day. Existing nodes unchanged.'
+  new_imports: []
+bundled_recommendations:
+- rec-5247
+- rec-5248
+followon_recs: []
+infrastructure_dependencies:
+- 'terraform/personal/ducklake_maintenance_telemetry.tf: one aws_cloudwatch_event_rule schedule_expression change plus description strings;
+  no IAM. Planned and applied by CI on merge (the guarded terraform/personal apply path, docs/contracts/environment-taxonomy.yaml);
+  never a local terraform init/plan/apply (Decision 119). Post-deploy proof is VP 7 (hourly MergeOpsTablesCount datapoints for MetaSchema
+  ducklake_telemetry).'
+acceptance_criteria:
+- The production telemetry catalog's merge_ops rule fires hourly at :50 UTC (cron(50 * * * ? *)), pinned by the terraform test.
+- Decision 236 clause 5 and docs/contracts/ducklake_maintenance.yaml say hourly for the telemetry catalog, in the operator-approved
+  words.
+- The arrival check narrows a window that answers read_deadline_exceeded down to one day instead of going red, still judges every merged
+  session, and is unreadable when a one-day window still times out.
+- After the apply, the telemetry merge runs hourly, the telemetry reader's maximum Duration stays below 100 s and every telemetry-arrival
+  run is green for 24 hours, and rec-5247 and rec-5248 are closed.
+- Seven days after the apply, the extra maintenance compute and the telemetry catalog's metadata size are read and recorded against
+  the 3 to 12 US dollar estimate.
+verification_plan:
+- step: 1
+  phase: pre-deploy
+  action: The arrival walk halves a window on read_deadline_exceeded (rec-5248's acceptance node).
+  command: bin/venv-python -m pytest "tests/telemetry_verify/test_session_presence.py::test_walk_halves_window_on_read_deadline" "tests/telemetry_verify/test_session_presence.py::test_a_one_day_read_deadline_is_unreadable"
+    -q
+  expected: exit 0; red before (the first window fails twice and the walk is unreadable).
+  fix_if: the walk retries the same window, skips days, or reads older halves first
+  hermetic: true
+  expected_literals:
+  - ' passed'
+  graduation: graduate
+  graduation_check_id: telemetry-arrival-halves-on-read-deadline
+- step: 2
+  phase: pre-deploy
+  action: The terraform pin reads the hourly cron.
+  command: bin/venv-python -m pytest tests/checks/iam_tf/test_telemetry_production_maintenance_tf.py -q
+  expected: exit 0; red before the .tf edit (pin reads the new cron, file still says */6).
+  fix_if: the cron string differs, or an alarm block changed
+  hermetic: true
+  expected_literals:
+  - ' passed'
+  graduation: waive
+  graduation_waiver_reason: An existing node in a file the fast tier already selects on terraform/personal changes; only its literal
+    changes.
+- step: 3
+  phase: pre-deploy
+  action: The touched suites still pass.
+  command: bin/venv-python -m pytest tests/telemetry_verify tests/checks/iam_tf -q
+  expected: exit 0
+  fix_if: an existing node fails
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: Whole suites already in the fast and full tiers; steps 1 and 2 graduate the new nodes.
+- step: 4
+  phase: pre-deploy
+  action: The .tf file is formatted (provider-free).
+  command: terraform fmt -check terraform/personal/ducklake_maintenance_telemetry.tf
+  expected: exit 0
+  fix_if: run terraform fmt on the file
+  hermetic: false
+  graduation: not-applicable
+- step: 5
+  phase: pre-deploy
+  action: The DECISIONS.md and contract edits equal the approved sidecar word for word.
+  command: bin/venv-python -m scripts.roadmap.approved_text verify --slug telemetry-read-timeouts --base origin/main
+  expected: exit 0
+  fix_if: any word differs from the sidecar's after text; fix the edit, never the sidecar
+  hermetic: false
+  graduation: not-applicable
+- step: 6
+  phase: pre-deploy
+  action: Full tier, then HEAD attestation, after the build commit and rebase and before the push; start it backgrounded from the top-level
+    session with a 2 h limit and read only the attestation.
+  command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+  expected: the full tier exits 0 and the attestation matches HEAD
+  fix_if: any failure; fix and rerun from the start
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion).
+- step: 7
+  phase: post-deploy
+  action: The hourly merge is live (read 7 h after the CI apply).
+  command: aws --profile agent_platform cloudwatch get-metric-statistics --namespace DuckLakeMaintenance --metric-name MergeOpsTablesCount
+    --dimensions Name=MetaSchema,Value=ducklake_telemetry --start-time "$(date -u -d '-7 hours' +%Y-%m-%dT%H:00:00Z)" --end-time "$(date
+    -u +%Y-%m-%dT%H:%M:00Z)" --period 3600 --statistics SampleCount --query 'length(Datapoints)'
+  expected: at least 6 hourly datapoints (an every-6h cadence gives at most 2); record the count and the apply run id.
+  fix_if: at most 2 means the apply did not land or the rule still says */6; check the apply run, never apply locally
+  hermetic: false
+- step: 8
+  phase: post-deploy
+  action: Reads fit the deadline for a day, and arrival stays green (read 24 h after the apply).
+  command: aws --profile agent_platform cloudwatch get-metric-statistics --namespace AWS/Lambda --metric-name Duration --dimensions
+    Name=FunctionName,Value=agent-platform-ducklake-telemetry-reader --start-time "$(date -u -d '-24 hours' +%Y-%m-%dT%H:00:00Z)" --end-time
+    "$(date -u +%Y-%m-%dT%H:%M:00Z)" --period 3600 --statistics Maximum --query 'max(Datapoints[].Maximum)'
+  expected: below 100000 (ms); and every telemetry-arrival run in the same 24 h concluded success (list them from the workflow's runs;
+    record the count and the maximum).
+  fix_if: 'a maximum at or above 100000 means the hourly tail is still too heavy at peak; record the hour and its writer invocations
+    on rec-4474 (the durable owner: reader parallelism) and report to the coordinator; do not raise the reader timeout or widen anything
+    in this plan'
+  hermetic: false
+- step: 9
+  phase: post-deploy
+  action: rec-5247 and rec-5248 are closed by the squash's Resolves trailer.
+  command: AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader;
+    rows, _ = fetch_recs_by_ids(make_reader(), ['rec-5247', 'rec-5248']); print([(r['id'], r['status']) for r in rows])"
+  expected: both closed; record the closure job run id.
+  fix_if: a ClosureArtifactRequired refusal means the shard is not in the squash; land it and re-run the closure route; never close
+    with a direct status write after a refusal (Decision 186)
+  hermetic: false
+- step: 10
+  phase: post-deploy
+  action: Spend reading against the estimate (Decision 88), 7 days after the apply.
+  command: for m in MergeOpsDurationMs CatalogMetadataBytes; do aws --profile agent_platform cloudwatch get-metric-statistics --namespace
+    DuckLakeMaintenance --metric-name $m --dimensions Name=MetaSchema,Value=ducklake_telemetry --start-time "$(date -u -d '-14 days'
+    +%Y-%m-%dT00:00:00Z)" --end-time "$(date -u +%Y-%m-%dT00:00:00Z)" --period 86400 --statistics Sum Maximum --output text; done
+  expected: daily MergeOpsDurationMs sums for the 7 days before and after the apply, and the CatalogMetadataBytes maximum for each day;
+    the report converts the duration delta to Lambda GB-seconds at 1536 MB and records it beside the estimate, and states that Neon
+    compute is not readable from the session, so the coordinator asks the operator for one reading of Neon usage.
+  fix_if: a daily merge duration sum above 2 h, or CatalogMetadataBytes growing faster than before the apply, is reported to the coordinator
+    for the operator; nothing is changed in this plan
+  hermetic: false
+test_obligations:
+- source: scripts/telemetry_verify/session_presence.py
+  behavior: a deadline-hit window is halved down to one day, newest half first, never retried as is
+  verification_step: 1
+  test_selector: tests/telemetry_verify/test_session_presence.py::test_walk_halves_window_on_read_deadline
+  red_green_expectation: red before, green after
+- source: terraform/personal/ducklake_maintenance_telemetry.tf
+  behavior: the telemetry merge rule is hourly at :50 and still targets the production telemetry catalog
+  verification_step: 2
+  test_selector: tests/checks/iam_tf/test_telemetry_production_maintenance_tf.py::TestTelemetryMaintenanceSchedulePins::test_rules_target_the_production_telemetry_catalog
+  red_green_expectation: red before the .tf edit, green after
+- source: docs/contracts/ducklake_maintenance.yaml
+  behavior: the contract names the telemetry catalog's hourly merge
+  verification_step: 6
+  command: bin/venv-python -m scripts.validate
+  waiver_reason: Prose cadence text plus one amendment_log row; the contract's shape and amendment_log grammar are covered by the full
+    tier's contract checks, and the cadence itself is pinned in terraform by VP 2.
+- source: docs/DECISIONS.md
+  behavior: Decision 236 carries the approved clause 5 amendment
+  verification_step: 5
+  command: bin/venv-python -m scripts.roadmap.approved_text verify --slug telemetry-read-timeouts --base origin/main
+  waiver_reason: Governing prose bound word for word by the approved-text sidecar; validate_merge_step enforces the same binding on
+    the PR.
+constraints:
+- No account id, host, URL or response body in code, tests, failure text or PR text (Decision 101).
+- The reader's timeout, memory, threads and deadline margin are unchanged; reader parallelism stays rec-4474's (its contract note requires
+  measured evidence first).
+- read_deadline_exceeded is never retried as the same read (docs/contracts/ducklake_telemetry_reader.yaml); callers narrow the window.
+- No alarm threshold, period or evaluation count changes; the ops catalog's every-6h merge is unchanged.
+- No rescue agents or workaround loops (Decision 55).
+- No existing assertion is loosened and the reader smoke gate is unchanged (Decision 235); the cron pin's literal change is a planned
+  change citing acceptance_criteria[0].
+context:
+- 'Decision-scout verdict NO_FLAGS (round 3, after the sidecar landed; FLAGS_FOUND rounds 1-2). CITE: 236 (cl.5 retuned; growth-alarm-recurs not fired, ingestion shape untouched),
+  88 (cl.1(iii) cadence sized to write rate; cl.2 measured by VP 10), 246 (sidecar binds the DECISIONS.md line and contract prose),
+  226 (cl.3 bundled reds never block; cl.4 forward-fix, as amended by 254), 250 (cl.2 unreadable is red, kept for a one-day timeout;
+  false-reds reversal counts rec-5248), 186 (fix-bound closure artifacts), 201 (verdict on the re-keyed acceptance), 235 (smoke unchanged;
+  halving keeps the same oracle over the same days). CONTRADICT: round 1 WARN 235 resolved by dropping the smoke split; round 1 WARN
+  246 resolved by binding the contract prose in the sidecar; round 2 NOTE 246 cl.4 (spend and deploy unbound by the sidecar) resolved
+  by citing the operator''s 2026-11-16 no-final-diff ruling id beside his 13:42Z approval (Spend item below). SPIRIT: none (round 1
+  NOTE 88 resolved by VP 10). RELATED: 177, 81, 143, 191, 192, 188, 193, 266, 214, 253, 230, 213, 199, 239, 126, 77, 92, 119, 252, 265,
+  128, 166, 181, 189, 244, 163, 254, 84, 210, 184, 55, 72, 73, 101. Decisions triaged: 217 of 217. Roadmap items intersected: 5; CONFLICT:
+  0; RELATED: 5. Serves: NS.5 2/5 -- The fix restores the telemetry reader''s named verbs to answering within their deadline, and callers
+  narrow windows instead of retrying. It is an operational repair, not an advance of the principle.'
+- 'Evidence (read-only, 2026-11-17; the build''s PR body carries the detail): arrival failed just before the 00:50Z and 12:50Z merges
+  and passed after each; reader Duration max ~110 s from 2026-11-16 15:00Z; writer invocations 2,712 on 2026-11-16; MergeOpsPassFailed
+  0 and files after merge 109-153 all week; a 7-day root read soon after a merge took 23 s.'
+- rec-4474 (ours) owns cold serial small-file reads; its acceptance is not met here, so it stays open and unbundled.
+- 'Spend and deploy (always_ask, Decision 246 cl.4): UNPROVEN estimate 3-12 USD/month, likely 2-4 (extra maintenance runs plus Neon
+  compute in quiet hours); VP 10 measures the Lambda side and is read beside Decision 214''s capped-bill trigger. Operator approved
+  the cost and plan 2026-11-17 13:42Z (cmsg_01YbaDZWowGfXCn2WtobCVVoKpnBtpzKCtWVuXmbAr3AZB). His 2026-11-16 ruling (cmsg_01YbaDZWowGfXCn2WtobCVVoNkoksprjGv5Mz9HrYSDG27):
+  once he has approved a plan, its build merges on review PROCEED and green CI with no final-diff word; anything the plan did not cover
+  is still asked.'
+- Singleton minutes stay distinct at hourly :50 (terraform header map); the telemetry merge's longest pass this week was 155 s.
+- 'Precedent for halving: scripts/telemetry_usage.py _Reads.read (PLAN-telemetry-usage-reader-verbs) splits on ReadDeadlineExceededError;
+  the reader contract''s read_deadline_exceeded row says never retried, narrow the window.'
+- 'Ruling 2026-11-05 (terraform/personal PRs hold during the Environment tidy''s post-merge proof; tidy now CI Reform''s): the build
+  checks the coordinator log before merging.'
+- 'Graduated shards kept unchanged: telemetry-maintenance-schedule-pins, telemetry-gc-enablement-baseline, telemetry-reader-deploy-gate,
+  telemetry-reader-smoke-covers-verification-verbs, telemetry-reads-gated-on-the-telemetry-reader.'
+- 'docs/contracts/ducklake_maintenance.yaml is NEAR_CAP (489 of 500): only the amendment_log row adds a line; if main has used the headroom,
+  stop and report, never a raise (Decision 128). PLAN-sit-restore-spike and 15 unbuilt plans share it or DECISIONS.md; whichever builds
+  second rebases.'
+- 'red_overlap (2026-11-17 13:12Z, main 3988bb09): {"verdict": "clear", reds: rec-5247 repairs_this_red}.'
+- 'Arrival halving is not a weakening (Decision 235): the oracle still judges every merged session over the same days and stays red
+  on a missing key and unreadable on a one-day timeout; only the read is split, as the reader contract''s read_deadline_exceeded row
+  asks (never retried; narrow the window) and scripts/telemetry_usage.py already does.'
+- 'rec-5247 acceptance re-keyed (operator 13:42Z; read back 13:43Z) to the terraform pin node test_rules_target_the_production_telemetry_catalog;
+  closure_artifact pytest:<that node>. rec-5248: VP 1''s first node, closure_artifact shard:telemetry-arrival-halves-on-read-deadline.
+  The build stamps both before merge (red-main-recovery.yaml).'
+- 'fork: reader smoke split | chosen: dropped, the smoke stays strict and the hourly merge fixes its cause (scout WARN Decision 235:
+  loosening a check red on the change) | class: asked | precedent: Decision 235 | precedent_kind: decision | reversible: yes | persisted:
+  docs/plans/PLAN-telemetry-read-timeouts.yaml'
+- 'fork: how the cadence change is recorded | chosen: one dated amendment line on Decision 236 framed as a cl.5 retune under Decision
+  88 cl.1(iii), not a new numbered Decision (operator 13:42Z) | class: asked | precedent: Decision 88 | precedent_kind: decision | reversible:
+  yes | persisted: docs/DECISIONS.md'
+- 'fork: arrival read on a deadline | chosen: split into halves down to one day, never retried as is | class: consistency-only | precedent:
+  docs/contracts/ducklake_telemetry_reader.yaml | precedent_kind: contract | reversible: yes | persisted: scripts/telemetry_verify/session_presence.py'
+gate_rounds:
+- {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:bbecdb2cc425383e79ab02d877c6c1051a236256a2986ef867386f15dc801559"}  # pragma: allowlist secret
+- {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:7c3c0b80124d39f81788fb8b17428d6b7eca2d402a12896dad9800c6f1111f71"}  # pragma: allowlist secret
+- {gate: decision-scout, round: 3, verdict: NO_FLAGS, scout_input_fingerprint: "v1:c012beb78f3bb5bd93cc1a8ed048545e3c6fdf4489fa9722f095cea0f4889cb2"}  # pragma: allowlist secret
+pre_implementation_checklist:
+- Branch confirmed not on main
+- docs/PROJECT_CONTEXT.md read
+- Decisions cited in cites read
+- All files in scope located and readable
+- Acceptance criteria understood and verifiable
+execution_steps:
+- session_presence.py and its tests; VP 1.
+- ducklake_maintenance_telemetry.tf and the pin test; VP 2, VP 4.
+- ducklake_maintenance.yaml and DECISIONS.md from the sidecar; VP 5.
+- Graduated shard for VP 1; the closure_artifact stamps on rec-5247 and rec-5248 (Decision 186).
+- 'CLOSURE: set implementation_declared: true; commit with Resolves: rec-5247, rec-5248; rebase onto origin/main; VP 3; VP 6; check
+  the coordinator log for a running terraform/personal post-merge proof; push; PR; subscribe; fresh-context code review; merge on review
+  PROCEED and green CI.'
+- 'After merge: VP 7 at +7 h, VP 8 at +24 h, VP 9, VP 10 at +7 days.'
+- 'Report: what was implemented, verification results'
+rollback: Revert the build PR; CI re-applies the every-6h cron and the reads go back to failing late in busy cycles.
