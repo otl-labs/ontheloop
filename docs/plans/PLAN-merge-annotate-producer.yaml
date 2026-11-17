@@ -58,7 +58,9 @@ scope:
       further GitHub reads for the run and counts the rest under skipped_no_ci (a later run picks them up); any other 403,
       or a 404, is an unreadable source and fails the run (a missing actions: read permission never reads green); the lowest run id in that list is the commit's run (a sha can have more than one push run); a run with run_attempt 1
       gives its conclusion; a re-run (run_attempt > 1) gives the conclusion of runs/{id}/attempts/1; cancelled included;
-      no concluded attempt 1 gives no row this run (attempt 1, so a re-run never changes a re-sent row; the commit's own
+      no concluded attempt 1, or no ci.yml push run for the sha, gives no row this run and counts the merge under
+      pending_ci, never skipped_no_ci (skipped_no_ci counts only reads deferred by a 5xx, a network error or a rate
+      limit) (attempt 1, so a re-run never changes a re-sent row; the commit's own
       run, not Decision 254's batch range verdict, deferred to rec-5295). Roots: the telemetry_root_sessions named verb
       through read_route's telemetry reader client (URL from DUCKLAKE_TELEMETRY_READER_URL or its SSM parameter), in
       config/telemetry/arrival.yaml's window_days (7), every window from the ref's date down to the floor with no early
@@ -83,7 +85,7 @@ scope:
       ^[a-z][a-z0-9_-]{0,63}$).
       project_ref from ci_pass.project_ref_home (Decision 224). --dry-run builds and prints counts, sends nothing. Prints
       one line "merge_annotate summary: merges=.. keys=.. windows_read=.. submitted=.. inserted=.. rejected=..
-      skipped_no_root=.. skipped_no_ci=.. skipped_no_pr=.." and shas only (Decision 101). --junit-xml writes, in a finally
+      skipped_no_root=.. skipped_no_ci=.. pending_ci=.. skipped_no_pr=.." and shas only (Decision 101). --junit-xml writes, in a finally
       block on every exit, one testcase merge_links (file=scripts/telemetry_capture/merge_annotate.py) that fails, with the
       exception class as its type (the fixed type RowsRejected for the rejected > 0 exit, which raises nothing), on any non-zero exit (an unreadable source, a writer refusal, anything else), so ci-rca
       attributes a red to this module and never falls back to the log tail (Decision 250 cl.4).
@@ -102,7 +104,10 @@ scope:
       file; a cancelled attempt 1 is written as cancelled; building twice yields identical rows; every row passes
       prepare_batch (imported in the test only; tests may import src.telemetry.append). CLI cases with fakes (git, GitHub,
       reader, WriterClient): a re-run commit reads attempts/1; a merge with no eligible root makes no GitHub call; a 5xx is
-      retried once then counted skipped_no_ci; a 429 or an exhausted-quota 403 stops further GitHub reads; another 403 or a 404 fails the run; a 422 schema_gate
+      retried once then counted skipped_no_ci; a 429, an exhausted-quota 403 or a 403 whose message contains "Rate Limit" in any case stops further GitHub reads;
+      another 403 or a 404 fails the run; an in-progress attempt 1 and a sha with no push run count under pending_ci and
+      leave skipped_no_ci 0; a sha listing two push runs uses the lower run id; --as-of outside 7-40 hex characters and
+      --days 0 or 121 each give a usage error with a junit testcase; a 422 schema_gate
       naming a row and a 422 row_rule naming a row each drop it, print the rejected line, count it rejected, resend once
       and exit non-zero after the resend (junit type RowsRejected); a 422 with no row fails the run without a resend; a
       merge with no Resolves trailer gives rec_ids null; pr_url uses DEFAULT_REPO with GITHUB_REPOSITORY set otherwise; a scheduled invocation (--days "" --as-of "") runs with 7 days on origin/main; a usage error still writes the junit
@@ -193,7 +198,7 @@ scope:
     action: Modify
     purpose: >-
       The validate_telemetry_field_realization entry's pre_globs gains "tests/fixtures/merge_annotate/golden/**" beside
-      the turn_capture corpus glob, so a PR touching only the ci_annotate corpus still runs R4-R6 in --pre (444 lines, one
+      the turn_capture corpus glob, so a PR touching only the ci_annotate corpus still runs R4-R6 in --pre (one line
       added). test_merge_annotate asserts the glob is listed.
     new_imports: []
   - file: config/telemetry/parser_versions.yaml
@@ -252,7 +257,7 @@ verification_plan:
       is deployed and the telemetry hold allows. Run it backgrounded; it waits for its own run (the newest dispatch run id
       before the dispatch is recorded, and only a different id is read).
     command: >-
-      git fetch -q origin main && A="$(git rev-parse origin/main)" && echo "$A" > /tmp/ma_asof &&
+      git fetch -q origin main && A="$(cat /tmp/ma_asof 2>/dev/null || git rev-parse origin/main)" && echo "$A" > /tmp/ma_asof &&
       P="$(gh api 'repos/otl-labs/ontheloop/actions/workflows/telemetry-merge-links.yml/runs?event=workflow_dispatch&per_page=1' --jq '.workflow_runs[0].id // 0')" &&
       gh api -X POST repos/otl-labs/ontheloop/actions/workflows/telemetry-merge-links.yml/dispatches -f ref=main -f "inputs[link_days]=120" -f "inputs[as_of]=$A" &&
       R="$P" && for i in $(seq 90); do sleep 10; R="$(gh api 'repos/otl-labs/ontheloop/actions/workflows/telemetry-merge-links.yml/runs?event=workflow_dispatch&per_page=1' --jq '.workflow_runs[0].id // 0')"; [ -n "$R" ] && [ "$R" != "$P" ] && break; done &&
@@ -264,8 +269,11 @@ verification_plan:
       [ "$(grep -o 'inserted=[0-9]*' /tmp/ma_run1 | cut -d= -f2)" -gt 0 ] && echo BACKFILL_OK
     expected: BACKFILL_OK (the run concluded success, rejected=0, skipped_no_ci=0 so no CI read was deferred, inserted > 0).
     fix_if: >-
-      skipped_no_ci > 0 (GitHub's hourly token budget ran out): wait an hour and run this step again with the same
-      /tmp/ma_asof (the scheduled 7-day run never revisits older merges); a cancelled conclusion (a queued run was
+      skipped_no_ci > 0 (GitHub's hourly token budget ran out): wait an hour and run this step again, which reuses
+      /tmp/ma_asof (the scheduled 7-day run never revisits older merges); if it still defers after two waits, the backfill
+      has outgrown one hour's budget: stop and file a rec through the portal for a paged ci.yml runs read (one request
+      per 100 runs; it changes SA-07's approved words, so it needs its own plan and approval run);
+      pending_ci > 0 is not a failure (merges whose CI has not concluded are linked by a later scheduled run); a cancelled conclusion (a queued run was
       replaced in the concurrency group): run it again; a GrainConflict or writer refusal (the junit testcase names it); rejected > 0 (the run log's "merge_annotate rejected" lines name the rule and column)
     hermetic: false
   - step: 4
@@ -274,7 +282,7 @@ verification_plan:
       A replay with the same link_days and as_of inserts nothing the first run sent. Start it at least 60 minutes after
       step 3 completed, so the backfill's GitHub reads have left the hourly token budget.
     command: >-
-      A="$(cat /tmp/ma_asof)" &&
+      [ $(( $(date +%s) - $(stat -c %Y /tmp/ma_run1) )) -ge 3600 ] && A="$(cat /tmp/ma_asof)" &&
       P="$(gh api 'repos/otl-labs/ontheloop/actions/workflows/telemetry-merge-links.yml/runs?event=workflow_dispatch&per_page=1' --jq '.workflow_runs[0].id // 0')" &&
       gh api -X POST repos/otl-labs/ontheloop/actions/workflows/telemetry-merge-links.yml/dispatches -f ref=main -f "inputs[link_days]=120" -f "inputs[as_of]=$A" &&
       R="$P" && for i in $(seq 90); do sleep 10; R="$(gh api 'repos/otl-labs/ontheloop/actions/workflows/telemetry-merge-links.yml/runs?event=workflow_dispatch&per_page=1' --jq '.workflow_runs[0].id // 0')"; [ -n "$R" ] && [ "$R" != "$P" ] && break; done &&
@@ -381,6 +389,7 @@ context:
   - "Critique r3 (REVISE) folded: 422 row_rule handled with schema_gate, a 422 without a row fails (B1); 10 steady-state windows to the ref - 63 floor (B2); value-free rejected lines, RowsRejected junit type, non-rate-limit 403/404 fail, bounded VP waits, env-only dispatch inputs, rec_ids null and fixed pr_url slug, the manifest pre_globs row, rec-5248 adoption rule, AC3 reworded (N1-N9)."
   - "Critique r4 (REVISE) folded: an empty --days/--as-of (the schedule) means the defaults, arguments parsed inside the junit try (B1); replay bound S2 - S1, constraint wording, SA-07 names the fixed slug, secondary-limit 403, zero skew allowance declared, empty-run-id guard, junit directory, headroom fallbacks (N1-N8)."
   - "Critique r5 (REVISE) folded: the backfill and replay require skipped_no_ci=0, the replay starts an hour after the backfill, and a deferred run is re-run (B1); argv pre-scan for --junit-xml, rate-limit message 403, docstring skew declaration, input validation, lowest run id, re-dispatch on cancel, invoke-count wording (N1-N4, N6-N9). N5 (test file size): the build keeps the one test file under 500 lines with parametrised case tables."
+  - "Critique r6 (REVISE) folded: an unconcluded or missing CI run counts under a separate pending_ci, so skipped_no_ci means only deferred reads, and VP 3 re-runs reuse the pinned as_of (B1); tests for the round-5 behaviours, an enforced hour between VP 3 and VP 4, a stop-and-file fallback if the backfill outgrows the hourly budget (N1, N2, N4)."
   - "Critique r1 (REVISE) folded: ci-rca filter (B1), golden case files (B2), rec-5270 bundled (B3), replay VP (B4), bounded walk and residual (B5), later-root drop and per-row prepare (B6), SA-07 instead of PC-09 (B7, B8), junit attribution (B9), nits N1-N11."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:dc78229ac43a2a44447ed77ebfb0b322842dd52ba18e4528148ea8ec0595c07f"}  # pragma: allowlist secret
@@ -399,6 +408,7 @@ gate_rounds:
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 9}
   - {gate: wording-check, round: 5, verdict: PASS, digest: a994c8879aff3dce9de152ab6b873828c7cab1b392546e5bfe213b2fe75e8dd5, base: eed2f6e47ca5a81c4098731ba4545c5d3c49293b, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 9}
+  - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 1, nits: 4}
 pre_implementation_checklist:
   - Branch confirmed not on main
 execution_steps:
