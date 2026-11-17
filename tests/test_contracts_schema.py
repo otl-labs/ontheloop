@@ -472,13 +472,13 @@ class TestRunShapes:
             ContractDocument.model_validate(doc)
 
 
-class TestFieldPerWrite:
-    def test_field_per_write_accepted(self) -> None:
-        assert FieldSpec.model_validate({"type": "str", "nullable": True, "per_write": True}).per_write is True
-        assert FieldSpec.model_validate({"type": "str"}).per_write is None
+def test_field_per_write_accepted() -> None:
+    assert FieldSpec.model_validate({"type": "str", "nullable": True, "per_write": True}).per_write is True
+    assert FieldSpec.model_validate({"type": "str"}).per_write is None
 
-    def test_field_per_write_requires_nullable(self) -> None:
-        for bad in ({"nullable": False}, {}, {"nullable": True, "derivation": {"realized": True}}):
-            with pytest.raises(ValidationError, match="per_write needs a nullable, non-derived column"):
-                FieldSpec.model_validate({"type": "str", "per_write": True, **bad})
-        assert FieldSpec.model_validate({"type": "str", "nullable": False, "per_write": False}).per_write is False
+
+def test_field_per_write_requires_nullable() -> None:
+    for bad in ({"nullable": False}, {}, {"nullable": True, "derivation": {"realized": True}}):
+        with pytest.raises(ValidationError, match="per_write needs a nullable, non-derived column"):
+            FieldSpec.model_validate({"type": "str", "per_write": True, **bad})
+    assert FieldSpec.model_validate({"type": "str", "nullable": False, "per_write": False}).per_write is False
