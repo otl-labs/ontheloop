@@ -546,6 +546,7 @@ _WAIVED_RULES = {
     "pattern": "^a$",
     "pattern_when": [{"when": {"k": ["a"]}, "pattern": "^a$"}],
     "array_element_format": "^a$",
+    "json_object": {"max_bytes": 8, "versions": {}},
     "required_when": {"k": ["a"]},
     "not_before": "k",
     "at_most": "k",

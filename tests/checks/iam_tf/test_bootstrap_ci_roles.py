@@ -33,7 +33,8 @@ _READ_ACTIONS = {
     "secretsmanager:GetResourcePolicy", "secretsmanager:ListSecrets", "s3:GetBucket*", "s3:GetAccelerateConfiguration",
     "s3:GetLifecycleConfiguration", "s3:GetReplicationConfiguration", "s3:GetEncryptionConfiguration", "s3:ListBucket",
     "s3:GetObject", "ssm:GetParameter", "ssm:GetParameters", "ssm:ListTagsForResource", "ssm:DescribeParameters",
-    "apigateway:GET", "lambda:GetPolicy", "servicequotas:Get*", "servicequotas:List*",
+    "apigateway:GET", "lambda:GetPolicy", "lambda:GetFunction*", "lambda:GetRuntimeManagementConfig",
+    "lambda:ListVersionsByFunction", "servicequotas:Get*", "servicequotas:List*",
 }  # fmt: skip
 _WRITE_ACTIONS = {
     "s3:PutObject", "s3:GetObject", "s3:DeleteObject", "iam:CreateRole", "iam:PutRolePolicy",
@@ -48,7 +49,7 @@ _PROTECTED_DENIES = {
 }  # fmt: skip
 _BOUNDARY_DENY_RESOURCES = {
     "arn:aws:iam::*:role/Platform*", "arn:aws:iam::*:role/bootstrap-*", "arn:aws:iam::*:role/github-settings-*",
-    "arn:aws:iam::*:role/platform-security-*", "arn:aws:iam::*:role/ducklake-api-*",
+    "arn:aws:iam::*:role/platform-security-*", "arn:aws:iam::*:role/ducklake-api-*", "arn:aws:iam::*:role/telemetry-content-*",
 }  # fmt: skip
 _DETECTOR_PATTERNS = {
     "aws_iam_role": ("role/platform-security-*",),
@@ -292,7 +293,7 @@ def boundary_deny_problems(texts: dict[str, str]) -> list[str]:
     if stmt.effect != "Deny" or set(stmt.actions) != {f"iam:{c}*" for c in "ACDPTU"}:
         problems.append("DenyBoundedWriteOnProtectedRoles must Deny iam:A*, C*, D*, P*, T*, U*")
     if set(stmt.resources) != _BOUNDARY_DENY_RESOURCES:
-        problems.append("DenyBoundedWriteOnProtectedRoles resources differ from the five protected role patterns")
+        problems.append("DenyBoundedWriteOnProtectedRoles resources differ from the six protected role patterns")
     for t in texts.values():
         for body in re.findall(r'resource\s+"aws_iam_role"\s+"\w+"\s*\{(.*?)\n\}', _nocomment(t), re.S):
             m = re.search(r'^\s*name\s*=\s*"([^"]+)"', body, re.M)

@@ -8,6 +8,7 @@ data-edge channel selects it when they change.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,37 @@ def _real() -> dict[str, Any]:
 
 def test_api_routes_are_the_four_verbs() -> None:
     assert routes_problems(_real()) == []
+
+
+_FIVE_ROUTES = {"ops/reader", "ops/writer", "telemetry/reader", "telemetry/writer", "telemetry/content"}
+
+
+def _sandbox_route_keys(api: str) -> dict[str, str]:
+    body = re.search(r"ducklake_api_routes\s*=\s*\{\s*sandbox\s*=\s*\{(.*?)\n    \}", re.sub(r"(?m)^\s*#.*$", "", api), re.S)
+    assert body is not None, "ducklake_api_routes sandbox map not found"
+    return dict(re.findall(r'"([\w/]+)"\s*=\s*(.+?)\s*$', body.group(1), re.M))
+
+
+def test_api_has_five_routes_with_the_content_route_on_the_content_function() -> None:
+    routes = _sandbox_route_keys(_real()["api"])
+    assert set(routes) == _FIVE_ROUTES
+    assert "aws_lambda_function.telemetry_content" in routes["telemetry/content"]
+
+
+def _permission_source(api: str) -> str:
+    block = re.search(r'resource "aws_lambda_permission" "agent_ducklake_route" \{(.*?)\n\}', api, re.S)
+    assert block is not None
+    return re.search(r"source_arn\s*=\s*(.+)", block.group(1)).group(1)  # type: ignore[union-attr]
+
+
+def test_content_route_permission_names_its_exact_stage_method_and_route() -> None:
+    api = _real()["api"]
+    assert re.search(r"for_each\s*=\s*local\.ducklake_api_routes", api)
+    source = _permission_source(api)
+    assert source.endswith('/${local.ducklake_api_stage}/POST/${each.key}"') and not re.search(r"[*?]", source)
+    assert "telemetry/content" in _sandbox_route_keys(api)
+    widened = api.replace("/POST/${each.key}", "/POST/*")
+    assert re.search(r"[*?]", _permission_source(widened))
 
 
 def test_api_methods_are_iam_post() -> None:

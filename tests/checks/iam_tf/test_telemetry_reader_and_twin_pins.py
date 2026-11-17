@@ -176,6 +176,16 @@ def reader_env_problems(text: str) -> list[str]:
     return problems
 
 
+_CONTENT_FILE = "telemetry_content_reader.tf"
+
+
+def _content_literal(text: str) -> int:
+    block = find_resource_block(_strip(text), "aws_lambda_function", "telemetry_content")
+    match = re.search(r"reserved_concurrent_executions\s*=\s*(\d+)\b", block)
+    assert match is not None, "telemetry_content has no literal reserved concurrency"
+    return int(match.group(1))
+
+
 def concurrency_problems(texts: dict[str, str]) -> list[str]:
     def literal(file: str, name: str) -> int:
         block = find_resource_block(_strip(texts[file]), "aws_lambda_function", name)
@@ -184,10 +194,11 @@ def concurrency_problems(texts: dict[str, str]) -> list[str]:
         return int(match.group(1))
 
     reader = literal(_READER_FILE, "ducklake_telemetry_reader")
+    content = _content_literal(texts[_CONTENT_FILE])
     writer = literal(_WRITER_FILE, "ducklake_telemetry_writer")
     twin = literal(_TWIN_FILE, "ducklake_telemetry_writer_smoke")
     problems: list[str] = []
-    if 2 * reader > LOGINS["ducklake_telemetry_reader"].connection_limit:
+    if 2 * (reader + content) > LOGINS["ducklake_telemetry_reader"].connection_limit:
         problems.append("reader concurrency exceeds its login limit")
     if 2 * writer > LOGINS["ducklake_telemetry_writer_prod"].connection_limit:
         problems.append("writer concurrency exceeds the production writer login limit")
@@ -197,7 +208,9 @@ def concurrency_problems(texts: dict[str, str]) -> list[str]:
 
 
 def _real() -> dict[str, str]:
-    return tf_dir_file_texts(_TERRAFORM_PERSONAL_DIR)
+    texts = tf_dir_file_texts(_TERRAFORM_PERSONAL_DIR)
+    texts[_CONTENT_FILE] = (_TERRAFORM_PERSONAL_DIR.parent / "bootstrap" / _CONTENT_FILE).read_text(encoding="utf-8")
+    return texts
 
 
 def test_twin_is_pinned_to_the_smoke_catalog_and_login() -> None:
@@ -311,7 +324,12 @@ def test_reader_env_predicate_red_on_each_mutation(mutate: Callable[[str], str])
 def test_concurrency_predicate_red_when_a_literal_outgrows_its_login() -> None:
     texts = _real()
     texts[_READER_FILE] = texts[_READER_FILE].replace(
-        "reserved_concurrent_executions = 5", "reserved_concurrent_executions = 6"
+        "reserved_concurrent_executions = 4", "reserved_concurrent_executions = 5"
+    )
+    assert "reader concurrency exceeds its login limit" in concurrency_problems(texts)
+    texts = _real()
+    texts[_CONTENT_FILE] = texts[_CONTENT_FILE].replace(
+        "reserved_concurrent_executions = 1", "reserved_concurrent_executions = 2"
     )
     assert "reader concurrency exceeds its login limit" in concurrency_problems(texts)
     texts = _real()

@@ -46,6 +46,7 @@ PROTECTED_NAME_PATTERNS = frozenset(
         "role/bootstrap-*",
         "role/platform-security-*",
         "role/ducklake-api-*",
+        "role/telemetry-content-*",
         f"policy/{BOUNDARY_NAME}",
         "policy/agent-platform-session-*",
         "policy/platform-security-*",

@@ -115,7 +115,7 @@ from scripts.ops_portal.risk_scoring import (  # noqa: F401
     compute_risk,
     load_capabilities,
 )
-from scripts.ops_portal.write_validators import gate_write  # noqa: F401
+from scripts.ops_portal.write_validators import carry_forward, gate_write  # noqa: F401
 from scripts.ops_portal.writer_transport import (  # noqa: F401
     _ducklake_write,
     _project_ops_record,
@@ -497,7 +497,7 @@ def update_rec(
             f"update_rec: {rec_id} does not exist in the current projection -- an absent rec cannot be "
             "updated (referential, CD.33 cl.8 / D-5). File it first via file_rec."
         )
-    merged = {**existing, **updates}
+    merged = {**carry_forward("ops_recommendations", existing), **updates}
     merged["id"] = rec_id  # always preserve the ID
 
     # Decision 186: stamp the closure_* kwargs into the MERGED context_v2_json blob before the

@@ -22,6 +22,7 @@ ALARMS = {
     "platform-security-iam-event-heartbeat",
     "platform-security-ducklake-api-change",
     "platform-security-agent-session-iam-change",
+    "platform-security-telemetry-content-change",
 }
 HEARTBEAT = "platform-security-iam-event-heartbeat"
 _REGEX_ALLOWED = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:_#=@/;,-^$?[]{}|\\*+.")
@@ -84,6 +85,22 @@ def _denied_role_regex_problems(pattern: str) -> list[str]:
 
 
 _SESSION = "platform-security-agent-session-iam-change"
+_CONTENT = "platform-security-telemetry-content-change"
+
+
+def _content_regex_problems(pattern: str) -> list[str]:
+    """Decision 270 cl.3: the content filter names the telemetry-content-* roles in any case, allowed or denied."""
+    role = re.search(r"\$\.requestParameters\.roleName\s*=\s*%([^%]*)%", pattern)
+    denied = re.search(r"\$\.errorMessage\s*=\s*%([^%]*)%", pattern)
+    if role is None or denied is None:
+        return ["content filter lacks a regex roleName or errorMessage clause"]
+    hits = ["telemetry-content-reader", "TELEMETRY-CONTENT-DEPLOY", "Telemetry-Content-Reader"]
+    misses = ["agent-platform-telemetry-content-reader", "telemetry-contents", "telemetry-reader"]
+    problems = [f"content role regex misses {n}" for n in hits if not re.search(role.group(1), n)]
+    problems += [f"content role regex matches {n}" for n in misses if re.search(role.group(1), n)]
+    rx = re.compile(denied.group(1))
+    problems += [f"content errorMessage regex misses {n}" for n in hits if not rx.search(_denied_message(f"role {n}"))]
+    return problems + [f"content errorMessage regex matches {n}" for n in misses if rx.search(_denied_message(f"role {n}"))]
 
 
 def _session_user_regex_problems(pattern: str) -> list[str]:
@@ -168,6 +185,12 @@ _REQUIRED_CLAUSES = {
         '"*:policy/agent-platform-session-*"',
     ),
     HEARTBEAT: ('$.eventSource = "iam.amazonaws.com"',),
+    _CONTENT: (
+        '($.eventSource = "lambda.amazonaws.com") && ($.readOnly IS FALSE)',
+        '$.eventName != "Invoke"',
+        '$.requestParameters.functionName = "*agent-platform-ducklake-telemetry-content*"',
+        '$.errorMessage = "*agent-platform-ducklake-telemetry-content*"',
+    ),
 }
 
 
@@ -193,6 +216,9 @@ def pattern_problems(patterns: dict[str, str]) -> list[str]:
     problems += _log_role_regex_problems(patterns.get("platform-security-ducklake-api-change", ""))
     problems += _session_user_regex_problems(patterns.get(_SESSION, ""))
     problems += _session_denied_regex_problems(patterns.get(_SESSION, ""))
+    problems += _content_regex_problems(patterns.get(_CONTENT, ""))
+    if "userIdentity" in patterns.get(_CONTENT, ""):
+        problems.append("content filter conditions on the actor (Decision 202 cl.6: never filtered by actor)")
     if "errorCode" in role:
         problems.append("role-change filter conditions on errorCode (denied attempts must match)")
     if set(re.findall(r"\$\.([\w.]+)", patterns.get(HEARTBEAT, ""))) != {"eventSource"}:

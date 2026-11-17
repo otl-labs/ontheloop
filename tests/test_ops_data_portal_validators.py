@@ -544,3 +544,46 @@ def test_repair_dependency_tokens_dry_run_writes_nothing():
         {"id": "rec-100", "before": ["[rec-1]"], "after": ["rec-1"]},
         {"id": "rec-103", "before": ["[rec-4", "rec-5]"], "after": ["rec-4", "rec-5"]},
     ]
+
+
+_JSON_LEG = {"max_bytes": 64, "versions": {1: {"required": {"schema_version": "integer"}}}}
+
+
+def _with_json_leg(leg_extra: dict | None = None):
+    import dataclasses  # noqa: PLC0415
+    from unittest.mock import patch  # noqa: PLC0415
+
+    import scripts.ops_portal.write_validators as wv  # noqa: PLC0415
+
+    real = rt.resolve_table_spec
+
+    def fake(name: str, *args, **kwargs):
+        spec = real(name, *args, **kwargs)
+        if name != "ops_recommendations":
+            return spec
+        column = {**spec.fields["context_v2_json"], "json_object": _JSON_LEG, **(leg_extra or {})}
+        return dataclasses.replace(spec, fields={**spec.fields, "context_v2_json": column})
+
+    return patch.object(wv, "resolve_table_spec", side_effect=fake)
+
+
+def test_gate_write_insert_refuses_malformed_json_object() -> None:
+    from scripts.ops_portal.write_validators import RowRuleRejected, gate_write  # noqa: PLC0415
+    from tests.fixtures.ducklake_fakes import ops_rec_fields  # noqa: PLC0415
+
+    with _with_json_leg():
+        gate_write("ops_recommendations", {**ops_rec_fields(), "context_v2_json": '{"schema_version": 1}'}, insert=True)
+        with pytest.raises(RowRuleRejected) as raised:
+            gate_write("ops_recommendations", {**ops_rec_fields(), "context_v2_json": "SENTINEL-nope"}, insert=True)
+    assert (raised.value.rule, raised.value.column) == ("json_object", "context_v2_json")
+    assert "JSON object of a declared schema_version within 64 bytes" in str(raised.value)
+    assert "SENTINEL" not in str(raised.value)
+
+
+def test_gate_write_update_leaves_dated_json_object_to_writer() -> None:
+    from scripts.ops_portal.write_validators import gate_write  # noqa: PLC0415
+    from tests.fixtures.ducklake_fakes import ops_rec_fields  # noqa: PLC0415
+
+    dated = {"exclude_before": {"json_object": "2026-12-01"}}
+    with _with_json_leg(dated):
+        gate_write("ops_recommendations", {**ops_rec_fields(), "id": "rec-4001", "context_v2_json": "nope"}, insert=False)
