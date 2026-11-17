@@ -203,3 +203,23 @@ def test_table_class_and_read_table(tmp_path: Path) -> None:
     _write(tmp_path, "demo", {"governance": {"table_class": "event"}, "fields": {"c": {"dq_intent": {"not_null": True}}}})
     fields, intents, cls = grammar.read_table("demo", tmp_path, tmp_path)
     assert (cls, intents, list(fields)) == ("event", {"c": {"not_null": True}}, ["c"])
+
+
+def test_advisory_only_true_on_repository_state_kinds() -> None:
+    path = "scripts/checks/contracts/_rule_grammar.py"
+    repo_state = {"class": "repository_state", "reason": "r", "owner": path}
+    for kind in ("glossary_lint", "acceptance_lint"):
+        ok = {kind: {"advisory": True}, "write_time_exemptions": {kind: repo_state}}
+        assert _errors(ok) == [], kind
+        for bad in (False, "true"):
+            errors = _errors({kind: {"advisory": bad}, "write_time_exemptions": {kind: repo_state}})
+            assert any("advisory must be true" in e for e in errors), (kind, bad)
+        temp = _errors({kind: {"advisory": True}, "write_time_exemptions": {kind: _WHY}})
+        assert any("advisory is only legal" in e and kind in e for e in temp), kind
+        none = _errors({kind: {"advisory": True}})
+        assert any("advisory is only legal" in e for e in none), kind
+    cross = {"class": "cross_row", "reason": "r", "owner": "rec-1"}
+    errors = _errors(
+        {"array_element_reference": {"advisory": True}, "write_time_exemptions": {"array_element_reference": cross}}
+    )
+    assert any("unknown sub-key" in e and "advisory" in e for e in errors)
