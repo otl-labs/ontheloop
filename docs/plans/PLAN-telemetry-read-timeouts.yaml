@@ -42,7 +42,8 @@ scope:
     as the latest of the newest MergeOpsTablesCount and MergeOpsGateTriggered datapoints for the MetaSchema over the last 6 hours (period
     60, SampleCount) and this warm container''s own last trigger time (none found: the window start), then reads the telemetry writer''s
     committed appends since then: DuckLakeTelemetryWriter CommitLatencyMs SampleCount with the same MetaSchema dimension (period 60;
-    one sample per committed append, so refusals, describes and other verbs are excluded; 1,020 on 2026-11-16 against 2,712 writer invocations).
+    one sample per committed append plus one per append whose OCC retries ran out, which is none while OccRetryCount stays 0; refusals,
+    describes and other verbs are excluded; 1,020 on 2026-11-16 against 2,712 writer invocations).
     merge is true when commits reach min_commits (reason backlog) or when the oldest non-zero per-minute commit datapoint since the last
     pass is at least max_unmerged_minutes old (reason age); otherwise false (reason below_threshold). When any read raises, merge is
     false (reason gate_unreadable): the every-6h rule stays the floor, so an unreadable gate never merges on every tick, and Decision
@@ -75,7 +76,9 @@ scope:
 - file: tests/checks/contracts/test_write_time_enforcement_conformance.py
   action: Modify
   purpose: The maintenance handler's _NON_ROW_WRITING entry ("moves or removes files, writes no caller row") gains merge_ops_gated,
-    so test_every_action_and_handler_is_classified classifies the new _ACTIONS key (planned change citing acceptance_criteria[1]).
+    so test_every_action_and_handler_is_classified classifies the new _ACTIONS key (planned change citing acceptance_criteria[1]). The
+    file is at 497 of 500 SLOC, so the name is appended to the existing key-string line (about 100 of 127 characters), adding no line;
+    if that does not fit, re-wrap within the current line count, never a budget raise (Decision 128).
   new_imports: []
 - file: src/lambdas/ducklake_maintenance/manifest.yaml
   action: Modify
@@ -90,7 +93,12 @@ scope:
     -> no merge), test_unreadable_metrics_skip_and_say_so (a raising client -> no merge, reason gate_unreadable, commits None), test_reads_commits_from_the_last_pass
     (the CommitLatencyMs query names the MetaSchema dimension and starts at the latest of the MergeOpsTablesCount and MergeOpsGateTriggered
     datapoints and the container''s own trigger time), test_rejects_a_malformed_gate (missing max_unmerged_minutes,
-    zero min_commits).'
+    zero min_commits), and gated nodes that drive gated(fake_action) with the fake client and a patched emitter so this file alone covers
+    backlog_gate.py to 100% (validate_test_coverage maps the module to this file only): test_gated_skip_emits_and_returns (below threshold
+    -> MergeOpsBacklogCommits emitted, skipped response, the action never called), test_gated_unreadable_emits_and_skips (MergeOpsGateUnreadable
+    1.0 emitted, skipped response), test_trigger_then_skip_in_one_container (the real decide, commits timestamped before the first
+    call, no pass datapoints: the first call emits MergeOpsGateTriggered and calls the action, the second skips with reason below_threshold).
+    An autouse fixture resets the container''s trigger time between tests.'
   new_imports: []
 - file: tests/lambdas/ducklake_maintenance/handler/test_merge_ops_backlog_gate.py
   action: Create
@@ -105,8 +113,8 @@ scope:
   action: Modify
   purpose: 'The every-6h :50 telemetry merge rule and its target are unchanged and stay the floor. A new rule ducklake_maintenance_telemetry_merge_gated
     (name agent-platform-ducklake-maintenance-telemetry-merge-gated, inside the CI apply role''s rule/agent-platform-* grant; schedule cron(0,6,8,10,16,18,20,22,24,26,32,34,36,38,40,46,52,54,56,58 * * * ? *): every two to six minutes, never in the three
-    minutes up to another rule''s start minute, :05, :15, :30, :45 or :50, so a pass of up to about 155 s ends before the next reserved
-    start), its target (input {action = "merge_ops_gated", data_path, meta_schema = local.ducklake_telemetry_prod_meta_schema, backlog_gate
+    minutes up to another rule''s start minute, :05, :15, :30, :45 or :50, so a pass of up to about 155 s started on a scheduled tick
+    ends before the next reserved start), its target (input {action = "merge_ops_gated", data_path, meta_schema = local.ducklake_telemetry_prod_meta_schema, backlog_gate
     = {min_commits = 60, max_unmerged_minutes = 30}}) and its lambda permission. One alarm, ducklake-telemetry-merge-gate-unreadable:
     MergeOpsGateUnreadable Sum, MetaSchema dimension, period 3600, threshold 1, GreaterThanOrEqualToThreshold, treat_missing_data
     notBreaching, the alerts topic. The header comment names the gated rule. Existing alarm blocks are unchanged.'
@@ -256,10 +264,12 @@ verification_plan:
   command: for m in MergeOpsBacklogCommits MergeOpsTablesCount MergeOpsGateUnreadable; do aws --profile agent_platform cloudwatch
     get-metric-statistics --namespace DuckLakeMaintenance --metric-name $m --dimensions Name=MetaSchema,Value=ducklake_telemetry --start-time
     "$(date -u -d '-3 hours' +%Y-%m-%dT%H:00:00Z)" --end-time "$(date -u +%Y-%m-%dT%H:%M:00Z)" --period 10800 --statistics SampleCount
-    Maximum --output text; done
+    Maximum --output text; done; aws --profile agent_platform cloudwatch get-metric-statistics --namespace AWS/Lambda --metric-name Throttles
+    --dimensions Name=FunctionName,Value=agent-platform-ducklake-maintenance --start-time "$(date -u -d '-3 hours' +%Y-%m-%dT%H:00:00Z)"
+    --end-time "$(date -u +%Y-%m-%dT%H:%M:00Z)" --period 300 --statistics Sum --output text
   expected: MergeOpsBacklogCommits about 60 samples per 3 h (20 ticks an hour, fewer when a tick is throttled behind a running pass)
     with a maximum below about 150; MergeOpsTablesCount at least 1 sample; MergeOpsGateUnreadable absent; record the three lines and
-    the apply and deploy run ids.
+    the apply and deploy run ids, and the 5-minute buckets with throttles (expected only where a gate tick met a running pass).
   fix_if: no backlog samples means the rule or the code did not land (check the apply and deploy runs, never apply or deploy locally);
     any MergeOpsGateUnreadable sample means the IAM statement did not land or the metric names differ; both are reported to the coordinator
   hermetic: false
@@ -365,7 +375,7 @@ test_obligations:
 - source: src/lambdas/ducklake_maintenance/backlog_gate.py
   behavior: a triggered pass is marked before merge_ops runs, so the next tick in the container does not re-trigger
   verification_step: 1
-  test_selector: tests/lambdas/ducklake_maintenance/handler/test_merge_ops_backlog_gate.py::test_merge_runs_the_unchanged_pass
+  test_selector: tests/lambdas/ducklake_maintenance/test_backlog_gate.py::test_trigger_then_skip_in_one_container
   red_green_expectation: red before, green after
 - source: src/lambdas/ducklake_maintenance/_shared.py
   behavior: the catalog sink admits MergeOpsFilesBeforeTotal for the telemetry catalog
@@ -417,6 +427,7 @@ constraints:
 - No existing alarm's threshold, period or evaluation count changes; the every-6h telemetry merge rule, its target and the ops catalog's
   merge are unchanged; merge_ops itself is unchanged.
 - The gate reads CloudWatch only and never opens a catalog connection on a skip or an unreadable tick, so a quiet catalog is not woken.
+- tests/checks/contracts/test_write_time_enforcement_conformance.py is at 497 of 500 SLOC; its edit adds no line (Decision 128).
 - handler.py is at 497 of 500 SLOC; the build adds at most 2 lines there and, if it would pass 500, moves the action into a submodule;
   never a budget raise (Decision 128).
 - No rescue agents or workaround loops (Decision 55).
@@ -462,8 +473,11 @@ context:
   lets the build merge on review PROCEED and green CI once he has approved the plan.'
 - 'Singleton (reserved concurrency 1): control_health :15 (about 45 s), telemetry merge floor :50 every 6 h (up to about 155 s), ops
   merge :30 every 6 h (450 s budget), ops gc Sun 03:45 (up to 244 s), telemetry gc Sun 04:05. Gated minutes avoid the three minutes
-  up to each of :05, :15, :30, :45 and :50, so a gated pass of up to about 155 s ends before the next reserved start. A gate tick that
-  meets a running pass is throttled and retried by Lambda; it costs about 1 s and usually skips (VP 12 reads the Sunday).'
+  up to each of :05, :15, :30, :45 and :50, so a gated pass of up to about 155 s started on a scheduled tick ends before the next
+  reserved start. A gate tick that meets a running pass is throttled and retried by Lambda, so a retried tick can start a pass off
+  schedule and in turn delay a reserved job, which Lambda also retries; VP 7 and VP 12 read Throttles.'
+- 'Accepted (critique round 6 N1): MergeOpsTablesCount lands at a pass''s end, so a commit that lands during a pass counts as merged;
+  under load the next commits trigger the backlog rule, and in a quiet hour such a commit waits for the next pass or the 6-hour floor.'
 - 'rec-5247 acceptance (re-keyed by the operator 2026-11-17 13:42Z) stays the terraform pin node test_rules_target_the_production_telemetry_catalog;
   rec-5248''s acceptance (today test_walk_halves_window_on_read_deadline) is re-keyed to test_merges_at_the_backlog_threshold (closure_artifact
   shard:telemetry-merge-backlog-gate) only with the operator''s word, asked in the plan approval and cited here by message id before
@@ -475,7 +489,7 @@ context:
   alarm and the reader-slow alarm, and VP 7 proves the rule is live.'
 - 'VP 10 reads run logs with gh in the session: per-run log text has no single mcp__github__ call (actions_list plus get_job_logs per
   job is the equivalent the build may use instead).'
-- 'Decision scout round 6 NO_FLAGS (the round 5 flags below are cleared). Round 5 FLAGS_FOUND: Decision 128 WARN (handler.py at 497 of 500) answered by the gated(action_merge_ops) wrapper
+- 'Decision scout rounds 6 and 7 NO_FLAGS (the round 5 flags below are cleared; decisions triaged 219 of 219; roadmap items intersected 7, CONFLICT 0, RELATED 6). Round 5 FLAGS_FOUND: Decision 128 WARN (handler.py at 497 of 500) answered by the gated(action_merge_ops) wrapper
   in backlog_gate.py, so handler.py gains an import and one _ACTIONS entry; Decision 88 NOTE (an unreadable gate merging every tick)
   answered by skip plus alarm. CITE: 236 (cl.5 amended by one dated line), 88 (cl.1(iii) cadence sized to write rate), 128, 81, 92,
   246, 226, 250, 186, 201, 235, 214.'
@@ -506,6 +520,8 @@ gate_rounds:
 - {gate: decision-scout, round: 6, verdict: NO_FLAGS, scout_input_fingerprint: "v1:9630a7a3cad80c49ff4ea65a3c7d6502116da4ea7a968f0716a8563ab3fc4c34"}  # pragma: allowlist secret
 - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 3, nits: 7}
 - {gate: wording-check, round: 5, verdict: PASS, digest: ff4856b5d3fc23e5b99b985d3e45c1e6192a156a8bd50e8e5864cd535fb190c0, base: ddb28a40c5dc5d3b382ea45fa403772f8c833edf, selection: complete}  # pragma: allowlist secret
+- {gate: decision-scout, round: 7, verdict: NO_FLAGS, scout_input_fingerprint: "v1:7e59ee703544715b08a4a65c809d9f2b339fe5aaa48f1704bb14fe29d667fe36"}  # pragma: allowlist secret
+- {gate: plan-critique, round: 6, verdict: REVISE, blocking: 3, nits: 5}
 - {gate: wording-check, round: 6, verdict: PASS, digest: c0031da5aa8e0b87c1f94ed07c15fda5f9fbbbae22695a814cc02163bad75c23, base: ddb28a40c5dc5d3b382ea45fa403772f8c833edf, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
 - Branch confirmed not on main
