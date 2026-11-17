@@ -48,7 +48,8 @@ scope:
     purpose: >-
       LoadedContract gains `verdict_consistency: dict[str, Any] | None` (the raw mapping, None when absent). load()
       refuses (RunRefused "verdict_consistency is malformed") a present value off the shape the validator checks (keys
-      and types only; no output_schema walk), so a hand-run contract cannot crash the evaluator. Plan 4 (rec-5267, not
+      and types only; no output_schema walk); a rule that passes this shape but names paths the value lacks is safe because
+      the evaluator never raises (verdict.py). Plan 4 (rec-5267, not
       yet built) also edits this file, at the BUILT constant; whichever builds second rebases.
   - file: src/persona_backends/verdict.py
     action: Create
@@ -56,10 +57,12 @@ scope:
       Persona-agnostic evaluator, naming no persona id or contract path (implementation_binding). `expected(rule,
       value) -> tuple[str, str]` returns (verdict, reason): walk cases in order; a condition holds when the dotted array
       path resolves to a list in value with an element (whose `field` value is in `in`); reason names the first holding
-      element ("findings[2].severity is High", "spirit[0] is present") or "no case holds". A path step that is missing
-      or not a dict, or a last step that is not a list, means no element. `verdict_errors(rule, value) -> list[str]`:
-      [] when value["verdict"] equals expected, else one error "$['verdict']: is <actual>, but the verdict rule gives
-      <expected> (<reason>); change the verdict, never the findings, to follow the rule".
+      element ("findings[2].severity is High", "spirit[0] is present") or "no case holds". Never raises on any value: a
+      path step that is missing or not a mapping, or a last step that is not a list, means no element; under a field
+      condition, an element that is not a mapping or lacks the field never matches. `verdict_errors(rule, value) ->
+      list[str]`: [] when value.get("verdict") equals expected, else one error "$['verdict']: is <actual or absent>, but
+      the verdict rule gives <expected> (<reason>); change the verdict, never the findings, to follow the rule" (a
+      missing verdict is an error, never a crash).
   - file: src/persona_backends/output.py
     action: Modify
     purpose: >-
@@ -70,7 +73,10 @@ scope:
   - file: tests/persona_backends/fakes.py
     action: Modify
     purpose: >-
-      `rule_contract(tmp_path, rule, output_schema=None) -> Path`: a tmp copy of fixture_persona.yaml carrying the rule
+      MALFORMED_RULES: the one list of malformed rule shapes (missing otherwise, empty cases, a case without any, field
+      without in, an extra key, a non-list in) that test_contract's parametrized refusal and fixture_tree's
+      verdict_rule_malformed mutators both iterate, so the two shape checks cannot drift. `rule_contract(tmp_path, rule,
+      output_schema=None) -> Path`: a tmp copy of fixture_persona.yaml carrying the rule
       (and, when given, a replacement output_schema) beside a copy of its rendered prompt, so load() hash-checks it as is
       (the rule and output_schema are not rendered into the fixture prompt). FIELD_SCHEMA: the fixture output_schema
       with findings as objects {severity: enum [blocking, nit]}. The fixture contract file itself is unchanged.
@@ -79,14 +85,14 @@ scope:
     purpose: >-
       Mirror test of verdict.py (map_source_to_test): ordered cases and first-match, field/in and array-only
       conditions, a dotted path (roadmap.rows), the reason text, a missing, non-dict or non-list path step meaning no
-      element, and verdict_errors' empty list on agreement and single error on contradiction. 100% line coverage of
-      verdict.py on its own.
+      element, a non-mapping element or one lacking the field under a field condition (no match, no raise), a value
+      without a verdict (one error, no raise), and verdict_errors' empty list on agreement and single error on
+      contradiction. 100% line coverage of verdict.py on its own.
   - file: tests/persona_backends/test_contract.py
     action: Modify
     purpose: >-
       New nodes: a present rule loads into LoadedContract.verdict_consistency; an absent one gives None; each malformed
-      shape (missing otherwise, empty cases, a case without any, field without in, an extra key) is refused
-      (test_malformed_verdict_rule_is_refused, parametrized). Covers every new contract.py line on its own (per-file
+      shape in fakes.MALFORMED_RULES is refused (test_malformed_verdict_rule_is_refused, parametrized). Covers every new contract.py line on its own (per-file
       coverage runs only the mirror test).
   - file: tests/persona_backends/test_output.py
     action: Modify
@@ -97,15 +103,20 @@ scope:
   - file: tests/persona_backends/test_verdict_consistency.py
     action: Create
     purpose: >-
-      The repair loop end to end on the fake transport and rule_contract copies (nodes in test_obligations). Plan 2b
-      adds test_real_contract_rules here (rec-5052's acceptance node), so this plan must not create that node.
+      The repair loop end to end on the fake transport and rule_contract copies, one node per AC1 behaviour:
+      test_contradictory_verdict_returns_schema_invalid (every terminal turn contradicts; schema_invalid after
+      max_revisions, the repair message carrying the verdict error), test_repaired_verdict_returns_success (one
+      contradiction, then an agreeing reply; one revision), test_failure_value_passes_unchecked and
+      test_contract_without_rule_is_unchanged. Plan 2b adds test_real_contract_rules here (rec-5052's acceptance node),
+      so this plan must not create that node.
   - file: tests/persona_contracts/fixture_tree.py
     action: Modify
     purpose: >-
       The fixture verdict persona's output_schema gains `findings` (array of objects {severity: enum [blocking, nit]},
       additionalProperties false, required [severity]) and its contract gains verdict_consistency (REVISE when any
       findings[].severity in [blocking], otherwise PROCEED); VERDICT_RULE becomes "Return REVISE when any blocking
-      finding remains, else PROCEED." MUTATORS and EXPECTED gain verdict_rule_malformed, verdict_rule_array,
+      finding remains, else PROCEED." MUTATORS and EXPECTED gain verdict_rule_malformed (one id per
+      tests.persona_backends.fakes.MALFORMED_RULES entry), verdict_rule_array,
       verdict_rule_field, verdict_rule_in_outside_enum, verdict_rule_coverage and verdict_rule_untethered, each
       re-rendering, each expecting its validator message fragment.
   - file: tests/checks/contracts/test_validate_persona_contracts.py
@@ -161,7 +172,9 @@ verification_plan:
   - step: 3
     phase: pre-deploy
     action: The validator's grammar rules, one red test each, and the real and fixture trees green.
-    command: bin/venv-python -m pytest tests/checks/contracts/test_validate_persona_contracts.py tests/persona_contracts -q
+    command: >-
+      bin/venv-python -m pytest tests/checks/contracts/test_validate_persona_contracts.py
+      tests/checks/contracts/test_validate_persona_contract_binding.py tests/persona_contracts -q
     expected: >-
       Exit 0, every node passes, including test_red_rule for the six verdict_rule_* ids and
       test_compute_plane_contract_with_verdict_rule_is_refused.
@@ -176,7 +189,8 @@ verification_plan:
     phase: pre-deploy
     action: The real contracts are untouched and the contract checks stay green.
     command: >-
-      git diff --quiet origin/main -- docs/contracts/ && bin/venv-python -m scripts.persona_contracts.render --check &&
+      git diff --quiet "$(git merge-base HEAD origin/main)" -- docs/contracts/ && test -z "$(git ls-files --others
+      --exclude-standard docs/contracts/)" && bin/venv-python -m scripts.persona_contracts.render --check &&
       bin/venv-python -c "from scripts.checks.contracts.validate_persona_contracts import validate_persona_contracts as a;
       from scripts.checks.contracts.validate_persona_contract_binding import validate_persona_contract_binding as b;
       f=[];a(f);b(f);print(*f,sep='\n');print(f'contract checks: {len(f)} failures');assert not f"
@@ -195,7 +209,11 @@ verification_plan:
       transient diff, which is empty on main.
   - step: 5
     phase: pre-deploy
-    action: No artifact bundles a changed path and no deploy channel watches one (Decision 249 clause 2).
+    action: >-
+      No Lambda artifact bundles a changed path and no PROD or DUCKLAKE source pathspec watches one (Decision 249 clause
+      2). The persona image channel (PLAN-persona-image-channel, unbuilt) is not checked: if it builds first and its
+      build.copy holds src/persona_backends, merging this plan republishes the image through that governed channel, which
+      is its intended path, never a deploy from this plan.
     command: >-
       bin/venv-python -c "import subprocess;from scripts.convergence_health.code_drift import PROD_SOURCE_PATHSPECS as P,DUCKLAKE_SOURCE_PATHSPECS as D;from scripts.lambda_manifest import compute_affected_artifacts as ca;import fnmatch;run=lambda a:subprocess.run(a,capture_output=True,text=True,check=True).stdout.split();mb=subprocess.run(['git','merge-base','HEAD','origin/main'],capture_output=True,text=True,check=True).stdout.strip();ch=sorted(set(run(['git','diff','--name-only',mb]))|set(run(['git','ls-files','--others','--exclude-standard'])));hit=lambda f,g:f==g or f.startswith(g.rstrip('/')+'/') or fnmatch.fnmatch(f,g);hits=sorted({f for f in ch for g in P+D if hit(f,g)});aff=ca(ch);print('changed',len(ch),'hits',hits,'affected',aff);assert 'src/persona_backends/verdict.py' in ch;assert not hits and aff == {};print('NO_DEPLOY_TRIGGER_OK')"
     expected: >-
@@ -226,22 +244,24 @@ test_obligations:
   - source: src/persona_backends/output.py
     behavior: A contradictory success gives the verdict error; a failure value is never verdict-checked; no rule, no check.
     verification_step: 2
-    test_selector: tests/persona_backends/test_output.py::test_contradictory_verdict_is_an_error
+    test_selector: tests/persona_backends/test_output.py
     red_green_expectation: red before (the success passes today), green after.
   - source: src/persona_backends/output.py
-    behavior: In the run loop, a contradiction is a repair turn and past max_revisions schema_invalid; a repaired verdict returns the success.
+    behavior: >-
+      In the run loop, a contradiction is a repair turn and past max_revisions schema_invalid; a repaired verdict returns
+      the success; a failure value passes unchecked; a contract without a rule is unchanged.
     verification_step: 1
-    test_selector: tests/persona_backends/test_verdict_consistency.py::test_contradictory_verdict_returns_schema_invalid
+    test_selector: tests/persona_backends/test_verdict_consistency.py
     red_green_expectation: red before (absent; the contradictory success is returned today), green after.
   - source: src/persona_backends/contract.py
     behavior: LoadedContract carries the rule (None when absent); a malformed rule is refused.
     verification_step: 2
-    test_selector: tests/persona_backends/test_contract.py::test_malformed_verdict_rule_is_refused
+    test_selector: tests/persona_backends/test_contract.py
     red_green_expectation: red before (absent), green after.
   - source: scripts/checks/contracts/validate_persona_contracts.py
-    behavior: The six grammar rules and the compute-plane refusal.
+    behavior: The six grammar rules (test_red_rule[verdict_rule_*]) and the compute-plane refusal.
     verification_step: 3
-    test_selector: tests/checks/contracts/test_validate_persona_contracts.py::test_compute_plane_contract_with_verdict_rule_is_refused
+    test_selector: tests/checks/contracts/test_validate_persona_contracts.py
     red_green_expectation: red before (no rule is checked; the new red-rule ids and this node fail), green after.
   - source: scripts/persona_contracts/schema.py
     behavior: PersonaContract accepts the verdict_consistency mapping (the fixture tree's rule-bearing contract validates).
@@ -282,6 +302,7 @@ gate_rounds:
   - {gate: wording-check, round: 1, verdict: PASS, digest: 529a7503099b431c15b308a838c4ff7f7901777a9d9820f4fe6f0ec1c98c1906, base: f5833a4fa3a0e06d803ac4fdeba5f523167f7210, selection: degraded}  # pragma: allowlist secret
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 3, nits: 5}
   - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:33f8fd7784d8c705799ad18edbb6408c25aaa898030528b9a607501c9c9496bf"}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 4}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
