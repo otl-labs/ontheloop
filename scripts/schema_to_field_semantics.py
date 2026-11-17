@@ -243,6 +243,8 @@ def _project_contract_table(
         )
         nullable = fspec.nullable if hasattr(fspec, "nullable") else fspec.get("nullable")
         col: dict[str, Any] = {"role": role, "sql_type": sql_type, "nullable": nullable}
+        if (fspec.per_write if hasattr(fspec, "per_write") else fspec.get("per_write")) is True:
+            col["per_write"] = True
         if include_prose:
             desc = fspec.description if hasattr(fspec, "description") else fspec.get("description")
             sem = fspec.semantics if hasattr(fspec, "semantics") else fspec.get("semantics")

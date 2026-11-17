@@ -186,7 +186,10 @@ def _write_ducklake_deploy_record(
     """Capture CodeSha256 from the update-function-code JSON response and write a deploy record.
 
     Writes ``deploy-records/<channel>/<function>.json``: ``{function, code_sha256,
-    source_git_sha, deployed_at}``. ``channel`` defaults to ``"ducklake"`` (the T2.38 original
+    source_git_sha, deployed_at, schema_version, run_id, run_attempt, trigger, workflow}``
+    (schema_version 2; the four-key shape is version 1; run facts read GITHUB_RUN_ID,
+    GITHUB_RUN_ATTEMPT, GITHUB_EVENT_NAME, GITHUB_WORKFLOW -- null, and trigger ``break_glass``, outside CI).
+    ``channel`` defaults to ``"ducklake"`` (the T2.38 original
     caller); the prod class (T2.43) passes ``channel="prod"`` -- same schema, different S3
     prefix, generalising this function rather than duplicating it. ``source_git_sha`` reads
     ``LAMBDA_ARTIFACT_SHA`` (the commit the deploy gate chose; under workflow_run ``GITHUB_SHA`` is
@@ -207,6 +210,11 @@ def _write_ducklake_deploy_record(
         "code_sha256": code_sha256,
         "source_git_sha": os.environ.get("LAMBDA_ARTIFACT_SHA") or os.environ.get("GITHUB_SHA") or None,
         "deployed_at": datetime.now(timezone.utc).isoformat(),
+        "schema_version": 2,
+        "run_id": os.environ.get("GITHUB_RUN_ID") or None,
+        "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT") or None,
+        "trigger": os.environ.get("GITHUB_EVENT_NAME") or "break_glass",
+        "workflow": os.environ.get("GITHUB_WORKFLOW") or None,
     }
     key = f"deploy-records/{channel}/{function}.json"
     result = subprocess.run(

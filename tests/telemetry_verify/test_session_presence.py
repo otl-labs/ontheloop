@@ -129,6 +129,21 @@ def test_the_shipped_config_excuses_the_rec_5194_session() -> None:
     assert (control.missing, control.lost_window, control.excused) == (1, 0, 0)
 
 
+def test_the_shipped_config_excuses_the_07cb0d3b_session() -> None:
+    key = "01G2j5RhJHzfcowduXUtmir5"  # pragma: allowlist secret
+    config = sp.load_config(ROOT)
+    sp.check_config(config)
+    pr_time = created({1: "2026-11-14T14:28:28+00:00"})
+    result = run([commit(1, key, pr=1)], Roots([]), config, pr=pr_time)
+    assert (result.excused, result.missing, result.lost_window) == (1, 0, 0)
+    assert result.status != "red"
+    assert [r for r in config["excused_sessions"] if r["key"] == key and r["owner"] == "rec-5276"]
+    assert result.pr_lookups == 0
+    stripped = {**config, "excused_sessions": [r for r in config["excused_sessions"] if r["key"] != key]}
+    control = run([commit(1, key, pr=1)], Roots([]), stripped, pr=pr_time)
+    assert (control.missing, control.lost_window, control.excused) == (1, 0, 0)
+
+
 def test_the_shipped_config_records_the_rec_5055_lost_window() -> None:
     config = sp.load_config(ROOT)
     sp.check_config(config)

@@ -17,7 +17,14 @@ import yaml
 
 from scripts import contract_rules
 from scripts.field_semantics_event_projection import KNOWN_DQ_KEYS as EVENT_DQ_KEYS
-from src.row_rules.rules import EXEMPTABLE_LEGS, PRODUCER_SIDE_KINDS, WAIVABLE_KINDS, WRITER_REFERENCE_KINDS
+from src.common.ducklake_write_rules import json_object_spec
+from src.row_rules.rules import (
+    EXEMPTABLE_LEGS,
+    PRODUCER_SIDE_KINDS,
+    WAIVABLE_KINDS,
+    WRITER_REFERENCE_KINDS,
+    RuleProjectionError,
+)
 
 SCD2_VOCABULARY = frozenset(
     {
@@ -29,6 +36,7 @@ SCD2_VOCABULARY = frozenset(
         "array_element_reference",
         "acceptance_lint",
         "glossary_lint",
+        "json_object",
         "not_before",
         "write_time_exemptions",
     }
@@ -43,6 +51,7 @@ _SUBKEYS: dict[str, frozenset[str]] = {
     "array_element_reference": frozenset({"exclude_before"}),
     "acceptance_lint": frozenset({"require_discrimination", "advisory", "exclude_before"}),
     "glossary_lint": frozenset({"advisory", "exclude_before"}),
+    "json_object": frozenset({"max_bytes", "versions", "exclude_before"}),
 }
 PRODUCER_CLASS = {
     "array_element_reference": "cross_row",
@@ -156,6 +165,11 @@ def _leg_errors(floor: str | None, where: str, kind: str, value: Any, exemptions
                 errors.append(f"{where}: {kind} {err}")
         if "advisory" in value:
             errors.extend(_advisory_errors(where, kind, value["advisory"], exemptions))
+        if kind == "json_object" and not extra:
+            try:
+                json_object_spec(where, {k: v for k, v in value.items() if k != "exclude_before"})
+            except RuleProjectionError as exc:
+                errors.append(f"{where}: json_object {exc}")
     for pat in _patterns_of(kind, value):
         err = regex_subset_error(pat)
         if err:

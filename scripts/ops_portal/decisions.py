@@ -40,7 +40,7 @@ from scripts.executor.jsonl_store import DECISIONS_JSONL, Decision
 from scripts.ops_portal._common import ROOT
 from scripts.ops_portal.cache import _refresh_cache_after_write, _sanitize_record, _sync_table
 from scripts.ops_portal.reader_transient import is_reader_unavailable
-from scripts.ops_portal.write_validators import gate_write
+from scripts.ops_portal.write_validators import carry_forward, gate_write
 from scripts.ops_portal.writer_transport import _ducklake_write
 
 if TYPE_CHECKING:
@@ -292,7 +292,7 @@ def update_decision(decision_id: str, updates: dict, profile: Optional[str] = No
             f"update_decision: {decision_id} does not exist in the current projection -- an absent decision "
             "cannot be updated (referential, CD.33 cl.8 / D-5). File it first via file_decision."
         )
-    merged = {**existing, **updates}
+    merged = {**carry_forward("ops_decisions", existing), **updates}
     merged["id"] = decision_id
 
     gate_write("ops_decisions", merged, insert=False, existing=existing)
