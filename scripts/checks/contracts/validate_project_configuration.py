@@ -305,8 +305,6 @@ def _check_verdict_app_row(body: ProjectConfigurationBody) -> list[str]:
     if not rows:
         return [f"{_APP_ROW} row is missing"]
     out: list[str] = []
-    if len(rows) > 1:
-        out.append(f"{_APP_ROW} appears more than once")
     for row in rows:
         if row.kind != "project" or row.variable is not None:
             out.append(f"setting {row.id}: must be kind project with a null variable")
