@@ -54,8 +54,10 @@ ALLOW = [
     SSM,
     "aws lambda get-function-url-config --function-name agent-platform-ducklake-writer",
     "curl -sS https://example.invalid/prod/ops/reader",
-    "URL=$(aws ssm get-parameter --name /agent-platform/ducklake/telemetry_writer_url --query Parameter.Value "
-    '--output text); curl -X POST "$URL" -d @e.json',
+    (
+        "URL=$(aws ssm get-parameter --name /agent-platform/ducklake/telemetry_writer_url --query Parameter.Value "
+        '--output text); curl -X POST "$URL" -d @e.json'
+    ),
     "git log -S _ducklake_write --oneline",
 ]
 
