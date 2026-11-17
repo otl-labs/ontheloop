@@ -38,6 +38,10 @@ def _base_spec() -> dict[str, Any]:
                             "acceptance_lint": {"class": "repository_state", "reason": "r", "owner": "x.py"}
                         },
                     ),
+                    "note": _field(
+                        glossary_lint={"advisory": True},
+                        write_time_exemptions={"glossary_lint": {"class": "repository_state", "reason": "r", "owner": "x.py"}},
+                    ),
                     "ref": _field(
                         array_element_reference={},
                         write_time_exemptions={
@@ -333,6 +337,24 @@ _ARMS: list[tuple[str, Callable[[dict[str, Any]], None], str | None]] = [
             ops_new={"governance": {"table_class": "SCD2"}, "fields": {"c": _field(not_null=True, min_length={"value": 1})}}
         ),
         None,
+    ),
+    (
+        "advisory-added-without-entry",
+        lambda s: _dq(s, "link")["acceptance_lint"].update(advisory=True),
+        "advisory added without a semantic-break entry",
+    ),
+    (
+        "advisory-added-with-break-entry",
+        lambda s: (
+            _dq(s, "link")["acceptance_lint"].update(advisory=True),
+            _entry(s, "link", change_class="governance_note_add", semantic_break=True, summary="advisory"),
+        ),
+        None,
+    ),
+    (
+        "advisory-removed-without-break-entry",
+        lambda s: _dq(s, "note")["glossary_lint"].pop("advisory"),
+        "advisory removed without a semantic-break entry",
     ),
     (
         "tightening-a-pattern-is-not-free",
