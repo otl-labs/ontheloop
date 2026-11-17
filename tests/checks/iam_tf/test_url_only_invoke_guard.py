@@ -21,13 +21,13 @@ _PERSONAL = _ROOT / "terraform" / "personal"
 _BOOTSTRAP = _ROOT / "terraform" / "bootstrap"
 _SCHEMAS = frozenset({"ducklake_ops", "public", "ducklake_smoke", "ducklake_telemetry"})
 _ARN = "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-"
-_FIVE = ("writer", "reader", "telemetry-writer", "telemetry-writer-smoke", "telemetry-reader")
-_BASES = {f"{_ARN}{fn}" for fn in _FIVE}
+_FUNCTIONS = ("writer", "reader", "telemetry-writer", "telemetry-writer-smoke", "telemetry-reader", "telemetry-content")
+_BASES = {f"{_ARN}{fn}" for fn in _FUNCTIONS}
 _DEV_BASES = {f"{_ARN}{fn}" for fn in ("writer", "reader", "telemetry-writer", "telemetry-reader")}
 _DEV_FORMS = _DEV_BASES | {f"{b}:*" for b in _DEV_BASES}
-_EXACT = {f"{_ARN}{fn}{suffix}" for fn in ("writer", "reader") for suffix in ("", ":*")}
-_FAMILY = f"{_ARN}telemetry-*"
-_BOUNDARY_FORMS = _EXACT | {_FAMILY}
+_PREFIX = "arn:aws:lambda:${var.aws_region}:*:function:agent-platform-ducklake-"
+_FAMILY = f"{_PREFIX}telemetry-*"
+_BOUNDARY_FORMS = {f"{_PREFIX}writer*", f"{_PREFIX}reader*", _FAMILY}
 _VIA_URL = "lambda:InvokedViaFunctionUrl"
 _NAMES = "writer|reader|telemetry-writer-smoke|telemetry-writer|telemetry-reader"
 _FORMS = (
@@ -168,7 +168,7 @@ def coverage_problems(text: str) -> list[str]:
     problems: list[str] = []
     for sid in ("DenyDuckLakeDirectInvoke", "DenyDuckLakeResourcePolicyEdit", "DenyDuckLakeEventSourceMapping"):
         patterns = _sid_patterns(by_sid[sid]) if sid in by_sid else []
-        for fn in _FIVE:
+        for fn in _FUNCTIONS:
             for suffix in ("", ":*"):
                 if not any(fnmatch.fnmatchcase(f"{_ARN}{fn}{suffix}", pattern) for pattern in patterns):
                     problems.append(f"{sid}: {fn}{suffix} matches no resource")
@@ -184,7 +184,7 @@ def trail_selector_problems(trail_text: str) -> list[str]:
     data_ok = any(
         re.search(r'\btype\s*=\s*"AWS::Lambda::Function"', b) and set(_list(_field(b, "values"))) == _BASES for b in data
     )
-    return (["no Lambda data-event selector for exactly the five functions"] if not data_ok else []) + (
+    return (["no Lambda data-event selector for exactly the six functions"] if not data_ok else []) + (
         ["the All management-event selector is missing"] if not mgmt else []
     )
 
@@ -324,17 +324,17 @@ _GOOD_BOUNDARY = _boundary(_BOUNDARY_FORMS)
 
 def _forms_without(name: str) -> set[str]:
     if name in ("writer", "reader"):
-        return {f for f in _BOUNDARY_FORMS if not f.startswith(f"{_ARN}{name}")}
-    others = [fn for fn in _FIVE if fn.startswith("telemetry-") and fn != name]
+        return {f for f in _BOUNDARY_FORMS if not f.startswith(f"{_PREFIX}{name}")}
+    others = [fn for fn in _FUNCTIONS if fn.startswith("telemetry-") and fn != name]
     return (_BOUNDARY_FORMS - {_FAMILY}) | {f"{_ARN}{fn}{s}" for fn in others for s in ("", ":*")}
 
 
 def test_coverage_predicate_is_green_on_the_synthetic_boundary_and_red_on_none() -> None:
     assert coverage_problems(_GOOD_BOUNDARY) == []
-    assert len(coverage_problems("locals { p = jsonencode({ Statement = [] }) }")) == 30
+    assert len(coverage_problems("locals { p = jsonencode({ Statement = [] }) }")) == 36
 
 
-@pytest.mark.parametrize("name", _FIVE)
+@pytest.mark.parametrize("name", _FUNCTIONS)
 def test_coverage_predicate_is_red_for_each_dropped_function(name: str) -> None:
     problems = coverage_problems(_boundary(_forms_without(name)))
     assert len(problems) == 6, problems
@@ -358,8 +358,8 @@ def test_boundary_predicate_is_green_on_a_complete_synthetic_boundary_and_red_on
         ('"lambda:UpdateEventSourceMapping"', '"lambda:ListTags"'),
         ('Resource = "*"', 'Resource = "x"'),
         (f'"{_FAMILY}"', '"x"'),
-        (f'"{_ARN}reader:*"', '"x"'),
-        (f'"{_ARN}writer"', f'"{_ARN}telemetry-writer"'),
+        (f'"{_PREFIX}reader*"', '"x"'),
+        (f'"{_PREFIX}writer*"', f'"{_PREFIX}writer"'),
         ('"lambda:FunctionArn" = [', '"lambda:EventSourceArn" = ['),
         ('Effect = "Deny"', 'Effect = "Allow"'),
     ],
@@ -448,6 +448,7 @@ resource "aws_cloudtrail" "platform_security" {
         (f'"{_ARN}telemetry-writer"', f'"{_ARN}telemetry-writer:*"'),
         (f'"{_ARN}telemetry-writer-smoke"', '"x"'),
         (f'"{_ARN}telemetry-reader"', '"x"'),
+        (f'"{_ARN}telemetry-content"', '"x"'),
         ("include_management_events = false", "include_management_events = true"),
         ("include_management_events = true", "include_management_events = false"),
     ],

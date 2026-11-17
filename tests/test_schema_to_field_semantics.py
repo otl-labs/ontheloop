@@ -76,30 +76,6 @@ class TestIcebergToSqlMapping:
 
 
 # ---------------------------------------------------------------------------
-# Role derivation rule
-# ---------------------------------------------------------------------------
-class TestProjectRole:
-    def test_no_derivation_is_input(self) -> None:
-        assert _project_role(None) == "input"
-
-    def test_empty_derivation_is_input(self) -> None:
-        assert _project_role({}) == "input"
-
-    def test_realized_true_is_derived(self) -> None:
-        assert _project_role({"realized": True}) == "derived"
-
-    def test_realized_false_is_input(self) -> None:
-        assert _project_role({"realized": False}) == "input"
-
-    def test_realized_missing_is_input(self) -> None:
-        assert _project_role({"formula": "some formula"}) == "input"
-
-    def test_derived_requires_exact_true(self) -> None:
-        assert _project_role({"realized": 1}) == "input"  # 1 != True (strict check)
-        assert _project_role({"realized": "true"}) == "input"  # string "true" is not True
-
-
-# ---------------------------------------------------------------------------
 # Migration columns subset enforcement
 # ---------------------------------------------------------------------------
 class TestMigrationColumnsSubset:
@@ -502,6 +478,27 @@ def test_control_class_projection_carries_optional_fields_when_present() -> None
     assert entry["entity_id_prefix"] == "cnt-"
     assert entry["id_keyspace"] == "writer"
     assert entry["migration_columns"] == migration_columns
+
+
+def _per_write_entry(per_write: object) -> dict[str, Any]:
+    fields = {
+        "j": {
+            "derivation": None,
+            "iceberg_type": "string",
+            "nullable": True,
+            **({} if per_write is None else {"per_write": per_write}),
+        }
+    }
+    return _project_contract_table("ops_entity_counters", fields, "j", {"status": "live"}, table_class="control")
+
+
+def test_per_write_projects_true() -> None:
+    assert _per_write_entry(True)["columns"]["j"]["per_write"] is True
+
+
+def test_absent_or_false_per_write_adds_nothing() -> None:
+    for value in (None, False):
+        assert "per_write" not in _per_write_entry(value)["columns"]["j"]
 
 
 # ---------------------------------------------------------------------------

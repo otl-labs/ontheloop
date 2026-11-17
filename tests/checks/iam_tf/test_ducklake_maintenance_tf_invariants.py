@@ -101,6 +101,64 @@ def _assert_no_current_version_expiration_rule(block: str) -> None:
         )
 
 
+_DEPLOY_RECORDS_PREFIX = "deploy-records/"
+_LOCAL_REF_RE = re.compile(r"^\$\{local\.(\w+)\}(.*)$", re.DOTALL)
+_RULE_PREFIX_RE = re.compile(r'\bprefix\s*=\s*"([^"]*)"')
+_LOCAL_VALUE_RE = r'\b{name}\s*=\s*"([^"]*)"'
+
+
+def _data_lake_versioning_block(file_texts: dict[str, str]) -> str:
+    for text in file_texts.values():
+        for match in re.finditer(r'resource\s+"aws_s3_bucket_versioning"\s+"(\w+)"\s*\{', text):
+            block = find_resource_block(text, "aws_s3_bucket_versioning", match.group(1))
+            if "aws_s3_bucket.data_lake" in block:
+                return block
+    return ""
+
+
+def _resolve_rule_prefix(raw: str, file_texts: dict[str, str]) -> str:
+    ref = _LOCAL_REF_RE.match(raw)
+    if ref is None:
+        return raw
+    for text in file_texts.values():
+        found = re.search(_LOCAL_VALUE_RE.format(name=re.escape(ref.group(1))), text)
+        if found:
+            return found.group(1) + ref.group(2)
+    raise AssertionError(f"lifecycle prefix {raw!r} does not resolve to a declared local -- failing closed")
+
+
+def _assert_deploy_record_history_unreclaimed(lifecycle_block: str, versioning_block: str, file_texts: dict[str, str]) -> None:
+    assert re.search(r'\bstatus\s*=\s*"Enabled"', versioning_block), (
+        "data_lake bucket versioning is not Enabled -- the deploy history would stop accruing"
+    )
+    for rule in split_rule_blocks(lifecycle_block):
+        found = _RULE_PREFIX_RE.search(rule)
+        assert found is not None and found.group(1), (
+            f"lifecycle rule has no filter prefix (bucket-wide) and would expire deploy-records/ versions: {rule[:200]!r}"
+        )
+        resolved = _resolve_rule_prefix(found.group(1), file_texts)
+        assert not (_DEPLOY_RECORDS_PREFIX.startswith(resolved) or resolved.startswith(_DEPLOY_RECORDS_PREFIX)), (
+            f"lifecycle rule prefix {resolved!r} reaches deploy-records/, the append-only deploy history"
+        )
+
+
+_GOOD_VERSIONING_TF = """
+resource "aws_s3_bucket_versioning" "data_lake" {
+  bucket = aws_s3_bucket.data_lake.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+"""
+_LOCALS_TF = 'locals {\n  ducklake_prod_data_prefix = "ducklake"\n  deploy_data_prefix = "deploy-records"\n}\n'
+
+
+def _history_case(lifecycle_tf: str, versioning_tf: str = _GOOD_VERSIONING_TF) -> None:
+    texts = {"main.tf": lifecycle_tf + versioning_tf + _LOCALS_TF}
+    block = _single_data_lake_lifecycle_block(texts)
+    _assert_deploy_record_history_unreclaimed(block, _data_lake_versioning_block(texts), texts)
+
+
 class TestDataLakeLifecycleGoverned:
     """PLAN-ducklake-noncurrent-version-reclaim / PLAN-smoke-prefix-lifecycle-coverage:
     net-tightened, per-rule guard (Decision 181)."""
@@ -171,6 +229,32 @@ class TestDataLakeLifecycleGoverned:
         assert "local.ducklake_smoke_data_prefix" in block, (
             "the smoke prefix local is not referenced by any rule in the governed lifecycle block"
         )
+
+    def test_no_rule_reclaims_deploy_record_history(self) -> None:
+        """The versions under deploy-records/ are the append-only deploy history (build-lambda.yaml
+        deploy_record.history); versioning must stay Enabled and no rule may reach that prefix."""
+        file_texts = tf_dir_file_texts(_TERRAFORM_PERSONAL_DIR)
+        _assert_deploy_record_history_unreclaimed(
+            _single_data_lake_lifecycle_block(file_texts), _data_lake_versioning_block(file_texts), file_texts
+        )
+        good = _GOOD_DATA_LAKE_LIFECYCLE_TF
+        _history_case(good)
+        red_cases = {
+            "literal deploy-records prefix": (
+                good.replace('"${local.ducklake_prod_data_prefix}/"', '"deploy-records/"'),
+                _GOOD_VERSIONING_TF,
+            ),
+            "local resolving to deploy-records": (
+                good.replace("ducklake_prod_data_prefix", "deploy_data_prefix"),
+                _GOOD_VERSIONING_TF,
+            ),
+            "empty filter": (good.replace('prefix = "${local.ducklake_prod_data_prefix}/"', ""), _GOOD_VERSIONING_TF),
+            "unresolvable local": (good.replace("ducklake_prod_data_prefix", "missing_local"), _GOOD_VERSIONING_TF),
+            "suspended versioning": (good, _GOOD_VERSIONING_TF.replace("Enabled", "Suspended")),
+        }
+        for lifecycle_tf, versioning_tf in red_cases.values():
+            with pytest.raises(AssertionError):
+                _history_case(lifecycle_tf, versioning_tf)
 
 
 # Red-case fixtures proving the guard above actually discriminates ("a guard that cannot fail is
