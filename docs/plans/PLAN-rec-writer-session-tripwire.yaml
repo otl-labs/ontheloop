@@ -21,25 +21,30 @@ scope:
     action: Create
     purpose: >-
       Pure classifier, no I/O. classify(command) -> Hit(shape, token) | None. Token tuples live here: HTTP_CLIENTS
-      (curl, wget, xh, http, https); ROUTE_TOKENS (ops/writer, writer_url, DUCKLAKE_WRITER_URL); TRANSPORT_CALL regexes
+      (curl, wget, xh, http, https); ROUTE_TOKENS (ops/writer, /ducklake/writer_url, DUCKLAKE_WRITER_URL; never a bare writer_url, which also matches the telemetry writer's /agent-platform/ducklake/telemetry_writer_url); TRANSPORT_CALL regexes
       (_ducklake_write\s*\(, _resolve_writer_url\s*\(, an import of scripts.ops_portal.writer_transport or of
       writer_transport from scripts.ops_portal); HTTP_LIB regexes (requests.post/put/request call, urllib.request,
-      httpx., http.client, AWSRequest\s*\(); LAMBDA_OPS (invoke, invoke-async, invoke-with-response-stream); WRITER_FN
-      (agent-platform-ducklake-writer). Fast path: a command containing none of ops/writer, writer_url,
-      DUCKLAKE_WRITER, _ducklake_write, _resolve_writer_url, writer_transport, ducklake-writer returns None unparsed.
+      httpx., http.client, AWSRequest\s*\(); LAMBDA_OPS (invoke, invoke-async, invoke-with-response-stream); WRITER_FN regex
+      (^|[:/])agent-platform-ducklake-writer(:[^:\s]+)?$, so a qualifier such as :live still matches). Fast path: a command containing none of ops/writer, /ducklake/writer_url,
+      DUCKLAKE_WRITER_URL, _ducklake_write, _resolve_writer_url, writer_transport, ducklake-writer returns None unparsed.
       Otherwise parse with protected_action_shell.walk(command, HTTP_CLIENTS) (the client names as stop words, so a
-      wrapper such as timeout or env still yields the client as the command word) and trip on the first of: A
-      http_client -- some simple command's basename is in HTTP_CLIENTS and any word of any simple command in the
+      wrapper such as timeout or env still yields the client as the command word). Portal exemption, checked first and
+      covering every shape: when any simple command in the parse runs the portal (a -m word followed by
+      scripts.ops_data_portal) or any inline code string names ops_data_portal, return None for the whole command
+      (rec text fed to the portal by argument, heredoc or bash -c-shaped prose is data). A simple command's client
+      word is its first word after any leading shell reserved words (do, then, else, elif, if, while, until, !, {).
+      Then trip on the first of: A http_client -- some simple command's client word basename is in HTTP_CLIENTS and any word of any simple command in the
       parse contains a ROUTE_TOKEN (catches a URL read by $(aws ssm ...) in the same command); B inline_code -- an
-      inline code string (Walk.inline) that does not contain ops_data_portal and either matches a TRANSPORT_CALL regex
-      or contains ops/writer and matches an HTTP_LIB regex; C lambda_invoke -- an aws simple command with lambda, an op
-      in LAMBDA_OPS and a word ending in WRITER_FN. A lexer ValueError propagates (the hook fails open on it). Imports
+      inline code string (Walk.inline) that matches a TRANSPORT_CALL regex or contains ops/writer and matches an HTTP_LIB regex; C lambda_invoke -- an aws simple command with lambda, an op
+      in LAMBDA_OPS and a word matching WRITER_FN. A lexer ValueError propagates (the hook fails open on it). Imports
       protected_action_shell read-only; never edits it.
     new_imports: [scripts.session.protected_action_shell]
   - file: .claude/hooks/rec_writer_tripwire.py
     action: Create
     purpose: >-
-      PreToolUse plumbing (never_on_main pattern, sys.path append of the repo root). Reads the hook JSON from stdin;
+      PreToolUse plumbing (never_on_main pattern, sys.path append of the repo root). The import of
+      scripts.session.rec_writer_match sits inside main's guarded body, so an ImportError fails open (exit 0) rather
+      than exiting 1 on every Bash call. Reads the hook JSON from stdin;
       for tool_name Bash or Monitor with a string tool_input.command, calls classify. On a hit: exit 2 with this
       stderr, filled with the hit's shape and token -- "rec-writer-tripwire: refused. This command calls the ops writer
       directly (<shape>: <token>)." / "Recs and decisions are written only through the portal: bin/venv-python -m
@@ -71,7 +76,7 @@ scope:
   - file: tests/test_session_rec_writer_match.py
     action: Create
     purpose: >-
-      Classifier nodes. test_direct_writer_calls_are_refused, parametrised over exactly these ten commands (host
+      Classifier nodes. test_direct_writer_calls_are_refused, parametrised over exactly these twelve commands (host
       example.invalid, never a real API host, Decision 101/255), each asserting the named shape: A1 curl -X POST
       https://example.invalid/prod/ops/writer -d @rec.json; A2 timeout 30 curl -sS https://example.invalid/prod/ops/writer;
       A3 env A=1 /usr/bin/curl https://example.invalid/prod/ops/writer; A4 bash -c "curl
@@ -80,14 +85,21 @@ scope:
       A6 wget --post-data=x "$DUCKLAKE_WRITER_URL"; B1 bin/venv-python -c "from scripts.ops_portal.writer_transport
       import _ducklake_write; _ducklake_write('ops_recommendations', {}, action='file_ops')"; B2 the same call as a
       bin/venv-python heredoc importing writer_transport from scripts.ops_portal; B3 python3 -c "import requests;
-      requests.post(BASE + '/ops/writer', data='{}')"; C1 aws lambda invoke --function-name
-      agent-platform-ducklake-writer --payload file://p.json out.json. test_ordinary_commands_pass, parametrised over
-      exactly these nine: grep -rn ops/writer scripts/; cat scripts/ops_portal/writer_transport.py; bin/venv-python -m
-      pytest tests/ops_data_portal/test_writer_transport.py -q; bin/venv-python -m scripts.ops_data_portal with
-      argument text naming curl, ops/writer and _ducklake_write(; bin/venv-python -c "from scripts.ops_data_portal
+      requests.post(BASE + '/ops/writer', data='{}')"; A7 for u in a; do curl -sS
+      https://example.invalid/prod/ops/writer; done; C1 aws lambda invoke --function-name
+      agent-platform-ducklake-writer --payload file://p.json out.json; C2 aws lambda invoke --function-name
+      agent-platform-ducklake-writer:live out.json. test_ordinary_commands_pass, parametrised over exactly these
+      twelve: grep -rn ops/writer scripts/; cat scripts/ops_portal/writer_transport.py; bin/venv-python -m pytest
+      tests/ops_data_portal/test_writer_transport.py -q; bin/venv-python -m scripts.ops_data_portal --file-rec --title
+      "curl https://example.invalid/prod/ops/writer fails in _ducklake_write("; bin/venv-python -m
+      scripts.ops_data_portal --file-rec --context "repro: bash -c 'curl https://example.invalid/prod/ops/writer'";
+      bin/venv-python -m scripts.ops_data_portal --file-rec --context-v2-json - fed by a heredoc whose body is
+      {"problem": "_ducklake_write( retried 3x on ops/writer"}; bin/venv-python -c "from scripts.ops_data_portal
       import file_rec; file_rec(title='_ducklake_write( times out on ops/writer')"; the A5 aws ssm get-parameter read
       alone; aws lambda get-function-url-config --function-name agent-platform-ducklake-writer; curl -sS
-      https://example.invalid/prod/ops/reader; git log -S _ducklake_write --oneline. test_fast_path_skips_parsing
+      https://example.invalid/prod/ops/reader; URL=$(aws ssm get-parameter --name
+      /agent-platform/ducklake/telemetry_writer_url --query Parameter.Value --output text); curl -X POST "$URL" -d @e.json;
+      git log -S _ducklake_write --oneline. test_fast_path_skips_parsing
       (walk monkeypatched to raise; a command naming no token returns None). test_transport_names_still_exist (imports
       scripts.ops_portal.writer_transport and asserts _ducklake_write and _resolve_writer_url exist, so a Decision 124
       rename turns this red instead of silently blinding shape B).
@@ -106,9 +118,9 @@ bundled_recommendations: []
 followon_recs: []
 infrastructure_dependencies: []
 acceptance_criteria:
-  - A session Bash command that sends a request to the ops/writer route with curl, including behind timeout, env, bash -c or a $(...) URL read, is refused with exit 2 and a message pointing at scripts.ops_data_portal.
+  - A session Bash command that sends a request to the ops/writer route with curl, including behind timeout, env, bash -c, a for loop or a $(...) URL read, is refused with exit 2 and a message pointing at scripts.ops_data_portal.
   - Inline interpreter code calling the writer transport, or posting to ops/writer with an HTTP library, is refused; aws lambda invoke on the writer function is refused.
-  - Every portal call passes whatever its text names, as do grep, cat, pytest, the SSM URL read alone and requests to other routes.
+  - Every portal call passes whatever its arguments, heredoc body or inline code name, as do grep, cat, pytest, the SSM URL read alone, requests to other routes and a telemetry writer URL read.
   - Malformed input, other tools, lexer errors and internal exceptions exit 0 with no output (fail-open).
   - .claude/settings.json and the rendered .claude/hooks/hooks.json both register the hook for Bash and Monitor.
   - The ducklake_writer.yaml edit equals the approved sidecar.
@@ -127,7 +139,7 @@ verification_plan:
     phase: pre-deploy
     action: Run every classifier and hook node (deny table, allow table, fail-open, registration, transport names).
     command: bin/venv-python -m pytest tests/test_session_rec_writer_match.py tests/hooks/test_rec_writer_tripwire.py -q
-    expected: exit 0, no failures; 31 nodes (ten refused, nine passing, two single classifier nodes; two subprocess, six fail-open, one registration hook nodes).
+    expected: exit 0, no failures; 34 nodes (twelve refused, twelve passing, two single classifier nodes; two subprocess, six fail-open, one registration hook nodes).
     fix_if: >-
       an allow-table command is refused (narrow the match, never drop the case); a deny-table command passes (widen the
       parse, e.g. a missing stop word); a fail-open case exits 2 or prints
@@ -158,8 +170,9 @@ verification_plan:
     action: Re-run the standing guards on the files this plan edits (plugin render parity, capture registration, settings denies, contract schema).
     command: >-
       bin/venv-python -m pytest tests/hooks/test_plugin_hooks.py tests/hooks/test_capture_hook_registration.py
-      tests/hooks/test_settings_tool_denies.py -q && bin/venv-python -m scripts.contracts docs/contracts/ducklake_writer.yaml
-    expected: exit 0, no failures; the contract loads
+      tests/hooks/test_settings_tool_denies.py -q && bin/venv-python -c "from scripts.contracts import load_contract;
+      print(type(load_contract('docs/contracts/ducklake_writer.yaml')).__name__)"
+    expected: exit 0, no failures; then prints ContractDocument
     fix_if: >-
       the render parity node fails (re-run plugin_hooks.py render, never hand-edit hooks.json); the contract fails to
       load (fix the edit to equal the sidecar)
@@ -205,9 +218,14 @@ verification_plan:
     hermetic: false
 test_obligations:
   - source: scripts/session/rec_writer_match.py
-    behavior: Refuses the ten direct-call shapes and passes the nine ordinary commands, including portal calls naming the tokens.
+    behavior: Refuses the twelve direct-call commands.
     verification_step: 2
     test_selector: tests/test_session_rec_writer_match.py::test_direct_writer_calls_are_refused
+    red_green_expectation: red before (module and test absent), green after.
+  - source: scripts/session/rec_writer_match.py
+    behavior: Passes the twelve ordinary commands, including portal calls whose text names every token and the telemetry writer URL read.
+    verification_step: 2
+    test_selector: tests/test_session_rec_writer_match.py::test_ordinary_commands_pass
     red_green_expectation: red before (module and test absent), green after.
   - source: .claude/hooks/rec_writer_tripwire.py
     behavior: Exits 2 with the portal pointer on a hit and exits 0 with no output on every other path.
@@ -244,10 +262,11 @@ context:
   - "Decision-scout verdict NO_FLAGS (rounds 1 and 2). CITE: Decisions 143, 210, 246, 255, 256, 269. Decisions triaged: 218 of 218. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2. Serves: NS.5 3/5."
   - "Why not a protected-actions class (blind consult /mnt/project-files/rec-write-path-hook/advisor-brief/ADVICE.md): that gate fails closed on its COARSE words, so a portal call whose rec text names the writer would be refused whenever the gate cannot run; and its classes need a binding control, which this has none of."
   - "Decision 203 differs: a fail-closed refusal authority with no override, hence a Decision. This hook is fail-open with authority none, so no numbered Decision (decision-entry.yaml significance routing_rule: no reversal-relevant authority); the contract line records it (Decision 181 cl.2: it states what it does not enforce)."
+  - "Prototype probe (2026-11-17, critique r1 fixes): a scratch classifier built to the scope row refused all twelve deny rows and passed all twelve allow rows."
   - "Walker gotcha (probed 2026-11-17): protected_action_shell.walk drops `timeout 30 curl ...` and `env A=1 curl ...` entirely unless the client names are passed as walk()'s stop words; with them it yields curl as the command word."
-  - "Portal-import exemption on shape B: rec text inside inline portal code may name _ducklake_write( or ops/writer (ci-rca files such recs and its claude -p runs load .claude/settings.json); a refused portal call costs more than a missed mixed-import bypass."
+  - "Command-level portal exemption: rec text fed to the portal (argument, heredoc, or inline portal code) may name every token (ci-rca files such recs and its claude -p runs load .claude/settings.json, with no operator to help); a refused portal call costs more than a missed bypass that also runs the portal."
   - "Deliberately absent: no CODEOWNERS line, no PROTECTED ratchet or capabilities.yaml boundary_patterns entry (Decision 117), so token tweaks stay cheap."
-  - "Not covered (contract line lists them): variables and aliases, script files written then run, other languages, tools other than Bash and Monitor, checkouts that predate the hook."
+  - "Not covered (contract line lists them): variables and aliases, script files written then run, other languages, tools other than Bash and Monitor, wrappers after a reserved word (do timeout 5 curl ...), checkouts that predate the hook. Accepted false positive: shape A reads every simple command, so ops/writer named anywhere beside an unrelated curl trips (the price of catching a $(...) URL read)."
   - "Overlaps (plan_obligations): unbuilt PLAN-hook-canary-evidence and PLAN-telemetry-content-reader-lock also scope .claude/settings.json and hooks.json; whichever builds second rebases and re-renders. CI Reform's open #2071 edits scripts/ops_portal/writer_transport.py, which this plan only reads."
   - "Follow-up not filed here: separate writer identities per caller (rec write-path brief, consult Q4) would let the writer tell the portal apart; out of this plan's scope."
   - "red_overlap at plan write (2026-11-17): blocked. Deferral: rec-5247 (telemetry-reader smoke 504; slo_breached, no shared files) and rec-5276 (telemetry arrival red; overlap only through shared test modules such as tests/hooks/test_plugin_hooks.py and test_capture_hook_registration.py, none of its fix files) are owned and being repaired by the Feedback Loop project; this plan edits nothing they repair. The build re-runs red_overlap and proceeds under the same deferral or waits for the operator's ruling."
@@ -256,6 +275,7 @@ gate_rounds:
   - {gate: decision-scout, round: 1, verdict: NO_FLAGS, scout_input_fingerprint: "v1:edd3a3b399e01fa19f2b2ed1ca4edbd3135a92af8240593dc772c677533b6333"}
   - {gate: wording-check, round: 1, verdict: PASS, digest: 67989ca649f9920fed235e783833ad7cca093e0c583465362db4b6d428382d3f, base: d98906cb276ed169bc961da1ae8b9d0ce3a8c9a8, selection: complete}  # pragma: allowlist secret
   - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: "v1:d856c9d9fe7865b381251c2f2b61d8cdc320dd100a3fea89e9355bb029c91b00"}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 4, nits: 7}  # B1-B4 fixed; N1 N3 N5 N6 fixed; N4 accepted cost (context); N2 declined: HB-1 names four hooks in a Feedback Loop telemetry surface; N7 declined: follow-up is the series brief's, outside this plan
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -269,4 +289,5 @@ execution_steps:
   - "Place sidecar block writer-tripwire-invariant in docs/contracts/ducklake_writer.yaml. Post: step 5 exits 0."
   - "Create both test files per their scope rows; confirm each is red against the tree without the source files, then green."
   - Execute Verification Plan -- run each pre-deploy step; loop until pass; on unrecoverable failure stop and RCA (Decision 55)
-  - "Report: what was implemented, verification results; after merge, step 7 in a fresh thread"
+  - "CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; commit; git fetch origin main && git rebase origin/main (re-render hooks.json if a sibling plan changed settings.json); re-run red_overlap (deferral as in context, or wait for the operator); VP 1-5; VP 6 (--pre, then the full tier backgrounded from the top-level session, then --verify-head; a timeout is BLOCKED, nothing is pushed); push; open the PR (body names the sidecar run and that the hook is a tripwire, never a control); subscribe; code review in a fresh context; merge by squash on code review PROCEED and green CI under the merge rule the handoff note states (hook code is a final-diff class in coordinator.yaml standing_authorisation; the note records the operator's ruling on it); then VP 7, reporting PR number, CI run ids and the read-back merge SHA."
+  - "Report: what was implemented, verification results"
