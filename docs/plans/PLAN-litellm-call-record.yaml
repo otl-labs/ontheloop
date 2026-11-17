@@ -1,0 +1,609 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: litellm-call-record
+intent: >-
+  Plan 3a of rec-4028's split. A blind consult split the work into 3a (this plan: the transport's per-call record and
+  the one usage mapping table) and 3b (the producer that maps run_persona's events file to Decision 199 rows; rec-4028
+  stays open for it). The operator chose capture from the transport record, so no LiteLLM CustomLogger is built. Every
+  provider attempt the litellm transport makes gains what a model_call row needs and the transport does not record
+  today:
+  - the provider response id where it is the provider's own, the raw usage LiteLLM keeps, the 5m/1h cache-write split,
+    the missing-usage marker and wall-clock times;
+  - provider and billing_shape on a failed attempt;
+  - the fallback's billable cold-start probe, surfaced as its own record.
+  The events header gains tools_sha256, an input of 3b's prefix_hash. The four token classes come from one pure mapping
+  over the provider's own usage fields. It is declared once as usage_mapping in docs/contracts/inference-provider.yaml,
+  with golden vectors per provider re-run at the pinned LiteLLM (1.106.2 today), and the transport calls it instead of
+  computing its own.
+  Bundles rec-5112: a response with no usage block, one global lock across the cold-start probe, max_attempts below
+  1, and the smoke test's load order. Serves NS.6: verdict runs on GitHub are measured from their first run.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-litellm-call-record.yaml
+phase: >-
+  T4.32 c1 (telemetry leg, part; plan 3a of rec-4028's split); closes no criterion. T4.32 is in_progress, and plan 1
+  (PLAN-run-persona-litellm-backend) is merged and built (#2132, eed2f6e4). scripts/llm/ is in no Lambda bundle, and the
+  data-pipeline manifest excludes src/turn_capture and src/persona_backends, so nothing deploys (V2). closes_criteria
+  is [] because c1 has unbuilt legs (3b, the fixture run), so naming T4.32:c1 would be false.
+closes_criteria: []
+cites: [dec:166, dec:173, dec:199, dec:246]
+scope:
+  - file: src/turn_capture/litellm_usage.py
+    action: Create
+    purpose: >-
+      The one usage mapping, stdlib only (tests/turn_capture/test_package_boundary.py holds the package's import rule).
+      - USAGE_TABLE: three rows (deepseek, anthropic, default) mirroring inference-provider.yaml usage_mapping.rows key
+        for key: each class's source field or expression, the structural 0s, guaranteed, cache_creation_split,
+        reasoning_tokens and response_id.
+      - row_for(prefix): returns the row for a LiteLLM prefix, else default.
+      - map_usage is driven by USAGE_TABLE: a small restricted parser reads each row's dotted paths and `a - b - c`
+        differences (never eval or exec, AGENTS.md Safety), so the table the tie test compares is the code that runs.
+        It also reads the literal 0 (a structural 0), none (reasoning_tokens or cache_creation_split absent: None), and
+        the split form `<path>.ephemeral_1h_input_tokens and ephemeral_5m_input_tokens`, whose second operand is a key
+        of the first operand's parent. Any other form raises ValueError when the table is first parsed (lazily on first
+        use, never at import), and a test parses every row.
+      - map_usage(prefix, usage): takes a LiteLLM Usage model_dump or None. Returns a frozen UsageColumns with
+        tokens_input, tokens_output, tokens_cache_read, tokens_cache_creation, cache_creation_1h_tokens,
+        cache_creation_5m_tokens, reasoning_tokens, usage_absent (a sorted tuple of class names) and response_id
+        ("provider" or "not_recorded").
+      Rules, as approved:
+      - No usage (None, or prompt_tokens, completion_tokens and total_tokens all 0, which litellm.completion writes when
+        the provider sent none) gives 0 in every class the row does not fix at a structural 0, and names each of them:
+        four for anthropic, three for deepseek and default (tokens_cache_creation is structural there).
+      - A missing guaranteed key gives 0 in each class it feeds and names those classes. A missing key outside
+        guaranteed (e.g. default's prompt_tokens_details.cached_tokens) reads 0 and is not named.
+      - A structural 0 is never named. A difference below 0 is 0, and its class is named.
+      - reasoning_tokens is the provider's count (deepseek) or None, never LiteLLM's local estimate.
+      - Each split value is None when absent, and None when above tokens_cache_creation. The guard is a few local
+        lines with the same semantics as src/turn_capture/usage.py _split, never an import of usage.py: that module's
+        closure brings about 20 modules (src/telemetry, src/sensitive_values with GITHUB_TOKEN string constants) into
+        scripts/run_persona.py's closure, which the persona image's agnosticism check refuses (critique r5 B1).
+      - Imports stdlib only; no src.* or scripts.* import at all.
+      - Only int values count; a bool or other type is treated as missing.
+  - file: scripts/llm/litellm_wire.py
+    action: Modify
+    purpose: >-
+      CallRecord gains these fields, appended with defaults so positional construction keeps working: response_id
+      (str | None), usage_raw (the Usage model_dump with None values stripped recursively, nested dicts included, or
+      None), cache_creation_1h_tokens, cache_creation_5m_tokens (int | None), usage_absent (tuple[str, ...]),
+      started_at_ms and responded_at_ms (wall-clock epoch ms, int | None). Attempt gains provider, billing_shape and
+      started_at_ms (each defaulting to None). read_response(..., started_at_ms=None, responded_at_ms=None) takes both
+      times from its caller, which reads its own clock, so a test fakes them at the caller. It reads
+      `getattr(response, "usage", None)` (a response without usage no longer raises; rec-5112), hands map_usage the
+      dump or None, and fills the four classes, the split, reasoning_tokens and usage_absent from the result; the
+      all-zero usage litellm.completion synthesizes is recognised by map_usage, not here. response_id is response.id
+      when the row says provider, else None. The token arithmetic it carries today is removed; no other module computes
+      a token class.
+  - file: scripts/llm/litellm_transport.py
+    action: Modify
+    purpose: >-
+      Every Attempt carries the selection's provider and billing_shape and its wall-clock start, from a module-level
+      _wall = time.time that tests replace; it also gives read_response its started_at_ms and responded_at_ms.
+      TransportResult gains probe_record (CallRecord | None, default None), and TransportError (defined in
+      scripts/llm/litellm_wire.py, about :61-78) gains probe_record, set to None in its __init__ there, which the
+      transport assigns. A fresh cold-start probe run in this call is surfaced from both places complete and
+      acomplete run one: the direct `role == warm_fetched_escape_hatch` ensure_asserted call before the role runs
+      (litellm_transport.py about :214-215 and :248-249), and the fail-over fallback_gate. Its record is set on the
+      result, or on the TransportError the call raises after the probe. A cached assertion (fresh False) sets None.
+      complete and acomplete refuse max_attempts below 1 with TransportError("refused", ...,
+      tag="max_attempts_below_one") before any call; the AssertionError path goes (rec-5112).
+  - file: scripts/llm/litellm_cold_start.py
+    action: Modify
+    purpose: >-
+      ColdStartResult gains fresh (bool, default False): True on any result whose probe ran in that call
+      (cold_start_check, acold_start_check, ensure_asserted, aensure_asserted); a cached return is the cached value
+      with fresh False (dataclasses.replace). The lock is per cache key, not one process-global lock held across every probe: a sync
+      dict of threading.Lock keyed by the cache key under a short guard lock, and an async per-loop dict of
+      asyncio.Lock keyed the same (rec-5112). A probe's record carries its wall-clock times, read from a module-level
+      _wall = time.time, through read_response.
+  - file: scripts/smoke_test_inference_credentials.py
+    action: Modify
+    purpose: A broad try now wraps the contract load (_row, about :60, which today runs outside the try at about :91-95), so a load failure prints a diagnostic and returns 1 instead of raising (rec-5112).
+  - file: src/persona_backends/events.py
+    action: Modify
+    purpose: >-
+      attempt_dict adds provider, billing_shape and started_at_ms. header(...) takes tools_sha256 as an appended keyword
+      defaulting to None (the SHA-256 hex of canonical_json of the tool list the run sends; positional callers such as
+      test_events.py:24 keep working) and writes it. turn_record(...) takes probe_record (the probe's
+      CallRecord as a dict, or None) and writes it. The events schema stays 1, since every change is an added key.
+  - file: src/persona_backends/litellm_backend.py
+    action: Modify
+    purpose: >-
+      run_persona builds the tool list once, hashes it into the header and hands the same list to _Run, so
+      tools_sha256 always equals the hash of the tools sent. on_result and on_transport_error pass the result's or the
+      error's probe_record (getattr, default None) into the turn record. No other behaviour changes; still under 500
+      SLOC.
+  - file: docs/contracts/inference-provider.yaml
+    action: Modify
+    purpose: >-
+      The approved sidecar's two blocks: the usage_mapping section before iam_requirements, and a new amendment_log row.
+      Then three notes are re-joined onto one line each, words unchanged, so the file stays at or under 500 effective
+      lines (measured 486 on a scratch tree of ddb28a40): the top-level note, projects_to's model_routing note and
+      tier_model.note. Approved text (Decision 246); no other edit.
+  - file: tests/fixtures/litellm_usage/vectors.json
+    action: Create
+    purpose: >-
+      Synthetic golden vectors, each {name, prefix, model, wire, dump, expected}. wire is a provider response body, dump
+      is the response.usage model_dump that litellm.completion returns for it at the pinned LiteLLM (the production path
+      read_response consumes), and expected is the UsageColumns.
+      - deepseek: a hit/miss pair with provider reasoning_tokens.
+      - anthropic: a cached call with the 5m/1h split, an uncached call, and a call with usage.iterations whose
+        iteration entries each carry their own cache fields, as the real API sends them (LiteLLM 1.106.2 drops the
+        top-level cache counts when the iterations carry none).
+      - default: an OpenAI-shaped cached pair.
+      - a deepseek body with no usage: its dump is LiteLLM's all-zero Usage, and expected names tokens_input,
+        tokens_cache_read and tokens_output in usage_absent.
+      Ids are synthetic.
+  - file: tests/turn_capture/test_litellm_usage.py
+    action: Create
+    purpose: >-
+      - test_usage_mapping_conformance: map_usage(dump) equals expected for every vector.
+      - test_vectors_match_litellm_completion: each wire body, served by tests/fixtures/litellm_capture.py's capture()
+        to litellm.completion(model, messages, api_key, num_retries=0) offline, gives a response whose usage
+        model_dump, None values stripped and projected onto the keys the vector's row reads plus iterations, equals the
+        same projection of the recorded dump (the full dump stays recorded), and Anthropic's response id differs from the
+        wire id. So an additive LiteLLM Usage field does not redden a grouped bump; a changed key a row reads does. It
+        also asserts map_usage(prefix, live_dump) equals expected, which covers the missing-usage rule's keys
+        (prompt_tokens, completion_tokens, total_tokens) on the live dump. litellm comes from
+        scripts.llm.litellm_wire.load_litellm() after cap.reset(monkeypatch), which keeps the local cost map (no
+        importorskip, no module-top import).
+      - test_difference_equals_wire_uncached: for each vector whose row derives tokens_input as a difference, expected
+        tokens_input equals the uncached count in the wire body (anthropic: input_tokens, summed over usage.iterations
+        when present; default: prompt_tokens minus prompt_tokens_details.cached_tokens), so the source text's proof is
+        not tautological.
+      - test_table_matches_contract: USAGE_TABLE equals inference-provider.yaml usage_mapping.rows.
+      - test_lock_only_diff_selects_this_file: derive_affected_tests([("M", "requirements-dev.txt")]) selects this file
+        (mirrors tests/test_llm_litellm_transport.py:90-92; the file spells "requirements-dev.txt" as a quoted token),
+        so a LiteLLM bump re-runs the vectors pre-merge.
+      - test_missing_usage_marks_absent: None and the all-zero usage, per row (four names for anthropic, three for
+        deepseek and default).
+      - test_missing_key_outside_guaranteed_is_not_named.
+      - test_negative_difference_is_zero_and_absent.
+      - test_split_above_cache_creation_is_none.
+      - test_non_int_value_is_missing: a bool, float or str in a guaranteed key counts as missing.
+      - test_run_persona_closure_adds_only_litellm_usage: an AST walk of scripts/run_persona.py's static first-party
+        import closure (import and from-import of src.* and scripts.*, following packages' __init__.py) holds, under
+        src/turn_capture/, exactly src/turn_capture/__init__.py and src/turn_capture/litellm_usage.py, and nothing under
+        src/sensitive_values/ or src/telemetry/. This pins the conditional image rows' enumeration whether or not the
+        image plan has merged. Its failure message names the companion edits (config/persona_image.yaml build.copy, its
+        Dockerfile and .dockerignore lines, and validate_persona_github_agnosticism's pre_globs in
+        scripts/checks/ci_guards/_manifest.py, when present) and says a deliberate widening edits this test.
+      - test_unknown_form_raises_on_first_use: a table row in a form the parser does not name raises ValueError on
+        first use, not at import; test_table_parses_every_row parses all three rows. USAGE_TABLE holds the structural 0
+        as int 0, as the contract's YAML loads it, so test_table_matches_contract compares like with like.
+      - test_reasoning_tokens_provider_only.
+  - file: tests/test_llm_litellm_robustness.py
+    action: Create
+    purpose: >-
+      rec-5112's TestMissingUsage, the node its acceptance names. A response fake with choices and no usage attribute
+      (defensive: at 1.106.2 litellm.completion never returns one, see context), through the primary (deepseek) role
+      of the transport and through cold_start_check on the fallback (anthropic) role, gives a record, never an
+      exception, whose usage_absent names every non-structural class of that row: three for deepseek, four for
+      anthropic. rec-5112's other three fixes are tested in each source's own mapped test file, so per-file coverage
+      (map_source_to_test) holds.
+  - file: tests/test_llm_litellm_wire.py
+    action: Modify
+    purpose: >-
+      TestRecords asserts the new CallRecord fields, recursive None-stripping of usage_raw, the passed-in times, and that
+      each token class comes from map_usage (no arithmetic left in read_response), including a response with no usage
+      attribute. The SimpleNamespace usage fakes move to real litellm.Usage objects carrying the provider keys; the
+      deepseek expectations change because the row now reads prompt_cache_hit/miss_tokens, a re-specification by
+      design (no weakening: the old fakes lacked those keys).
+  - file: tests/test_llm_litellm_transport.py
+    action: Modify
+    purpose: >-
+      - TestAttemptFields: provider, billing_shape and started_at_ms on ok and failed attempts, from a fake _wall.
+      - TestProbeRecord: a fail-over result carries the fresh probe's record; a second fail-over in the process
+        carries None; a fallback raise after a fresh probe carries it on the error; a direct warm_fetched_escape_hatch
+        call carries its fresh probe's record on the result and on a later error, and a cached one carries None. Sync
+        and async.
+      - TestMaxAttempts: max_attempts 0 is refused with tag max_attempts_below_one before any call, sync and async,
+        including with role warm_fetched_escape_hatch, where zero requests are made (the refusal precedes the direct
+        ensure_asserted, a billable probe).
+      TestToolsCallUnderPins is unchanged.
+  - file: tests/test_llm_litellm_cold_start.py
+    action: Modify
+    purpose: >-
+      TestGates asserts fresh True on the probing call and False on the cached return. Planned re-specification (rec-5112 and the cold-start scope row):
+      the `first is again` identity asserts (about :92 and :109) become equality on every field but fresh, since the
+      cached return is now a replaced copy. TestColdStartLock (rec-5112): two cache keys probe concurrently without
+      waiting on each other, and one key probes once, sync and async. Deterministic: the first key's probe blocks on a
+      threading.Event (asyncio.Event for async) that the second key's probe sets, with a bounded timeout, never a sleep.
+  - file: tests/test_smoke_test_inference_credentials.py
+    action: Modify
+    purpose: >-
+      TestRun gains test_contract_load_error_returns_one (rec-5112): a contract load error prints a diagnostic and
+      returns 1. Planned re-specification (AC6): test_missing_row (about :130-133) expected a raised TierSelectionError
+      and now asserts the return 1 and the diagnostic, which is rec-5112's fix.
+  - file: tests/persona_backends/test_events.py
+    action: Modify
+    purpose: test_attempt_and_probe_fields (attempt keys, header tools_sha256, turn probe_record).
+  - file: tests/persona_backends/test_litellm_backend.py
+    action: Modify
+    purpose: >-
+      Adds test_fail_over_turn_carries_probe_record and test_header_tools_sha256_matches_tools_sent;
+      test_tool_then_final_succeeds_with_two_turn_events is unchanged.
+  - file: tests/persona_backends/fakes.py
+    action: Modify
+    purpose: The fakes keep the real shapes. attempt() and record() fill the new fields, and the result and error fakes can carry probe_record.
+  - file: config/persona_image.yaml
+    action: Modify
+    purpose: >-
+      Conditional: only if PLAN-persona-image-twin has merged at build time (the file exists on origin/main). This plan
+      puts src/turn_capture/litellm_usage.py into the static import closure of scripts/run_persona.py (run_persona ->
+      litellm_transport -> litellm_wire -> litellm_usage), and that plan's validate_persona_github_agnosticism fails on a
+      closure module build.copy does not hold. build.copy gains exactly src/turn_capture/__init__.py and
+      src/turn_capture/litellm_usage.py, the two files test_run_persona_closure_adds_only_litellm_usage pins. No other
+      key changes. If the plan has not merged,
+      skip this row and the three below: that plan measures build.copy from the closure when it builds.
+  - file: docker/persona/Dockerfile
+    action: Modify
+    purpose: Conditional, as config/persona_image.yaml above. One COPY per new build.copy entry, to /app/<same path>, so validate_persona_image_digest's COPY-equals-build.copy rule holds.
+  - file: docker/persona/Dockerfile.dockerignore
+    action: Modify
+    purpose: Conditional, as config/persona_image.yaml above. One "!<path>" per new build.copy entry, so the allow-list equals build.copy plus the lock.
+  - file: scripts/checks/ci_guards/_manifest.py
+    action: Modify
+    purpose: >-
+      Conditional, as config/persona_image.yaml above. validate_persona_github_agnosticism's literal pre_globs gain
+      src/turn_capture/__init__.py and src/turn_capture/litellm_usage.py, so tests/checks/ci_guards/test__manifest.py's
+      rule (the pre_globs match every .py file under a live build.copy entry) holds and a PR touching only
+      litellm_usage.py still runs the check in --pre. No other entry changes.
+bundled_recommendations: [rec-5112]
+followon_recs: [rec-4028, rec-5318]
+infrastructure_dependencies: []
+acceptance_criteria:
+  - map_usage maps every golden vector's recorded dump and live dump to its expected columns, each wire body served to litellm.completion at the pinned LiteLLM gives a dump whose projection onto the keys its row reads equals the recorded dump's, and each difference-derived tokens_input equals the wire body's uncached count.
+  - USAGE_TABLE equals inference-provider.yaml usage_mapping.rows and drives map_usage. The contract names no LiteLLM version, and a change to requirements-dev.txt selects the golden-vector test pre-merge. The persona image's own litellm lock re-running the vectors is rec-5318 (T7 image line), not this plan.
+  - read_response computes no token class itself. A response with no usage block, or LiteLLM's all-zero usage, gives a record whose usage_absent names every non-structural class of its row (four for anthropic, three for deepseek and default), never an exception.
+  - Every Attempt the transport returns or raises carries provider, billing_shape and started_at_ms. A call that ran a fresh cold-start probe, through the fail-over gate or the direct warm_fetched_escape_hatch role, carries that probe's CallRecord on its result or error, and a cached assertion carries none.
+  - The events header carries tools_sha256 equal to the hash of the tools sent, and each turn record carries probe_record.
+  - max_attempts below 1 is refused, the cold-start lock is per key, and the smoke test returns 1 on a contract load error.
+  - inference-provider.yaml carries the two approved blocks word for word and is at or under 500 effective lines.
+  - Nothing deploys from this plan, and no telemetry row or writer call is added (VP 6). A persona image republish through PLAN-persona-image-channel, if built, is disclosed in VP 6's action and is that channel's path, not this plan's.
+  - rec-5112 is closed by the merge's Resolves trailer.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The usage mapping against the golden vectors, litellm.completion at the pinned version, and the contract table.
+    command: bin/venv-python -m pytest tests/turn_capture/test_litellm_usage.py -q
+    expected: >-
+      Exit 0, every node passes. Nothing can skip: the test loads litellm through load_litellm() with no importorskip, so
+      a venv without it errors. Red before (the module and the test are absent).
+    fix_if: >-
+      A vector's dump differs from what litellm.completion returns: re-record the dump only if the wire body is right,
+      and never edit expected to match the code. A table mismatch: the code is wrong, since the contract is the approved
+      text.
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: litellm-usage-mapping-conformance
+  - step: 2
+    phase: pre-deploy
+    action: The transport, wire and cold-start changes, and rec-5112's four fixes, each in its source's mapped test file except TestMissingUsage.
+    command: >-
+      bin/venv-python -m pytest tests/test_llm_litellm_robustness.py tests/test_llm_litellm_wire.py
+      tests/test_llm_litellm_transport.py tests/test_llm_litellm_cold_start.py tests/test_smoke_test_inference_credentials.py -q
+    expected: >-
+      Exit 0, every node passes. Red before (the robustness file is absent, so pytest exits 4). Each changed source keeps
+      100% coverage from its own mapped test file (VP 7's validate_test_coverage).
+    fix_if: >-
+      An attempt without provider, or a probe record surfaced twice or missing on the direct fallback path: fix the
+      transport, never the fake. A coverage gap: add the node to the source's mapped test file, never to the robustness
+      file.
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: litellm-call-record-transport
+  - step: 3
+    phase: pre-deploy
+    action: The events file carries the new fields, and the backend passes them through.
+    command: >-
+      bin/venv-python -m pytest tests/persona_backends/test_events.py::test_attempt_and_probe_fields
+      tests/persona_backends/test_litellm_backend.py::test_fail_over_turn_carries_probe_record
+      tests/persona_backends/test_litellm_backend.py::test_header_tools_sha256_matches_tools_sent -q
+    expected: >-
+      Exit 0, the three nodes pass. Red before (they are absent, so pytest exits 4). The rest of tests/persona_backends,
+      including the kept run-persona-litellm-backend-loop node, runs in every tier.
+    fix_if: tools_sha256 computed from a different list than the one sent; build the list once in run_persona.
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: litellm-call-record-events
+  - step: 4
+    phase: pre-deploy
+    action: Import boundaries. src/turn_capture stays stdlib plus its allowed imports, and src imports nothing under scripts.
+    command: bin/venv-python -m pytest tests/turn_capture/test_package_boundary.py tests/persona_backends/test_package_boundary.py -q && bin/venv-python -m scripts.import_governance --check-contracts
+    expected: Exit 0 from both; import-linter reports 0 contracts broken.
+    fix_if: litellm_usage importing yaml or scripts; keep it stdlib and let the test read the contract.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      Both halves are already standing guards: the two boundary tests run in every fast tier and the import-linter run
+      is a registered check, so a registry shard would duplicate them.
+  - step: 5
+    phase: pre-deploy
+    action: >-
+      The placed contract text. The sidecar binds inference-provider.yaml, the contract stays under the contracts size
+      cap, and the inference-provider registry check passes.
+    command: >-
+      bin/venv-python -m scripts.roadmap.approved_text verify --slug litellm-call-record && bin/venv-python -c
+      "from scripts.checks.structural.size_limits import validate_structural_size_limits as a;
+      from scripts.checks.contracts.validate_inference_provider_registry import validate_inference_provider_registry as b;
+      f=[];a(f);b(f);f=[x for x in f if 'inference-provider' in x or 'inference_provider' in x];print(*f,sep='\n');
+      print(f'contract checks: {len(f)} failures');assert not f"
+    expected: The verify run passes, and the last line reports 0 failures.
+    expected_literals:
+      - 'contract checks: 0 failures'
+    fix_if: >-
+      A verify mismatch: place the block word for word, and never edit the sidecar. Over the cap: re-join the three named
+      notes (words unchanged). If still over, STOP to this planning thread; never raise the budget.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      The approved-text verify runs in validate_merge_step and both checks run in every tier, so a shard would
+      duplicate them.
+  - step: 6
+    phase: pre-deploy
+    action: >-
+      No Lambda artifact bundles a changed path, and no PROD or DuckLake deploy channel watches one (Decision 249 clause
+      2). If PLAN-persona-image-channel has built, its publish workflow rebuilds the persona image after main's CI
+      because build.copy holds scripts/llm and src/persona_backends: that republish is the channel's intended path, never
+      a deploy from this plan, and the non-null-digest STOP in constraints still applies.
+    command: >-
+      bin/venv-python -c "import subprocess;from scripts.convergence_health.code_drift import PROD_SOURCE_PATHSPECS as P,DUCKLAKE_SOURCE_PATHSPECS as D;from scripts.lambda_manifest import compute_affected_artifacts as ca;import fnmatch;run=lambda a:subprocess.run(a,capture_output=True,text=True,check=True).stdout.split();mb=subprocess.run(['git','merge-base','HEAD','origin/main'],capture_output=True,text=True,check=True).stdout.strip();ch=sorted(set(run(['git','diff','--name-only',mb]))|set(run(['git','ls-files','--others','--exclude-standard'])));hit=lambda f,g:f==g or f.startswith(g.rstrip('/')+'/') or fnmatch.fnmatch(f,g);hits=sorted({f for f in ch for g in P+D if hit(f,g)});aff=ca(ch);print('changed',len(ch),'hits',hits,'affected',aff);assert 'scripts/llm/litellm_wire.py' in ch and 'src/turn_capture/litellm_usage.py' in ch;assert not hits and not aff;print('NO_DEPLOY_TRIGGER_OK')"
+    expected: >-
+      Exit 0. The change list holds the wire module and the new usage module, no changed path matches a
+      PROD_SOURCE_PATHSPECS or DUCKLAKE_SOURCE_PATHSPECS entry, affected is empty, and the last line is
+      NO_DEPLOY_TRIGGER_OK.
+    fix_if: >-
+      An artifact is affected: a changed path is bundled somewhere. STOP to this planning thread; never deploy from this
+      plan.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      It reads this branch's transient diff against the merge-base, which is empty on main. The data-pipeline excludes
+      are held in every tier by the turn-capture and persona-backends boundary tests.
+  - step: 7
+    phase: pre-deploy
+    action: Pre-handoff full tier on the committed, rebased tree (Decision 163), read through its evidence file.
+    command: bin/venv-python -m scripts.validate; bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: >-
+      Start the full tier backgrounded with a 2 h limit from the top-level session (AGENTS.md; it outlasts the foreground
+      cap), then read the verdict with --verify-head, never a pipe's exit status. It reports the full tier passed on
+      HEAD's tree.
+    fix_if: Any failure; fix and re-run both from the start (timeout_disposition blocked).
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: post-deploy
+    action: rec-5112 is closed by the merge.
+    command: >-
+      AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids,
+      make_reader; r,_=fetch_recs_by_ids(make_reader(),['rec-5112']); print(r[0]['status']); assert
+      r[0]['status']=='closed'"
+    expected: Prints closed.
+    fix_if: An open rec means the Resolves trailer was missing; close it through the portal with the merge SHA as evidence.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: src/turn_capture/litellm_usage.py
+    behavior: Each row's mapping, the missing-usage marker, the never-negative rule and provider-only reasoning tokens.
+    verification_step: 1
+    test_selector: tests/turn_capture/test_litellm_usage.py::test_usage_mapping_conformance
+    red_green_expectation: red before (module and test absent), green after.
+  - source: scripts/llm/litellm_wire.py
+    behavior: read_response fills the record from map_usage, takes its times from the caller, and survives a response with no usage.
+    verification_step: 2
+    test_selector: tests/test_llm_litellm_wire.py::TestRecords
+    red_green_expectation: red before (the new field and map_usage assertions fail; on main a response fake with no usage attribute raises AttributeError), green after.
+  - source: scripts/llm/litellm_transport.py
+    behavior: Attempts carry provider, billing_shape and their start; a fresh probe's record surfaces once from the fail-over gate and the direct fallback role; max_attempts below 1 is refused (TestMaxAttempts in the same file).
+    verification_step: 2
+    test_selector: tests/test_llm_litellm_transport.py::TestProbeRecord
+    red_green_expectation: red before (absent), green after.
+  - source: scripts/llm/litellm_cold_start.py
+    behavior: fresh marks a probe run in this call, and the lock is per key.
+    verification_step: 2
+    test_selector: tests/test_llm_litellm_cold_start.py::TestColdStartLock
+    red_green_expectation: red before (absent; on main a second key waits on the first probe), green after.
+  - source: scripts/smoke_test_inference_credentials.py
+    behavior: A contract load error returns 1 with a diagnostic.
+    verification_step: 2
+    test_selector: tests/test_smoke_test_inference_credentials.py::TestRun::test_contract_load_error_returns_one
+    red_green_expectation: red before (absent; on main the load error raises), green after.
+  - source: src/persona_backends/events.py
+    behavior: Attempt keys, header tools_sha256 and the turn's probe_record.
+    verification_step: 3
+    test_selector: tests/persona_backends/test_events.py::test_attempt_and_probe_fields
+    red_green_expectation: red before (absent), green after.
+  - source: src/persona_backends/litellm_backend.py
+    behavior: A fail-over turn carries the probe's record, and the header hash equals the hash of the tools sent.
+    verification_step: 3
+    test_selector: tests/persona_backends/test_litellm_backend.py::test_fail_over_turn_carries_probe_record
+    red_green_expectation: red before (absent; VP 3 also runs test_header_tools_sha256_matches_tools_sent), green after.
+  - source: docs/contracts/inference-provider.yaml
+    behavior: The two approved blocks, word for word, and USAGE_TABLE equal to the rows.
+    verification_step: 1
+    test_selector: tests/turn_capture/test_litellm_usage.py::test_table_matches_contract
+    red_green_expectation: red before (absent; then red until u02 is placed), green after.
+  - source: config/persona_image.yaml
+    behavior: build.copy holds the src/turn_capture entries in run_persona's closure (conditional row).
+    verification_step: 7
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: >-
+      Applies only if PLAN-persona-image-twin has merged at build time. Its own registered checks,
+      validate_persona_github_agnosticism (closure module missing from build.copy) and validate_persona_image_digest
+      (COPY list and allow-list equal build.copy), are the test and run in every tier, including VP 7's full tier; this
+      plan adds no test of its own for a config or Dockerfile line.
+  - source: docker/persona/Dockerfile
+    behavior: One COPY per new build.copy entry (conditional row).
+    verification_step: 7
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: >-
+      Applies only if PLAN-persona-image-twin has merged at build time. Its own registered checks,
+      validate_persona_github_agnosticism (closure module missing from build.copy) and validate_persona_image_digest
+      (COPY list and allow-list equal build.copy), are the test and run in every tier, including VP 7's full tier; this
+      plan adds no test of its own for a config or Dockerfile line.
+  - source: docker/persona/Dockerfile.dockerignore
+    behavior: One allow-list line per new build.copy entry (conditional row).
+    verification_step: 7
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: >-
+      Applies only if PLAN-persona-image-twin has merged at build time. Its own registered checks,
+      validate_persona_github_agnosticism (closure module missing from build.copy) and validate_persona_image_digest
+      (COPY list and allow-list equal build.copy), are the test and run in every tier, including VP 7's full tier; this
+      plan adds no test of its own for a config or Dockerfile line.
+  - source: scripts/checks/ci_guards/_manifest.py
+    behavior: validate_persona_github_agnosticism's pre_globs cover the new src/turn_capture build.copy entries (conditional row).
+    verification_step: 7
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: >-
+      Applies only if PLAN-persona-image-twin has merged at build time. That plan's tests/checks/ci_guards/test__manifest.py
+      asserts the pre_globs match every .py file under a live build.copy entry; it is the test and runs in every tier,
+      including VP 7's full tier.
+weakening_dispositions: []
+constraints:
+  - >-
+    Place every sidecar block word for word, with {{DATE}} filled with the build date; never edit the sidecar (Decision
+    246). inference-provider.yaml gets no other edit than the three whitespace-only re-joins. If the rebase moves a
+    block's before text, STOP to this planning thread.
+  - >-
+    No telemetry row, writer call, AWS call or key read, and no LiteLLM CustomLogger or callback (operator ruling
+    2026-11-17). src/turn_capture/litellm_usage.py imports stdlib only, and no src module imports scripts. No edit to
+    scripts/run_persona.py, src/persona_backends/contract.py or executor-personas.yaml (plans 2 and 4 own those).
+  - >-
+    Golden vectors run only through litellm.completion, never a provider SDK (Decision 173 clause 1). Every id and
+    value in them is synthetic (Decision 101).
+  - Every module stays under 500 SLOC (Decision 128); split, never raise.
+  - >-
+    If PLAN-persona-image-twin has merged, the four conditional image rows (config/persona_image.yaml, the Dockerfile,
+    its .dockerignore and the agnosticism check's pre_globs in scripts/checks/ci_guards/_manifest.py) apply and the PR
+    runs the image conformance build. If config/persona_image.yaml then carries a non-null digest, or the image checks fail for any reason other than
+    the new src/turn_capture entries, STOP to this planning thread; never edit another image key.
+  - No rescue agents or workaround loops (Decision 55); never skip, disable or quarantine a test (Decision 235).
+context:
+  - >-
+    Decision-scout r3 (2026-11-17): Verdict: FLAGS_FOUND. Decisions triaged: 219 of 219. Roadmap items intersected: 3;
+    CONFLICT: 0; RELATED: 2. Serves: NS.6 3/5. CITE: 166, 173, 199, 246. Both Decision 99 NOTEs resolved:
+    - r1 (one source of truth for versions): the table is tied by test_table_matches_contract, and the contract names no
+      litellm version; each lock that pins litellm is its own runtime's source.
+    - r3 (a pin-equality test makes litellm lockstep and strands the Dependabot pip minor-and-patch group): there is no
+      pin-equality test. The vectors compare only the usage keys a row reads, so a bump turns red only if it changes one
+      of those, and litellm needs no exclude-pattern or auto-merge denylist entry. A red grouped bump is re-checked by
+      whoever lands that bump PR, like any failing test it brings.
+    Decision-scout r6: Verdict: NO_FLAGS. Decisions triaged: 219 of 219. Roadmap items intersected: 3; CONFLICT: 0;
+    RELATED: 2. Serves: NS.6 3/5. CITE: 166, 173, 199, 246.
+  - >-
+    Split and design: blind consult /mnt/project-files/run-persona-backend/plan3-advisor-brief/ADVICE.md. Sign-off:
+    operator "write the plan" 2026-11-17 18:35 UTC on PRESENTATION-plan3a.md; decision card "Transport record, re-word
+    rec" (no CustomLogger). rec-4028 re-worded the same day (title, file, acceptance; read back).
+  - >-
+    Offline probe at LiteLLM 1.106.2 on synthetic bodies, re-measured through litellm.completion over
+    tests/fixtures/litellm_capture.py (critique r1 B1):
+    - DeepSeek's dump keeps prompt_cache_hit_tokens and prompt_cache_miss_tokens, cached_tokens equals the hit count,
+      and the id passes through.
+    - Anthropic's prompt_tokens includes cache read and creation, the split sits at
+      prompt_tokens_details.cache_creation_token_details, and reasoning_tokens is LiteLLM's estimate.
+    - LiteLLM replaces Anthropic's message id with its own chatcmpl- id, hence response_id not_recorded.
+    - A DeepSeek body with no usage gives Usage(prompt_tokens 0, completion_tokens 0, total_tokens 0, no details), hence
+      the approved all-zero rule. An Anthropic body with no usage raises inside LiteLLM as APIConnectionError (an
+      outage, retried). Only transform_response called directly leaves no usage attribute, so rec-5112's no-usage case
+      is defensive hardening tested on a fake response.
+    UNPROVEN until the fixture run: real provider usage keys and ids at deepseek-flash and claude-opus-5-5.
+  - >-
+    For 3b (brief written at handoff): it maps rows from these records. Its open forks are the root-session pin envelope
+    text, the failed-attempt ref grammar, the sender with the egress plan, and thinking rows as a child rec. Shared files
+    with parallel plans: src/persona_backends/litellm_backend.py and events.py (plan 4, rec-5267, told 2026-11-17;
+    tools_sha256 must hash the full tool list once MCP tools join it). inference-provider.yaml is also scoped by unbuilt
+    PLAN-billing-shape-local and PLAN-retire-github-pat-secret, and tests/persona_backends/fakes.py by unbuilt
+    PLAN-run-persona-verdict-consistency. Whichever builds second rebases. PLAN-persona-image-twin
+    (T7, building) gives the persona image its own litellm lock that Dependabot bumps apart from requirements-dev.txt;
+    re-running these vectors at that lock's version is rec-5318 (filed 2026-11-17, owner the T7 image planning line). That plan's
+    build.copy is measured from run_persona's closure, which this plan widens to src/turn_capture/litellm_usage.py, hence
+    the four conditional image scope rows when it builds first (critique r4 B1). If this plan merges first, the image
+    plan's builder adds src/turn_capture/__init__.py and litellm_usage.py to build.copy, its Dockerfile, .dockerignore
+    and the agnosticism check's pre_globs (its own closure and test__manifest.py rules demand it); the T7 image line was
+    told on 2026-11-17. Also for 3b: the probe's
+    CallRecord persona is the contract's first persona (litellm_cold_start.py about :56-58), not the running persona;
+    a probe that got a response but is not_asserted (no choices) or spent may be billed yet carries no record;
+    litellm_backend.py (about :191, :211) counts probe_turn 1 on any fail-over, including a cached assertion whose turn
+    carries probe_record None, so probe_turn is not a billed probe; an asyncio.wait_for timeout (about :135-153) can
+    cancel a call whose fresh probe was billed and leave no record; and the
+    1h/5m split's sum residual that telemetry_observations.yaml (about :438, :446) gives rec-4028 is narrowed here by the
+    per-value at_most guard.
+  - >-
+    Graduated shards kept unchanged: litellm-transport-tools-call-under-pins (TestToolsCallUnderPins) and
+    run-persona-litellm-backend-loop (test_tool_then_final_succeeds_with_two_turn_events). Neither node is renamed.
+  - >-
+    Red-overlap 2026-11-17: blocked, slo_breached, on rec-5247 (telemetry reader smoke 504, Feedback Loop's); shared
+    paths none. Deferral: this plan touches no telemetry reader or smoke path, and its build still needs a green full
+    tier.
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:2004bf23042d68c92e884b3183576537284103f19290895f7a6891c32d7bcbda"}
+  - {gate: wording-check, round: 1, verdict: PASS, digest: 1687ce0f1d8a6f985b92e823c66e198155e039cd8150337106b7e6f0f06ffa3d, base: ddb28a40c5dc5d3b382ea45fa403772f8c833edf, selection: complete}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: "v1:02887c821572db72a2799b1f9c604d1b04075477bcbabc6b865f5ffe2e354068"}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 4, nits: 12}
+  - {gate: wording-check, round: 2, verdict: PASS, digest: 7d2519f11c72ffe7bc422d6925084d7edf129b516058a9a8508835e53a788e4e, base: ddb28a40c5dc5d3b382ea45fa403772f8c833edf, selection: complete}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:f3d490b4d343cea90ad043a61e354db7fc6629de82f9b117e05fa687999f90e5"}
+  - {gate: plan-critique, round: 2, verdict: PROCEED, blocking: 0, nits: 10}
+  - {gate: wording-check, round: 3, verdict: PASS, digest: fe906b0e8dd599fdb878e0c821b525472f0ae4c1b2b54bacd12397bd37da074b, base: ddb28a40c5dc5d3b382ea45fa403772f8c833edf, selection: complete}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 4, verdict: NO_FLAGS, scout_input_fingerprint: "v1:00863cf182bbe2fdc7020fd36bd1465e3934d5e62787b71b07df888d40c77fd2"}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 6}
+  - {gate: wording-check, round: 4, verdict: PASS, digest: ceb9bc98ae024a0951d42c87a76d21bb89e2ffd519082b81d03f464a15d6fd7f, base: ddb28a40c5dc5d3b382ea45fa403772f8c833edf, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 6}
+  - {gate: decision-scout, round: 5, verdict: NO_FLAGS, scout_input_fingerprint: "v1:977ceafed1430fa6a3c2faa13b6eafd6c1f0ff3841c9f39acf29b8ee187d9aa2"}
+  - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 4}
+  - {gate: plan-critique, round: 6, verdict: PROCEED, blocking: 0, nits: 3}
+  - {gate: plan-critique, round: 7, verdict: REVISE, blocking: 1, nits: 4}
+  - {gate: decision-scout, round: 6, verdict: NO_FLAGS, scout_input_fingerprint: "v1:5e31802dc06d2890bfa7e6f0a7c78c99a9e5499b4f8f6c76fda22c4d332c12a3"}
+  - {gate: plan-critique, round: 8, verdict: PROCEED, blocking: 0, nits: 3}
+  - {gate: plan-critique, round: 9, verdict: PROCEED, blocking: 0, nits: 2}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Only the plan-cited decision sections (166, 173, 199, 246)
+  - All files in scope located and readable; docs/plans/approved/litellm-call-record.yaml read
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - >-
+    Read scripts/llm/litellm_wire.py, litellm_transport.py, litellm_cold_start.py,
+    src/persona_backends/events.py, litellm_backend.py, tests/persona_backends/fakes.py and the sidecar.
+  - >-
+    Place the sidecar's two blocks in docs/contracts/inference-provider.yaml ({{DATE}} = build date). Re-join the
+    three named notes (words unchanged) and measure effective lines (scripts.checks.structural._classify.effective_lines)
+    at or under 500.
+  - >-
+    Write tests/fixtures/litellm_usage/vectors.json. Record each dump by serving its wire body through
+    tests/fixtures/litellm_capture.py's capture() to litellm.completion offline (the path read_response consumes, not a
+    provider config's transform_response), and write expected by hand from the approved rows. Then write
+    src/turn_capture/litellm_usage.py and tests/turn_capture/test_litellm_usage.py, red first.
+  - >-
+    Write tests/test_llm_litellm_robustness.py (TestMissingUsage) and the new nodes in the transport, cold-start, wire and
+    smoke tests red, then edit litellm_wire.py, litellm_transport.py, litellm_cold_start.py and the smoke script, and
+    update the fakes. Each rec-5112 fix is tested in its source's mapped test file, so per-file coverage holds.
+  - Edit src/persona_backends/events.py and litellm_backend.py and their tests.
+  - Run bin/venv-python -m scripts.validate --pre and fix; git add the new files.
+  - Execute Verification Plan steps 1-6. Run each step and loop until it passes; on an unrecoverable failure stop and RCA (Decision 55).
+  - >-
+    CLOSURE. Report each outcome separately: readiness, parent-validator evidence, postflight evidence, and the real
+    push and PR outcome (implement skill Commit Flows; docs/contracts/git-ops.yaml handoff_sequence).
+    - Run bin/venv-python -m scripts.session.github_readiness.
+    - Run /implement's Verification Graduation walk, which writes the registry shards
+      litellm-usage-mapping-conformance, litellm-call-record-transport and litellm-call-record-events.
+    - Record weakening_dispositions as planned-change, citing rec-5112 and this plan's scope rows, for each candidate
+      validate_weakening_candidates lists, expected: tests/test_smoke_test_inference_credentials.py::TestRun::test_missing_row,
+      the two `first is again` asserts in tests/test_llm_litellm_cold_start.py::TestGates, and the deepseek expectations
+      in tests/test_llm_litellm_wire.py::TestRecords. Then set implementation_declared: true in this plan.
+    - Commit (feat(litellm-call-record): ...) with the trailer `Resolves: rec-5112` in the commit body.
+    - git fetch origin main && git rebase origin/main.
+    - Run VP step 7 on that committed, rebased tree.
+    - Write /tmp/implementation-retrospective.json with the scripts.session.postflight_evidence.CATEGORIES keys, then
+      run bin/venv-python -m scripts.session.postflight --evidence /tmp/implementation-retrospective.json.
+    - Push (git push -u origin HEAD as its own call). Open the PR, and report it as opened only with the returned PR
+      number. Subscribe to it.
+    - On green CI, squash-merge with the Resolves trailer in the commit message. Then run VP step 8.
+    - No roadmap edit (T4.32 c1 stays open).
+  - 'Report: what was implemented, verification results, and anything UNPROVEN.'
+rollback: >-
+  Revert the build commit. Nothing reads the new record fields yet (3b is unbuilt), no stored row or deployed artifact
+  depends on them, and the contract rows revert with the code.

@@ -8,6 +8,7 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
+from src.persona_backends import verdict
 from src.persona_backends.contract import LoadedContract
 
 _ERROR_CAP = 20
@@ -50,9 +51,12 @@ def check(content: str, finish_reason: str | None, loaded: LoadedContract) -> Ch
         return Checked(None, [f"$: not valid JSON ({exc.msg})"])
     if not isinstance(value, dict):
         return Checked(None, ["$: not a JSON object"])
-    errors = (
-        _failure_errors(value, loaded) if value.get("outcome") == "failure" else schema_errors(loaded.output_schema, value)
-    )
+    if value.get("outcome") == "failure":
+        errors = _failure_errors(value, loaded)
+    else:
+        errors = schema_errors(loaded.output_schema, value)
+        if not errors and loaded.verdict_consistency is not None:
+            errors = verdict.verdict_errors(loaded.verdict_consistency, value)
     return Checked(None if errors else value, errors)
 
 

@@ -72,9 +72,10 @@ TEST_BASE_SECONDS = 180.0
 # used only when the merge-base cost table read is `absent` (the installing PR).
 PER_MODULE_SECONDS = 2.0
 
-# Derived guardrail, not a second tier budget (Decision 153): pr-validate's 30-min job timeout
-# (.github/workflows/ci.yml) minus a ~5-min diagnostic margin, on the fast tier's own elapsed clock
-# (job clock additionally includes checkout/pip). Re-derive if timeout-minutes changes.
+# Derived guardrail, not a second tier budget (Decision 153): pr-validate's 45-min job timeout
+# (.github/workflows/ci.yml) minus the persona image conformance step's 15-min timeout minus a ~5-min diagnostic
+# margin = 25 min = 1500 s, on the fast tier's own elapsed clock (job clock additionally includes checkout/pip).
+# Re-derive if either timeout-minutes changes.
 CEILING_SECONDS = 1500.0
 
 # 450.0 -- written as the partition it IS, so the two halves and their sum can never drift apart.
