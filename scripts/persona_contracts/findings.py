@@ -64,6 +64,11 @@ def _dec(item: dict[str, Any]) -> str | None:
     return f"dec:{value}" if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def _cite_id(item: dict[str, Any]) -> str | None:
+    anchor = _dec(item)
+    return anchor.replace("dec:", "cite:") if anchor else None
+
+
 @dataclass(frozen=True)
 class ListSpec:
     path: str
@@ -124,7 +129,7 @@ LISTS: dict[str, tuple[ListSpec, ...]] = {
             "cite",
             "cite",
             ("decision",),
-            lambda i: _dec(i).replace("dec:", "cite:") if _dec(i) else None,
+            lambda i: _cite_id(i),
             _no,
             _no,
             _dec,

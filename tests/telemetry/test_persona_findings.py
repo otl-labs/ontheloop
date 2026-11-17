@@ -70,7 +70,7 @@ def test_a_run_without_findings_keeps_its_verdict_row() -> None:
 
 
 def test_unreadable_results_keep_only_the_verdict_row() -> None:
-    cases = {
+    cases: dict[str, dict[str, Any]] = {
         "block_absent": {"text": _fixture("code_review_no_block.txt")},
         "block_invalid": {"text": BLOCK_MARKER + "{not json"},
         "content_unavailable": {},
@@ -122,10 +122,16 @@ def test_validated_results_project_for_every_verdict_persona() -> None:
     assert [r.finding_ordinal for r in rows] == [0, 1, 2, 3, 4]
 
 
+def _accepted(field: Any) -> set[str]:
+    assert field.dq_intent is not None
+    return set(field.dq_intent["accepted_values"]["values"])
+
+
 def test_lists_cover_every_finding_list_of_each_persona_contract() -> None:
     contract = load_contract(CONTRACT)
-    verdicts = set(contract.fields["verdict"].dq_intent["accepted_values"]["values"])
-    severities = set(contract.fields["severity"].dq_intent["accepted_values"]["values"])
+    assert contract.fields is not None
+    verdicts = _accepted(contract.fields["verdict"])
+    severities = _accepted(contract.fields["severity"])
     for persona_id, specs in LISTS.items():
         schema = _schema(persona_id)
         paths = {s.path for s in specs}
@@ -157,7 +163,8 @@ def test_the_check_holds_types_and_enums_but_not_id_patterns() -> None:
 
     rows = project_result(_identity(), result={"verdict": "REVISE", "findings": [item()]})
     assert (rows[1].finding_id, rows[1].parse_status) == ("src/x.py:12:Testing", "parsed")
-    for bad in ({"verdict": "REVISE", "findings": [item(severity=3)]}, {"findings": []}):
+    bads: list[dict[str, Any]] = [{"verdict": "REVISE", "findings": [item(severity=3)]}, {"findings": []}]
+    for bad in bads:
         rows = project_result(_identity(), result=bad)
         assert [(r.parse_status, r.verdict) for r in rows] == [("block_invalid", None)]
     rows = project_result(
@@ -181,7 +188,8 @@ def test_the_code_review_skill_prints_the_block_the_projection_reads() -> None:
 def test_contract_fields_match_the_row() -> None:
     contract = load_contract(CONTRACT)
     assert contract.contract.class_.value == "A"
-    assert all(f.derivation["timing"] == "read" for f in contract.fields.values())
+    assert contract.fields is not None
+    assert all(f.derivation is not None and f.derivation["timing"] == "read" for f in contract.fields.values())
     assert list(contract.fields) == [f.name for f in dataclasses.fields(FindingRow)]
     assert PROJECTION_VERSION == 1
 
