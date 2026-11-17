@@ -47,24 +47,27 @@ scope:
       with cancel-in-progress true; every uses: pinned to a 40-hex SHA with a trailing version comment. Three jobs.
       actions/checkout places main under $GITHUB_WORKSPACE only, so every checkout of main lands at
       $GITHUB_WORKSPACE/main, and every python step is `python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py"
-      <verb>` (absolute path) with the working directory $RUNNER_TEMP/work and env PERSONA_SNAPSHOT set to
-      $RUNNER_TEMP/snapshot (outside the workspace; never the cwd). (1) prepare (timeout-minutes 10; permissions contents: read,
+      <verb>` (absolute path) with `working-directory: ${{ runner.temp }}/work` and `env: PERSONA_SNAPSHOT: ${{
+      runner.temp }}/snapshot` (expression forms, because Actions does not shell-expand env or working-directory
+      values; outside the workspace; never the cwd). Each job's first step after checkout is `mkdir -p
+      "$RUNNER_TEMP/work"`, since a working directory must exist before its step starts. Pip steps keep the default
+      workspace cwd and name the constraint file absolutely: `-c "$GITHUB_WORKSPACE/main/requirements.txt"`. (1) prepare (timeout-minutes 10; permissions contents: read,
       pull-requests: read; no environment, no id-token): checks out main at github.sha (persist-credentials false) into
-      main/, sets up Python 3.12 and runs `pip install pyyaml -c main/requirements.txt` (the approved-text-approval.yml
+      main/, sets up Python 3.12 and runs `pip install pyyaml -c "$GITHUB_WORKSPACE/main/requirements.txt"` (the approved-text-approval.yml
       pattern; no new dependency); then, in this order: resolve (GH_TOKEN in its step env), which logs one fixed line
       `PERSONA-VERDICT head_sha=<sha> change_id=<id> allowlisted=<bool>`; route (GH_TOKEN), which logs
       `PERSONA-VERDICT routes=<n> <ids>`; and, only when a route
       exists and the author is allowlisted, fetch (GH_TOKEN) then materialise, whose step env holds no token (no
       github.token, secrets.GITHUB_TOKEN or GH_TOKEN reference); uploads one artifact persona-verdict-prepared
       (resolution, routes, one input JSON per routed persona). (2) run (needs prepare; timeout-minutes 15; permissions
-      contents: read; no environment, no id-token; if: always() && needs.prepare.result == 'success'): checks out main,
-      sets up Python 3.12, runs `pip install jsonschema -c main/requirements.txt`, downloads the artifact and runs the
+      contents: read; no environment, no id-token; if: ${{ !cancelled() && needs.prepare.result == 'success' }}): checks out main,
+      sets up Python 3.12, runs `pip install jsonschema -c "$GITHUB_WORKSPACE/main/requirements.txt"`, downloads the artifact and runs the
       execute verb (no token in its env), skipped when the resolution is not allowlisted; uploads
       persona-verdict-results. No bound persona other than the probe exists, so this job runs nothing else in this
       plan. (3) post (needs [prepare, run]; if: ${{ !cancelled() }}, so a run cancelled by a newer push on the same
       branch posts nothing and the newer run posts; timeout-minutes 5; permissions checks: write, contents: read,
       actions: read): checks out main, sets up Python 3.12, runs `pip install pyyaml jsonschema -c
-      main/requirements.txt` and the post verb, which posts one completed check run per route on the resolved head SHA
+      "$GITHUB_WORKSPACE/main/requirements.txt"` and the post verb, which posts one completed check run per route on the resolved head SHA
       from whatever artifacts exist (a missing or invalid one maps to failure). The workflow exits 0 on every verdict
       outcome and goes red only on a shell fault (an exception in a script, or a check-run POST that fails after
       retries), so ci-rca never files on a verdict.
@@ -106,7 +109,8 @@ scope:
       fingerprint coverage, every-head personas re-run on ready heads rather than reusing a covered verdict, so a check
       exists on the merge-time head the gate reads. (b) T4.2 c12's extras: a code-class PR that adds a
       docs/plans/PLAN-*.yaml, or modifies one in a field outside docs/contracts/implement-scope-boundary.yaml
-      sanction_rows.implementing_plan_bookkeeping.permitted_field_edits (read from main; base and head plan text
+      sanction_rows.implementing_plan_bookkeeping.permitted_field_edits (read from main; plan text at the compare response's
+      merge_base_commit.sha and at head
       compared with yaml.safe_load after a 512 KiB size cap; plan text over the cap, or whose yaml.parse event stream
       holds an AliasEvent or an event carrying an anchor (never a text scan, so a scalar such as PLAN-*.yaml is not an
       alias), is treated as unparseable), also gets the plan-class set with the same head rule, so the scout runs on every
@@ -254,8 +258,9 @@ scope:
       scripts/__init__.py, scripts/personas/__init__.py and a .pth file, each writing a sentinel when imported or
       processed. Lays out the runner's directories in tmp_path (workspace/main as a copy of the needed main files,
       runner_temp/work, runner_temp/snapshot) and runs the materialise verb with the exact argv, working directory and
-      PERSONA_SNAPSHOT parsed from persona-verdict.yml's prepare job, with $GITHUB_WORKSPACE and $RUNNER_TEMP
-      substituted, under a hostile environment (PYTHONPATH set to the snapshot); asserts no sentinel and no loaded
+      PERSONA_SNAPSHOT parsed from persona-verdict.yml's prepare job, substituting the `${{ runner.temp }}` and `${{
+      github.workspace }}` expressions and the $GITHUB_WORKSPACE shell variable it parses, and swapping only the leading
+      python3 token for sys.executable (-I and the rest verbatim, so both cases use one interpreter), under a hostile environment (PYTHONPATH set to the snapshot); asserts no sentinel and no loaded
       module __file__ under the snapshot. Negative control: the same argv with -I removed and the same PYTHONPATH fires
       a sentinel (sitecustomize.py and json.py shadow from PYTHONPATH), so the test can fail. A run by script path puts
       the script's own directory, not the cwd, at sys.path[0], so a cwd-only control would never fire and is not used.
@@ -270,9 +275,14 @@ scope:
       PLAN-persona-verdict-egress amends this rule); any job whose permissions differ from its pinned set (trigger {},
       prepare contents: read and pull-requests: read, run contents: read, post checks: write, contents: read and
       actions: read); a python step that is not `python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" <verb>`,
-      lacks PERSONA_SNAPSHOT in its env, or has a working directory under the snapshot or the workspace; a job's pip
-      install line other than its pinned set (prepare pyyaml; run jsonschema; post pyyaml jsonschema), each with -c
-      main/requirements.txt; a post job condition other than !cancelled(); a prepare job whose fetch step comes after
+      lacks `PERSONA_SNAPSHOT: ${{ runner.temp }}/snapshot` in its env, or whose working-directory is not exactly `${{
+      runner.temp }}/work`; a bare $RUNNER_TEMP or $GITHUB_WORKSPACE in any env: or working-directory: value; a job
+      with python steps but no `mkdir -p "$RUNNER_TEMP/work"` step before them; a job's pip install line other than
+      its pinned set (prepare pyyaml; run jsonschema; post pyyaml jsonschema), each with -c
+      "$GITHUB_WORKSPACE/main/requirements.txt"; a run job condition other than `!cancelled() &&
+      needs.prepare.result == 'success'` or a post job condition other than `!cancelled()`; a verdict workflow whose
+      workflow_run types are not exactly [completed], or a trigger whose pull_request types are not exactly [opened,
+      synchronize, reopened, ready_for_review]; a prepare job whose fetch step comes after
       materialise, or whose fetch or materialise step lacks the allowlisted condition; a github.token,
       secrets.GITHUB_TOKEN or GH_TOKEN reference in the env of the materialise or execute step; a run job running
       anything but the execute verb. It reads the
@@ -574,6 +584,7 @@ context:
   - "rec-5241 (High, filed 2026-11-16): the merge gate accepts any same-named persona check run; dormant while every gates.<persona>.verdict_source reads in_session; its fix binds before the first flip."
   - "Other unbuilt plans share scope files (bin/venv-python -m scripts.roadmap.plan_obligations --plan docs/plans/PLAN-persona-verdict-chain.yaml lists them): 12 on config/ci_rca_taxonomy.yaml and/or scripts/checks/ci_guards/_manifest.py; PLAN-telemetry-content-reader-lock and PLAN-wording-approval-routing on config/agent/executor/capabilities.yaml; PLAN-roadmap-start-edges on tests/roadmap/test_verdict_persona_criteria.py, where a rebase can move the hint-set-test anchor and force a new wording approval. Whichever builds second rebases; the taxonomy compaction leaves about 8 lines of headroom."
   - "rec-5251 (Low, filed 2026-11-17 from critique r2): scripts/session/merge_checks.py now drives routing as well as the merge gate but sits outside boundary_patterns; a pre-existing Decision 185 cl.3 gap, filed rather than widened here."
+  - "Critique r4 REVISE fixed: env and working-directory use ${{ runner.temp }} expression forms (Actions does not shell-expand them), a mkdir step creates the work directory, pip constraints are absolute, the run job skips cancelled runs, rule (b) compares plan text at merge_base_commit, and the shape check pins those forms and both event type lists."
   - "Critique r3 REVISE fixed: main checks out under $GITHUB_WORKSPACE and every python step uses that absolute path (isolation test and shape check follow the real layout); the sidecar's 'credential-free job' now reads 'token-free step' (wording-check r4); compare from base.ref; parse-event alias detection; closed probe stem set; pinned per-job permissions and installs; PERSONA_SNAPSHOT required; post skips cancelled runs; routes logged."
   - "Critique r2 REVISE fixed: one fixture head with four marker files (one full-tier attest, not four); an execute verb and module for the run job; snapshot fetch, materialise and run gated on allowlisted, tarball extracted with filter=data and links refused, no token in materialise or execute env; route.py counts previous_filename and routes both sets on a truncated list; PERSONA-VERDICT log line replaces job summaries; run job contents: read."
   - "Unbuilt plans scoping docs/ROADMAP-PLATFORM.yaml (operator-decision-journal-kind, planning-eligibility-start-edges, plans-only-main-fast-tier, roadmap-start-edges, sit-organization, telemetry-producer-admission-plan-review-capture, wording-approval-routing, work-graph-edge-model): whichever builds second rebases; the sidecar anchors are T4.32-local."
@@ -593,6 +604,9 @@ gate_rounds:
   - {gate: decision-scout, round: 4, verdict: NO_FLAGS, scout_input_fingerprint: "v1:2b8dca5418f056141c8fef4e2a6167b009edd9e8928d6bf2ce70a40e0a8fc607"}
   - {gate: decision-scout, round: 5, verdict: NO_FLAGS, scout_input_fingerprint: "v1:a68033b999dff032447cfceae8a96ca68bc952c6619a51189289d5f52a931430"}
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 2, nits: 11}
+  - {gate: wording-check, round: 4, verdict: PASS, digest: 3ff148c34150d7a98fad1449a97d468ce3f0e6f943e98133bef04fe054c255a7, base: 07ce87cb6343487c293cde4771b6ae87a908d106, selection: complete}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 6, verdict: NO_FLAGS, scout_input_fingerprint: "v1:277a0225645e7039445313ae316418370e3608881eaadbc7915e32acecee76a9"}
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 2, nits: 5}
   - {gate: wording-check, round: 1, verdict: FAIL, digest: f6c0fd645925c434c01aa8df548d708127cbcfdbf0576fd408a684f99955b702, base: 013411ea495131d2a452823b1dade68e314a5130, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 2, verdict: FAIL, digest: b6a28e40475b85ddf637b6c39159d5ae4fac4fc9bf09068cedb3207d4ae2bf51, base: 013411ea495131d2a452823b1dade68e314a5130, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 3, verdict: PASS, digest: 1bff547d3e77c113a8820a6f41fcf6538a736b5e21c4fb8be5383901e0d3e1f0, base: 013411ea495131d2a452823b1dade68e314a5130, selection: complete}  # pragma: allowlist secret
