@@ -2,8 +2,9 @@
 
 Registered check and the evaluator of docs/contracts/executor-personas.yaml: the closed capability vocabulary, the
 refused targets and verbs, every personas row's contract shape, budget, schema dialect, rendered prompt and skill
-tether, an optional verdict_consistency rule (ordered cases "verdict V when any element of array A [with field F in S]",
-then otherwise; checked against output_schema and the prose verdict_rule), a row's required registry_key (a
+tether, a verdict_consistency rule (required of a verdict persona by the index's required_for_verdict; ordered cases
+"verdict V when any element of array A [with field F in S]", then otherwise; checked against output_schema and the
+prose verdict_rule), a row's required registry_key (a
 registered, unique source_registry.yaml canonical_id equal to the contract's skill_tether.skill; the registry is read
 whenever the index has a row), and the leash's own paths being executor boundary paths. Never imports jsonschema (fast
 tier).
@@ -223,6 +224,13 @@ def _rendered_failures(
     return out
 
 
+def _verdict_enum(output_schema: Any) -> list[str] | None:
+    props = output_schema.get("properties") if isinstance(output_schema, dict) else None
+    verdict = props.get("verdict") if isinstance(props, dict) else None
+    enum = verdict.get("enum") if isinstance(verdict, dict) else None
+    return enum if isinstance(enum, list) and all(isinstance(v, str) for v in enum) else None
+
+
 def _tether_failures(persona: str, contract: PersonaContract, root: Path) -> list[str]:
     tether = contract.skill_tether
     if tether is None:
@@ -238,8 +246,8 @@ def _tether_failures(persona: str, contract: PersonaContract, root: Path) -> lis
         if value not in text
     ]
     tokens = set(_VERDICT_TOKEN.findall(tether.verdict_line.partition(":")[2]))
-    enum = ((contract.output_schema.get("properties") or {}).get("verdict") or {}).get("enum")
-    if not isinstance(enum, list) or tokens != set(enum):
+    enum = _verdict_enum(contract.output_schema)
+    if enum is None or tokens != set(enum):
         out.append(f"{_LABEL}: {persona}: verdict_line tokens {sorted(tokens)} differ from output_schema verdict enum")
     return out
 
@@ -314,9 +322,9 @@ def _verdict_rule_failures(persona: str, contract: PersonaContract) -> list[str]
                 out.append(f"{label}field {cond['field']} is not an enum property of {path}'s items")
                 continue
             out += [f"{label}in value {v} is outside {path}[].{cond['field']}'s enum" for v in cond["in"] if v not in enum]
-    verdict_enum = ((contract.output_schema.get("properties") or {}).get("verdict") or {}).get("enum")
+    verdict_enum = _verdict_enum(contract.output_schema)
     verdicts = [c["verdict"] for c in rule["cases"]] + [rule["otherwise"]]
-    if not isinstance(verdict_enum, list) or sorted(verdicts) != sorted(verdict_enum):
+    if verdict_enum is None or Counter(verdicts) != Counter(verdict_enum):
         out.append(f"{label}verdict_consistency verdicts differ from the verdict enum")
     prose = contract.skill_tether.verdict_rule if contract.skill_tether else ""
     names = [*verdicts, *(v for c in rule["cases"] for cond in c["any"] for v in cond.get("in", []))]
