@@ -74,13 +74,15 @@ scope:
       imports mcp for a run that names no warehouse_read. A contract with warehouse_verbs and
       mcp_server None is RunRefused ("warehouse_read needs the MCP server"); keyword `mcp_errlog: TextIO | None = None`
       (None means os.devnull, opened by a synchronous helper outside the async function, as ruff ASYNC230 forbids
-      open() inside it, and closed when the bridge exits, so no handle leaks per run) is passed through as open_bridge's
-      errlog. The run's wall-clock deadline is taken once,
+      open() inside it, opened only after mcp_server() returns and closed when the bridge exits, so no handle leaks per
+      run) is passed through as open_bridge's errlog. The run's wall-clock deadline is taken once,
       before the bridge opens (moved out of go()), so startup counts against max_wall_clock_seconds. After the input check
       passes (so an input_incomplete run starts no server), a contract with warehouse_verbs opens open_bridge(mcp_server(),
       verbs, startup_timeout=deadline - clock()) around the run loop: BridgeTimeout returns failure budget_exhausted
       (detail "max_wall_clock_seconds reached while the MCP server started"), and BridgeUnavailable aborts with kind
-      tool_server_unavailable (header and end records written, no model call). The tool list is the read_input spec when
+      tool_server_unavailable (header and end records written, no model call); an ImportError from the in-branch mcp or
+      mcp_bridge import, or any Exception from the mcp_server() factory, aborts with that same kind (class name only),
+      so an image without mcp ends with an end record and exit 4, never a traceback. The tool list is the read_input spec when
       the contract names a read_input blob, then the bridge's specs (an empty list is sent as no tools, None, never []); the opening user message keeps its read_input blob
       lines only when the contract names a blob. Tool dispatch becomes async: read_input is served as now, a named verb
       awaits Bridge.call under asyncio.wait_for(deadline - clock() measured when the call starts) (a timeout returns
@@ -161,7 +163,8 @@ scope:
       tool_server_unavailable, zero transport calls, end record aborted); test_server_failure_mid_run_aborts (kind
       tool_server_error; the transport called exactly once and a turn record listing the verb written before the end
       record); test_tool_turn_ended_at_is_transport_return (the wall fake, run_persona's
-      wall injectable that stamps ended_at_ms, not the deadline clock, advanced inside the warehouse call shows the turn record's ended_at_ms equals the time the transport returned, before the warehouse call); test_startup_hang_returns_budget_exhausted (mode hang, a contract copy with
+      wall injectable that stamps ended_at_ms, not the deadline clock, advanced inside the warehouse call through a
+      monkeypatched wrapper around Bridge.call, shows the turn record's ended_at_ms equals the time the transport returned, before the warehouse call); test_startup_hang_returns_budget_exhausted (mode hang, a contract copy with
       max_wall_clock_seconds 1: the run returns budget_exhausted within seconds, with no transport call);
       test_warehouse_call_past_deadline_returns_budget_exhausted (mode slow, a roomy max_wall_clock_seconds, and
       asyncio.wait_for monkeypatched to time out the bridge call as test_wait_for_timeout_returns_budget_exhausted does,
@@ -170,7 +173,10 @@ scope:
       test_transport_outage_with_bridge_open_aborts (the fake transport raises an outage after the bridge opened:
       RunAborted kind outage, not an ExceptionGroup and not tool_server_error); test_contract_without_read_input_blob_offers_no_read_input_tool (no
       read_input tool and no blob lines in the opening message); a contract naming no tools sends tools None; a contract without warehouse_read starts no server
-      (an mcp_server factory that raises if called still succeeds).
+      (an mcp_server factory that raises if called still succeeds); test_errlog_devnull_closed_after_run (the handle
+      the helper opened, recorded through a monkeypatched helper, is closed after a warehouse run);
+      test_factory_failure_aborts_unavailable (a factory raising ImportError aborts with kind tool_server_unavailable
+      and an end record).
   - file: tests/test_run_persona.py
     action: Modify
     purpose: >-
@@ -185,7 +191,10 @@ scope:
       FAKE-SERVER-STDERR-MARKER is absent from captured fd 1 and fd 2; this also proves a warehouse run's abort exits
       4, not a traceback with exit 1); test_non_warehouse_run_imports_no_mcp (a fresh subprocess sets sys.modules["mcp"]
       to None, then runs scripts/run_persona.py through runpy on the fixture contract with an incomplete input: exit 0,
-      result input_incomplete, no transport call; red while main() builds the parameters eagerly); the isolated-mode subprocess refusal case names
+      result input_incomplete, the events file's turns empty; then a second leg in a fresh subprocess with the same
+      block sets scripts.llm.litellm_transport.acomplete to a scripted read_input-then-final transport before runpy
+      (runpy reuses the module already in sys.modules) and runs the good input: exit 0, outcome success, so the shared
+      tool-dispatch path is mcp-free too; red while main() builds the parameters eagerly); the isolated-mode subprocess refusal case names
       read_repo in place of warehouse_read:x.
   - file: docs/contracts/executor-personas.yaml
     action: Modify
@@ -471,6 +480,7 @@ gate_rounds:
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 3, nits: 10}
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 5}
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 5}
+  - {gate: plan-critique, round: 5, verdict: PROCEED, blocking: 0, nits: 6}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
