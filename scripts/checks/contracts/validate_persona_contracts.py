@@ -2,9 +2,11 @@
 
 Registered check and the evaluator of docs/contracts/executor-personas.yaml: the closed capability vocabulary, the
 refused targets and verbs, every personas row's contract shape, budget, schema dialect, rendered prompt and skill
-tether, a row's required registry_key (a registered, unique source_registry.yaml canonical_id equal to the contract's
-skill_tether.skill; the registry is read whenever the index has a row), and the leash's own paths being executor
-boundary paths. Never imports jsonschema (fast tier).
+tether, an optional verdict_consistency rule (ordered cases "verdict V when any element of array A [with field F in S]",
+then otherwise; checked against output_schema and the prose verdict_rule), a row's required registry_key (a
+registered, unique source_registry.yaml canonical_id equal to the contract's skill_tether.skill; the registry is read
+whenever the index has a row), and the leash's own paths being executor boundary paths. Never imports jsonschema (fast
+tier).
 """
 
 from __future__ import annotations
@@ -242,6 +244,88 @@ def _tether_failures(persona: str, contract: PersonaContract, root: Path) -> lis
     return out
 
 
+def _malformed_rule(rule: Any) -> bool:
+    def condition_ok(cond: Any) -> bool:
+        if not isinstance(cond, dict) or not isinstance(cond.get("array"), str):
+            return False
+        keys = set(cond)
+        if keys == {"array"}:
+            return True
+        values = cond.get("in")
+        return (
+            keys == {"array", "field", "in"}
+            and isinstance(cond["field"], str)
+            and isinstance(values, list)
+            and bool(values)
+            and all(isinstance(v, str) for v in values)
+        )
+
+    def case_ok(case: Any) -> bool:
+        any_of = case.get("any") if isinstance(case, dict) else None
+        return (
+            isinstance(case, dict)
+            and set(case) == {"verdict", "any"}
+            and isinstance(case["verdict"], str)
+            and isinstance(any_of, list)
+            and bool(any_of)
+            and all(condition_ok(c) for c in any_of)
+        )
+
+    if not isinstance(rule, dict) or set(rule) != {"cases", "otherwise"} or not isinstance(rule["otherwise"], str):
+        return True
+    cases = rule["cases"]
+    return not (isinstance(cases, list) and cases and all(case_ok(c) for c in cases))
+
+
+def _walk_array(schema: Any, path: str) -> dict[str, Any] | None:
+    node = schema
+    for step in path.split("."):
+        props = node.get("properties") if isinstance(node, dict) else None
+        node = props.get(step) if isinstance(props, dict) else None
+        if not isinstance(node, dict):
+            return None
+    return node if node.get("type") == "array" else None
+
+
+def _verdict_rule_failures(persona: str, contract: PersonaContract) -> list[str]:
+    rule = contract.verdict_consistency
+    if rule is None:
+        return []
+    label = f"{_LABEL}: {persona}: "
+    if contract.kind == "compute_plane":
+        return [f"{label}verdict_consistency on a compute_plane contract"]
+    if _malformed_rule(rule):
+        return [f"{label}verdict_consistency is malformed"]
+    out: list[str] = []
+    for case in rule["cases"]:
+        for cond in case["any"]:
+            path = cond["array"]
+            array = _walk_array(contract.output_schema, path)
+            if array is None:
+                out.append(f"{label}array {path} is not an array of output_schema")
+                continue
+            if "field" not in cond:
+                continue
+            items = array.get("items")
+            props = items.get("properties") if isinstance(items, dict) else None
+            prop = props.get(cond["field"]) if isinstance(props, dict) else None
+            enum = prop.get("enum") if isinstance(prop, dict) else None
+            if not isinstance(enum, list):
+                out.append(f"{label}field {cond['field']} is not an enum property of {path}'s items")
+                continue
+            out += [f"{label}in value {v} is outside {path}[].{cond['field']}'s enum" for v in cond["in"] if v not in enum]
+    verdict_enum = ((contract.output_schema.get("properties") or {}).get("verdict") or {}).get("enum")
+    verdicts = [c["verdict"] for c in rule["cases"]] + [rule["otherwise"]]
+    if not isinstance(verdict_enum, list) or sorted(verdicts) != sorted(verdict_enum):
+        out.append(f"{label}verdict_consistency verdicts differ from the verdict enum")
+    prose = contract.skill_tether.verdict_rule if contract.skill_tether else ""
+    names = [*verdicts, *(v for c in rule["cases"] for cond in c["any"] for v in cond.get("in", []))]
+    for name in dict.fromkeys(names):
+        if not re.search(rf"\b{re.escape(name)}\b", prose):
+            out.append(f"{label}verdict_consistency names {name}, absent from skill_tether.verdict_rule")
+    return out
+
+
 def _contract_failures(row: Any, index: PersonaIndex, root: Path) -> list[str]:
     persona = row.persona
     path = root / row.contract
@@ -279,6 +363,7 @@ def _contract_failures(row: Any, index: PersonaIndex, root: Path) -> list[str]:
     ]
     out += _rendered_failures(persona, row, raw, contract, index, root)
     out += _tether_failures(persona, contract, root)
+    out += _verdict_rule_failures(persona, contract)
     tether = contract.skill_tether
     if tether is not None and row.registry_key != tether.skill:
         out.append(f"{_LABEL}: {persona}: registry_key '{row.registry_key}' differs from skill_tether.skill '{tether.skill}'")

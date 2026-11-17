@@ -2,7 +2,7 @@ import json
 
 from src.persona_backends.contract import load
 from src.persona_backends.output import check, failure, repair_message
-from tests.persona_backends.fakes import FIXTURE, VALID
+from tests.persona_backends.fakes import FIELD_SCHEMA, FIXTURE, RULE, VALID, rule_contract
 
 LOADED = load(FIXTURE)
 
@@ -42,3 +42,30 @@ def test_repair_message_lists_errors():
 def test_failure_detail_must_be_a_string():
     value = {"outcome": "failure", "failure": "budget_exhausted", "detail": 5}
     assert check(json.dumps(value), "stop", LOADED).errors == ["$['detail']: must be a string"]
+
+
+def _ruled(tmp_path):
+    return load(rule_contract(tmp_path, RULE, FIELD_SCHEMA))
+
+
+def _success(verdict, *severities):
+    return json.dumps({"outcome": "success", "verdict": verdict, "findings": [{"severity": s} for s in severities]})
+
+
+def test_contradictory_verdict_is_an_error(tmp_path):
+    result = check(_success("PROCEED", "blocking"), "stop", _ruled(tmp_path))
+    assert result.value is None and "the verdict rule gives REVISE" in result.errors[0]
+
+
+def test_agreeing_success_and_unchecked_failure(tmp_path):
+    loaded = _ruled(tmp_path)
+    assert check(_success("REVISE", "blocking"), "stop", loaded).errors == []
+    assert check(_success("PROCEED", "nit"), "stop", loaded).errors == []
+    value = failure("budget_exhausted", "x")
+    assert check(json.dumps(value), "stop", loaded).value == value
+
+
+def test_schema_invalid_value_reports_schema_errors_only(tmp_path):
+    bad = json.dumps({"outcome": "success", "verdict": "MAYBE", "findings": [{"severity": "blocking"}]})
+    errors = check(bad, "stop", _ruled(tmp_path)).errors
+    assert errors and all("verdict rule" not in e for e in errors)

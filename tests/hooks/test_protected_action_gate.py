@@ -374,7 +374,7 @@ def test_registered_rendered_and_code_owned() -> None:
     assert group["hooks"] == [
         {"type": "command", "command": 'bash "$CLAUDE_PROJECT_DIR/.claude/hooks/protected_action_gate.sh"', "timeout": 60}
     ]
-    assert len(groups) == 4
+    assert len(groups) == 5
     sys.path.insert(0, str(REAL_ROOT / ".claude/hooks"))
     try:
         import plugin_hooks

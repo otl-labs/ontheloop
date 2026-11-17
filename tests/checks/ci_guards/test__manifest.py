@@ -131,3 +131,15 @@ class TestGatedEntryInputClosures:
             "scripts/checks/_common.py",
             "scripts/checks/registry.py",
         } <= self._globs("validate_dependabot_config")
+
+    def test_actions_sha_pinned_entry_closes_over_its_inputs(self) -> None:
+        entry = next(e for e in _manifest.ENTRIES if e.name == "validate_actions_sha_pinned")
+        assert entry.pre is True
+        assert {
+            ".github/workflows/**",
+            ".github/actions/**",
+            "config/actions_sha_pin_baseline.yaml",
+            "scripts/checks/ci_guards/validate_actions_sha_pinned.py",
+            "scripts/checks/_common.py",
+            "scripts/checks/registry.py",
+        } <= self._globs("validate_actions_sha_pinned")

@@ -131,6 +131,7 @@ class PersonaContract(_Strict):
     prompt_template: str
     rendered_prompt_sha256: str
     skill_tether: SkillTether | None = None
+    verdict_consistency: dict[str, Any] | None = None
 
 
 def load_yaml(path: Path) -> Any:
