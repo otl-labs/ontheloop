@@ -14,7 +14,6 @@ import pytest
 import yaml
 
 from scripts.ci_rca import fingerprint
-from scripts.telemetry_verify import completeness
 from scripts.telemetry_verify import session_presence as sp
 
 NOW = datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
@@ -340,7 +339,7 @@ def test_the_open_start_lost_window_ends_on_the_production_first_judged_day() ->
     config = yaml.safe_load((ROOT / sp.CONFIG).read_text(encoding="utf-8"))
     open_start = [w for w in config["lost_windows"] if "from" not in w]
     assert len(open_start) == 1
-    assert open_start[0]["to"].startswith(completeness.PRODUCTION_FIRST_JUDGED_DAY)
+    assert open_start[0]["to"].startswith("2026-10-28")
     sp.check_config(config)
     expectation = sp.load_expectation(ROOT)
     assert sp.check_expectation(expectation) == timedelta(minutes=60)
@@ -463,3 +462,8 @@ def test_recent_commits_bounds_by_judge_days(monkeypatch: pytest.MonkeyPatch) ->
     sp._recent_commits(ROOT, NOW, CONFIG)
     sp._recent_commits(ROOT, NOW, "bad")
     assert seen == [NOW - timedelta(days=4), None]
+
+
+def test_normalise_key_strips_either_prefix() -> None:
+    values = ("session_X", "cse_X", "X", "session_", "", None, 5)
+    assert [sp.normalise_key(v) for v in values] == ["X", "X", "X", None, None, None, None]

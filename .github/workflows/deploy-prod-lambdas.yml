@@ -1,10 +1,10 @@
 name: deploy-prod-lambdas
 
-# Governed code-deploy channel for the two prod-class Lambdas (T2.43 / Decision 125/126).
+# Governed code-deploy channel for the three prod-class Lambdas (T2.43 / Decision 125/126).
 #
 # Realizes the Decision 125 "deploy code" verb for the decoupled_build_pipeline class: the
-# scheduled-agent-dispatcher and findings-processor functions (provisioned by
-# terraform/personal/prod_lambdas.tf, rec-2157/rec-2164) ship code through this scoped, auditable
+# scheduled-agent-dispatcher, findings-processor and workflow-dispatcher functions (provisioned by
+# terraform/personal/prod_lambdas.tf and scheduled_workflow_dispatch.tf, rec-2157/rec-2164) ship code through this scoped, auditable
 # path with post-deploy smoke gates and a deployment record -- retiring the local
 # `bin/venv-python -m scripts.build_lambda --deploy` break-glass invocation as the ONLY route (it
 # remains available as a genuinely non-default fallback; see
@@ -47,15 +47,16 @@ name: deploy-prod-lambdas
 # smoke job (needs: deploy; Decision 55 false-green avoidance):
 #   - Runs ONLY when deploy actually shipped code (needs.deploy.outputs.deployed == 'true') --
 #     never on a bootstrap-window no-op.
-#   - Asserts deploy-record freshness (source_git_sha == the gate sha) for both functions
+#   - Asserts deploy-record freshness (source_git_sha == the gate sha) for all three functions
 #     BEFORE running the smoke gates -- a stale or partially-written record fails closed instead
 #     of letting a skipped/no-op deploy report smoke-green.
 #   - Assumes agent-platform-github-ci-branch (ProdLambdaInvokeCI grant -- the scoped deploy role
 #     above needs no invoke permission, which keeps the "UpdateFunctionCode-only" literal).
-#   - Invokes each of the two functions with an empty payload and asserts each one's observable,
+#   - Invokes each of the three functions with an empty payload and asserts each one's observable,
 #     schedule/PAT-independent output (verified against the handler source at plan time):
 #       scheduled-agent-dispatcher -> {"status": "disabled", ...}      (SCHEDULED_AGENTS_ENABLED=false)
 #       findings-processor         -> {"skipped_comparison": true, ...} (no live GitHub PAT value)
+#       workflow-dispatcher        -> {"status": "smoke", "schedules": [the three schedules]} (event without "schedule")
 #     A failed gate is a loud-fail (Decision 55): stop and RCA, never auto-retry into green.
 
 on:
@@ -207,7 +208,7 @@ jobs:
       - name: Assert deploy-record freshness (source_git_sha == gate sha)
         # False-green guard (Decision 55): a skipped/partial/stale deploy must not let the smoke gates report green against
         # previously-deployed code; both records must name the commit the gate chose.
-        run: python3 -m scripts.ci.deploy_gate freshness --channel prod --expected-sha "${{ needs.gate.outputs.sha }}" agent-platform-scheduled-agent-dispatcher agent-platform-findings-processor
+        run: python3 -m scripts.ci.deploy_gate freshness --channel prod --expected-sha "${{ needs.gate.outputs.sha }}" agent-platform-scheduled-agent-dispatcher agent-platform-findings-processor agent-platform-workflow-dispatcher
 
       - name: Smoke invoke -- scheduled-agent-dispatcher (expect status=disabled; schedule stays off)
         run: |
@@ -226,3 +227,12 @@ jobs:
           cat out-findings.json
           python3 -c "import json; d=json.load(open('out-findings.json')); assert d.get('skipped_comparison') is True, d"
           echo "OK findings-processor smoke: skipped_comparison=true"
+
+      - name: Smoke invoke -- workflow-dispatcher (expect status=smoke and the three schedules)
+        run: |
+          set -euo pipefail
+          aws lambda invoke --function-name agent-platform-workflow-dispatcher \
+            --payload '{}' --cli-binary-format raw-in-base64-out --region "$AWS_REGION" out-workflow-dispatcher.json
+          cat out-workflow-dispatcher.json
+          python3 -c "import json; d=json.load(open('out-workflow-dispatcher.json')); assert d.get('status') == 'smoke' and d.get('schedules') == ['convergence-health', 'main-canary', 'terraform-drift'], d"
+          echo "OK workflow-dispatcher smoke: status=smoke, three schedules"
