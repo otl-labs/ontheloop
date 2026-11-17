@@ -9,6 +9,7 @@ lazily.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import threading
 import time
 import weakref
@@ -40,11 +41,14 @@ class ColdStartResult:
     outcome: str
     record: CallRecord | None
     detail: str
+    fresh: bool = False
 
 
 _asserted: dict[tuple[str, str], ColdStartResult] = {}
-_sync_lock = threading.Lock()
-_async_locks: weakref.WeakKeyDictionary[Any, asyncio.Lock] = weakref.WeakKeyDictionary()
+_sync_guard = threading.Lock()
+_sync_locks: dict[tuple[str, str], threading.Lock] = {}
+_async_locks: weakref.WeakKeyDictionary[Any, dict[tuple[str, str], asyncio.Lock]] = weakref.WeakKeyDictionary()
+_wall = time.time
 
 
 def clear_cache() -> None:
@@ -89,17 +93,28 @@ def _result(
 def _failed(selection: tier_selection.Selection, exc: BaseException) -> ColdStartResult:
     kind = classify(exc)
     status = getattr(exc, "status_code", None)
-    return _result(selection, "spent" if kind == "credit_exhausted" else "not_asserted", f"{kind} (status {status})")
+    return _fresh(_result(selection, "spent" if kind == "credit_exhausted" else "not_asserted", f"{kind} (status {status})"))
 
 
-def _interpreted(selection: tier_selection.Selection, response: Any, started: float) -> ColdStartResult:
+def _fresh(result: ColdStartResult) -> ColdStartResult:
+    return dataclasses.replace(result, fresh=True)
+
+
+def _interpreted(selection: tier_selection.Selection, response: Any, started: float, started_ms: int) -> ColdStartResult:
     if not getattr(response, "choices", None):
-        return _result(selection, "not_asserted", "the response carried no choices")
+        return _fresh(_result(selection, "not_asserted", "the response carried no choices"))
     latency = int((time.monotonic() - started) * 1000)
     record = read_response(
-        response, selection=selection, persona=selection.persona, role=selection.role, attempt=1, latency_ms=latency
+        response,
+        selection=selection,
+        persona=selection.persona,
+        role=selection.role,
+        attempt=1,
+        latency_ms=latency,
+        started_at_ms=started_ms,
+        responded_at_ms=int(_wall() * 1000),
     )[3]
-    return _result(selection, "asserted", "one minimal completion succeeded", record)
+    return _fresh(_result(selection, "asserted", "one minimal completion succeeded", record))
 
 
 def _not_applicable(selection: tier_selection.Selection) -> ColdStartResult:
@@ -113,24 +128,24 @@ def cold_start_check(role: str, *, credential_holder: str = "on_the_loop", root:
     prepared = _prepare(selection)
     if isinstance(prepared, ColdStartResult):
         return prepared
-    started = time.monotonic()
+    started, started_ms = time.monotonic(), int(_wall() * 1000)
     try:
         response = load_litellm().completion(**prepared)
     except Exception as exc:  # intentionally broad: a probe failure is an outcome, never a raise
         return _failed(selection, exc)
-    return _interpreted(selection, response, started)
+    return _interpreted(selection, response, started, started_ms)
 
 
 async def _acold_start_probe(selection: tier_selection.Selection) -> ColdStartResult:
     prepared = _prepare(selection)
     if isinstance(prepared, ColdStartResult):
         return prepared
-    started = time.monotonic()
+    started, started_ms = time.monotonic(), int(_wall() * 1000)
     try:
         response = await load_litellm().acompletion(**prepared)
     except Exception as exc:  # intentionally broad, as in cold_start_check
         return _failed(selection, exc)
-    return _interpreted(selection, response, started)
+    return _interpreted(selection, response, started, started_ms)
 
 
 async def acold_start_check(role: str, *, credential_holder: str = "on_the_loop", root: Path | None = None) -> ColdStartResult:
@@ -156,10 +171,12 @@ def _unavailable(result: ColdStartResult) -> TransportError:
 def ensure_asserted(role: str, *, credential_holder: str = "on_the_loop", root: Path | None = None) -> ColdStartResult:
     selection = _resolve(role, credential_holder, root)
     key = _cache_key(selection, root)
-    with _sync_lock:
+    with _sync_guard:
+        lock = _sync_locks.setdefault(key, threading.Lock())
+    with lock:
         cached = _asserted.get(key)
         if cached is not None:
-            return cached
+            return dataclasses.replace(cached, fresh=False)
         result = cold_start_check(role, credential_holder=credential_holder, root=root)
         if result.outcome != "asserted":
             raise _unavailable(result)
@@ -171,11 +188,11 @@ async def aensure_asserted(role: str, *, credential_holder: str = "on_the_loop",
     selection = _resolve(role, credential_holder, root)
     key = _cache_key(selection, root)
     loop = asyncio.get_running_loop()
-    lock = _async_locks.setdefault(loop, asyncio.Lock())
+    lock = _async_locks.setdefault(loop, {}).setdefault(key, asyncio.Lock())
     async with lock:
         cached = _asserted.get(key)
         if cached is not None:
-            return cached
+            return dataclasses.replace(cached, fresh=False)
         result = await acold_start_check(role, credential_holder=credential_holder, root=root)
         if result.outcome != "asserted":
             raise _unavailable(result)

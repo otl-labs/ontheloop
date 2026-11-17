@@ -2,6 +2,64 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 271: A persona verdict check counts only when the dedicated verdict GitHub App posted it -- the merge gate pins persona checks to the App id read from origin/main and ignores same-named runs from any other source (amends Decisions 264 and 205) (Decided)
+
+```yaml
+number: 271
+status: Decided
+decided_date: "2026-11-17"
+kind:
+  value: direction
+  justification: >-
+    Clause 1 changes what the merge gate accepts as a persona verdict and clause 3 adds a refusal only the operator
+    can release, which moves a gate; undone, any branch workflow passes the persona leg.
+amends: [264, 205]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable, reversal-relevant: the trust rule for every persona verdict and the verdict identity every later
+    persona plan builds on. Not a project-configuration.yaml or ports.yaml note: a contract records a row and a
+    coupling, not the authority to refuse a merge (Decision 264's rejected home). Not amendment_forms on Decision
+    264: it also changes Decision 205 clause 2's verdict identity, and a dated note amends one body only.
+```
+
+**Status:** Decided
+**Date:** 2026-11-17
+**Warehouse ID:** dec-271 (per Decision 84 backfill)
+
+**Problem:** Decision 264 clauses 1 and 4 accept a persona check as the newest check run by the GitHub Actions app. Any workflow on an in-repo branch whose token holds checks: write runs as that app and can post a run with a persona's name and conclusion success on any head (rec-5241), so once a persona's row reads actions an agent could pass the persona leg without the persona running. The verdict chain posts its check through the Checks API from a workflow_run run whose own check suite is on main's commit, so nothing about a check run's suite ties it to the chain.
+
+**Intent:** A persona verdict counts only when the verdict chain on main posted it.
+
+**Decision:**
+1. **Verdict App pin.** For a check named persona-verdict/<persona>, the merge gate counts only check runs whose app id equals the gates.verdict_app.app_id row of docs/contracts/project-configuration.yaml on origin/main, read with the persona rows; Decision 264 clause 1's rules then apply to the newest such run. Required checks that are not persona checks keep clause 1's GitHub Actions rule. The app id is on the check runs the gate already reads, so no read is added.
+2. **Same-named runs from another source.** A persona-named run from any other app, the GitHub Actions app included, is ignored for the verdict and is never a refusal on its own, so a branch pusher can neither pass nor wedge an agent merge with one. Tracing and removing each such run is rec-5271.
+3. **Fail closed.** While the row is empty, absent or unreadable on origin/main, a persona check an actions row adds refuses (Decision 264 clause 3), and a PR head whose row does not read refuses. An agent merge of a pull request whose own change alters the row's value, adding or removing it included, is refused, so the operator merges it in the GitHub UI (the Decision 264 clause 5 pattern).
+4. **Verdict identity (amends Decision 205 clause 2).** On Actions too, the verdict check run is created under the dedicated verdict App, not the job's GITHUB_TOKEN; the executor App still holds no checks: write. The App, its key home, the role that reads the key and the post job's token mint belong to PLAN-persona-verdict-egress, under its own Decision, which widens Decision 263 clause 2's grant list and records the key-custody residual in the Decision 267 clause 5 form. Until then the row stays empty, so a persona row switched to actions refuses every agent merge of its class.
+5. **Coverage (Decision 181 cl.2).** Clauses 1-3: the merge gate and its hook tests (rec-5241). Clause 4: PLAN-persona-verdict-egress, a residual until built. Residuals: any principal that can read the App key can post as the App, so the key's custody is the trust root; GitHub UI merges and the ruleset, which require no persona check until rec-4624, which should require them from the App; persona-named runs from other sources are ignored but not yet reported (rec-5271). docs/contracts/ports.yaml PC-10 records the gate's coupling.
+
+**Rationale:** A dedicated App rather than a pointer the gate verifies: only the App's key can create its check runs, the pin costs no read at merge time, and the ruleset can later require the same App, which also covers operator UI merges. Rejected: rec-5241's check-suite predicate (the chain's suite is on main's commit, so it would refuse every genuine verdict); a check run naming its workflow run, verified through public run data (about two more reads per persona, a redesign of the post job, nothing for the ruleset); signed attestations (a signature verifier inside a fail-closed hook); refusing any foreign same-named run (a free wedge on agent merges for anyone who can push a branch).
+
+```yaml reversal-conditions
+decision: 271
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan; never add an agent override"
+conditions:
+  - id: app-key-exposed
+    kind: manual
+    description: "A principal outside the egress plan's declared readers reads the App key, or a check run the verdict chain did not post carries the App: rotate the key and re-decide clause 1."
+  - id: native-pin-available
+    kind: manual
+    description: "rec-4624 lets the ruleset require the persona checks from the App: retire the clauses GitHub then enforces."
+  - id: foreign-runs-recur
+    kind: manual
+    description: "rec-5271 records repeated persona-named runs from other sources: re-decide clause 2 (refuse rather than ignore)."
+```
+
+**Related:** Decisions 83, 143, 181, 203, 205, 212, 224, 229, 237, 245, 263, 264, 267; T4.2, T4.32; rec-4624, rec-5241, rec-5271.
+
+---
+
 ## Decision 270: The telemetry content reader is reached through a fifth DuckLake API route, and its change lock lives in the CI apply boundary, paid for by prefix-named URL-only Denies (amends Decisions 144, 202, 213, 230, 239, 255, 256, 257 and 258) (Decided)
 
 ```yaml
@@ -483,6 +541,8 @@ conditions:
 ```
 
 **Related:** Decisions 73, 76, 83, 89, 100, 163, 181, 203, 205, 212, 217, 224, 229, 234, 245, 246; T4.32; rec-2827, rec-4080, rec-4085, rec-4087, rec-4624, rec-4874, rec-4891.
+
+> **Amended by Decision 271 (2026-11-17):** Clauses 1 and 4 count a persona check only from the verdict App that gates.verdict_app.app_id names on origin/main, ignoring same-named runs from any other source, and an agent merge changing that row is refused. Clause 6's residual for a workflow posting a run named like a persona check narrows to custody of the App's key.
 
 ---
 
@@ -2488,6 +2548,8 @@ conditions:
 **Related:** Decisions 230, 81, 91, 199, 200 (amended), 143, 188, 192, 209, 213, 216, 88, 181, 177.
 
 [Amendment 2026-10-29, Decision 239: cl.3's content consumer exists; agents read production transcript text masked, only through the telemetry content reader; cl.2 and cl.6 count two production telemetry readers, so the closed read boundary is three readers.]
+
+[Amendment 2026-11-17, PLAN-telemetry-read-timeouts: cl.5's every-6h merge_ops on the production telemetry catalog stays as the floor, and a backlog-gated pass is added, as Decision 88 cl.1(iii) sizes cadence to write rate: a rule ticks every two to six minutes, never in the three minutes up to another maintenance job's start, reads CloudWatch only, and merges when at least 60 telemetry commits have landed since the last pass or a commit has waited 30 minutes; a gate that cannot read its metrics skips and alarms. Each telemetry write lands as its own small files, and on every busy day the 6-hour backlog pushed cold reads of the newest days past the reader's deadline (rec-5247, rec-5248). The weekly guarded gc_ops, the guards and every existing alarm are unchanged.]
 
 ---
 
@@ -4539,6 +4601,8 @@ conditions:
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
 > **Amended by Decision 254 (2026-11-12):** Clause 5's plans-only test reads the batch range prev..head, never the head commit alone, so a batch holding any non-plans commit runs the full tier (Decision 254 cl.1).
+
+> **Amended by Decision 271 (2026-11-17):** Clause 2's verdict identity on Actions is the dedicated verdict App, not the job's GITHUB_TOKEN; the merge gate counts a persona check only from that App (Decision 271 cl.1, cl.4).
 
 ---
 

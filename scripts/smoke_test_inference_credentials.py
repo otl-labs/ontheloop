@@ -57,9 +57,13 @@ def _row(role: str) -> dict[str, Any]:
 # "envelope" term avoids CodeQL's sensitive-name heuristic flagging the identifier (scripts/ci/redaction_check.py).
 def run(role: str, region: str | None = None) -> int:
     """Fetch the role's key and run its cold start through the transport. Return 0 on success, 1 on failure."""
-    row = _row(role)
-    envelope_id = str(row["this_repository"]["current_home"])
-    env_envelope = str(row["variable"])
+    try:
+        row = _row(role)
+        envelope_id = str(row["this_repository"]["current_home"])
+        env_envelope = str(row["variable"])
+    except Exception as exc:  # intentionally broad so a contract load failure prints a diagnostic and returns 1
+        print(f"FAIL [{role}] contract load raised {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
     print(f"[{role}] Fetching parameter: {envelope_id}")
     client = boto3.Session(profile_name=resolve_aws_profile()).client("ssm", region_name=region or _default_region())
 

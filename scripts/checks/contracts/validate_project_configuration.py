@@ -20,7 +20,9 @@ key; (j) ambient_trigger exists and names this contract; (k) a row id fits its a
 gates.<persona>.verdict_source row ids name exactly the kind-verdict personas of
 docs/contracts/executor-personas.yaml, one row each, each kind project with a null variable and equal local and
 cloud defaults in {in_session, actions}; and an ontheloop/platform.yaml carrying a gates key while a gates row's
-this_repository.current_home is null is a finding (no reader reads it yet), as is one that does not parse.
+this_repository.current_home is null is a finding (no reader reads it yet), as is one that does not parse;
+(m) exactly one gates.verdict_app.app_id row, kind project with a null variable, defaults.local equal to
+defaults.cloud, each null or a positive integer (never a bool).
 """
 
 from __future__ import annotations
@@ -295,6 +297,25 @@ def _check_gate_rows(body: ProjectConfigurationBody, root: Path) -> list[str]:
     return out
 
 
+_APP_ROW = "gates.verdict_app.app_id"
+
+
+def _check_verdict_app_row(body: ProjectConfigurationBody) -> list[str]:
+    rows = [r for r in body.settings if r.id == _APP_ROW]
+    if not rows:
+        return [f"{_APP_ROW} row is missing"]
+    out: list[str] = []
+    for row in rows:
+        if row.kind != "project" or row.variable is not None:
+            out.append(f"setting {row.id}: must be kind project with a null variable")
+        local, cloud = row.defaults.local, row.defaults.cloud
+        if local != cloud or type(local) is not type(cloud):
+            out.append(f"setting {row.id}: defaults.local and defaults.cloud must be equal")
+        elif local is not None and (isinstance(local, bool) or not isinstance(local, int) or local <= 0):
+            out.append(f"setting {row.id}: defaults must each be null or a positive integer")
+    return out
+
+
 def _rule_findings(body: ProjectConfigurationBody, root: Path) -> list[str]:
     items, decs = _roadmap_criteria(root), _dec_numbers(root)
     return [
@@ -307,6 +328,7 @@ def _rule_findings(body: ProjectConfigurationBody, root: Path) -> list[str]:
         *_check_semantics(body),
         *_check_trigger(body, root),
         *_check_gate_rows(body, root),
+        *_check_verdict_app_row(body),
     ]
 
 

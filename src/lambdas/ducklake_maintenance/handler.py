@@ -42,6 +42,7 @@ from src.common import ducklake_maintenance as maint
 from src.common import ducklake_maintenance_scope as scope
 from src.common import ducklake_runtime as rt
 from src.lambdas.ducklake_maintenance import (
+    backlog_gate,
     catalog_actions,
     health_actions,
     index_actions,
@@ -543,6 +544,7 @@ _ACTIONS: dict[str, Any] = {
     "catalog_reinit": action_catalog_reinit,
     "restore_drill": action_restore_drill,
     "merge_ops": action_merge_ops,
+    "merge_ops_gated": backlog_gate.gated(action_merge_ops),
     "gc_ops": action_gc_ops,
     "catalog_stats": health_actions.action_catalog_stats,
     "reconcile_columns": action_reconcile_columns,
