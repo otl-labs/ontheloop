@@ -37,3 +37,8 @@ def test_repair_message_lists_errors():
     text = repair_message(["$: a", "$: b"])
     assert text.startswith("Your last reply is not a valid result:\n$: a\n$: b\n")
     assert text.endswith("a failure the contract lists.")
+
+
+def test_failure_detail_must_be_a_string():
+    value = {"outcome": "failure", "failure": "budget_exhausted", "detail": 5}
+    assert check(json.dumps(value), "stop", LOADED).errors == ["$['detail']: must be a string"]

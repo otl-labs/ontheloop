@@ -53,6 +53,12 @@ def _opening(loaded: LoadedContract, materialised_input: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _record_dict(record: Any) -> Any:
+    if dataclasses.is_dataclass(record) and not isinstance(record, type):
+        return dataclasses.asdict(record)
+    return record
+
+
 class _Run:
     def __init__(
         self,
@@ -213,7 +219,7 @@ class _Run:
         if result.failed_over:
             self.role = _FALLBACK
         common: dict[str, Any] = {
-            "record": dataclasses.asdict(result.record) if dataclasses.is_dataclass(result.record) else result.record,
+            "record": _record_dict(result.record),
             "failed_over": bool(result.failed_over),
             "finish_reason": result.finish_reason,
             "message": result.message,

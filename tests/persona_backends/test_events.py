@@ -27,3 +27,8 @@ def test_write_atomic_leaves_no_tmp_and_whole_document(tmp_path):
     ev.write_atomic(path, head, [{"turn": 1}], ev.end_record("success", None, 1, 0, 2))
     assert json.loads(path.read_text())["end"]["turns_used"] == 1
     assert os.listdir(tmp_path) == ["events.json"]
+
+
+def test_end_record_carries_error_only_when_given():
+    assert "error" not in ev.end_record("success", None, 1, 0, 2)
+    assert ev.end_record("aborted", None, 1, 0, 2, "outage")["error"] == "outage"

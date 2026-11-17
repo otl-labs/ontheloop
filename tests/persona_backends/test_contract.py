@@ -58,3 +58,29 @@ def test_capability_gate_matches_index():
         if row["binding"]["litellm"]["kind"] == "backend_tool" and row["binding"]["litellm"]["owning_item"] == "T4.32:c1"
     }
     assert set(BUILT) == owned
+
+
+def test_unreadable_and_non_mapping_contracts_are_refused(tmp_path):
+    with pytest.raises(RunRefused, match="unreadable"):
+        load(tmp_path / "absent.yaml")
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("a: [", encoding="utf-8")
+    with pytest.raises(RunRefused, match="unreadable"):
+        load(bad)
+    listing = tmp_path / "list.yaml"
+    listing.write_text("- a\n", encoding="utf-8")
+    with pytest.raises(RunRefused, match="not a mapping"):
+        load(listing)
+
+
+def test_missing_rendered_prompt_is_refused(tmp_path):
+    contract = _copy(tmp_path)
+    (contract.parent / "rendered" / "fixture_persona.txt").unlink()
+    with pytest.raises(RunRefused, match="rendered prompt unreadable"):
+        load(contract)
+
+
+def test_capability_naming_an_undeclared_blob_is_refused(tmp_path):
+    contract = _copy(tmp_path, lambda d: d["capabilities"].append("read_input:ghost"))
+    with pytest.raises(RunRefused, match="ghost"):
+        load(contract)

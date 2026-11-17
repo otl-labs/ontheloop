@@ -107,3 +107,11 @@ def test_missing_required_argument_exits_two(flag):
     with pytest.raises(SystemExit) as info:
         run_persona.main(argv)
     assert info.value.code == 2
+
+
+def test_import_inserts_the_repo_root_when_absent(monkeypatch):
+    import importlib
+
+    monkeypatch.setattr(sys, "path", [p for p in sys.path if p != str(ROOT)])
+    importlib.reload(run_persona)
+    assert sys.path[0] == str(ROOT)
