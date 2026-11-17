@@ -104,9 +104,23 @@ def _marked_temporary(base: TableView, column: str, kind: str) -> bool:
     return any((base.exemptions.get((column, k)) or {}).get("class") == "temporary" for k in keys)
 
 
+def _without_advisory(params: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in params.items() if k != "advisory"}
+
+
+def _advisory_errors(
+    where: str, b: contract_rules.DeclaredRule, h: contract_rules.DeclaredRule, entries: list[dict[str, Any]]
+) -> list[str]:
+    was, now = bool(dict(b.params).get("advisory")), bool(dict(h.params).get("advisory"))
+    if was == now or _break_entry(entries):
+        return []
+    verb = "added" if now else "removed"
+    return [f"ratchet: {where} advisory {verb} without a semantic-break entry"]
+
+
 def _params_narrowed(kind: str, base_params: dict[str, Any], head_params: dict[str, Any]) -> tuple[bool, set[Any]]:
     if kind != "accepted_values":
-        return base_params != head_params, set()
+        return _without_advisory(base_params) != _without_advisory(head_params), set()
     removed = set(base_params.get("values") or []) - set(head_params.get("values") or [])
     rest_b = {k: v for k, v in base_params.items() if k != "values"}
     rest_h = {k: v for k, v in head_params.items() if k != "values"}
@@ -138,6 +152,7 @@ def _leg_errors(table: str, key: tuple[str, str], base: TableView, head: TableVi
     b, h = base.rules[key], head.rules[key]
     entries = _gained(base, head, column)
     errors = _date_errors(where, b.exclude_before, h.exclude_before, entries)
+    errors.extend(_advisory_errors(where, b, h, entries))
     sourced = column in head.registry_sourced and kind == "accepted_values"
     narrowed, removed = (False, set()) if sourced else _params_narrowed(kind, dict(b.params), dict(h.params))
     if removed and not _narrow_value_entry(entries, removed):

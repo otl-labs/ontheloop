@@ -211,14 +211,18 @@ def test_producer_side_rules_follow_the_contract_exemptions(tmp_path: Path, clea
     _write_validators._rec_exists_memo.clear()
 
 
-def _refusal(record: dict[str, Any], **kwargs: Any) -> str:
-    with pytest.raises(ValueError, match="unqualified") as exc:
-        gate_write("ops_recommendations", record, **kwargs)
-    return str(exc.value)
+def _finding(record: dict[str, Any], **kwargs: Any) -> str:
+    unclean = [r for r in gate_write("ops_recommendations", record, **kwargs) if r.outcome == "finding"]
+    assert len(unclean) == 1, unclean
+    return unclean[0].message
 
 
-def test_glossary_lint_refuses_unqualified_title() -> None:
-    message = _refusal({**ops_rec_fields(), "title": "Fix the platform runner for retries"}, insert=True)
+def _clean_findings(record: dict[str, Any], **kwargs: Any) -> list[Any]:
+    return [r for r in gate_write("ops_recommendations", record, **kwargs) if r.outcome in ("finding", "error")]
+
+
+def test_glossary_lint_reports_unqualified_title() -> None:
+    message = _finding({**ops_rec_fields(), "title": "Fix the platform runner for retries"}, insert=True)
     assert message.startswith('title: unqualified "platform" -- say instead: On The Loop, core')
     assert "runner for retries" not in message
     assert "context_v2_json" not in message
@@ -227,29 +231,29 @@ def test_glossary_lint_refuses_unqualified_title() -> None:
 def test_glossary_lint_update_judges_only_new_sentences() -> None:
     stored = reader_rec_row(context="The platform runner stalls. " + "x" * 90)
     kept = {**stored, "context": stored["context"] + " Retry with a bounded delay."}
-    gate_write("ops_recommendations", kept, insert=False, existing=stored)
+    assert _clean_findings(kept, insert=False, existing=stored) == []
     added = {**stored, "context": stored["context"] + " The product hangs too."}
-    assert 'unqualified "product"' in _refusal(added, insert=False, existing=stored)
+    assert 'unqualified "product"' in _finding(added, insert=False, existing=stored)
 
 
-def test_glossary_lint_fails_closed_without_contract(tmp_path: Path) -> None:
+def test_glossary_lint_reports_error_without_contract(tmp_path: Path) -> None:
     _write_validators._load_glossary.cache_clear()
     with patch.object(_write_validators, "_GLOSSARY_PATH", tmp_path / "absent.yaml"):
-        with pytest.raises(ValueError, match="failing closed"):
-            gate_write("ops_recommendations", ops_rec_fields(), insert=True)
+        results = gate_write("ops_recommendations", ops_rec_fields(), insert=True)
+    assert {r.column: r.outcome for r in results if r.kind == "glossary_lint"}["title"] == "error"
     _write_validators._load_glossary.cache_clear()
 
 
 def test_glossary_lint_covers_verification_not_resolution() -> None:
-    assert 'verification: unqualified "platform"' in _refusal(
+    assert 'verification: unqualified "platform"' in _finding(
         {**ops_rec_fields(), "verification": "Check the platform runner."}, insert=True
     )
-    gate_write("ops_recommendations", {**ops_rec_fields(), "resolution": "Fixed the platform runner."}, insert=True)
+    assert _clean_findings({**ops_rec_fields(), "resolution": "Fixed the platform runner."}, insert=True) == []
 
 
 def test_glossary_lint_context_message_names_derivation() -> None:
     long_context = "The platform runner stalls on retry. " * 4
-    assert "context_v2_json" in _refusal({**ops_rec_fields(), "context": long_context}, insert=True)
+    assert "context_v2_json" in _finding({**ops_rec_fields(), "context": long_context}, insert=True)
 
 
 @pytest.mark.parametrize(
@@ -261,7 +265,7 @@ def test_glossary_lint_context_message_names_derivation() -> None:
     ],
 )
 def test_glossary_lint_passes_quotes_identifiers_and_none(column: str, value: str | None) -> None:
-    gate_write("ops_recommendations", {**ops_rec_fields(), column: value}, insert=True)
+    assert _clean_findings({**ops_rec_fields(), column: value}, insert=True) == []
 
 
 # ---------------------------------------------------------------------------
