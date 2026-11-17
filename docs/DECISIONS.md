@@ -2542,6 +2542,8 @@ conditions:
 
 [Amendment 2026-10-29, Decision 239: cl.3's content consumer exists; agents read production transcript text masked, only through the telemetry content reader; cl.2 and cl.6 count two production telemetry readers, so the closed read boundary is three readers.]
 
+[Amendment 2026-11-17, PLAN-telemetry-read-timeouts: cl.5's every-6h merge_ops on the production telemetry catalog stays as the floor, and a backlog-gated pass is added, as Decision 88 cl.1(iii) sizes cadence to write rate: a rule ticks every two to six minutes, never in the three minutes up to another maintenance job's start, reads CloudWatch only, and merges when at least 60 telemetry commits have landed since the last pass or a commit has waited 30 minutes; a gate that cannot read its metrics skips and alarms. Each telemetry write lands as its own small files, and on every busy day the 6-hour backlog pushed cold reads of the newest days past the reader's deadline (rec-5247, rec-5248). The weekly guarded gc_ops, the guards and every existing alarm are unchanged.]
+
 ---
 
 ## Decision 235: Verification weakening is human-gated at entry and earns autonomy on a ladder lane behind a shadow step, out-of-loop redundancy evidence and an irreducible floor (amends Decision 181 clause 1 and Decision 187 clauses 3-5) (Decided)

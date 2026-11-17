@@ -25,6 +25,28 @@ from scripts.contract_rules import (
 )
 
 _D = "2026-05-01"
+_PROV_V1 = {
+    "required": {
+        "schema_version": "integer",
+        "client": "string",
+        "client_commit": "string",
+        "client_dirty": "boolean",
+        "ruleset_version": "string",
+        "checks": {"map": {"key_pattern": "^[a-z][a-z0-9_]{0,63}$", "values": ["pass", "fail", "advisory", "skipped"]}},
+    },
+    "optional": {
+        **dict.fromkeys(
+            ("file_exists_at_commit", "complexity_fallback", "effort_fallback", "coverage_present", "ceiling_fallback"),
+            "boolean",
+        ),
+        "boundary_match": "boolean",
+        "empty_file_fallback": "boolean",
+        "risk_formula_version": "string",
+        **dict.fromkeys(("complexity_max", "effort_scale", "risk_raw", "maturity_ceiling"), "number"),
+        "coverage_line_rate": "number?",
+    },
+}
+_PROV_LEG = {"max_bytes": 4096, "versions": {1: _PROV_V1}}
 _ALLOWED = frozenset({"not_null", "accepted_values", "min_length", "write_time_exemptions"})
 
 
@@ -87,6 +109,7 @@ def test_ops_recommendations_declares_its_rule_list() -> None:
         "tags": {"array_element_format": ({"pattern": "^[a-z][a-z0-9-]*$"}, "2026-09-08")},
         "created_timestamp": {"not_null": ({}, None)},
         "last_updated_timestamp": {"not_null": ({}, None), "not_before": ({"value": "created_timestamp"}, None)},
+        "provenance_json": {"json_object": (_PROV_LEG, "2026-11-17")},
     }
     actual = {col: {kind: _shape(rule) for kind, rule in kinds.items()} for col, kinds in cols.items()}
     assert actual == expected

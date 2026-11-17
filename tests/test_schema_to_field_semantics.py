@@ -292,8 +292,8 @@ class TestGenerateIntegration:
         cols = doc["ops_tables"]["ops_recommendations"]["columns"]
         assert "ulid" in cols
         assert "id" in cols
-        assert "_contract_version" in cols
-        assert len(cols) == 26
+        assert "_contract_version" in cols and "provenance_json" in cols
+        assert len(cols) == 27
 
     def test_ops_decisions_columns_present(self) -> None:
         doc = generate()
