@@ -112,50 +112,103 @@ class _Msg:
         return dict(self._fields)
 
 
-def _read(sel, response):
-    return read_response(response, selection=sel, persona="p", role=sel.role, attempt=2, latency_ms=7)
+def _read(sel, response, **times):
+    return read_response(response, selection=sel, persona="p", role=sel.role, attempt=2, latency_ms=7, **times)
+
+
+def _usage(**fields):
+    return litellm_wire.load_litellm().Usage(**fields)
 
 
 class TestRecords:
     def test_deepseek_usage_and_served_model(self) -> None:
         sel = cap.selection(role="primary")
-        usage = SimpleNamespace(
+        usage = _usage(
             prompt_tokens=100,
             completion_tokens=20,
-            prompt_tokens_details=SimpleNamespace(cached_tokens=30),
-            completion_tokens_details=SimpleNamespace(reasoning_tokens=9),
+            total_tokens=120,
+            prompt_cache_hit_tokens=30,
+            prompt_cache_miss_tokens=70,
+            prompt_tokens_details={"cached_tokens": 30},
+            completion_tokens_details={"reasoning_tokens": 9},
         )
         call = SimpleNamespace(id="c1", type="function", function=SimpleNamespace(name="f", arguments="{}"))
-        content, calls, message, rec = _read(sel, _response("dated-build", usage, _Msg("hello", [call], x=None, y=1)))
+        response = _response("dated-build", usage, _Msg("hello", [call], x=None, y=1), id="resp-9")
+        content, calls, message, rec = _read(sel, response, started_at_ms=1000, responded_at_ms=1500)
         assert (content, message["y"]) == ("hello", 1) and "x" not in message
         assert calls == [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]
         assert rec.requested_model == sel.model and rec.model == "dated-build"
         assert (rec.tokens_input, rec.tokens_cache_read, rec.tokens_cache_creation) == (70, 30, 0)
         assert (rec.tokens_output, rec.reasoning_tokens, rec.attempt, rec.latency_ms) == (20, 9, 2, 7)
+        assert (rec.response_id, rec.started_at_ms, rec.responded_at_ms, rec.usage_absent) == ("resp-9", 1000, 1500, ())
+        assert rec.usage_raw["prompt_cache_hit_tokens"] == 30
+        assert rec.cache_creation_1h_tokens is None and rec.cache_creation_5m_tokens is None
+
+    def test_usage_raw_strips_none_recursively(self) -> None:
+        sel = cap.selection(role="primary")
+        usage = _usage(
+            prompt_tokens=10,
+            completion_tokens=3,
+            total_tokens=13,
+            prompt_cache_hit_tokens=0,
+            prompt_cache_miss_tokens=10,
+            prompt_tokens_details={"cached_tokens": 0},
+        )
+        rec = _read(sel, _response("m", usage, _Msg("x"), id="r"))[3]
+        assert rec.usage_raw["prompt_tokens_details"] == {"cached_tokens": 0}
+        assert "completion_tokens_details" not in rec.usage_raw
+
+    def test_usage_raw_strips_none_inside_lists(self) -> None:
+        sel = cap.selection(role="warm_fetched_escape_hatch")
+        usage = _usage(
+            prompt_tokens=10,
+            completion_tokens=3,
+            total_tokens=13,
+            cache_read_input_tokens=0,
+            cache_creation_input_tokens=0,
+            iterations=[{"type": "message", "input_tokens": 10, "unused": None}, None],
+        )
+        rec = _read(sel, _response("m", usage, _Msg("x"), id="r"))[3]
+        assert rec.usage_raw["iterations"] == [{"type": "message", "input_tokens": 10}]
 
     def test_deepseek_bare_usage_and_no_model(self) -> None:
         sel = cap.selection(role="primary")
-        usage = SimpleNamespace(
-            prompt_tokens=10, completion_tokens=3, prompt_tokens_details=None, completion_tokens_details=None
-        )
-        message = _Msg(None)
-        response = SimpleNamespace(usage=usage, choices=[SimpleNamespace(message=message)])
+        response = SimpleNamespace(choices=[SimpleNamespace(message=_Msg(None))])
         content, calls, _, rec = _read(sel, response)
         assert content == "" and calls == []
         assert rec.model is None and rec.reasoning_tokens is None
-        assert (rec.tokens_input, rec.tokens_cache_read, rec.tokens_cache_creation) == (10, 0, 0)
+        assert rec.usage_raw is None
+        assert (rec.tokens_input, rec.tokens_cache_read, rec.tokens_output) == (0, 0, 0)
+        assert rec.usage_absent == ("tokens_cache_read", "tokens_input", "tokens_output")
+        assert (rec.response_id, rec.started_at_ms, rec.responded_at_ms) == (None, None, None)
 
     def test_anthropic_records_have_no_reasoning_tokens(self) -> None:
         sel = cap.selection(role="warm_fetched_escape_hatch")
-        usage = SimpleNamespace(
+        usage = _usage(
             prompt_tokens=100,
             completion_tokens=20,
-            prompt_tokens_details=SimpleNamespace(cached_tokens=10, cache_creation_tokens=5),
-            completion_tokens_details=SimpleNamespace(reasoning_tokens=4),
+            total_tokens=120,
+            cache_read_input_tokens=10,
+            cache_creation_input_tokens=5,
+            prompt_tokens_details={
+                "cached_tokens": 10,
+                "cache_creation_tokens": 5,
+                "cache_creation_token_details": {"ephemeral_1h_input_tokens": 2, "ephemeral_5m_input_tokens": 3},
+            },
+            completion_tokens_details={"reasoning_tokens": 4},
         )
-        rec = _read(sel, _response("m", usage, _Msg("x")))[3]
+        rec = _read(sel, _response("m", usage, _Msg("x"), id="chatcmpl-local"))[3]
         assert rec.reasoning_tokens is None
+        assert rec.response_id is None
         assert (rec.tokens_input, rec.tokens_cache_read, rec.tokens_cache_creation) == (85, 10, 5)
+        assert (rec.cache_creation_1h_tokens, rec.cache_creation_5m_tokens) == (2, 3)
+
+    def test_all_zero_usage_is_absent_and_tokens_come_from_map_usage(self) -> None:
+        sel = cap.selection(role="warm_fetched_escape_hatch")
+        usage = _usage(prompt_tokens=0, completion_tokens=0, total_tokens=0)
+        rec = _read(sel, _response("m", usage, _Msg("x"), id="r"))[3]
+        assert rec.usage_absent == ("tokens_cache_creation", "tokens_cache_read", "tokens_input", "tokens_output")
+        assert "prompt_tokens -" not in open(litellm_wire.__file__, encoding="utf-8").read()
 
 
 class _Status(Exception):
