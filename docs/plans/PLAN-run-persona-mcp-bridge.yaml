@@ -1,0 +1,370 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: run-persona-mcp-bridge
+intent: >-
+  Build the warehouse_read consumption leg of the run_persona litellm backend (T4.32 c1, T4.10a c7's consumption leg;
+  rec-5267), plan 4 of the four plans PLAN-run-persona-litellm-backend split into. A stdio MCP client in
+  src/persona_backends/mcp_bridge.py starts the one On The Loop MCP server (scripts/agent_sdk/mcp_server.py) once per
+  run whose contract names warehouse_read:<named_read>, offers the model only the named reads the contract lists (with
+  the server's own input schemas), and returns each call's text to the tool loop; scripts/run_persona.py injects the
+  server's launch parameters (the module named by the index binding, run from the repository root, with an environment
+  that carries the reader's configuration and credentials and never an inference key), so src/persona_backends still
+  imports nothing under scripts. The capability gate admits warehouse_read, test_capability_gate_matches_index counts
+  every T4.32:c1-owned binding, and run_persona.result says what the backend builds. Proven against a fake stdio server
+  built on the real server module with a fake reader. Serves NS.3: verdicts run on GitHub from main's definition.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-run-persona-mcp-bridge.yaml
+phase: >-
+  T4.32 c1 (backend leg, part: the warehouse_read MCP consumption the item's T4.10a c7 annotation hands to c1); closes
+  no criterion (c1's credential, chain, image and adapter legs stay open). T4.32 is in_progress and the backend plan's
+  build merged (#2132, eed2f6e4). src/persona_backends is excluded from the data-pipeline bundle and scripts/run_persona.py
+  is in no bundle, so nothing deploys (V2).
+closes_criteria: []
+cites: [dec:84, dec:205, dec:206, dec:212, dec:246, dec:256]
+scope:
+  - file: src/persona_backends/mcp_bridge.py
+    action: Create
+    purpose: >-
+      The stdio MCP client. `open_bridge(server: mcp.client.stdio.StdioServerParameters, verbs: tuple[str, ...])` is an
+      async context manager yielding a Bridge: it runs stdio_client and ClientSession, initialize() and list_tools(), and
+      raises BridgeUnavailable (class name only in its text, Decision 101) when the server cannot start or initialise, or
+      when a named verb is not among the listed tools (naming the verb). `Bridge.tool_specs()` returns one OpenAI-style
+      function spec per named verb, in contract order: name = the verb, description and parameters = the listed tool's
+      description and input_schema, verbatim; tools the server lists but the contract does not name are never offered
+      (Decision 206 clause 1). `await Bridge.call(name, arguments_json) -> str`: arguments that are not a JSON object
+      return "error: ..." text without a server call; a result with is_error returns "error: " + its text; otherwise the
+      text contents joined by newlines; any reply past read_input.READ_CAP_BYTES is cut at that byte count (on a
+      character boundary) and ends "[truncated: <total> bytes]". A failure of the session itself (closed stream, an
+      McpError, the process gone) raises BridgeFailed (class name only). Names no persona id and no scripts path.
+  - file: src/persona_backends/contract.py
+    action: Modify
+    purpose: >-
+      BUILT = frozenset({"read_input", "warehouse_read"}). read_input:<blob> keeps its input_schema property check;
+      warehouse_read:<verb> needs a non-empty parameter that is not "read_input" (the backend's own tool name), else
+      RunRefused naming the capability. LoadedContract gains warehouse_verbs: tuple[str, ...] (contract order, duplicates
+      dropped). Domain membership (an agent_facing NAMED_READS key) stays the full tier's validate_persona_contracts
+      check; at run time the server's own tool list is the authority.
+  - file: src/persona_backends/litellm_backend.py
+    action: Modify
+    purpose: >-
+      run_persona gains keyword `mcp_server: StdioServerParameters | None = None`. A contract with warehouse_verbs and
+      mcp_server None is RunRefused ("warehouse_read needs the MCP server"). After the input check passes (so an
+      input_incomplete run starts no server), a contract with warehouse_verbs opens open_bridge(mcp_server, verbs) around
+      the run loop; BridgeUnavailable aborts with kind tool_server_unavailable (header and end records written, no model
+      call). The tool list is the read_input spec when the contract names a read_input blob, then the bridge's specs.
+      Tool dispatch becomes async: read_input is served as now, a named verb awaits Bridge.call under
+      asyncio.wait_for(remaining wall clock) (a timeout returns budget_exhausted, as a transport timeout does), any other
+      name gets "error: unknown tool"; BridgeFailed aborts with kind tool_server_error. Tool turns keep the plan-1 turn
+      record shape (tool_calls names, tool_result_bytes). A tool call spends no turn (a turn is a provider attempt).
+      Stays under 500 SLOC.
+  - file: scripts/run_persona.py
+    action: Modify
+    purpose: >-
+      MCP_SERVER_MODULE = "scripts.agent_sdk.mcp_server"; `server_parameters(environ=os.environ)` returns
+      StdioServerParameters(command=sys.executable, args=["-m", MCP_SERVER_MODULE], cwd=<repo root>, env=server_env(environ)).
+      `server_env(environ)` is the mcp library's get_default_environment() plus the variables whose names start with
+      AWS_, DUCKLAKE_ or OTL_ and the proxy and CA-bundle variables (HTTPS_PROXY, HTTP_PROXY, NO_PROXY and their lowercase
+      forms, SSL_CERT_FILE, REQUESTS_CA_BUNDLE, CURL_CA_BUNDLE): the reader's configuration and credentials, never an
+      inference key or GITHUB_TOKEN. main() passes mcp_server=server_parameters() to run_persona; the server is started
+      only for a contract that names warehouse_read. The server's stderr is the entry point's stderr; stdout still
+      carries only the result. Exit 4 covers the two new abort kinds.
+  - file: tests/persona_backends/fake_mcp_server.py
+    action: Create
+    purpose: >-
+      A stdio MCP server for tests, run as `python -m tests.persona_backends.fake_mcp_server [mode]` from the repository
+      root: scripts.agent_sdk.mcp_server.create_server(reader=<fake reader>) served through that module's _run_stdio, so
+      the client meets the real server projection. The fake reader's describe() lists two agent-facing verbs (one with a
+      required array argument) and one agent_facing false verb; named() returns synthetic rows, or rows past the byte
+      cap in mode big. Mode crash raises in describe() (the server exits at startup); mode die exits the process on the
+      first call. Synthetic values only (Decision 101).
+  - file: tests/persona_backends/test_mcp_bridge.py
+    action: Create
+    purpose: >-
+      Mirror test, every case through a real subprocess of fake_mcp_server: test_offers_only_named_verbs (specs equal
+      the named verbs in contract order with the server's input_schema; the unnamed and the agent_facing false verbs are
+      absent); test_call_returns_rows_text; test_server_input_error_is_error_text (a schema-invalid argument returns
+      "error: Input validation error..."); test_bad_json_arguments_make_no_call; test_reply_past_cap_is_truncated;
+      test_missing_verb_is_unavailable (names the verb); test_server_crash_at_start_is_unavailable;
+      test_server_dying_mid_run_is_bridge_failed.
+  - file: tests/persona_backends/test_contract.py
+    action: Modify
+    purpose: >-
+      warehouse_read:x leaves the refused-by-name parametrisation and gets test_warehouse_read_loads_verbs (order kept,
+      duplicates dropped) and test_warehouse_read_naming_read_input_is_refused; test_capability_gate_matches_index
+      derives BUILT from every capability row whose litellm owning_item is T4.32:c1, of any binding kind (red before
+      BUILT gains warehouse_read).
+  - file: tests/persona_backends/test_litellm_backend.py
+    action: Modify
+    purpose: >-
+      On the fake transport and the fake stdio server: test_warehouse_tool_turn_returns_server_text (a tool call to a
+      named verb gets the server's rows text as its tool message, and the turn record lists the verb);
+      test_offered_tools_are_read_input_then_named_verbs; test_warehouse_without_server_is_refused;
+      test_input_incomplete_starts_no_server; test_unavailable_server_aborts_before_any_call (kind
+      tool_server_unavailable, zero transport calls, end record aborted); test_server_failure_mid_run_aborts (kind
+      tool_server_error); test_contract_without_read_input_blob_offers_no_read_input_tool; a contract without
+      warehouse_read starts no server (mcp_server pointing at a command that does not exist still succeeds).
+  - file: tests/test_run_persona.py
+    action: Modify
+    purpose: >-
+      test_server_module_matches_index_binding (MCP_SERVER_MODULE as a path, scripts/agent_sdk/mcp_server.py, equals the
+      warehouse_read row's binding server in executor-personas.yaml); test_server_env_withholds_inference_keys (an
+      environ holding DEEPSEEK_API_KEY, ANTHROPIC_API_KEY, GITHUB_TOKEN and AWS_ACCESS_KEY_ID yields an env with only the
+      last); test_server_parameters_run_the_module_from_the_root; the isolated-mode subprocess refusal case names
+      read_repo in place of warehouse_read:x.
+  - file: docs/contracts/executor-personas.yaml
+    action: Modify
+    purpose: >-
+      Exactly the sidecar's e01-e02 blocks (docs/plans/approved/run-persona-mcp-bridge.yaml): the amendment_log row and
+      the run_persona.result sentence on what the litellm backend builds.
+  - file: docs/contracts/ports.yaml
+    action: Modify
+    purpose: >-
+      Exactly the sidecar's e03-e04 blocks: one amendment_log row, and coupling PC-01's description gains one sentence,
+      appended to its last line (no new line; the file is at 498 of 500 effective lines), recording scripts/run_persona.py
+      handing the MCP server it starts for a warehouse_read run the AWS_, DUCKLAKE_, OTL_ and proxy variables, so such a
+      run needs a host holding an AWS identity with a reader grant (Decision 212 clause 3; Decision 263 clause 2 gives the
+      persona-verdict role none today); no port row is added.
+bundled_recommendations:
+  - rec-5267
+followon_recs:
+  - rec-5312
+infrastructure_dependencies: []
+acceptance_criteria:
+  - A contract naming warehouse_read:<verb> runs with the model offered exactly the named verbs, with the server's input schemas, and a tool call to one returns the server's text as the tool message.
+  - The bridge never offers a verb the contract does not name, refuses a run whose named verb the server does not list, and aborts (exit 4) when the server cannot start or fails mid-run.
+  - The server is started only for a contract that names warehouse_read, and only after the input check passes.
+  - The server's environment carries AWS_, DUCKLAKE_ and OTL_ variables and the proxy and CA-bundle variables, and no inference key or GITHUB_TOKEN.
+  - BUILT holds read_input and warehouse_read, equal to every T4.32:c1-owned binding in the live index; src/persona_backends imports nothing under scripts.
+  - executor-personas.yaml and ports.yaml carry the sidecar's four blocks word for word, and the persona contract and ports checks stay green.
+  - rec-5267 is closed by the build's merge (Resolves trailer).
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The MCP client against a real subprocess of the fake stdio server (built on the real server module).
+    command: bin/venv-python -m pytest tests/persona_backends/test_mcp_bridge.py -q
+    expected: Exit 0, every node passes. Red before (the module and the test are absent).
+    fix_if: >-
+      An unnamed verb offered, an error result raised instead of returned as text, or a crash not reported as
+      BridgeUnavailable or BridgeFailed: fix the bridge, never the fake server or the expectation.
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: run-persona-mcp-bridge-client
+  - step: 2
+    phase: pre-deploy
+    action: The capability gate against the live index, and the run loop's warehouse tool turns, refusals and aborts.
+    command: bin/venv-python -m pytest tests/persona_backends/test_contract.py tests/persona_backends/test_litellm_backend.py -q
+    expected: >-
+      Exit 0, every node passes. Red before: test_capability_gate_matches_index (widened) fails while BUILT lacks
+      warehouse_read, and the new warehouse cases fail while run_persona has no mcp_server argument.
+    fix_if: >-
+      A server started for a contract without warehouse_read or before the input check, or a tool call spending a turn:
+      fix the backend.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      The kept shards run-persona-litellm-backend-contract-tool-events and run-persona-litellm-backend-loop already rerun
+      these two files' standing nodes, and the fast tier runs both files whole.
+  - step: 3
+    phase: pre-deploy
+    action: The entry point's server parameters, the environment allow-list and the module-to-binding tie.
+    command: bin/venv-python -m pytest tests/test_run_persona.py -q
+    expected: Exit 0, every node passes. Red before (server_parameters and server_env are absent).
+    fix_if: An inference key or GITHUB_TOKEN in the server env, or a module that differs from the binding; fix the entry point.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      The kept shard run-persona-entry-point already reruns this file's standing node, and the fast tier runs it whole.
+  - step: 4
+    phase: pre-deploy
+    action: The import boundary still holds (the new module imports mcp, never scripts).
+    command: bin/venv-python -m pytest tests/persona_backends/test_package_boundary.py -q && bin/venv-python -m scripts.import_governance --check-contracts
+    expected: Exit 0 from both; the import-linter run lists the src.persona_backends contract as kept.
+    expected_literals:
+      - src.persona_backends imports nothing under scripts
+    fix_if: A src module importing scripts -- inject the dependency from scripts/run_persona.py instead.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      The pytest half is a standing guard through the fast tier's test run and the import-linter half is already a
+      standing check (scripts.import_governance), so a shard would duplicate both.
+  - step: 5
+    phase: pre-deploy
+    action: No artifact bundles a changed path and no deploy channel watches one (Decision 249 clause 2).
+    command: >-
+      bin/venv-python -c "import subprocess;from scripts.convergence_health.code_drift import PROD_SOURCE_PATHSPECS as P,DUCKLAKE_SOURCE_PATHSPECS as D;from scripts.lambda_manifest import compute_affected_artifacts as ca;import fnmatch;run=lambda a:subprocess.run(a,capture_output=True,text=True,check=True).stdout.split();mb=subprocess.run(['git','merge-base','HEAD','origin/main'],capture_output=True,text=True,check=True).stdout.strip();ch=sorted(set(run(['git','diff','--name-only',mb]))|set(run(['git','ls-files','--others','--exclude-standard'])));hit=lambda f,g:f==g or f.startswith(g.rstrip('/')+'/') or fnmatch.fnmatch(f,g);hits=sorted({f for f in ch for g in P+D if hit(f,g)});aff=ca(ch);print('changed',len(ch),'hits',hits,'affected',aff);assert 'src/persona_backends/mcp_bridge.py' in ch and 'scripts/run_persona.py' in ch;assert not hits and aff=={};print('NO_DEPLOY_TRIGGER_OK')"
+    expected: >-
+      Exit 0; the change list holds the bridge and the entry point, no changed path matches a PROD_SOURCE_PATHSPECS or
+      DUCKLAKE_SOURCE_PATHSPECS entry, affected is empty, and the last line is NO_DEPLOY_TRIGGER_OK.
+    fix_if: An artifact is affected or a pathspec hits; STOP to this planning thread, never deploy from this plan.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      It reads this branch's transient diff against the merge-base, empty on main; the data-pipeline exclude is held by
+      test_package_boundary's test_excluded_from_data_pipeline in every tier.
+  - step: 6
+    phase: pre-deploy
+    action: The placed contract text and the checks that read the two contracts.
+    command: >-
+      bin/venv-python -m scripts.roadmap.approved_text verify --slug run-persona-mcp-bridge && bin/venv-python -c
+      "from scripts.checks.contracts.validate_persona_contracts import validate_persona_contracts as a;
+      from scripts.checks.contracts.validate_persona_contract_binding import validate_persona_contract_binding as b;
+      from scripts.checks.contracts.validate_ports_contract import validate_ports_contract as c;
+      f=[];a(f);b(f);c(f);print(*f,sep='\n');print(f'contract checks: {len(f)} failures');assert not f"
+    expected: The verify run passes and the last line reports 0 failures.
+    expected_literals:
+      - 'contract checks: 0 failures'
+    fix_if: >-
+      A verify mismatch: place the block word for word (never edit the sidecar). A moved before-text after the rebase:
+      STOP to this planning thread.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      The three checks already run in every tier and the approved-text verify runs in validate_merge_step; a shard would
+      duplicate them.
+  - step: 7
+    phase: pre-deploy
+    action: >-
+      Live read through the real server: the bridge, with run_persona.py's server parameters and this session's
+      proxy-signed reader access (Decision 256), lists recs_by_ids and reads rec-5267.
+    command: |-
+      bin/venv-python - <<'PY'
+      import asyncio, json
+      from scripts.run_persona import server_parameters
+      from src.persona_backends.mcp_bridge import open_bridge
+      async def main():
+          async with open_bridge(server_parameters(), ("recs_by_ids",)) as bridge:
+              names = [spec["function"]["name"] for spec in bridge.tool_specs()]
+              reply = await bridge.call("recs_by_ids", json.dumps({"ids": ["rec-5267"]}))
+          print(names, reply[:200])
+          assert names == ["recs_by_ids"] and "rec-5267" in reply and not reply.startswith("error:")
+          print("LIVE_BRIDGE_OK")
+      asyncio.run(main())
+      PY
+    expected: The probe prints the offered tool names (recs_by_ids only) and a reply naming rec-5267, then LIVE_BRIDGE_OK.
+    fix_if: >-
+      The server cannot reach the reader with the allow-listed environment: a variable the reader needs is missing from
+      server_env; add its name and its test case, never pass the full environment.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Needs live reader credentials, which CI's fast tier does not hold; the hermetic legs are steps 1-3.
+  - step: 8
+    phase: pre-deploy
+    action: Pre-handoff full tier on the committed, rebased tree (Decision 163), read through its evidence file.
+    command: bin/venv-python -m scripts.validate; bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: The verify-head read reports the full tier passed on HEAD's tree.
+    fix_if: Any failure; fix and re-run both from the start (timeout_disposition blocked).
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: src/persona_backends/mcp_bridge.py
+    behavior: Only named verbs offered, text replies with the cap, error text, and unavailable or failed sessions raised as typed errors.
+    verification_step: 1
+    test_selector: tests/persona_backends/test_mcp_bridge.py
+    red_green_expectation: red before (module and test absent), green after.
+  - source: src/persona_backends/contract.py
+    behavior: BUILT equals every T4.32:c1-owned binding in the live index; warehouse_read verbs load in order; a verb named read_input is refused.
+    verification_step: 2
+    test_selector: tests/persona_backends/test_contract.py::test_capability_gate_matches_index
+    red_green_expectation: red before (the widened test sees warehouse_read owned by T4.32:c1 but not in BUILT), green after.
+  - source: src/persona_backends/litellm_backend.py
+    behavior: A warehouse tool turn returns the server's text; the server starts only for warehouse_read and after the input check; refusal without a server; the two abort kinds.
+    verification_step: 2
+    test_selector: tests/persona_backends/test_litellm_backend.py
+    red_green_expectation: red before (run_persona takes no mcp_server argument), green after.
+  - source: scripts/run_persona.py
+    behavior: The server module equals the index binding, runs from the repository root, and gets no inference key or GITHUB_TOKEN.
+    verification_step: 3
+    test_selector: tests/test_run_persona.py
+    red_green_expectation: red before (server_parameters and server_env absent), green after.
+  - source: docs/contracts/executor-personas.yaml
+    behavior: The approved blocks e01-e02, word for word.
+    verification_step: 6
+    command: scripts.roadmap.approved_text verify --slug run-persona-mcp-bridge
+    red_green_expectation: red before the blocks are placed (verify mismatch), green after.
+  - source: docs/contracts/ports.yaml
+    behavior: The approved blocks e03-e04, word for word.
+    verification_step: 6
+    command: scripts.roadmap.approved_text verify --slug run-persona-mcp-bridge
+    red_green_expectation: red before the blocks are placed (verify mismatch), green after.
+weakening_dispositions: []
+constraints:
+  - >-
+    Place every sidecar block word for word ({{DATE}} filled with the build date); never edit the sidecar (Decision 246).
+    executor-personas.yaml and ports.yaml get no other edit. If the rebase moves a block's before text (plans 2 and 3
+    of this split, or another unbuilt ports.yaml plan, landed first), STOP to this planning thread.
+  - >-
+    src/persona_backends imports nothing under scripts (the .importlinter contract); the bridge takes the server's
+    launch parameters as an argument. No code names a registered persona id or contract path (implementation_binding).
+  - >-
+    The server's environment is the name allow-list in scripts/run_persona.py, never os.environ whole and never an
+    inference key variable or GITHUB_TOKEN (Decision 205 clause 2). Server error text reaching the model or stderr names
+    an exception class only (Decision 101).
+  - >-
+    No telemetry row, writer call or GitHub API call; the only AWS reach is the server's own reader reads, and only in
+    VP step 7's live probe. Leave scripts/agent_sdk/, scripts/llm/ and the verdict chain's paths untouched.
+  - Every module stays under 500 SLOC (Decision 128); no budget raise.
+  - Public repository (Decision 101) -- fixtures are synthetic; no key, account id or hostname anywhere.
+  - No rescue agents or workaround loops (Decision 55); never skip, disable or quarantine a test (Decision 235).
+context:
+  - >-
+    Decision-scout r2 (2026-11-17): Verdict: FLAGS_FOUND. Decisions triaged: 218 of 218. Roadmap items intersected: 6;
+    CONFLICT: 0; RELATED: 6. Serves: NS.5 4/5. CITE: 84, 205, 206, 212, 246, 256. r1's WARN 212 (cl.3: the server env
+    presumes an AWS identity) is recorded in ports.yaml PC-01 (e04). NOTE 263 (cl.2 gives the persona-verdict role no
+    reader grant, and its session can read the inference keys; cl.4) is deferred to rec-5312, which must land before any
+    verdict contract names warehouse_read. Operator chose these on
+    /mnt/project-files/run-persona-backend/PRESENTATION-plan4.md ("write the plan", 2026-11-17).
+  - >-
+    Split settled on a blind consult (run-persona-backend/advisor-brief-split/ADVICE.md): plan 1 (#2111, built #2132),
+    then rec-5052 and rec-4028 (planned in parallel; neither is a prerequisite), then this plan. Plans 2 and 3 were told
+    which files and which run_persona.result sentence this plan edits; whichever builds second rebases. Plan 3a
+    (rec-4028 split) adds tools_sha256 to the events header over the full tool list sent: if it lands first, this
+    build keeps that hash over the full tool list the run sends, read_input plus the bridge's specs.
+  - >-
+    Probe 2026-11-17 (this session): mcp 2.3.0's stdio_client passes only HOME, LOGNAME, PATH, SHELL, TERM and USER by
+    default, so `python -m scripts.agent_sdk.mcp_server` failed at startup (reader URL unresolvable without the AWS and
+    OTL_OPS_VERBS_TRANSPORT variables); with the full environment it listed 24 tools. Hence server_env.
+  - >-
+    UNPROVEN until a contract names warehouse_read: the server's reader reach from an Actions run (the persona-verdict
+    role has no reader grant, Decision 263 cl.2; T4.32 c7's egress list would need the reader endpoint). The follow-on
+    rec (rec-5312) owns both. No current persona contract names warehouse_read, so no verdict persona's behaviour changes.
+  - >-
+    Red-overlap 2026-11-17: blocked, slo_breached, on rec-5247 (telemetry-reader smoke 504; Feedback Loop's), shared
+    paths none. Deferral: this plan touches no telemetry path, and its build still needs a green full tier.
+  - >-
+    Kept graduated shards (rerun unchanged; their nodes survive): run-persona-entry-point,
+    run-persona-litellm-backend-contract-tool-events, run-persona-litellm-backend-loop.
+  - >-
+    ports.yaml is at 498 of 500 effective lines; e04 appends to PC-01's last line (lines may run to 2000 chars), so the
+    change adds one line (e03). Unbuilt plans also scoping ports.yaml rebase as usual.
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:02b8563356b71f7c68abbff9377ef2b27326dcec67455545360c65bb98e5ab37"}
+  - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:b65349f2799172711d0bf24294872ce989ba50c6d09df87b34c3b9b36cfbf5fa"}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Only the plan-cited decision sections (205, 206, 246, 256)
+  - All files in scope located and readable; scripts/agent_sdk/mcp_server.py and the mcp client API (mcp.client.stdio, mcp.client.session) read
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - Read executor-personas.yaml (run_persona, capability_vocabulary.warehouse_read), scripts/agent_sdk/mcp_server.py and plan 1's src/persona_backends.
+  - Write tests/persona_backends/fake_mcp_server.py, then src/persona_backends/mcp_bridge.py with tests/persona_backends/test_mcp_bridge.py, red first.
+  - Modify src/persona_backends/contract.py and litellm_backend.py with their test changes, red first.
+  - Modify scripts/run_persona.py and tests/test_run_persona.py.
+  - Place the sidecar's four blocks ({{DATE}} = build date) in executor-personas.yaml and ports.yaml.
+  - Run bin/venv-python -m scripts.validate --pre and fix.
+  - git add the new files.
+  - Execute Verification Plan steps 1-7 -- run each step; loop until pass; on an unrecoverable failure stop and RCA (Decision 55).
+  - >-
+    CLOSURE, each outcome reported separately (implement skill Commit Flows; docs/contracts/git-ops.yaml
+    handoff_sequence): bin/venv-python -m scripts.session.github_readiness; the Verification Graduation walk writes the
+    run-persona-mcp-bridge-client shard; set implementation_declared: true in this plan; commit
+    (feat(run-persona-mcp-bridge): ...); git fetch origin main && git rebase origin/main; VP step 8 on that committed,
+    rebased tree; postflight evidence; push; open the PR and report it only with the returned PR number; subscribe; on
+    green CI squash-merge with "Resolves: rec-5267" in the commit body. No roadmap edit (T4.32 c1 stays open).
+  - 'Report: what was implemented, verification results, and anything UNPROVEN.'
+rollback: >-
+  Revert the build commit: no persona contract names warehouse_read, so nothing calls the bridge, no stored row or
+  deployed artifact depends on it, and the contract sentences revert with it.
