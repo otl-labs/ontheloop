@@ -167,8 +167,10 @@ locals {
       {
         # URL-only invariant (Decision 213 cl.1). A handler that trusts requestContext.authorizer.iam is safe
         # only while every non-URL path to it is closed, so the three statements here and below close those
-        # paths for the DuckLake writer, reader and telemetry writer. The telemetry writer is named before
-        # its function exists, which IAM accepts. lambda:InvokedViaFunctionUrl is false on a direct call and
+        # paths for the DuckLake writer, reader and every telemetry function, the content reader included. Each
+        # prefix (writer*, reader*, telemetry-*) covers its function and every qualifier and widens a Deny only to a
+        # future function of that prefix; the account segment is * and the region is kept (Decision 269 cl.4).
+        # lambda:InvokedViaFunctionUrl is false on a direct call and
         # true through the Function URL (live-verified 2026-10-06); BoolIfExists also denies a call that
         # carries no such key at all.
         Sid    = "DenyDuckLakeDirectInvoke"
@@ -178,11 +180,9 @@ locals {
           "lambda:InvokeAsync"
         ]
         Resource = [
-          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-writer",
-          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-writer:*",
-          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader",
-          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader:*",
-          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-*",
+          "arn:aws:lambda:${var.aws_region}:*:function:agent-platform-ducklake-writer*",
+          "arn:aws:lambda:${var.aws_region}:*:function:agent-platform-ducklake-reader*",
+          "arn:aws:lambda:${var.aws_region}:*:function:agent-platform-ducklake-telemetry-*",
         ]
         Condition = {
           BoolIfExists = {
@@ -205,11 +205,9 @@ locals {
           "lambda:DeleteResourcePolicy"
         ]
         Resource = [
-          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-writer",
-          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-writer:*",
-          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader",
-          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader:*",
-          "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-*",
+          "arn:aws:lambda:${var.aws_region}:*:function:agent-platform-ducklake-writer*",
+          "arn:aws:lambda:${var.aws_region}:*:function:agent-platform-ducklake-reader*",
+          "arn:aws:lambda:${var.aws_region}:*:function:agent-platform-ducklake-telemetry-*",
         ]
       },
       {
@@ -227,11 +225,9 @@ locals {
         Condition = {
           ArnLike = {
             "lambda:FunctionArn" = [
-              "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-writer",
-              "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-writer:*",
-              "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader",
-              "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-reader:*",
-              "arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-telemetry-*",
+              "arn:aws:lambda:${var.aws_region}:*:function:agent-platform-ducklake-writer*",
+              "arn:aws:lambda:${var.aws_region}:*:function:agent-platform-ducklake-reader*",
+              "arn:aws:lambda:${var.aws_region}:*:function:agent-platform-ducklake-telemetry-*",
             ]
           }
         }
@@ -267,7 +263,8 @@ locals {
             "aws:PrincipalArn" = [
               "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-telemetry-writer",
               "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-telemetry-reader",
-              "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-maintenance"
+              "arn:aws:iam::${var.account_id}:role/agent-platform-ducklake-maintenance",
+              "arn:aws:iam::${var.account_id}:role/telemetry-content-reader"
             ]
           }
         }
@@ -349,7 +346,17 @@ locals {
         Sid      = "DenyBoundedWriteOnProtectedRoles"
         Effect   = "Deny"
         Action   = ["iam:A*", "iam:C*", "iam:D*", "iam:P*", "iam:T*", "iam:U*"]
-        Resource = ["arn:aws:iam::*:role/Platform*", "arn:aws:iam::*:role/bootstrap-*", "arn:aws:iam::*:role/github-settings-*", "arn:aws:iam::*:role/platform-security-*", "arn:aws:iam::*:role/ducklake-api-*"]
+        Resource = ["arn:aws:iam::*:role/Platform*", "arn:aws:iam::*:role/bootstrap-*", "arn:aws:iam::*:role/github-settings-*", "arn:aws:iam::*:role/platform-security-*", "arn:aws:iam::*:role/ducklake-api-*", "arn:aws:iam::*:role/telemetry-content-*"]
+      },
+      {
+        # Decision 239 cl.5 as amended by Decision 269 cl.3: no boundary carrier creates, deletes, publishes, puts,
+        # tags or updates anything on the content reader or its qualifiers; the deploy role (telemetry-content-deploy) is
+        # boundary-free, so this never refuses it. A and R (permissions) are in DenyDuckLakeResourcePolicyEdit; reads and
+        # invokes match none of the five families.
+        Sid      = "DenyTelemetryContentChange"
+        Effect   = "Deny"
+        Action   = ["lambda:C*", "lambda:D*", "lambda:P*", "lambda:T*", "lambda:U*"]
+        Resource = "arn:aws:lambda:${var.aws_region}:*:function:agent-platform-ducklake-telemetry-content*"
       }
     ]
   })

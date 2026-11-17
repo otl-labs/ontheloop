@@ -48,6 +48,38 @@ def test_role_is_masked_and_missing_identity_is_unknown(capsys: pytest.CaptureFi
         assert _line(capsys)["role"] == "unknown"
 
 
+def _rest_event(arn: str, *, api_id: str | None = "abc123", method: str | None = "POST", extra: dict | None = None) -> dict:
+    account = "".join(["1234", "5678", "9012"])
+    context: dict[str, Any] = {"identity": {"accountId": account, "userArn": arn}}
+    if api_id:
+        context["apiId"] = api_id
+    event: dict[str, Any] = {"body": "{}", "requestContext": {**context, **(extra or {})}}
+    if method:
+        event["httpMethod"] = method
+    return event
+
+
+def test_rest_and_function_url_shapes_yield_the_caller_name(capsys: pytest.CaptureFixture[str]) -> None:
+    account = "".join(["1234", "5678", "9012"])
+    session_arn = f"arn:aws:iam::{account}:user/agent-platform-session"
+    access_log.write(_rest_event(session_arn), "v", 200, 0, 0, {}, None, None)
+    assert _line(capsys)["role"] == "agent-platform-session"
+    access_log.write(caller_event({}, role="PlatformDev"), "v", 200, 0, 0, {}, None, None)
+    assert _line(capsys)["role"] == "PlatformDev"
+
+
+def test_mixed_absent_and_malformed_shapes_are_unknown(capsys: pytest.CaptureFixture[str]) -> None:
+    account = "".join(["1234", "5678", "9012"])
+    arn = f"arn:aws:iam::{account}:user/agent-platform-session"
+    both = _rest_event(arn, extra={"authorizer": {"iam": {"accountId": account, "userArn": arn}}})
+    no_method = _rest_event(arn, method=None)
+    no_api = _rest_event(arn, api_id=None)
+    malformed = _rest_event("not-an-arn")
+    for event in (both, no_method, no_api, malformed, _rest_event(""), {"requestContext": "not-a-dict"}):
+        access_log.write(event, "v", 400, 0, 0, {}, None, None)
+        assert _line(capsys)["role"] == "unknown"
+
+
 def test_write_never_raises(capsys: pytest.CaptureFixture[str]) -> None:
     access_log.write({}, "v", 200, 0, 0, {"x": object()}, None, None)  # type: ignore[dict-item]
     line = _line(capsys)

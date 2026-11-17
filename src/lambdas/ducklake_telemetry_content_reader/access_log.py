@@ -15,13 +15,47 @@ EVENT = "telemetry_content_read"
 _FALLBACK = {"event": EVENT, "role": "unknown", "verb": "unknown", "status": 500, "session_id": None, "rows": 0}
 
 
-def _role(lambda_event: Any) -> str:
+def _rest_caller(context: Any) -> dict[str, Any] | None:
+    identity = context.get("identity")
+    if context.get("apiId") and isinstance(identity, dict) and "authorizer" not in context:
+        return identity
+    return None
+
+
+def _url_caller(context: Any) -> dict[str, Any] | None:
+    authorizer = context.get("authorizer")
+    iam = authorizer.get("iam") if isinstance(authorizer, dict) else None
+    return iam if isinstance(iam, dict) and not context.get("apiId") else None
+
+
+def caller_fields(lambda_event: Any) -> tuple[str, str] | None:
+    """The delivering path's signed (accountId, userArn), or None when absent, mixed or not a string pair.
+
+    A REST AWS_PROXY event (httpMethod present, requestContext.apiId set) carries them under requestContext.identity;
+    a Function URL event under requestContext.authorizer.iam. Both shapes at once, or neither, is no caller
+    (Decision 255 cl.2: the caller is read from the path that delivered the request, never from a body field).
+    """
     try:
-        arn = str(lambda_event["requestContext"]["authorizer"]["iam"]["userArn"])
-        segments = arn.split(":", 5)[-1].split("/")
-        name = segments[1] if len(segments) > 1 else ""
-    except (KeyError, TypeError):
+        context = lambda_event["requestContext"]
+        if not isinstance(context, dict):
+            return None
+        rest = _rest_caller(context) if lambda_event.get("httpMethod") else None
+        url = _url_caller(context)
+        if (rest is None) == (url is None):
+            return None
+        fields = rest if rest is not None else url
+        account, arn = fields.get("accountId"), fields.get("userArn")
+    except (KeyError, TypeError, AttributeError):
+        return None
+    return (account, arn) if isinstance(account, str) and account and isinstance(arn, str) and arn else None
+
+
+def _role(lambda_event: Any) -> str:
+    fields = caller_fields(lambda_event)
+    if fields is None:
         return "unknown"
+    segments = fields[1].split(":", 5)[-1].split("/")
+    name = segments[1] if len(segments) > 1 else ""
     return mask(name, "read_masked").text if name else "unknown"
 
 

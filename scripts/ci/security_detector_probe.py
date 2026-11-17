@@ -41,6 +41,7 @@ EXPECTED_ALARMS = frozenset(
         "platform-security-alerts-topic-change",
         "platform-security-ducklake-api-change",
         "platform-security-agent-session-iam-change",
+        "platform-security-telemetry-content-change",
         HEARTBEAT_ALARM,
     }
 )
