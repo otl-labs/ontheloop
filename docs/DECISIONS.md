@@ -538,6 +538,27 @@ conditions:
 
 **Related:** Decisions 77, 94, 113, 143, 172, 180, 202, 205, 233, 237, 239, 246, 248, 252.
 
+> **Update (2026-11-16):** The preview also checks, with IAM Access Analyzer, each IAM policy and role trust the run
+> would change (PLAN-bootstrap-iam-analyzer-checks). Clause 3 widens for bootstrap-preview alone: it may call ValidatePolicy,
+> CheckAccessNotGranted, CheckNoNewAccess and CheckNoPublicAccess, which read no account resource and return only
+> verdicts; bootstrap-apply gains nothing. Clause 2 gains a step: the preview checks each policy document and trust
+> the plan creates, changes, imports or moves, and the policy of each new attachment; a change to the never-list or
+> the checking code, or a push whose changed files cannot be read, re-checks every document once. A document is
+> held to the never-list in config/iam-invariants.json of each class its name or the principal it is attached to
+> falls in: the agent session user, or any agent-platform-* role or policy. One that grants a never-listed action,
+> that ValidatePolicy reports an error on (in those classes, a security warning too), or (a trust) that allows
+> public access refuses the run before the approval, CloudShell plans included; so does an AWS-managed policy on
+> the session user. The CI apply boundary, a ceiling only the operator changes, is held to neither the never-list
+> nor security warnings while it is attached nowhere. A grant wider than the one it replaces is flagged, never
+> refused. The gated job calls no Access Analyzer check: it applies only rows whose documents match, by digest, the
+> ones the preview checked. Output names the resource, the check and its verdict, never the document or a
+> finding's text (Decision 238 cl.4). The never-list changes only by a reviewed PR, and a never row is never
+> removed or narrowed to pass a check (Decision 235). Clause 8's coverage adds the analyzer's, gate's and
+> invariants' tests. Residuals: each check reads one document, never its boundary or its principal's other
+> policies; other AWS-managed attachments, documents and trusts unknown until apply, IAM group policies, resource
+> policies (the API route, App key and trail policies) and policy blocks inside a role are not checked; a trust is
+> checked for public access only.
+
 ---
 
 ## Decision 256: Agent sessions reach AWS only as a proxy-held IAM user that signs each call itself -- no session assumes a role or holds an AWS key, and admin authority stays out of agent environments (amends Decisions 113, 202, 223, 248 and 252) (Decided)
