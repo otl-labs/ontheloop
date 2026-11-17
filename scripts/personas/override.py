@@ -154,7 +154,7 @@ def origin(repo: str, token: str | None, head_sha: str, route: str, check_run_id
         raise Refused("the record's producing run is not a verdict run for this head")
     listed = _get(f"/repos/{repo}/commits/{head_sha}/check-runs?check_name=persona-verdict%2F{route}&per_page=100", token)
     rows = listed.get("check_runs") if isinstance(listed, dict) else None
-    ids = [r.get("id") for r in rows or [] if isinstance(r, dict) and isinstance(r.get("id"), int)]
+    ids = [int(r["id"]) for r in rows or [] if isinstance(r, dict) and isinstance(r.get("id"), int)]
     if not ids or max(ids) != check_run_id:
         raise Refused("the check run is not the newest persona-verdict check of that name on the head")
     return rec, text

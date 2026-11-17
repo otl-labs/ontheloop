@@ -327,6 +327,14 @@ RED = [
         "holds the token",
         lambda d: _ostep(d, "gate-opened").update({"env": {"X": "${{ github.token }}"}}),
     ),
+    _red(
+        "override-top-permissions",
+        "top-level permissions are not",
+        lambda d: d[3].update({"permissions": {"contents": "read"}}),
+    ),
+    _red("override-run-name", "run-name is not", lambda d: d[3].update({"run-name": "x"})),
+    _red("override-top-env", "a top-level env", lambda d: d[3].update({"env": {"X": "1"}})),
+    _red("override-top-concurrency", "a top-level concurrency", lambda d: d[3].update({"concurrency": {"group": "g"}})),
     _red("override-run-without-id", "without an id", lambda d: _ostep(d, "gate-opened").pop("id")),
     _red(
         "override-permissions-widened",
