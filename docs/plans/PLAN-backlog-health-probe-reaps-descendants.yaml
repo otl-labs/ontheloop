@@ -70,8 +70,8 @@ scope:
       --mount-proc). The module docstring's "Hermetic: never depends on a real unshare" sentence is rewritten to say every node
       is hermetic except test_timeout_kills_descendants, test_proc_agrees_with_sandbox_pids and
       test_probed_command_is_not_namespace_init, which need the real primitive and skip without it, including in every
-      CI job that does not run the AppArmor sysctl; so the kill guarantee has no recurring CI regression beyond the
-      argv-token nodes.
+      CI job that does not run the AppArmor sysctl; so in CI the kill guarantee is exercised live only by the weekly
+      backlog-health probe job and ci.yml's trailer-acceptance-evaluate, with the argv-token nodes as the unit guard.
     new_imports: []
 bundled_recommendations: [rec-3691]
 followon_recs: []
@@ -97,7 +97,7 @@ verification_plan:
     action: Live proof of the primitive in this container (real unshare); the node must run, not skip.
     command: bin/venv-python -m pytest "tests/test_backlog_health_probe.py::TestRunOne::test_timeout_kills_descendants" -q -rs
     expected: exit 0 with 1 passed and 0 skipped; red before (a descendant survives the timeout)
-    fix_if: skipped (the container lacks user namespaces; record UNPROVEN-locally and rely on VP 9, then VP 5) or a survivor is found
+    fix_if: skipped (the container lacks user namespaces; record UNPROVEN-locally and rely on VP 9 if possible, then VP 5) or a survivor is found
     hermetic: false
     graduation: waive
     graduation_waiver_reason: Depends on the host allowing unprivileged user and PID namespaces; VP 1 carries the durable regression.
@@ -123,22 +123,25 @@ verification_plan:
   - step: 9
     phase: pre-deploy
     action: >-
-      (Listed out of numeric order on purpose: it runs before merge, between VP 4 and VP 5.) Before merge, prove the
-      primitive on a GitHub runner: dispatch backlog-health on the build PR's branch with
-      dry_run=true (writes no rec) as a person or session identity, never otl-workflow-dispatcher[bot] (its runs skip
-      census and so probe), so a -p failure never reaches the Decision 201 closure gate.
-    command: gh workflow run backlog-health.yml --repo otl-labs/ontheloop --ref "$(git branch --show-current)" -f dry_run=true
+      (Listed out of numeric order on purpose: it runs before merge, between VP 4 and VP 5.) Decide whether a pre-merge
+      runner proof is possible: census assumes agent-platform-github-ci-branch, whose trust (terraform/personal/
+      oidc_ci_roles.tf) admits only refs/heads/main and refs/heads/agent/*, so a dispatch from the session's claude/*
+      build branch cannot run census or probe. Read the trust; if it still excludes the build branch, skip the dispatch
+      and say in the PR body and to the operator that merge rests on VP 8's revert path (if -p or --mount-proc fails on
+      the runner, probeable trailer closures are refused until a revert, which fails safe). If it admits the branch,
+      dispatch backlog-health there with dry_run=true as a person or session identity (never
+      otl-workflow-dispatcher[bot], whose runs skip census and so probe).
+    command: grep -n 'refs/heads/' terraform/personal/oidc_ci_roles.tf
     expected: >-
-      the probe job concludes success, its log has no OSError, and it shows [backlog_health probe] ...
-      isolation_available=True with a non-empty verdict count; record the run id in the PR body (from a session use mcp__github__actions_run_trigger with ref set to the branch).
+      the trusted ref patterns are listed; when a dispatch is possible, its probe job concludes success, has no OSError,
+      and logs [backlog_health probe] ... isolation_available=True with a non-empty verdict count; record the run id in
+      the PR body. When it is not, the PR body carries the operator note above.
     fix_if: >-
-      probe is skipped (not proven: re-dispatch as another identity), or probe fails with OSError or every verdict is isolation_unavailable: -p or --mount-proc did not engage on the runner; stop
-      and report, do not merge. Before dispatching, read whether the agent-platform-github-ci-branch role trusts non-main refs; if census fails on
-      credentials, record that, tell the operator the merge then rests on VP 8's revert path alone (probeable trailer
-      closures are refused until a revert, which fails safe), and rely on VP 5 and VP 8 after merge.
+      a dispatched probe is skipped (re-dispatch as another identity), fails with OSError, or reports every verdict
+      isolation_unavailable: -p or --mount-proc did not engage; stop and report, do not merge
     hermetic: false
     graduation: waive
-    graduation_waiver_reason: Remote dispatch on a branch ref; its exit code proves only that the dispatch happened, and the run outcome is read by hand.
+    graduation_waiver_reason: Reads live trust text and possibly dispatches a remote run; the run outcome is read by hand.
   - step: 5
     phase: post-deploy
     action: Dispatch backlog-health on main with dry_run=true (writes no rec) and read its jobs.
@@ -205,7 +208,7 @@ test_obligations:
     red_green_expectation: red before (no trap segment), green after
 constraints:
   - "No verdict semantics change: PASS/FAIL/TIMEOUT/BUDGET_EXHAUSTED/ISOLATION_UNAVAILABLE and the timeouts are untouched (Decision 235: nothing loosened)."
-  - "Local measurements ran as uid 0, which bypasses RLIMIT_NPROC, so the ulimit -u 64 interplay (one extra bash init process; zombie reaping) is exercised only on the runner, by VP 9 and VP 5."
+  - "Local measurements ran as uid 0, which bypasses RLIMIT_NPROC, so the ulimit -u 64 interplay (one extra bash init process; zombie reaping) is exercised only on the runner, by VP 5 (and VP 9 if a pre-merge dispatch is possible)."
   - "Bash stays the namespace init (leading trap : EXIT && segment), so the probed command is never PID 1: default-disposition signals keep working and orphans are reaped, so zombies do not accumulate against ulimit -u 64."
   - "The sandbox only tightens: the PID namespace is added to the existing user, mount and net namespaces, read-only bind and pid cap."
   - ".github/workflows/backlog-health.yml is not edited; its header comment's unshare -rmn wording is left for the next edit of that file."
@@ -217,9 +220,10 @@ context:
   - "Approval: the operator wrote write the plan in this plan's thread 2026-11-17T19:13:45Z after the alignment presentation. No always-ask wording and no new Decision, so no approved-text sidecar."
   - "Red overlap (scripts.ci_rca.red_overlap, 2026-11-17T19:15Z): verdict blocked by rec-5247 (telemetry-reader smoke 504; slo_breached, product_regression, shared paths none). Deferral rationale: Feedback Loop owns it (coordinator log 2026-11-17 12:58Z), this plan edits none of its files and does not repair it; Decision 254 cl.6 makes the past-SLO case an operator alarm, and red_overlap's slo_breached rule predates it (rec-5108). The build re-runs red_overlap at its start."
   - "Ownership: the operator handed this red to CI Reform 2026-11-17; claimed on the coordinator log (issue #1963, CI Reform 19:08Z entry)."
-  - "rec-5094 is not bundled: its liveness acceptance is undecidable by the trailer gate and its source says a human closes it, so VP 6 closes it by hand with the operator's word. rec-3691's grep acceptance is replaced at plan write by the VP 1 node TestRunOne::test_argv_uses_pid_namespace_prefix."
+  - "rec-5094 is excluded from bundled_recommendations by design (12k exception): its liveness acceptance is undecidable by the trailer gate and its source says a human closes it, so VP 6 closes it by hand with the operator's word. rec-3691's grep acceptance is replaced at plan write by the VP 1 node TestRunOne::test_argv_uses_pid_namespace_prefix."
   - "A third run_all caller, scripts/session/merge_step.py premerge (line 138) and recover (line 338), goes through acceptance.evaluate; if the primitive failed there the verdict is unmeasurable, which is not fatal in premerge and refuses closure in recover (safe-failing)."
   - "Decision 201 cl.4: ci.yml's trailer-acceptance evaluator runs rec-authored commands through this same probe.run_all sandbox, so the change reaches the closure gate too (VP 8). Its job already runs the same AppArmor sysctl as the probe job. ci.yml's comments saying unshare -rmn (lines 266, 296) are left stale, as are backlog-health.yml's header, scripts/rec_trailer_acceptance.py line 14, scripts/checks/ci_guards/validate_sandbox_runner_test_deps.py lines 11 and 24, tests/test_backlog_health_workflow.py line 27 and docs/contracts/git-ops.yaml line 437 (all comment or docstring only; kept out of scope so the plan touches no workflow or guard)."
+  - "Not reused: scripts/checks/_process_group.py kill_and_reap kills a process group, which a setsid'd descendant escapes (its own header says so), and it needs a Popen where probe injects a subprocess.run seam; a PID namespace reaps every descendant."
   - "Adjacent, not bundled: rec-4079 (COVERAGE_FILE in the probe env plus an acceptance-lint change) edits the same function; it needs its own plan."
   - "Graduated shards kept unchanged: backlog-probe-never-false-pass, backlog-probe-sole-rec-authored-executor, backlog-health-probe-runs-compound-commands, backlog-health-package-suite."
 gate_rounds:
@@ -232,6 +236,7 @@ gate_rounds:
   - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 7}
   - {gate: plan-critique, round: 6, verdict: PROCEED, blocking: 0, nits: 8}
   - {gate: plan-critique, round: 7, verdict: REVISE, blocking: 1, nits: 4}
+  - {gate: plan-critique, round: 8, verdict: REVISE, blocking: 1, nits: 5}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -239,7 +244,7 @@ pre_implementation_checklist:
   - All files in scope located and readable
   - Acceptance criteria understood and verifiable
 execution_steps:
-  - "probe.py: add the shared prefix constant and use it in _isolated_argv and isolation_available; switch run_one to mkdtemp plus the bounded-retry removal helper in a finally; update the docstring. Pre: VP 1 red. Post: VP 1 and 2 green."
+  - "probe.py: add the shared prefix constant and use it in _isolated_argv and isolation_available; switch run_one to TemporaryDirectory(delete=False) plus the private helper that retries td.cleanup() in a finally; update the docstring. Pre: VP 1 red. Post: VP 1 and 2 green."
   - "tests: add the new nodes and move test_uses_isolated_argv's assertion to the prefix; run VP 1-3. Keep the node id TestRunOne::test_argv_uses_pid_namespace_prefix exactly (rec-3691's acceptance names it; re-read the rec before merge). Record weakening_dispositions for the five predictable candidates: the changed assertions in TestRunOne::test_uses_isolated_argv and TestRunOne::test_compound_command_runs_every_segment (both tightened) and the env: skips on the new live nodes test_timeout_kills_descendants, test_proc_agrees_with_sandbox_pids and test_probed_command_is_not_namespace_init."
   - "Add the graduated shard config/agent/verification_registry/entries/backlog-probe-reaps-descendants.yaml (VP 1's graduation) with check_spec node_id tests/test_backlog_health_probe.py::TestRunOne::test_argv_uses_pid_namespace_prefix (one node, distinct from the whole-file shard backlog-probe-never-false-pass; VP 1's other nodes, the removal and
       bash-as-init nodes, stay guarded through that whole-file shard)."
