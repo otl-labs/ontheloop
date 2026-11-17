@@ -15,6 +15,6 @@ No standing rationale here (Decision 86) — see `environment-taxonomy.yaml` for
 classification SoT and `docs/contracts/build-lambda.yaml`'s `deploy_channels` for the
 artifact->channel mapping.
 
-`data-pipeline` (dispatcher + findings-processor) is also `terraform/personal`-managed
-(T2.43, `decoupled_build_pipeline` class), decoupled from day one; its code-deploy channel is
+`data-pipeline` (dispatcher, findings-processor, workflow dispatcher) is `terraform/personal`-managed
+(T2.43, `decoupled_build_pipeline`), decoupled; its code-deploy channel is
 `.github/workflows/deploy-prod-lambdas.yml` — see `src/data/handlers/CLAUDE.md`.
