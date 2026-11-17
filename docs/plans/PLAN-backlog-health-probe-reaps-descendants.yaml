@@ -31,7 +31,8 @@ scope:
       command runs as an ordinary child (measured: sh -c 'read p _ < /proc/self/stat; test "$p" != 1' exits 1
       without the trap and 0 with it; exit status passes through, 3 -> 3).
       (2) run_one makes its scratch dir with tempfile.mkdtemp and removes it in a finally through a helper that retries
-      shutil.rmtree on OSError up to 10 attempts 0.5 s apart (about 4.5 s, spent only on the failure path; the sleep is a keyword-only
+      shutil.rmtree (with an onexc handler that chmods u+rwx and retries the entry, as TemporaryDirectory does, so a
+      read-only subtree a probe leaves is still removed) on OSError up to 10 attempts 0.5 s apart (about 4.5 s, spent only on the failure path; the sleep is a keyword-only
       parameter of the private removal helper, never of run_one, so no public signature changes) with an injectable sleep (the namespace teardown is
       asynchronous to unshare's exit, so a just-killed descendant can lag by milliseconds), and re-raises the last
       OSError when every attempt fails, so a real escape (the namespace did not engage) still fails the job loudly as
@@ -46,23 +47,24 @@ scope:
       TestRunOne::test_scratch_removal_retries_then_succeeds, TestRunOne::test_scratch_removal_raises_after_bounded_retries,
       TestRunOne::test_timeout_kills_descendants, TestRunOne::test_proc_agrees_with_sandbox_pids, TestRunOne::test_inner_program_keeps_bash_as_init,
       TestRunOne::test_probed_command_is_not_namespace_init): run_one's argv starts with the shared PID-namespace prefix; isolation_available's argv starts with the
-      same prefix; a scratch removal that fails once then succeeds leaves no dir and keeps the verdict; a removal that
+      same prefix; a scratch removal that fails once then succeeds leaves no dir and keeps the verdict (sleep patched); a removal that
       fails on every attempt raises OSError after exactly 10 attempts (sleep injected, so the node takes no wall time); and one live node (skipped only when
       the real primitive is unavailable) where a timed-out command whose descendant keeps writing into
       PYTHONPYCACHEPREFIX returns TIMEOUT with no surviving descendant and no OSError. test_uses_isolated_argv's -rmn
       membership assertion moves to the new prefix, and test_compound_command_runs_every_segment's prefix literal gains
       the leading trap : EXIT && segment (its command_portion == cmd assertion is unchanged). test_inner_program_keeps_bash_as_init
       (hermetic) asserts the inner program starts with trap : EXIT && ; test_probed_command_is_not_namespace_init (live,
-      same skip) runs sh -c 'read p _ < /proc/self/stat; test "$p" != 1' through run_one and expects PASS.
+      same skip) runs sh -c 'read p _ < /proc/self/stat; test "$p" != 1' through run_one and expects PASS (a forward guard
+      against dropping the trap, not a red-before node).
       The prefix nodes assert the literal tokens -rpmn, --fork, --kill-child and --mount-proc in order before --, never equality with
       probe's own constant. The live nodes create repo_root = tmp_path / "repo" (mkdir before isolation_available, so the bind can succeed) and skip only when probe.isolation_available(repo_root) is false, with a skip
       reason starting "env: " (validate_test_skip_citations); its command runs a descendant carrying a unique argv
       marker that appends a heartbeat to a file outside the bind (in tmp_path) and writes into
-      PYTHONPYCACHEPREFIX; the descendant heartbeats every 0.05 s; after run_one returns TIMEOUT (timeout=1) it waits 1 s, asserts the
+      PYTHONPYCACHEPREFIX; the descendant heartbeats every 0.05 s; after run_one returns TIMEOUT (timeout=2, margin for a loaded host) it waits 1 s, asserts the
       heartbeat file exists and is non-empty (so the check is not vacuous), then asserts no /proc/*/cmdline holds
       the marker and the heartbeat file's size is unchanged across two reads 0.5 s apart; a finally pkills the marker so a red-before run leaves nothing
       behind. test_proc_agrees_with_sandbox_pids (live, same skip) runs read p _ < /proc/self/stat; test "$p" = "$BASHPID" through
-      run_one and expects PASS (measured: exit 1 under -rpmn --fork --kill-child, whose host /proc disagrees; exit 0 with
+      run_one and expects PASS (a forward guard, not a red-before node: it also passes on today's flags; measured: exit 1 under -rpmn --fork --kill-child, whose host /proc disagrees; exit 0 with
       --mount-proc). The module docstring's "Hermetic: never depends on a real unshare" sentence is rewritten to say every node
       is hermetic except test_timeout_kills_descendants, test_proc_agrees_with_sandbox_pids and
       test_probed_command_is_not_namespace_init, which need the real primitive and skip without it, including in every
@@ -81,7 +83,7 @@ verification_plan:
   - step: 1
     phase: pre-deploy
     action: The new hermetic nodes pass (prefix shared by both argv builders; scratch removal retries and never raises).
-    command: bin/venv-python -m pytest tests/test_backlog_health_probe.py -q -k "pid_namespace or scratch_removal"
+    command: bin/venv-python -m pytest tests/test_backlog_health_probe.py -q -k "pid_namespace or scratch_removal or bash_as_init"
     expected: exit 0; red before (the prefix is -rmn and probe has no removal helper)
     fix_if: an argv lacks --fork or --kill-child, or a removal failure propagates
     hermetic: true
@@ -121,12 +123,13 @@ verification_plan:
     action: >-
       (Listed out of numeric order on purpose: it runs before merge, between VP 4 and VP 5.) Before merge, prove the
       primitive on a GitHub runner: dispatch backlog-health on the build PR's branch with
-      dry_run=true (writes no rec), so a -p failure never reaches the Decision 201 closure gate.
+      dry_run=true (writes no rec) as a person or session identity, never otl-workflow-dispatcher[bot] (its runs skip
+      census and so probe), so a -p failure never reaches the Decision 201 closure gate.
     command: gh workflow run backlog-health.yml --repo otl-labs/ontheloop --ref "$(git branch --show-current)" -f dry_run=true
     expected: >-
       the probe job concludes success and its log has no OSError; record the run id in the PR body (from a session use mcp__github__actions_run_trigger with ref set to the branch).
     fix_if: >-
-      probe fails with OSError or every verdict is isolation_unavailable: -p or --mount-proc did not engage on the runner; stop
+      probe is skipped (not proven: re-dispatch as another identity), or probe fails with OSError or every verdict is isolation_unavailable: -p or --mount-proc did not engage on the runner; stop
       and report, do not merge. Before dispatching, read whether the agent-platform-github-ci-branch role trusts non-main refs; if census fails on
       credentials, record that, tell the operator the merge then rests on VP 8's revert path alone (probeable trailer
       closures are refused until a revert, which fails safe), and rely on VP 5 and VP 8 after merge.
@@ -183,15 +186,21 @@ test_obligations:
   - source: scripts/backlog_health/probe.py
     behavior: probe commands and the availability probe share the PID-namespace prefix; scratch removal retries a bounded number of times, then raises
     verification_step: 1
-    command: bin/venv-python -m pytest tests/test_backlog_health_probe.py -q -k "pid_namespace or scratch_removal"
+    command: bin/venv-python -m pytest tests/test_backlog_health_probe.py -q -k "pid_namespace or scratch_removal or bash_as_init"
     red_green_expectation: red before (prefix -rmn, no removal helper), green after
   - source: scripts/backlog_health/probe.py
     behavior: a timed-out probe command leaves no live descendant and run_one returns TIMEOUT without raising
     verification_step: 2
     test_selector: tests/test_backlog_health_probe.py::TestRunOne::test_timeout_kills_descendants
     red_green_expectation: red before (one survivor under -rmn), green after
+  - source: scripts/backlog_health/probe.py
+    behavior: "the inner program keeps bash as the namespace init (leading trap : EXIT && segment)"
+    verification_step: 1
+    test_selector: tests/test_backlog_health_probe.py::TestRunOne::test_inner_program_keeps_bash_as_init
+    red_green_expectation: red before (no trap segment), green after
 constraints:
   - "No verdict semantics change: PASS/FAIL/TIMEOUT/BUDGET_EXHAUSTED/ISOLATION_UNAVAILABLE and the timeouts are untouched (Decision 235: nothing loosened)."
+  - "Local measurements ran as uid 0, which bypasses RLIMIT_NPROC, so the ulimit -u 64 interplay (one extra bash init process; zombie reaping) is exercised only on the runner, by VP 9 and VP 5."
   - "Bash stays the namespace init (leading trap : EXIT && segment), so the probed command is never PID 1: default-disposition signals keep working and orphans are reaped, so zombies do not accumulate against ulimit -u 64."
   - "The sandbox only tightens: the PID namespace is added to the existing user, mount and net namespaces, read-only bind and pid cap."
   - ".github/workflows/backlog-health.yml is not edited; its header comment's unshare -rmn wording is left for the next edit of that file."
@@ -216,6 +225,7 @@ gate_rounds:
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 6}
   - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 8}
   - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 7}
+  - {gate: plan-critique, round: 6, verdict: PROCEED, blocking: 0, nits: 8}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -224,7 +234,7 @@ pre_implementation_checklist:
   - Acceptance criteria understood and verifiable
 execution_steps:
   - "probe.py: add the shared prefix constant and use it in _isolated_argv and isolation_available; switch run_one to mkdtemp plus the bounded-retry removal helper in a finally; update the docstring. Pre: VP 1 red. Post: VP 1 and 2 green."
-  - "tests: add the new nodes and move test_uses_isolated_argv's assertion to the prefix; run VP 1-3. Keep the node id TestRunOne::test_argv_uses_pid_namespace_prefix exactly (rec-3691's acceptance names it; re-read the rec before merge). Record weakening_dispositions for the four predictable candidates: the changed assertions in TestRunOne::test_uses_isolated_argv and TestRunOne::test_compound_command_runs_every_segment (both tightened) and the env: skips on the new live nodes test_timeout_kills_descendants, test_proc_agrees_with_sandbox_pids and test_probed_command_is_not_namespace_init."
+  - "tests: add the new nodes and move test_uses_isolated_argv's assertion to the prefix; run VP 1-3. Keep the node id TestRunOne::test_argv_uses_pid_namespace_prefix exactly (rec-3691's acceptance names it; re-read the rec before merge). Record weakening_dispositions for the five predictable candidates: the changed assertions in TestRunOne::test_uses_isolated_argv and TestRunOne::test_compound_command_runs_every_segment (both tightened) and the env: skips on the new live nodes test_timeout_kills_descendants, test_proc_agrees_with_sandbox_pids and test_probed_command_is_not_namespace_init."
   - "Add the graduated shard config/agent/verification_registry/entries/backlog-probe-reaps-descendants.yaml (VP 1's graduation) with check_spec node_id tests/test_backlog_health_probe.py::TestRunOne::test_argv_uses_pid_namespace_prefix (one node, distinct from the whole-file shard backlog-probe-never-false-pass)."
   - "CLOSURE (implement skill Commit Flows): commit with Resolves: rec-3691; rebase on origin/main; VP 4 (record the validation_result attestation line, PR number and run ids in the PR body); push; open the PR; VP 9 (pre-merge dispatch on the PR branch); code review in a fresh context; merge on PROCEED and green CI with Resolves: rec-3691 in the squash body; then VP 5, 7 and 8 at once and VP 6 after the Monday run (Decision 267: cron can drop a tick; if the Monday tick is missing, dispatch instead of waiting)."
   - "Report: what was implemented, verification results, run ids"
