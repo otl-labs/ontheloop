@@ -23,40 +23,57 @@ scope:
       Rule PV-1's base resolution changes; the line grammar, checkout, dirty, the project_ref line, stdout, exit code
       and the no-index-refresh rule do not. One wall-clock deadline (bash SECONDS) of B seconds from the hook's start
       bounds the whole base resolution, including every git call in it; each of those calls runs under
-      timeout min(5, remaining) and none starts once the deadline has passed. New order: (1) read the default
-      branch's live tip with one `git -C "$repo" ls-remote --exit-code origin refs/heads/main` (read-only, no local
-      write); (2) when it yields a sha S, base is `git merge-base HEAD S`, accepted at once when it equals HEAD or S (a
+      timeout min(5, remaining) and none starts once the deadline has passed. When `command -v timeout` fails the
+      hook skips steps 1-3 and goes straight to step 4, so no network call ever runs unbounded. New order: (1) read
+      the default branch's live tip with one `git -C "$repo" ls-remote --exit-code origin refs/heads/main` run with
+      GIT_TERMINAL_PROMPT=0 and GIT_SSH_COMMAND="ssh -o BatchMode=yes" so no credential or host-key prompt can block
+      (read-only, no local write); (2) when it yields a sha S, base is `git merge-base HEAD S`, accepted at once when it equals HEAD or S (a
       direct ancestry fact, exact even in a shallow history) and otherwise only when `git rev-parse
       --is-shallow-repository` prints false; (3) WAIT TRIGGER: only when that first attempt is unresolved AND the
       repository was shallow at the hook's start (the fresh-container state, while session_start_deepen_history and
       session_start_sync_main are fetching) AND GITHUB_ACTIONS is not "true", it re-tries once a second until the
       deadline, then prints base=unknown, never the tracking ref; otherwise (a full clone, a test run, CI) it prints
       unknown at once, so tests/hooks/test_session_start_log_turn.py's in-place runs never wait; (4) only when the
-      live read fails (no origin remote, offline) does it keep today's `git -C "$repo" merge-base HEAD origin/main`.
+      live read fails (no origin remote, offline, timed out, or no timeout binary) AND the repository was not shallow
+      at the hook's start does it keep today's `git -C "$repo" merge-base HEAD origin/main`; a shallow start with a
+      failed live read prints unknown, because there the tracking ref is the stale image ref rec-4426 found.
       B is 10 by default (deepen_history measured --unshallow at 2.9 s; in this thread's start every sibling hook had
       finished 6.9 s after the pin hook ran); a --base-wait-seconds=<0..60> argument overrides it for tests, any other
-      value reads as 10; settings.json does not pass it, so no user-set setting is added (Decision 224). Worst case:
-      base resolution ends by B plus at most one second, plus the existing 5 s status call, so the hook ends within
-      about 16 s. Shape limits from the existing structural test: no `read `, no `cat`, no `<<` in non-comment lines,
-      exactly one `>&2`, and the literal fallback line kept (parse ls-remote with parameter expansion,
-      e.g. "${out%%[[:space:]]*}"). Header comment updated to say all of this and to name rec-4426.
+      value reads as 10; settings.json does not pass it, so no user-set setting is added (Decision 224). Worst case,
+      where `timeout` exists: base resolution ends by B plus at most one second, plus the existing 5 s status call, so
+      the hook ends within about 16 s; where it does not, the hook makes no network call and its duration is
+      today's. Shape limits from the existing structural test: no `read ` substring and no `cat` or `<<` in
+      non-comment lines (so no word such as "thread " in code either), exactly one `>&2` in the whole file, comments
+      included (the header must not quote it), and the literal fallback line kept (parse ls-remote with parameter
+      expansion, e.g. "${out%%[[:space:]]*}"). Header comment updated to say all of this and to name rec-4426.
     new_imports: []
   - file: tests/telemetry/test_session_start_log_turn_base.py
     action: Create
     purpose: >-
-      rec-4426's named acceptance file. Builds a bare origin and a clone in tmp_path (no network) and runs a copy of
-      the hook. Nodes: test_base_resolved_when_origin_main_fetched_late (the cloud case: origin/main tracking ref
-      stale at an older commit, HEAD at the live tip, so today's script prints the stale commit or unknown; the new
-      one prints the live tip); test_base_waits_for_a_late_fetch_of_the_live_tip (HEAD on a work branch, the live tip
-      one commit ahead and absent locally, a background `git fetch origin main` after about 1 s; prints the fork
-      commit within the bound; the clone starts shallow so the wait trigger holds); test_unresolvable_live_tip_prints_
-      unknown_not_the_tracking_ref (shallow clone, the live tip never arrives, --base-wait-seconds=1; base=unknown
-      although origin/main resolves, elapsed at least 1 s); test_full_clone_does_not_wait (same but a full clone and
-      --base-wait-seconds=5: unknown in under 3 s); test_ci_does_not_wait (shallow, GITHUB_ACTIONS=true,
-      --base-wait-seconds=5: unknown in under 3 s); test_no_origin_remote_keeps_the_tracking_ref (the existing local
-      behaviour); test_invalid_wait_values_keep_a_well_formed_line (61, -1, "x" with S local: the line is well formed,
-      exit 0, base is S). Every node sets its subprocess environment explicitly (GITHUB_ACTIONS removed unless the node
-      sets it). The existing one-ref-flag rule for --project-ref is unaffected by the new argument.
+      rec-4426's named acceptance file. Builds a bare origin and clones in tmp_path (no network) and runs a copy of
+      the hook. F is the fork commit: the newest commit shared by the work branch and main. Nodes:
+      test_base_resolved_when_origin_main_fetched_late (the cloud case: origin/main tracking ref stale at an older
+      commit, HEAD at the live tip, so today's script prints the stale commit or unknown; the new one prints the live
+      tip); test_base_waits_for_a_late_unshallow_of_the_live_tip (shallow clone, HEAD on a work branch with its own
+      commit after F, the live tip one commit ahead of F and absent locally; a background `git fetch --unshallow
+      origin main` after about 1 s, mirroring session_start_deepen_history; prints F within the bound, after waiting);
+      test_full_clone_accepts_a_fork_merge_base (full clone, HEAD on a work branch with its own commit, main advanced
+      on origin and fetched into the clone, so S is local and F is neither HEAD nor S; prints F at once);
+      test_shallow_clone_rejects_a_fork_merge_base (the same shape but shallow with S local, --base-wait-seconds=1:
+      prints unknown, elapsed at least 1 s); test_unresolvable_live_tip_prints_unknown_not_the_tracking_ref (shallow
+      clone, the live tip never arrives, --base-wait-seconds=1; base=unknown although origin/main resolves, elapsed
+      at least 1 s); test_zero_wait_does_not_wait (the same with --base-wait-seconds=0: unknown in under 3 s);
+      test_full_clone_does_not_wait (live tip absent, full clone, --base-wait-seconds=5: unknown in under 3 s);
+      test_ci_does_not_wait (shallow, GITHUB_ACTIONS=true, --base-wait-seconds=5: unknown in under 3 s);
+      test_no_origin_remote_keeps_the_tracking_ref (full clone, no origin remote: today's tracking-ref merge-base);
+      test_no_timeout_binary_skips_the_live_read (PATH is a tmp_path directory of symlinks to every tool the hook
+      uses except timeout; full clone whose origin points at a missing path: well-formed line, exit 0, base is the
+      tracking-ref merge-base, no ls-remote attempted); test_invalid_wait_values_keep_a_well_formed_line (61, -1, "x"
+      with S local: no crash, well-formed line, exit 0, base is S). Mechanics: shallow clones use a file:// URL (git
+      ignores --depth on a plain path); setup commits set commit.gpgsign=false as the existing GIT_ENV does; every
+      hook subprocess sets HOME to tmp_path and its environment explicitly (GITHUB_ACTIONS removed unless the node
+      sets it); a background fetch is joined before the node returns. The existing one-ref-flag rule for
+      --project-ref is unaffected by the new argument.
     new_imports: []
 bundled_recommendations: [rec-4426]
 followon_recs: []
@@ -64,8 +81,8 @@ infrastructure_dependencies: []
 acceptance_criteria:
   - >-
     With a stale origin/main tracking ref and HEAD at the default branch's live tip, the hook prints base=<live tip>;
-    with the live tip unreachable it prints base=unknown, never the stale ref; with no origin remote it prints what
-    it prints today.
+    with the live tip unreachable from a shallow start it prints base=unknown, never the stale ref; with no origin
+    remote in a full clone it prints what it prints today.
   - "tests/hooks/test_session_start_log_turn.py passes unedited (pin line grammar, one stderr write, no index refresh)."
   - >-
     After the merge, the first session started on the merged main has a pin line whose base is a sha equal to
@@ -86,7 +103,7 @@ verification_plan:
     graduation_check_id: capture-pin-base-from-live-main
   - step: 2
     phase: pre-deploy
-    action: The whole new file passes (late fetch, unknown not tracking ref, shallow, no remote, bound values).
+    action: The whole new file passes (late unshallow, fork accept and reject, unknown not tracking ref, no wait outside shallow starts, no remote, no timeout binary, bound values).
     command: bin/venv-python -m pytest tests/telemetry/test_session_start_log_turn_base.py -q
     expected: exit 0
     fix_if: a node fails; fix the hook, never the node's expectation
@@ -98,9 +115,11 @@ verification_plan:
   - step: 3
     phase: pre-deploy
     action: >-
-      The existing hook suite still passes unedited, and stays fast: its in-place runs of the real hook now make one
-      live ls-remote each (about 0.3-0.8 s measured) but never wait, because this checkout is not shallow and CI sets
-      GITHUB_ACTIONS.
+      The existing hook suite still passes unedited, and stays fast: its in-place runs of the real hook (under env -i,
+      so GITHUB_ACTIONS is not set) now make one live ls-remote each (about 0.2-0.6 s measured) and never wait only
+      because the checkout is not shallow (CI's pr-validate and main-validate check out with fetch-depth 0; a CC-web
+      container is unshallowed by deepen_history). A shallow host checkout would make each run wait about B s, which
+      the durations check catches.
     command: bin/venv-python -m pytest tests/hooks/test_session_start_log_turn.py -q --durations=5
     expected: exit 0, and no single test duration above 10 s in the durations report (record the slowest in the PR body)
     fix_if: >-
@@ -167,8 +186,13 @@ test_obligations:
     verification_step: 1
     test_selector: tests/telemetry/test_session_start_log_turn_base.py::test_base_resolved_when_origin_main_fetched_late
     red_green_expectation: red before (stale tracking commit printed), green after
+  - source: .claude/hooks/session_start_log_turn.sh
+    behavior: a fork merge-base is accepted only outside a shallow history; a shallow start waits for the live tip, then prints unknown
+    verification_step: 2
+    test_selector: tests/telemetry/test_session_start_log_turn_base.py::test_shallow_clone_rejects_a_fork_merge_base
+    red_green_expectation: red before (the tracking-ref merge-base or the stale commit printed), green after
 constraints:
-  - "Offline fallback tension (stated, not hidden): when the live read fails the hook keeps today's tracking-ref merge-base, which can be older than main at that start (a false negative for back-validation, never a false positive); the contract's 'never guessed' is fully met only on the live path. Kept because it is today's behaviour, operator-approved with this plan, and the cloud path no longer uses it."
+  - "Offline fallback tension (stated, not hidden): when the live read fails in a repository that was not shallow at the start, the hook keeps today's tracking-ref merge-base, which can be older than main at that start (a false negative for back-validation, never a false positive); the contract's 'never guessed' is fully met only on the live path. Kept because it is today's behaviour, operator-approved with this plan, and a fresh cloud container (shallow at start) prints unknown instead."
   - "The pin line grammar is unchanged, so src/turn_capture/provenance.py, PARSER_VERSION and every contract stay untouched; checkout_base_sha's contract text (telemetry_sessions.yaml) already reads 'the merge-base of the checkout with the repository's default branch at that start ... NULL when it could not be resolved, never guessed'."
   - "The hook writes nothing locally: ls-remote and merge-base only; no fetch, no ref update, no index refresh (it runs beside session_start_sync_main and session_start_deepen_history, which do write)."
   - "No existing assertion is loosened (Decision 235); tests/hooks/test_session_start_log_turn.py is not edited."
@@ -178,13 +202,14 @@ context:
   - "Red overlap (scripts.ci_rca.red_overlap, 2026-11-17, main 3988bb09): verdict blocked; red rec-5247 (telemetry reader smoke 504 on sessions_window; slo_breached, product_regression, shared paths none). Deferral rationale: this plan edits none of its files and does not repair it; rec-5247 is owned by this workspace (operator ruling 2026-11-17, a separate thread plans its fix); Decision 254 cl.6 replaced the past-SLO block with an operator alarm and red_overlap's slo_breached rule predates it (rec-5108). The build re-runs red_overlap at its start."
   - "plan_obligations: PLAN-telemetry-capture-hook-labels also scopes the hook; it built and merged as #1903 (a6d2e85a), so nothing is in flight on the file."
   - "Root cause (read this session, 2026-11-17, reflog of a fresh project-thread container): refs/remotes/origin/main came from the image (2026-11-14, depth 50, 4bdf58a9); HEAD was fetched to 3988bb09 at 12:57:14Z; the pin hook ran at 12:57:18.5Z and printed base=unknown; session_start_sync_main moved origin/main at 12:57:19Z and deepen_history unshallowed after. So at hook time the tracking ref was three days stale in a shallow history, and merge-base found nothing; had it found something it would have been the stale commit. The rec's 'race with sync_main' reading holds in part. In this thread the pin attachment landed before the first prompt, so the open row would carry the facts (rec-4641 covers threads where it does not)."
-  - "Hook duration (B2): in this thread's start (transcript timestamps) the pin hook finished at 12:57:18.5Z, the slowest sibling hooks (sync_deps, deepen_history) at 12:57:25.4Z, and the first prompt record at 12:57:25.7Z, so Claude Code waited for every SessionStart hook before the first prompt; a pin hook ending within B=10 s plus the status call stays inside that window and cannot land after the first prompt or outside its resume hook group (one observed start; inferred for resume/clear/compact, where the wait trigger rarely holds because the container is already unshallowed)."
+  - "Hook duration: in this thread's start (transcript timestamps) the pin hook ran at about 12:57:18Z and the slowest sibling hooks (sync_deps, deepen_history) finished at 12:57:25.4Z, with the first prompt record at 12:57:25.7Z: Claude Code waited for every repo settings.json SessionStart hook before the first prompt (one observed start). A full B=10 wait would end about 12:57:28Z, a few seconds after the slowest sibling, so the real cost is a few seconds more startup on shallow, unresolved starts; the record still lands before the first prompt. rec-4633's late records concern late-loaded plugin hooks, not this one. On resume, clear and compact the container is already unshallowed, so the wait trigger does not hold."
   - "Live read: `git ls-remote origin refs/heads/main` from this container returned main's tip through the git proxy (2026-11-17). In a fresh session HEAD is main's tip, so merge-base HEAD S equals HEAD and resolves at once with no wait."
   - "Related, not bundled: rec-4641 (read-time recovery of checkout facts when the pin lands after the open row, a reader change); rec-5269 (deploy events) and rec-5270 (merge-to-session links), the other two baseline recordings of the same operator ruling."
   - "Approvals: the operator said write the plan on 2026-11-17 13:12Z in this planning thread, after the presentation of the approach (live tip, bounded wait, unknown never the stale ref, offline keeps the tracking ref, main hard-coded)."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: NO_FLAGS, scout_input_fingerprint: "v1:2a4fd85d7dcc2b2dd455d6fda1a84c11b66d242543d2ea6f085c4d3b22b99b37"}  # pragma: allowlist secret
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 8}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 6}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
