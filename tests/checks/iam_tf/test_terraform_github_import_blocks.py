@@ -46,6 +46,10 @@ _CONTENT_DEPLOY_REASON = (
     "created by the approved terraform-github-apply.yml dispatch naming it in gate_change"
     " (PLAN-telemetry-content-reader-api-lock, VP 8); the remote object does not exist before it"
 )
+_PERSONA_VERDICT_APP_REASON = (
+    "created by the approved terraform-github-apply.yml dispatch naming it in gate_change"
+    " (PLAN-persona-verdict-app-grant, VP 10); the remote object does not exist before it"
+)
 EXEMPT: dict[str, str] = {
     "github_repository_environment.approved_text": _APPROVED_TEXT_REASON,
     "github_repository_environment_deployment_policy.approved_text_main": _APPROVED_TEXT_REASON,
@@ -55,6 +59,8 @@ EXEMPT: dict[str, str] = {
     "github_repository_environment_deployment_policy.persona_verdict_main": _PERSONA_VERDICT_REASON,
     "github_repository_environment.persona_verdict_override": _PERSONA_VERDICT_OVERRIDE_REASON,
     "github_repository_environment_deployment_policy.persona_verdict_override_main": _PERSONA_VERDICT_OVERRIDE_REASON,
+    "github_repository_environment.persona_verdict_app": _PERSONA_VERDICT_APP_REASON,
+    "github_repository_environment_deployment_policy.persona_verdict_app_main": _PERSONA_VERDICT_APP_REASON,
     "github_repository_environment.tf_bootstrap_apply": _BOOTSTRAP_APPLY_REASON,
     "github_repository_environment_deployment_policy.tf_bootstrap_apply_main": _BOOTSTRAP_APPLY_REASON,
     "github_repository_environment.telemetry_content_deploy": _CONTENT_DEPLOY_REASON,
