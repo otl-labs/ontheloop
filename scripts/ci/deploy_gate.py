@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Deploy gate for the governed Lambda code-deploy channels (Decision 249, rec-4912).
+"""Deploy gate for the governed code-deploy channels (Decision 249, rec-4912).
 
-Both channels (deploy-ducklake-lambdas.yml, deploy-prod-lambdas.yml) are woken by a completed CI run and call
-this module through .github/workflows/deploy-gate.yml. `resolve` picks the newest main commit whose main-validate
+The Lambda channels (deploy-ducklake-lambdas.yml, deploy-prod-lambdas.yml) are woken by a completed CI run and call
+this module through .github/workflows/deploy-gate.yml; the persona image channel (persona-image-publish.yml, channel
+persona_image) calls `resolve` from its own gate job, with the GHCR main tag's revision label as its record.
+`resolve` picks the newest main commit whose main-validate
 full-tier step passed and decides deploy or skip against the channel's deploy records; `freshness` replaces the
 inline deploy-record asserts. Stdlib only at import so `freshness` runs on the runner's system python3; the
 pathspecs and the function lists are imported lazily inside `resolve`.
@@ -29,9 +31,11 @@ GATE_MODULE = "scripts/ci/deploy_gate.py"
 RECORD_BUCKET = "agent-platform-data-lake"
 ABSENT_RECORD_TEXT = "(404) when calling the HeadObject operation"
 DEFAULT_REPO = "otl-labs/ontheloop"
+ROOT = Path(__file__).resolve().parents[2]
 
 
-CHANNELS = ("ducklake", "prod", "telemetry-content")
+LAMBDA_CHANNELS = ("ducklake", "prod", "telemetry-content")
+CHANNELS = (*LAMBDA_CHANNELS, "persona_image")
 CONTENT_FUNCTION = "agent-platform-ducklake-telemetry-content"
 
 
@@ -120,6 +124,10 @@ def _resolvable(git: Git, sha: Optional[str]) -> bool:
     return bool(sha) and git.ok("cat-file", "-e", f"{sha}^{{commit}}")
 
 
+def _missing_required(git: Git, sha: str, required: tuple[str, ...]) -> bool:
+    return any(not git.ok("cat-file", "-e", f"{sha}:{path}") for path in required)
+
+
 def _latest_watched(git: Git, rev: str, pathspecs: tuple[str, ...]) -> str:
     return git.out("log", "-1", "--format=%H", rev, "--", *pathspecs)
 
@@ -141,11 +149,13 @@ def decide(
     git: Git,
     force: bool,
     pre_channel_file: Optional[str] = None,
+    *,
+    required_paths: tuple[str, ...] = (),
 ) -> tuple[bool, str]:
     """(deploy, reason) for `target` against the channel's deploy records; rules 0-5 in order."""
     if not git.ok("cat-file", "-e", f"{target}:{GATE_MODULE}"):
         return False, "pre_gate_target"
-    if pre_channel_file and not git.ok("cat-file", "-e", f"{target}:{pre_channel_file}"):
+    if _missing_required(git, target, (pre_channel_file, *required_paths) if pre_channel_file else required_paths):
         return False, "pre_channel_target"
     for sha in records.values():
         if _resolvable(git, sha) and sha != target and git.ok("merge-base", "--is-ancestor", target, str(sha)):
@@ -186,9 +196,48 @@ def read_record_sha(channel: str, function: str, run: Optional[Callable[..., Any
     return (record or {}).get("source_git_sha") or None
 
 
+def _load_pin() -> Any:
+    try:
+        return importlib.import_module("src.persona_hosts.image_pin").load_pin(ROOT)
+    except (ValueError, OSError, ImportError) as exc:
+        raise GateError(f"persona image pin unreadable: {exc}") from exc
+
+
+def _persona_required() -> tuple[str, ...]:
+    return ("config/persona_image.yaml", _load_pin().dockerfile, "scripts/ci/persona_image_publish.py")
+
+
+def persona_image_reader(first_publish: bool = False) -> Callable[[str, str], Optional[str]]:
+    """The persona_image record reader: the GHCR main tag's revision label; load_pin and RecordError become GateError."""
+
+    def read(channel: str, function: str) -> Optional[str]:
+        registry = importlib.import_module("scripts.ci.registry_record")
+        image = _load_pin().image
+        try:
+            return registry.read_record(image, token=os.environ.get("GITHUB_TOKEN"), first_publish=first_publish)
+        except registry.RecordError as exc:
+            raise GateError(f"registry record read failed: {exc}") from exc
+
+    return read
+
+
+def _image_required(override: Optional[tuple[str, ...]]) -> tuple[str, ...]:
+    return override if override is not None else _persona_required()
+
+
+def _image_skip(git: Git, sha: Optional[str], required: tuple[str, ...]) -> Optional[str]:
+    """A persona_image skip decided before any registry read: no green commit, or a target older than the channel."""
+    if sha is None:
+        return "no_green_in_window"
+    return "pre_channel_target" if _missing_required(git, sha, required) else None
+
+
 def _channel_inputs(channel: str) -> tuple[list[str], tuple[str, ...]]:
     if channel not in CHANNELS:
         raise GateError(f"unknown channel {channel!r}")
+    if channel == "persona_image":
+        # config/persona_image.yaml (the pin) is deliberately not an input: a pin merge must never republish.
+        return ["image"], tuple(_load_pin().inputs())
     # importlib, not an import statement: only `resolve` has pyyaml/pydantic installed, and `freshness` runs on the
     # runner's bare system python3, so the dependency closure of this module must stay stdlib.
     config = importlib.import_module("scripts.build_lambda_config")
@@ -217,6 +266,7 @@ def resolve(
     reader: Callable[[str, str], Optional[str]] = read_record_sha,
     inputs: Optional[tuple[list[str], tuple[str, ...]]] = None,
     record_reader: Callable[[str, str], Optional[dict[str, Any]]] = read_record,
+    required_paths: Optional[tuple[str, ...]] = None,
 ) -> int:
     git = git or Git()
     api = api or GithubApi()
@@ -227,18 +277,24 @@ def resolve(
             git.out("fetch", "origin", "main")
         functions, pathspecs = inputs or _channel_inputs(channel)
         sha = newest_green_sha(api, git)
-        records = {fn: reader(channel, fn) for fn in functions}
+        is_image = channel == "persona_image"
+        required = _image_required(required_paths) if is_image else ()
+        skip = _image_skip(git, sha, required) if is_image else None
+        records: dict[str, Optional[str]] = {} if skip else {fn: reader(channel, fn) for fn in functions}
         record_sha = record_code_sha256 = ""
-        if len(functions) == 1 and records[functions[0]]:
+        if len(functions) == 1 and records.get(functions[0]):
             record_sha = str(records[functions[0]])
-            full = record_reader(channel, functions[0]) or {}
-            record_code_sha256 = str(full.get("code_sha256") or "")
+            if not is_image:
+                full = record_reader(channel, functions[0]) or {}
+                record_code_sha256 = str(full.get("code_sha256") or "")
         if sha is None:
             deploy, reason = False, "no_green_in_window"
             print("::notice::DEPLOY-GATE no green main commit within the window; skipping")
+        elif skip:
+            deploy, reason = False, skip
         else:
             pre_file = PRE_CHANNEL_FILE if channel == "telemetry-content" else None
-            deploy, reason = decide(sha, records, pathspecs, git, force, pre_file)
+            deploy, reason = decide(sha, records, pathspecs, git, force, pre_file, required_paths=required)
     except GateError as exc:
         print(f"::error::DEPLOY-GATE failed closed: {exc}", file=sys.stderr)
         return 2
@@ -294,15 +350,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     res = sub.add_parser("resolve")
     res.add_argument("--channel", choices=list(CHANNELS), required=True)
     res.add_argument("--force", action="store_true")
+    res.add_argument("--first-publish", action="store_true")
     res.add_argument("--manifest", required=True)
     fresh = sub.add_parser("freshness")
-    fresh.add_argument("--channel", choices=list(CHANNELS), required=True)
+    fresh.add_argument("--channel", choices=list(LAMBDA_CHANNELS), required=True)
     paths = sub.add_parser("pathspecs")
-    paths.add_argument("--channel", choices=list(CHANNELS), required=True)
+    paths.add_argument("--channel", choices=list(LAMBDA_CHANNELS), required=True)
     fresh.add_argument("--expected-sha", required=True)
     fresh.add_argument("functions", nargs="+")
     args = parser.parse_args(argv)
     if args.cmd == "resolve":
+        if args.first_publish and args.channel != "persona_image":
+            print("::error::DEPLOY-GATE --first-publish applies only to the persona_image channel", file=sys.stderr)
+            return 2
+        if args.channel == "persona_image":
+            return resolve(args.channel, args.force, args.manifest, reader=persona_image_reader(args.first_publish))
         return resolve(args.channel, args.force, args.manifest)
     if args.cmd == "pathspecs":
         print("\n".join(_channel_inputs(args.channel)[1]))
