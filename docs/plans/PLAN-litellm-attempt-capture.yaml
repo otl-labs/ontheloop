@@ -4,11 +4,12 @@ handoff_policy:
   timeout_disposition: blocked
 slug: litellm-attempt-capture
 intent: >-
-  Plan 3b-2a of rec-4028 (the litellm telemetry producer). A blind consult split 3b-2 into three plans: this one (the
-  run record captures every billed call), 3b-2b (the Claude Code monitor checks are scoped to producer claude_code,
-  LL-5) and 3b-2c (the producer, its registry entry, golden corpus and the three row contracts, which closes rec-4028).
-  3b-1 (#2223) put the rules in docs/contracts/telemetry-event-envelope.yaml; this plan makes the events file hold what
-  LL-3 and LL-4 say it holds, so 3b-2c can map it without guessing:
+  Solves rec-5395. rec-4028 (the litellm telemetry producer) was superseded on 2026-11-18 (one plan solves one rec) by
+  rec-5395 (this plan: the run record keeps every billed call), rec-5388 (the Claude Code monitor checks are scoped to
+  producer claude_code, LL-5; independent) and rec-5396 (the producer, its registry entry, golden corpus and the three
+  row contracts; depends on rec-5395). PLAN-litellm-producer-envelope (#2223) put the rules in
+  docs/contracts/telemetry-event-envelope.yaml; this plan makes the events file hold what LL-3 and LL-4 say it holds,
+  so rec-5396's producer can map it without guessing:
   - a turn the run's wall-clock deadline cuts short records every attempt the transport made, the call in flight as
     one more attempt entry with outcome cancelled, and a fresh probe that completed earlier in that turn;
   - a fail-over whose fallback cold start fails keeps the primary attempts and the failed probe as an attempt entry;
@@ -18,7 +19,7 @@ plan_type: IMPLEMENTATION
 verification_tier: V2
 plan_path: docs/plans/PLAN-litellm-attempt-capture.yaml
 phase: >-
-  T4.32 c1 (telemetry leg, part; rec-4028 plan 3b-2a); closes no criterion. 3b-1 is built (#2223, 93fb5215); plan 4
+  T4.32 c1 (telemetry leg, part; rec-5395); closes no criterion. PLAN-litellm-producer-envelope is built (#2223); plan 4
   (the MCP bridge, #2174) is built. scripts/llm/ and src/persona_backends/ are in no Lambda bundle, so nothing deploys
   (V2).
 closes_criteria: []
@@ -29,16 +30,19 @@ scope:
     purpose: >-
       - header schema 2 (was 1): an attempt entry's outcome may now be cancelled, a failed cold-start probe may be an
         attempt entry, and the header is written once. Nothing reads a schema 1 file (no producer exists; no workflow
-        runs run_persona).
-      - Capture: a stdlib dataclass the backend creates per transport call and passes as capture=. Fields: attempts
-        (list, every completed attempt in send order across both roles, a failed probe included), in_flight (the
-        attempt being awaited, or None), record (the CallRecord of the attempt that returned ok, or None) and
+        runs run_persona). A cold-start probe's attempt entry (raised or cancelled) carries attempt 0, a value no call
+        takes (a call's per-role counter starts at 1), so the producer can tell a probe from the fallback's first call.
+      - Capture: a stdlib dataclass the backend creates per transport call and passes as capture=. Fields: filled
+        (bool, False; the transport sets it True on entry, so a transport that ignores capture= is detectable),
+        attempts (list, every completed attempt in send order across both roles, a raised probe included), in_flight
+        (the attempt being awaited, or None), record (the CallRecord of the attempt that returned ok, or None) and
         probe_record (a fresh probe's CallRecord, or None). The transport fills it by duck typing; this package still
         imports nothing under scripts.
       - cancelled_dict(in_flight, latency_ms): attempt_dict with outcome cancelled and the given latency.
       - The module docstring names the declared losses this file cannot hold: a run killed before its header is
-        written (during MCP bridge startup) leaves no events file, and any process exit before a turn record lands
-        (runner lost, job timeout, an OSError from write_atomic) loses that turn's attempts (LL-3 prefix rule).
+        written (during MCP bridge startup) leaves no events file; a warehouse_read run refused for want of an MCP
+        server leaves none either (no call is made); and any process exit before a turn record lands (runner lost, job
+        timeout, an OSError from write_atomic) loses that turn's attempts (LL-3 prefix rule).
   - file: src/persona_backends/litellm_backend.py
     action: Modify
     purpose: >-
@@ -47,19 +51,27 @@ scope:
         set, replacing today's re-emit (about :149-151); and by end() first when it has not gone out, which covers input
         refusal, tool_server_unavailable (factory or BridgeUnavailable) and BridgeTimeout with no per-path code. On those
         early exits tools_sha256 keeps the pre-bridge tool list's hash (no call was sent).
-      - step() creates an ev.Capture per call and passes capture= to the transport. The asyncio.TimeoutError branch
-        writes the turn record from it: attempts = every captured attempt, then the in-flight entry (if any) as
-        cancelled with latency_ms = now_ms minus its started_at_ms; record = the captured record as a dict (an attempt
-        that returned ok before the cancel keeps its CallRecord, so no ok entry ever lacks one); probe_record = the
-        captured probe record and probe_turn 1 when it is set; attempts_known true. turns_used adds one per entry
-        written plus one for the probe record. A deadline during a retry backoff has no in-flight entry.
-      - on_transport_error for kind fallback_unavailable counts the probe once: a failed probe is already an attempt
-        entry, so probe_turn is 0 there and turns_used adds the attempts alone. Other kinds are unchanged.
+      - step() creates an ev.Capture per call and passes capture= to the transport. The asyncio.TimeoutError branch,
+        when capture.filled, writes the turn record from it: attempts = every captured attempt, then the in-flight
+        entry (if any) as cancelled with latency_ms = max(0, now_ms minus its started_at_ms) (both time.time in
+        production; the clamp covers a fake wall); record = the captured record as a dict (an attempt that returned ok
+        before the cancel keeps its CallRecord, so no ok entry ever lacks one); probe_record = the captured probe
+        record and probe_turn 1 when it is set; attempts_known true. failed_over is true when the turn began on role
+        primary and any written entry or the probe record is warm_fetched_escape_hatch's, and then the record's role
+        is warm_fetched_escape_hatch, as on_result writes a fail-over turn; otherwise role is the turn's starting role
+        and failed_over false. turns_used adds one per entry written plus one for the probe record. A deadline during
+        a retry backoff has no in-flight entry. When capture.filled is false (a transport that ignores capture=), the
+        branch keeps today's values: attempts [], attempts_known false, turns_used the upper bound.
+      - on_transport_error for kind fallback_unavailable: no fallback call was answered, so the turn record keeps role
+        primary and failed_over false, self.role is not switched (the run aborts), probe_turn is 0 (a raised probe is
+        already an attempt entry) and turns_used adds the attempts alone, or the upper bound when there are none.
+        Other kinds are unchanged.
       Stays under 500 SLOC.
   - file: scripts/llm/litellm_transport.py
     action: Modify
     purpose: >-
-      - complete and acomplete take capture: Any = None (keyword) and carry it on _Call.
+      - complete and acomplete take capture: Any = None (keyword), set capture.filled True on entry and carry it on
+        _Call.
       - _run_role and _arun_role: set capture.in_flight to the selection's Attempt (outcome cancelled, latency 0,
         provider, billing_shape, started_at_ms) just before each completion call; after it returns or raises Exception,
         in one synchronous stretch with no await, clear in_flight, append the completed Attempt to capture.attempts and,
@@ -73,16 +85,21 @@ scope:
     action: Modify
     purpose: >-
       - ColdStartResult gains attempt (Attempt | None, default None). _failed (a probe that raised) sets it: role
-        warm_fetched_escape_hatch (the resolved role), the selection's model, provider and billing_shape, attempt 1,
-        outcome the classify kind, latency and started_at_ms measured as for a call. A probe with no choices, a "no
-        request made" probe and a not_applicable role set none (LL-4; rec-5338 stays open).
+        warm_fetched_escape_hatch (the resolved role), the selection's model, provider and billing_shape, attempt 0
+        (the probe marker, see events.py), outcome the classify kind, latency and started_at_ms measured as for a
+        call. A probe with no choices, a "no request made" probe and a not_applicable role set none (LL-4; rec-5338
+        stays open). The probe's model is the first persona's resolution (_resolve), not the run's persona; rec-5396 maps
+        it as it finds it.
       - _unavailable carries attempts=(result.attempt,) when set, else (). fallback_gate and afallback_gate, on a
         TransportError from ensure_asserted, set its attempts to primary_error.attempts plus its own before re-raising
         from primary_error (as _mid_run already copies them). Both faces.
       - cold_start_check, acold_start_check, ensure_asserted, aensure_asserted and both gates take capture=None and pass
-        it to the probe. The async probe sets capture.in_flight (role warm_fetched_escape_hatch, outcome cancelled)
-        before its completion await and clears it after; a failed probe's attempt is appended to capture.attempts in the
-        same stretch. The same cancelling() rule as the transport applies. The sync probe fills capture the same way.
+        it to the probe only when it is not None, so existing callers and fakes with the old signature keep working.
+        The async probe sets capture.in_flight (role warm_fetched_escape_hatch, attempt 0, outcome cancelled) before
+        its completion await and clears it after; a raised probe's attempt is appended to capture.attempts in the same
+        stretch. The same cancelling() rule as the transport applies: an Exception raised while the task is cancelling
+        re-raises CancelledError before _failed, with in_flight left set and nothing appended. The sync probe fills
+        capture the same way.
   - file: tests/persona_backends/fakes.py
     action: Modify
     purpose: >-
@@ -95,24 +112,27 @@ scope:
       New nodes:
       - test_deadline_mid_call_records_cancelled_in_flight: two primary outages captured, the third call in flight at
         the deadline; the turn holds three entries in send order, the last cancelled with provider, billing_shape and
-        started_at_ms from the selection and a measured latency; attempts_known true; turns_used 3.
+        started_at_ms from the selection and a latency of at least 0; attempts_known true; role primary, failed_over
+        false; turns_used 3.
       - test_deadline_in_backoff_adds_no_entry.
       - test_deadline_after_asserted_probe_keeps_probe_record: primary outages, an asserted fresh probe, the deadline
-        during the fallback call; probe_record set, probe_turn 1, the fallback call a cancelled entry (3b-1 critique r3
-        B1).
+        during the fallback call; probe_record set, probe_turn 1, the fallback call a cancelled entry, role
+        warm_fetched_escape_hatch and failed_over true (PLAN-litellm-producer-envelope critique r3 B1).
       - test_deadline_during_probe_records_cancelled_probe_entry: the probe in flight is an entry with role
-        warm_fetched_escape_hatch and outcome cancelled at its position.
+        warm_fetched_escape_hatch, attempt 0 and outcome cancelled at its position.
       - test_deadline_after_returned_call_keeps_its_record: wait_for patched to run the call to completion and then
         raise TimeoutError; the ok entry is written with its CallRecord.
-      - test_fallback_unavailable_lands_primary_and_probe_attempts: primary outages and a failed probe entry land in
-        the turn record, attempts_known true, probe_turn 0, turns_used = entries.
+      - test_deadline_with_unfilled_capture_keeps_unknown: a transport that ignores capture= gives attempts [],
+        attempts_known false and the upper bound (today's values, never a guessed zero).
+      - test_fallback_unavailable_lands_primary_and_probe_attempts: primary outages and a raised probe entry (attempt
+        0) land in the turn record, attempts_known true, role primary, failed_over false, probe_turn 0, turns_used =
+        entries.
       - test_first_written_header_is_final: a warehouse_read run's on_event sees one head, equal to the final header.
       - test_early_exits_write_header_then_end: input refusal, tool_server_unavailable and BridgeTimeout each emit the
         head then the end, once each.
-      Planned re-specifications (the old values described the defects this plan fixes):
-      test_wait_for_timeout_returns_budget_exhausted (attempts_known false, turns_used 5 -> the captured entry, true,
-      1), test_fallback_unavailable_counts_upper_bound (replaced by the node above) and
-      test_header_tools_sha256_covers_bridge_specs (two heads -> one).
+      test_wait_for_timeout_returns_budget_exhausted and test_fallback_unavailable_counts_upper_bound stay unchanged
+      (their fakes fill no capture or carry no attempts). Planned re-specification (the old value described the
+      defect this plan fixes): test_header_tools_sha256_covers_bridge_specs (two heads -> one).
   - file: tests/persona_backends/test_events.py
     action: Modify
     purpose: test_header_schema_two_and_capture_defaults; test_cancelled_dict_overrides_outcome_and_latency.
@@ -127,35 +147,45 @@ scope:
       - test_cancel_in_backoff_leaves_no_in_flight.
       - test_cancel_raised_as_error_is_not_retried: a fake that answers cancellation with an APIConnectionError-shaped
         error; CancelledError propagates, one completion call, no sleep, in_flight set.
-      - test_probe_record_on_capture (direct fallback role and fail-over gate).
+      - test_probe_record_on_capture (direct fallback role and fail-over gate) and capture.filled set on entry.
+      - test_outage_inside_task_group_is_still_classified: an outage raised while the role runs inside an anyio task
+        group (as the MCP bridge path does) is classified and retried, never turned into CancelledError (critique r1
+        risk: no residual cancel count).
   - file: tests/test_llm_litellm_cold_start.py
     action: Modify
     purpose: >-
-      TestProbeAttempt, sync and async: a raising probe's result carries an attempt with the fallback role, its
-      classify outcome, selection fields and start; a no-choices probe and a no-request probe carry none; _unavailable's
-      error carries it; fallback_gate and afallback_gate prepend primary_error.attempts; a cancelled async probe leaves
-      capture.in_flight with role warm_fetched_escape_hatch.
+      TestProbeAttempt, sync and async: a raising probe's result carries an attempt with the fallback role, attempt 0,
+      its classify outcome, selection fields and start; a no-choices probe and a no-request probe carry none;
+      _unavailable's error carries it; fallback_gate and afallback_gate prepend primary_error.attempts; a cancelled
+      async probe leaves capture.in_flight with role warm_fetched_escape_hatch;
+      test_probe_cancel_raised_as_error_is_cancelled (async: a fake completion answers cancellation with an
+      APIConnectionError-shaped error; CancelledError propagates, in_flight is set, nothing is appended). The four
+      TestColdStartLock fakes (about :200, :219, :234, :253) are unchanged, since capture is forwarded only when set.
 implementation_declared: false
-bundled_recommendations: []
-followon_recs: [rec-4028]
+bundled_recommendations: [rec-5395]
+followon_recs: [rec-5396]
 infrastructure_dependencies: []
 acceptance_criteria:
   - >-
     A turn cut short by the deadline records every attempt the transport made in send order, the call in flight as one
     more entry with outcome cancelled and its selection's provider, billing_shape and started_at_ms, a returned call's
-    CallRecord and a completed fresh probe's record, with attempts_known true; a deadline in a retry backoff adds no
-    entry.
+    CallRecord and a completed fresh probe's record, with attempts_known true and the role and failed_over the scope
+    row states; a deadline in a retry backoff adds no entry, and a transport that fills no capture keeps attempts
+    unknown.
   - >-
     A fail-over whose fallback cold start fails keeps the primary attempts and, when the probe was sent and raised, the
-    probe as an attempt entry, on both faces; a probe with no choices or no request adds none.
+    probe as an attempt entry (attempt 0), on both faces, with the turn record's role primary and failed_over false; a
+    probe with no choices or no request adds none.
   - >-
     The events header (schema 2) is emitted once and equals the final header, including on input refusal,
     tool_server_unavailable and BridgeTimeout, where it is followed by the end record.
   - >-
-    An error raised while the task is being cancelled is never retried past the deadline.
+    An error raised while the task is being cancelled, in a call or in the cold-start probe, is never classified or
+    retried past the deadline.
   - src/persona_backends imports nothing under scripts, src/telemetry or src/sensitive_values; every changed module
     stays under 500 SLOC and keeps full coverage from its mapped test file.
-  - Nothing deploys and no telemetry row is written (VP 4).
+  - rec-5395 is closed by the merge's Resolves trailer (VP 6).
+  - Nothing deploys (VP 4), and no telemetry row is written (VP 3's closure test holds no src/telemetry in run_persona's closure, and the constraints forbid a writer call).
 verification_plan:
   - step: 1
     phase: pre-deploy
@@ -167,6 +197,7 @@ verification_plan:
       tests/persona_backends/test_litellm_backend.py::test_deadline_after_asserted_probe_keeps_probe_record
       tests/persona_backends/test_litellm_backend.py::test_deadline_during_probe_records_cancelled_probe_entry
       tests/persona_backends/test_litellm_backend.py::test_deadline_after_returned_call_keeps_its_record
+      tests/persona_backends/test_litellm_backend.py::test_deadline_with_unfilled_capture_keeps_unknown
       tests/persona_backends/test_litellm_backend.py::test_fallback_unavailable_lands_primary_and_probe_attempts
       tests/persona_backends/test_litellm_backend.py::test_first_written_header_is_final
       tests/persona_backends/test_litellm_backend.py::test_early_exits_write_header_then_end
@@ -237,6 +268,17 @@ verification_plan:
     fix_if: Any failure; fix and re-run both from the start (timeout_disposition blocked).
     hermetic: false
     graduation: not-applicable
+  - step: 6
+    phase: post-deploy
+    action: rec-5395 is closed by the merge.
+    command: >-
+      AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids,
+      make_reader; r,_=fetch_recs_by_ids(make_reader(),['rec-5395']); print(r[0]['status']); assert
+      r[0]['status']=='closed'"
+    expected: Prints closed.
+    fix_if: An open rec means the Resolves trailer was missing; close it through the portal with the merge SHA as evidence.
+    hermetic: false
+    graduation: not-applicable
 test_obligations:
   - source: src/persona_backends/litellm_backend.py
     behavior: The deadline branch writes the captured attempts, the cancelled in-flight entry, the record and the probe record; the header is final at its first write.
@@ -262,7 +304,7 @@ constraints:
   - >-
     No telemetry row, writer call, AWS call or key read, and no LiteLLM CustomLogger or callback (operator ruling
     2026-11-17). No edit to Feedback Loop's contracts or code, scripts/run_persona.py, scripts/personas/,
-    executor-personas.yaml or ports.yaml (3b-2b and 3b-2c own those).
+    executor-personas.yaml or ports.yaml (rec-5388 and rec-5396 own those).
   - >-
     The approved LL-3 and LL-4 words (telemetry-event-envelope.yaml) are the specification; where this plan and they
     differ, STOP to this planning thread. The transport_exception path stays without a turn record (LL-4).
@@ -272,24 +314,31 @@ constraints:
 context:
   - >-
     Decision-scout r1 (2026-11-18): Verdict: NO_FLAGS. Decisions triaged: 221 of 221. Roadmap items intersected: 2;
-    CONFLICT: 0; RELATED: 1. Serves: NS.6 3/5. CITE: 173, 206, 235 (the three re-specified backend nodes are named in
-    scope and recorded as planned-change, Decision 235 cl.1). A raising probe as an attempt entry rests on LL-2's
-    positional ref and LL-4's failed-attempt clause (3b-1 critique r4, brief).
+    CONFLICT: 0; RELATED: 1. Serves: NS.6 3/5. CITE: 173, 206, 235 (the re-specified backend node is named in scope and
+    recorded as planned-change, Decision 235 cl.1; critique r1 cut three to one).
+    A raising probe as an attempt entry rests on LL-2's positional ref and LL-4's failed-attempt clause (PLAN-litellm-producer-envelope critique r4, brief).
   - >-
     Sign-off: operator "write the plan" 2026-11-18 15:43 UTC on PRESENTATION-plan3b2a.md (the three small choices
     taken). Split and design: blind consult /mnt/project-files/run-persona-backend/plan3b2-advisor-brief/ADVICE.md (sections 1,
-    5, 6); work brief BRIEF-plan-3b2.md beside it (3b-1 critique r3-r6 items). Python 3.12.3: asyncio.wait_for awaits
+    5, 6); work brief BRIEF-plan-3b2.md beside it (that plan's critique r3-r6 items). Python 3.12.3: asyncio.wait_for awaits
     the coroutine in the caller's task, so the transport sees the deadline's cancel at its own awaits (read on the venv).
   - >-
     Not here: the host-run sidecar writer and the run_persona ordinal go to the T8 fixture-run plan that adds the
     litellm runner to scripts/personas/execute.py (consult s3-4); the stale "one per turn" executor-personas.yaml text,
-    the loss-marker columns and the ordinal limit are 3b-2c's; the monitor read budget sizing rec is owed before the
-    egress plan (consult s7).
+    the loss-marker columns and the ordinal limit are rec-5396's. rec-5388 (LL-5 scoping) and rec-5385 (monitor read
+    budget sizing, consult s7) land before any persona run writes a litellm row (the egress and first-key-read plans
+    carry that order); neither is a dependency of this plan.
+  - >-
+    closes_criteria is empty: a part leg of T4.32 c1, the accepted precedent (PLAN-litellm-producer-envelope critique
+    r6, r8, r9). Critique r1: B1 role and failed_over stated and tested on both branches; B2 the probe's cancelling()
+    node added; nits fixed (capture.filled for attempts_known, attempt 0 probe marker, latency clamp, capture forwarded
+    only when set, the no-server refusal declared, AC evidence).
   - >-
     Graduated shards kept unchanged (their nodes are not edited): litellm-call-record-events,
     litellm-call-record-transport, litellm-transport-tools-call-under-pins, run-persona-litellm-backend-loop.
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: NO_FLAGS, scout_input_fingerprint: "v1:9b636b0f7e9aaf6bd0bf2c3cf7a13b4ed989a2fabb550fea90b0660289e31e3f"}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 8}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -303,15 +352,15 @@ execution_steps:
   - >-
     Write the new transport and cold-start nodes red, then edit litellm_cold_start.py (ColdStartResult.attempt, the
     gates, capture) and litellm_transport.py (capture, in_flight, the cancelling rule).
-  - Write the events and backend nodes red, add CapturingTransport to the fakes, then edit events.py and litellm_backend.py and apply the three planned re-specifications.
+  - Write the events and backend nodes red, add CapturingTransport to the fakes, then edit events.py and litellm_backend.py and apply the one planned re-specification.
   - Run bin/venv-python -m scripts.validate --pre and fix; git add the changed files.
   - Execute Verification Plan steps 1-4. Run each step and loop until it passes; on an unrecoverable failure stop and RCA (Decision 55).
   - >-
     CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml handoff_sequence): run
     bin/venv-python -m scripts.session.github_readiness; run /implement's Verification Graduation walk (shards
     litellm-attempt-capture-backend and litellm-attempt-capture-transport); record weakening_dispositions as
-    planned-change, citing this plan's scope rows, for the three re-specified backend nodes; set
-    implementation_declared true in this plan with the code; commit (feat(litellm-attempt-capture): ...); git fetch
+    planned-change, citing this plan's scope rows, for the re-specified test_header_tools_sha256_covers_bridge_specs; set
+    implementation_declared true in this plan with the code; commit (feat(litellm-attempt-capture): ...) with the trailer `Resolves: rec-5395` in the commit body; git fetch
     origin main && git rebase origin/main; run VP step 5 on that committed, rebased tree; push, open the PR and merge
-    it on green (2026-11-16 ruling).
+    it on green (2026-11-16 ruling), keeping the Resolves trailer in the squash body; then run VP step 6.
   - 'Report: what was implemented, verification results, and the PR and merge SHA.'
