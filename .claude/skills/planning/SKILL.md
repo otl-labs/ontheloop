@@ -287,7 +287,7 @@ not -- forks and confirmation ride a post-verdict `GATE_REQUEST` (`gate: project
 overseer relays.
 
 ## Create Branch (Workflow Step 7)
-See `docs/contracts/git-ops.yaml` as the canonical git-ops authority for branching topology (DEV vs ADMIN containers, AWS profiles, harness branch vs never agent/).
+See `docs/contracts/git-ops.yaml#branching_topology` as the canonical git-ops authority (DEV vs ADMIN containers, AWS profiles, harness branch vs never agent/).
 
 Verify you are on the harness branch and not on `main`:
 ```bash

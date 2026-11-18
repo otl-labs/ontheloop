@@ -7,7 +7,7 @@ argument-hint: [docs/plans/PLAN-slug.yaml]
 
 **Intent**: Execute an IMPLEMENTATION plan's Ordered Execution Steps directly.
 
-*Note: For detailed guidelines on how to execute each step below, invoke your `implement` skill via the Skill tool. For the canonical git-ops procedure (branching, rebase rules, PR/CI/merge flow), see `docs/contracts/git-ops.yaml`.*
+*Note: For detailed guidelines on how to execute each step below, invoke your `implement` skill via the Skill tool. For the git-ops procedure read only the key a step names: `docs/contracts/git-ops.yaml#handoff_sequence`, `git-ops.yaml#rebase_phase_distinction.commit_flow_time`, `git-ops.yaml#push_pr_ci_merge_flow` and, with bundled recs, `git-ops.yaml#resolves_trailer`.*
 
 ## Step 1: Run Preflight
 ```bash

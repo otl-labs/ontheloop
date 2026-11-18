@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 from scripts.checks.contracts.validate_git_ops_contract import validate_git_ops_contract
@@ -22,7 +23,8 @@ _AGENTS_MD_REL_PATH = "AGENTS.md"
 def _write_repo(
     tmp_path: Path,
     *,
-    agents_md_text: str = f"See `{_CONTRACT_REL_PATH}` for the full git-ops procedure.\n",
+    agents_md_text: str = f"See `{_CONTRACT_REL_PATH}#flow` for the full git-ops procedure.\n",
+    extra_surfaces: dict[str, str] | None = None,
     referenced_repo_paths: list[str] | None = None,
     create_referenced_files: bool = True,
     write_contract: bool = True,
@@ -43,11 +45,18 @@ def _write_repo(
         contract_body = {
             "contract": {"id": "git-ops", "class": "D", "contract_version": 1, "status": "ratified"},
             "referenced_repo_paths": referenced_repo_paths,
+            "flow": {"steps": ["x"]},
+            "nested": {"inner": {"leaf": 1}},
         }
         (contract_dir / "git-ops.yaml").write_text(yaml.safe_dump(contract_body), encoding="utf-8")
 
     if write_agents_md:
         (tmp_path / "AGENTS.md").write_text(agents_md_text, encoding="utf-8")
+
+    for rel, text in (extra_surfaces or {}).items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
 
     return tmp_path
 
@@ -144,3 +153,46 @@ class TestContractShapeEdgeCases:
         validate_git_ops_contract(failed, repo_root=tmp_path)
 
         assert any("missing or empty" in f for f in failed)
+
+
+class TestAnchorResolution:
+    def test_unanchored_agents_md_pointer_fails(self, tmp_path: Path) -> None:
+        _write_repo(tmp_path, agents_md_text=f"See `{_CONTRACT_REL_PATH}` whole.\n")
+
+        failed: list[str] = []
+        validate_git_ops_contract(failed, repo_root=tmp_path)
+
+        assert any("without a #<key> anchor" in f for f in failed)
+
+    def test_anchor_to_missing_key_in_skill_fails(self, tmp_path: Path) -> None:
+        _write_repo(tmp_path, extra_surfaces={".claude/skills/x/SKILL.md": "See `git-ops.yaml#ghost_key` here.\n"})
+
+        failed: list[str] = []
+        validate_git_ops_contract(failed, repo_root=tmp_path)
+
+        assert any(".claude/skills/x/SKILL.md anchor git-ops.yaml#ghost_key does not resolve" in f for f in failed)
+
+    def test_dotted_anchor_in_command_resolves(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        _write_repo(tmp_path, extra_surfaces={".claude/commands/c.md": "See `git-ops.yaml#nested.inner.leaf`.\n"})
+
+        failed: list[str] = []
+        validate_git_ops_contract(failed, repo_root=tmp_path)
+
+        assert failed == []
+        assert "2 anchor(s) resolve" in capsys.readouterr().out
+
+    def test_anchor_to_missing_nested_key_fails(self, tmp_path: Path) -> None:
+        _write_repo(tmp_path, extra_surfaces={".claude/commands/c.md": "See `git-ops.yaml#nested.inner.ghost`.\n"})
+
+        failed: list[str] = []
+        validate_git_ops_contract(failed, repo_root=tmp_path)
+
+        assert any("git-ops.yaml#nested.inner.ghost does not resolve" in f for f in failed)
+
+    def test_sentence_final_period_is_not_part_of_the_key(self, tmp_path: Path) -> None:
+        _write_repo(tmp_path, extra_surfaces={".claude/commands/c.md": "Read git-ops.yaml#flow.\n"})
+
+        failed: list[str] = []
+        validate_git_ops_contract(failed, repo_root=tmp_path)
+
+        assert failed == []

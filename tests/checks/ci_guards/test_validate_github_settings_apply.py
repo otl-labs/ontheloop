@@ -465,6 +465,11 @@ def test_f_unpinned_action(wf) -> None:
     assert "f: preview uses actions/setup-python@v7 without a 40-hex commit SHA pin" in v.check_workflow(wf)
 
 
+def test_f_ownerless_sha_is_not_a_pin(wf) -> None:
+    _step(wf, "preview", "uses", "setup-python")["uses"] = "@" + "a" * 40
+    assert any(x.startswith("f: preview uses @") for x in v.check_workflow(wf))
+
+
 @pytest.mark.parametrize(
     "expr",
     [

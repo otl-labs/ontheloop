@@ -230,7 +230,6 @@ ENTRIES: tuple[Entry, ...] = (
         pre_globs=(
             ".github/workflows/**",
             ".github/actions/**",
-            "config/actions_sha_pin_baseline.yaml",
             "scripts/checks/ci_guards/validate_actions_sha_pinned.py",
             "scripts/checks/*.py",
         ),

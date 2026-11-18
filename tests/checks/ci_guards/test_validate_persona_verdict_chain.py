@@ -116,6 +116,7 @@ RED = [
     _red(
         "short-sha-uses", "not pinned", lambda d: _jobs(d)["prepare"]["steps"][0].update({"uses": "actions/checkout@abc123"})
     ),
+    _red("local-uses", "not pinned", lambda d: _jobs(d)["prepare"]["steps"][0].update({"uses": "./.github/actions/x"})),
     _red("checks-write-on-run", "holds checks: write", lambda d: _jobs(d)["run"]["permissions"].update({"checks": "write"})),
     _red("id-token", "id-token: write", lambda d: _jobs(d)["prepare"]["permissions"].update({"id-token": "write"})),
     _red("environment-on-post", "names an Environment", lambda d: _jobs(d)["post"].update({"environment": "persona-verdict"})),
