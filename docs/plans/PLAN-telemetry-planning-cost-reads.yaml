@@ -30,8 +30,10 @@ scope:
       telemetry_sessions rows with event_kind compact over every tree session), merge_links (list of struct merge_sha,
       merged_at, pr_url, rec_ids, ci_outcome from deduped telemetry_sessions annotate rows of producer ci_annotate in the tree,
       merge_sha parsed from external_ref by the regex ':merge:([0-9a-f]+)#0/annotate$' (no brace quantifier inside the
-      rendered template), ordered by merged_at then merge_sha, [] when none) and the tree stamps (_TREE_STAMPS). No token
-      column. Reuses _USAGE_TREE unchanged. Written with f-strings over _TREE_KEY and _TREE_USING, not "+" chains (ruff
+      rendered template), ordered by merged_at then merge_sha, [] when none) and the tree stamps (_TREE_STAMPS); rows ordered
+      by session_started_at, root_session_id, project_id like the sibling usage verbs, and the oracle sorts the same way. The
+      workflows list reads each session's own workflow as ses resolves it (its first non-null value), so the oracle takes one
+      value per session, never every row's. No token column. Reuses _USAGE_TREE unchanged. Written with f-strings over _TREE_KEY and _TREE_USING, not "+" chains (ruff
       explodes those): a drafted, ruff-formatted TREE_ROLLUP_SQL of this shape measured 471 -> 486 SLOC on main 6696da07,
       against 502 for the "+" form.
     new_imports: []
@@ -71,8 +73,9 @@ scope:
       planning only adds to the informational unlinked count) and mixed (a linked tree's workflows also contain implement,
       audit or orient: tokens cannot be split at tree grain); summary linked, caught, planning_trees_unlinked and verdict PASS
       when at least one merge is linked and every linked tree is planning, else FAIL (exit 1). The command takes its own
-      arguments (subcommand arguments; --from/--to stay required for the window commands only); the existing MAX_CALLS cap
-      binds, and reaching it fails closed.
+      arguments (subcommand arguments; --from/--to stay required for the window commands only). --max-windows does not apply
+      to plans (its span is derived, not typed, and a 56-day lookback already needs 9 windows): plans prints its window
+      count, and each of its two reads is its own _Reads with its own MAX_CALLS cap of 32, which fails closed when reached.
     new_imports: [scripts.telemetry_verify.session_presence]
   - file: scripts/ducklake_smoke/lambda_telemetry_reader_gates.py
     action: Modify
@@ -189,11 +192,17 @@ verification_plan:
   - step: 5
     phase: post-deploy
     action: The governed deploy ships the telemetry reader once the hold allows.
-    command: bin/venv-python -m scripts.checks.ops_governance.validate_reconcile_pending_gate --telemetry-hold
+    command: >-
+      bin/venv-python -m scripts.checks.ops_governance.validate_reconcile_pending_gate --telemetry-hold && for id in $(gh api
+      'repos/otl-labs/ontheloop/actions/workflows/deploy-ducklake-lambdas.yml/runs?status=success&per_page=100' --jq
+      '.workflow_runs[].id'); do gh api "repos/otl-labs/ontheloop/actions/runs/$id/jobs" --jq '[.jobs[] |
+      select((.name=="deploy-telemetry" or .name=="telemetry-smoke") and .conclusion=="success")] | length' | grep -qx 2 &&
+      { echo "run $id"; break; }; done
     expected: >-
-      stdout held=false; then the next deploy-ducklake-lambdas run on a commit containing this build has deploy-telemetry and
-      telemetry-smoke succeeded (the smoke reads session_tree_rollup). The build's report names that run id as the read-back
-      (mcp__github__actions_list on deploy-ducklake-lambdas.yml).
+      stdout held=false, then "run <id>": the newest deploy-ducklake-lambdas run whose deploy-telemetry and telemetry-smoke
+      jobs both succeeded (the smoke reads session_tree_rollup). That run's deploy-telemetry job log names the deployed commit
+      (LAMBDA_ARTIFACT_SHA), which must contain the build commit (the commit carrying "Resolves: rec-5257"); the report names
+      the run id (the same read through mcp__github__actions_list and get_job_logs where gh is unavailable).
     fix_if: the hold is still on; wait, never bypass it
     hermetic: false
   - step: 6
@@ -220,12 +229,19 @@ verification_plan:
       cl.1; this build never dispatches one) is on a commit that contains this build. Waits on the operator; the build
       reports it pending with this step named, and the coordinator keeps it on the waiting list.
     command: >-
-      run_sha=$(gh api 'repos/otl-labs/ontheloop/actions/workflows/deploy-telemetry-content.yml/runs?status=success&per_page=1'
-      --jq '.workflow_runs[0].head_sha') && git fetch -q origin main && git merge-base --is-ancestor
-      "$(git log -1 --format=%H --grep='telemetry-planning-cost-reads' origin/main)" "$run_sha" && echo contains
+      git fetch -q origin main && build=$(git log -1 --format=%H --grep='^Resolves: .*rec-5257' origin/main) && test -n
+      "$build" && for id in $(gh api
+      'repos/otl-labs/ontheloop/actions/workflows/deploy-telemetry-content.yml/runs?status=success&per_page=100' --jq
+      '.workflow_runs[].id'); do job=$(gh api "repos/otl-labs/ontheloop/actions/runs/$id/jobs" --jq '.jobs[] |
+      select(.name=="record" and .conclusion=="success") | .id'); [ -n "$job" ] || continue; deployed=$(gh api
+      "repos/otl-labs/ontheloop/actions/jobs/$job/logs" | grep -oE 'LAMBDA_ARTIFACT_SHA: [0-9a-f]{40}' | head -1 | cut -d' '
+      -f2); echo "run $id deployed $deployed"; git merge-base --is-ancestor "$build" "$deployed" && echo contains; break; done
     expected: >-
-      contains; that run's deploy and record jobs succeeded, and the report names its run id (the same read through
-      mcp__github__actions_list where gh is unavailable).
+      "run <id> deployed <sha>" then contains: the newest deploy-telemetry-content run whose record job succeeded (a run the
+      gate skipped has no successful record job, so it is passed over), and the commit that run deployed (its record job's
+      LAMBDA_ARTIFACT_SHA, the gate's sha) contains the build commit (the one squash commit carrying "Resolves: rec-5257";
+      the plan's own commits carry no such trailer). The report names the run id (the same read through
+      mcp__github__actions_list and get_job_logs where gh is unavailable).
     fix_if: no approved run since the merge yet (wait, never dispatch), or the run failed (the content channel's own recovery)
     hermetic: false
 test_obligations:
@@ -295,10 +311,11 @@ gate_rounds:
   - {gate: wording-check, round: 1, verdict: FAIL, digest: c0fb47b6645023283417c5698defcbfc3a1c8ab81d03bd05826c22b2061feede, base: dfcd98df3587e0f099a95e03db850e3669817fe8, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 2, verdict: PASS, digest: f018fe39d1cd81802f69992d5aa1cb682f0cc2066bea674432b3a57f6bcfcbf2, base: 6696da076dadf797f18446926352b9a33aaa28e5, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 4, nits: 6}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 7}
 pre_implementation_checklist:
   - Branch confirmed not on main
-  - "PLAN-merge-annotate-contract-reader's build is on main (git log --oneline origin/main -- scripts/telemetry_verify/orphans.py shows its commit); else stop and wait."
+  - "PLAN-merge-annotate-contract-reader's build is on main (git log --oneline origin/main --grep='merge-annotate-contract-reader' -- scripts/telemetry_verify/orphans.py shows its commit); else stop and wait."
 execution_steps:
   - "SQL, registry, fields, client, oracle, smoke list, CLI and tests; contracts from the sidecar; VP 1-3, then the full tier (VP 4)."
-  - "PR with Resolves: rec-5257 (re-key rec-5257's acceptance first, below); merge on review PROCEED + green CI; VP 5-7 after deploy."
+  - "PR with Resolves: rec-5257 (its acceptance is already re-keyed, see context); merge on review PROCEED + green CI; VP 5-7 after deploy."
 rollback: Revert; the verb leaves the served set and the CLI commands go with it. No stored row changes.
