@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from scripts.checks import _common, registry
-from scripts.checks.contracts import _evaluator_coverage, _population, _shared
+from scripts.checks.contracts import _amendment_retention, _evaluator_coverage, _population, _shared
 
 if TYPE_CHECKING:
     from scripts.contracts_schema import ContractDocument, ContractMeta
@@ -395,6 +395,12 @@ def validate_contract_drift(
                     amend_err = _population.check_amendment_log_for_class_d(base_data, head_data)
                     if amend_err:
                         failed.append(f"Contract drift (amendment): {name}: {amend_err}")
+
+                failed.extend(
+                    _amendment_retention.pass2_messages(
+                        name, base_data, head_data, head_shape == "class_d" and base_shape == "class_d"
+                    )
+                )
         else:
             print("  advisory-SKIP: Pass 2 (diff-aware) checks skipped -- origin/main unreachable.")
 

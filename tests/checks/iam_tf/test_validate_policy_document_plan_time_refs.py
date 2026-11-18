@@ -100,6 +100,7 @@ def test_reference_in_inline_json_fails() -> None:
 def test_required_documents_include_the_trusted_github_plan_role() -> None:
     assert "github_ci_trusted_github_plan" in REQUIRED_DOCUMENTS
     assert "github_ci_persona_verdict" in REQUIRED_DOCUMENTS
+    assert "github_ci_persona_verdict_app" in REQUIRED_DOCUMENTS
 
 
 def test_missing_required_document_reported() -> None:

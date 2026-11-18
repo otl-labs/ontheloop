@@ -2,6 +2,154 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 275: Contracts are budgeted in bytes as well as lines, and a contract at its budget compacts its amendment_log or splits off a second subject before any raise (amends Decisions 166 and 240) (Decided)
+
+```yaml
+number: 275
+status: Decided
+decided_date: "2026-11-18"
+kind:
+  value: direction
+  justification: >-
+    Clause 2 adds a human gate: a grandfathered contract grows past its seeded bytes only with Decision text added in
+    the same change naming it; undone, contract bytes grow with no one approving.
+amends: [166, 240]
+significance:
+  value: numbered_decision
+  justification: >-
+    It adds a unit and a roster to Decision 166's engine under reversal conditions; a field-semantics note in
+    config/structural_size_budgets.yaml (considered) holds the values but cannot authorize the roster's raise
+    markers (Decision 165), and citing Decision 166 (considered) authorizes by path mention only, after its one-time
+    clause 5 grandfather.
+```
+
+**Status:** Decided
+**Date:** 2026-11-18
+**Warehouse ID:** dec-275 (per Decision 84 backfill)
+
+**Problem:** The contracts budget counts lines while readers pay in bytes. At the limit, edits arrive line-neutral
+(sampled commits kept or lost lines while adding 1,190 to 5,297 bytes), and bytes per effective line rose from 63 to
+84 (audits/contract-first-retrospective-177c8f37.yaml, CFR-05). amendment_log rows are about a sixth of the class's
+bytes and refill the budget after every trim (rec-4119). The 2,000-character long-line companion has never bound.
+
+**Intent:** A contract that reaches its budget sheds history or splits by subject, and the budget's unit tracks what
+an agent pays to read it.
+
+**Decision:**
+1. **Byte companion.** The contracts class keeps its 500-effective-line budget (Decisions 128, 166) and gains a
+   per-file limit in raw bytes, held at config/structural_size_budgets.yaml's contracts row (max_bytes, today
+   49,152). Its permitted maximum is pinned in code, so a raise is a reviewed code edit and a new Decision.
+2. **Seed and raises.** At install, each contract over the limit has its amendment_log compacted (clause 4); those
+   still over are seeded in the byte_budgets roster at their size on main, citing this Decision. Only these
+   docs/contracts files, each over 44 KiB when this was decided, may be seeded: ci-rca-lifecycle.yaml,
+   data-modeling-standard.yaml, deploy-paths.yaml, ducklake_maintenance.yaml, ducklake_telemetry_writer.yaml,
+   file-router.yaml, git-ops.yaml, github-org-transfer.yaml, iam-simulate-fixture.yaml, ports.yaml,
+   telemetry-event-envelope.yaml, telemetry_agents.yaml, telemetry_observations.yaml and telemetry_sessions.yaml.
+   An entry may always shrink. A raise or a new entry needs a marker citing a Decision whose text added in that
+   change names the contract (Decision 165).
+3. **Relief, in order.** Compact amendment_log rows (clause 4); move detail to the owning plan or Decision by
+   citation; split a second subject into a sibling contract with its own evaluator and reader (Decision 168); a loud
+   cited raise last. Splitting one subject across files, and history or prose companions, stay forbidden (Decision
+   86). Pointer keys to forward intent (status, residual_owner, flips_to_hard_fail_when) are never compacted away.
+4. **Retention.** A contract's top-level amendment_log keeps at most its newest N rows in full, N held at
+   docs/contracts/contract-population.yaml amendment_log_retention (today 5); older rows become one-line terse rows
+   naming the plan, rec or Decision, which git history and the plan expand. A change that adds a row leaves no more
+   full rows than N, or than the base had if that is more. Rows marking a semantic break, field-level logs and
+   north-star.yaml (its Tier A guard reads an append-only log) are exempt. A reworded or compacted old row never
+   counts as a new row.
+5. **Amends Decisions 166 and 240.** Decision 166 clause 3's limits gain this companion for contracts, and its
+   reversal condition (d) counts byte_budgets from its install seed. Compacting a top-level amendment_log row to a
+   terse row is the one rewrite of a record Decision 240 clause 4 allows; its full wording stays in git history.
+
+**Options considered:** lowering the long-line companion with present lines grandfathered -- rejected: 500 long
+lines still pass; seeding every contract at its size -- rejected: most contracts grow monthly, so raises become
+routine; dropping old rows -- rejected: tests and readers cite them, and a terse row keeps the trail; a history file
+outside the census -- rejected: a second surface (AGENTS.md); 40 KiB -- rejected: 15 contracts stay seeded after
+compaction, against about 7; naming only those over 48 KiB today -- rejected: contracts grew about 700 lines in a
+day, so the list would go stale before the build.
+
+**Coverage (Decision 181 cl.2):** cl.1-2 -- validate_structural_size_limits and
+validate_structural_size_budget_raises; cl.4 -- validate_contract_drift; cl.3 -- plan_obligations' headroom line,
+which also reports each contract's 30-day byte growth (advisory); cl.5 -- the dated notes on Decisions 166 and 240
+and glossary.yaml's read_as rule. Residual: which subject to split, and whether a row marks a semantic break, is
+judgement, owned by rec-5298.
+
+```yaml reversal-conditions
+decision: 275
+review_by: 2027-02-17
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: seed-too-tight
+    kind: manual
+    description: "More than three byte raises land in the 30 days after install (splits and compactions do not count): reseed the limit once, then stop."
+  - id: density-still-rising
+    kind: manual
+    description: "Bytes per effective line for the contracts class rises across two boundaries 30 days apart: re-decide the unit or the limit."
+  - id: read-by-section
+    kind: manual
+    description: "Agents come to load contracts by section rather than whole: retire the byte limit, as Decision 179 retired the corpus byte ceilings."
+```
+
+**Related:** Decisions 166 and 240 (amended), 86, 128, 165, 168, 179, 181 cl.2; rec-5262, rec-4119.
+
+---
+
+## Decision 274: Decision 133's allocation of the operator's build capacity is retired with no successor rule -- this repository holds only On The Loop's source, so each adopter product sets its own order in the monorepo that holds it (supersedes Decision 133) (Decided)
+
+```yaml
+number: 274
+status: Decided
+decided_date: "2026-11-18"
+supersedes: [133]
+kind:
+  value: direction
+  justification: >-
+    Clause 1 removes a standing allocation of the operator's build capacity, the goal-level commitment Decision 133
+    made; undoing it would restore that allocation and its review.
+significance:
+  value: numbered_decision
+  justification: >-
+    It retires a ratified, reversal-conditioned allocation and its monitored stanza, and names where sequencing now
+    sits. Not amendment_forms (considered): a note cannot retire a Decision (Decision 247). Not a contract note
+    (considered): no contract owns build-capacity allocation, and decision-entry.yaml's work_item row orders work, it
+    does not retire a ratified allocation. Not a stub pointing at Decision 178 (considered): 178 never names 133, so it
+    fails compaction's subsumption test.
+```
+
+**Status:** Decided
+**Date:** 2026-11-18
+**Warehouse ID:** dec-274 (per Decision 84 backfill)
+
+**Problem:** Decision 133 (2026-07-16) gave the sole operator's build capacity to this repository's work rather than
+interleave a manual paper-trading loop for the trading adopter product, while the Decision 93 MVP boundary stayed open,
+with a review due 2026-09-30. The review passed with the boundary still open, and the condition monitor has shown it as
+due in every session since. Its premises have left: under Decision 178 (2026-08-27) this repository holds only On The
+Loop's source, docs/ROADMAP-PRODUCT.yaml was removed, CD.3 retired and T2.6 reserved; Decisions 209 and 220 put the
+trading adopter product in the private monorepo and the first showcase in the public monorepo for open-code adopter products (Decision 220
+keeps only the showcase's purpose and selection rationale here).
+
+**Intent:** No standing rule splits the operator's build capacity between On The Loop and its adopter products; each
+is ordered where its work lives.
+
+**Decision:**
+1. **Retirement.** Decision 133's allocation is retired with no successor rule. Work in this repository is ordered by
+   its roadmap and recs through the planning workflow (decision-entry.yaml significance.routing.work_item). The trading
+   adopter product and the first showcase set their own order in the monorepos that hold them (Decision 209
+   clause 3; Decision 220 clause 1).
+2. **Clauses accounted for.** Decision 133's examined paper-loop alternative and its telemetry correction (SEQ-03) are
+   analysis with no live clause. Its CD.3 / T2.6 disposition was discharged when both left this repository
+   (2026-08-26). Its conditions (a), (c) and (d) lapse with it, including (a)'s mandatory activation decision for an
+   adopter product at MVP close. Decision 93's sentence on dormant cross-roadmap edges cites Decision 133's conditions
+   and has no live subject; a dated note there says so.
+3. **Reopen trigger.** If an adopter product's code or roadmap moves into this repository, or the operator wants a
+   standing split of build capacity between this repository and an adopter product, a new Decision decides it via
+   /plan. No reversal stanza: a record that sets no rule has nothing to review.
+
+**Related:** Decision 133 (superseded; compacted to a stub), 93 (dated note), 178, 209, 220, 149, 177, 247 (the
+supersede-and-compact precedent), 240.
+
+---
+
 ## Decision 273: The verdict GitHub App's key lives in one SSM /secret/ parameter that only the post job's own role reads, and the CI apply boundary refuses that read to every other carrier -- an accepted residual against Decision 143 clause 1 (amends Decisions 258 and 270) (Decided)
 
 ```yaml
@@ -2337,6 +2485,8 @@ conditions:
 **Related:** Decisions 77, 84, 86, 177, 178, 181, 184, 195, 196, 198, 200, 205, 209, 211, 220, 226, 232, 233; rec-3925, rec-4560, rec-4676.
 
 > **Update (2026-11-02):** clause 4's older text is now the records: the files glossary.yaml's read_as.records lists (Decision bodies older than this entry, plans, audit prompts, the roadmap below its header, the two archives), amendment_log rows, and recs filed before this entry. Records keep their wording and read through the read_as rows. PLAN-glossary-sweep (rec-4676) rewrote the rest to glossary names, README.md and the roadmap's header included; no other clause's meaning changes. Coverage: the reads-through note on each Decision in read_as.noted_decisions -- validate_glossary's note leg; clause 3's other files -- its whole-file leg; records -- the read_as rows. The reversal stanza's read-as-misread was re-armed to match.
+
+> **Amended by Decision 275 (2026-11-18):** a top-level amendment_log row may be compacted to a terse row naming its plan, rec or Decision (Decision 275 cl.4); that is the one rewrite of a record clause 4 allows, and the full wording stays in git history.
 
 > **Amended by Decision 269 (2026-11-16):** Clause 5's portal leg reports, never refuses: the rec portal runs glossary_lint on a rec title, context or verification and reports each finding while the write proceeds; the Coverage line's "the portal's glossary_lint rule" reads as that report plus rec-5239's scheduled re-run, an unenforced residual until it runs (Decision 269 cl.1).
 
@@ -7811,6 +7961,8 @@ T1.5 (the STRATEGIC, CD.17-frozen portal cutover that eventually retires `docs/d
 
 [Amendment 2026-08-24: Decision 176 supersedes point 6's CD.29 archival pre-commitment and reversal condition (f)'s response for `config/agent/verification_registry/registry.yaml` -- the file is re-grained to one record per file under `entries/<check_id>.yaml` and its calibrated 6,000-effective-line / 2,315-character ceiling is retired outright (no replacement roster entry). Both `budgets:`/`long_line_budgets:` roster entries this point seeded are removed from `config/structural_size_budgets.yaml`. See Decision 176 for the full path selection and rationale.]
 
+[Amendment 2026-11-18: Decision 275 adds a per-file byte companion to the contracts class (clause 3) and counts the byte_budgets roster from its install seed for reversal condition (d).]
+
 ---
 
 ## Decision 165: Raise-marker validation narrows from existence to authorization; the retroactive scan is load-bearing over present markers (amends Decision 128 clause 3, amends Decision 159, amends Decision 161 clause 4, amends Decision 162 R3, and amends Decision 149) (Decided)
@@ -9674,57 +9826,12 @@ Ratifies the `ratify-prose-with-size-governance` disposition of the decisions-au
 
 ## Decision 133: Platform-first sequencing of build capacity (ratified with reversal conditions) (Decided)
 
-**Status:** Decided
+**Status:** Superseded
 **Date:** 2026-07-16
-**Warehouse ID:** dec-133 (keyed on the decision number; synced to ops_decisions via `ops_data_portal --backfill-decisions-md` post-merge, per Decision 84)
 
-**Problem:**
-All of the sole operator's build capacity flows to the platform plane under a "platform-first" directive that, until now, existed nowhere as a ratified decision. The audit `audits/platform-first-sequencing-f4dec93.yaml` (executive summary `audits/platform-first-sequencing-f4dec93.md`) census found 41 citations of the frame and ZERO ratify-class artifacts: the frame was cited as a given by Decision 93 ("per the platform-first directive", twice) and recorded only as a user steer in one plan's scoping fields (`docs/plans/PLAN-platform-mvp-boundary.yaml:17`, restated `:146`, ~2026-06-20). None of the live Decision headers ratified plane sequencing; no alternative was recorded as examined; the only end-condition language was circular ("until product work begins" / "revisited when the product roadmap is activated" / T2.6 "when product formula-discovery work begins"). This is the system's single most consequential standing allocation carried as an inherited premise while materially smaller choices (file formats, provider routing, size ceilings) carry full ratification + reversal machinery (SEQ-01).
+**Decision:** Superseded by Decision 274, which retires this entry's allocation of the operator's build capacity with no successor rule after its review fell due on 2026-09-30 (rec-5273); its premises left this repository with Decision 178. Kept live rather than archived because scripts/preflight/decision_conditions.py, scripts/checks/ops_governance/validate_reversal_stanzas.py and their tests still cite "Decision 133" by name (Decision 146's still-cited-live carve-out; compacted under docs/contracts/decision-entry.yaml's `compaction:` section).
 
-**Decision:**
-Ratify platform-first sequencing of build capacity as a CONSCIOUS, reversal-conditioned choice: while the platform-MVP boundary (Decision 93) is open, the sole operator's build capacity is sequenced to the platform plane rather than interleaved with a manual product/paper trading loop. This is a governance-record change ONLY -- it reallocates no build capacity, changes no code or infra, and leaves `docs/ROADMAP-PRODUCT.yaml` at `status: draft`. The allocation is held for a recorded reason (below), not by inheritance, and is bounded by the observable reversal/review conditions in the stanza below -- it is never silently renewed.
-
-**Frame provenance (conscious choice, not agent inertia):**
-The frame is a conscious human steer, dated ~2026-06-20 in `docs/plans/PLAN-platform-mvp-boundary.yaml:17` (restated `:146`) as "the user's 'complete the full platform first' directive", and cited-as-given in Decision 93 (the two "per the platform-first directive" lines). The pivot transcript settles the ARCHITECTURAL platform/product plane SEPARATION (contracts, sibling roadmaps, validation lenses) but never weighs build-capacity TIMING between the planes -- so the sequencing rationale was genuinely absent from the record, not merely unindexed. The stronger "frame-locked" reading (Decision 75) was examined and REJECTED: the operator consciously restated the steer in a dated artifact and the owned /audit chain re-asked the question, so Decision 75's "silently constrains, nobody re-asks" limb does not hold. This Decision is the Decision-75-mandated conversion of an inherited, cited-as-given premise into a conscious, reversal-conditioned choice.
-
-**Examined alternative (the interleaved manual/paper L1+L3 loop):**
-The alternative -- interleaving platform work with a manual paper-trading loop today -- is FEASIBLE (human operations bypass every absent code surface: the operator is the broker adapter, order lifecycle, and reconciliation loop, over a production-grade data plane) but HIGH-COST in the binding resource (the sole operator's attention). Costed in operator units (audit Q2): one-time setup ~20-40 hours (paper brokerage account, daily signal-extraction path, sizing rule, pre-registered promotion criteria, logging/reconciliation runbook); recurring ~2-5 hours/week of market-hours-coupled, interrupt-driven attention sustained >= 13 weeks; calendar >= one quarter before promotion-grade evidence. The load-bearing qualifier: an honest ALPHA-premise test needs a discovered-formula artifact, and the discovery substrate is parked (CD.3 pending, T2.6 deferred_post_mvp) -- without a formula artifact the loop exercises operations plumbing, not the edge.
-
-**Corrected value model (SEQ-03 -- telemetry category separation):**
-The interleave's strongest stated payoff -- "real trading telemetry feeding the T2.36/T3.x chain" -- is a CATEGORY ERROR. The Decision-95 telemetry chain (T2.36 relands the agent-telemetry write path; T3.20 captures agent turns) is the session-rooted AGENT trace/observation model; a manual paper loop does not feed the Decision-95 agent-telemetry chain (it emits none of it). Paper-trading data would land in PRODUCT tables (strategy_runs, tca_events, fills) that `current_state` lists as ABSENT (the Decision-78 / Decision-95-97 ops/telemetry vs product-table split makes this literal) -- so "real telemetry sooner" does not hold, and building those product tables early IS the resequencing decision, circularly. Net (audit Q3): on the corrected value model the interleave's headline payoff evaporates, the near-term platform critical path (T2.26 -> T2.36 -> T3.2 -> T3.3) is dual-use substrate the product's evaluation funnel needs later, and reversal stays operationally ~free -- so sequencing is favored, CONDITIONALLY on the triggers below. Full costing and category analysis: `audits/platform-first-sequencing-f4dec93.yaml` (Q2/Q3, findings SEQ-03/SEQ-04).
-
-**CD.3 / T2.6 disposition (SEQ-04 -- alpha-premise test path):**
-CD.3 (compute node for PySR formula discovery) is DEFERRED, gated on the named reversal conditions below -- specifically alpha-readiness (c) and platform-MVP close (a). No compute-node stand-up date is committed and no substitute discovery substrate is named; the PySR discovery substrate and T2.6 stay parked. CD.3's re-entry trigger BECOMES condition (c): a candidate PySR formula artifact passing the research bar. This de-circularizes the prior note (T2.6 reactivating "when product formula-discovery work begins", an event nothing defined): T2.6's reactivation clause and Decision 93's product-edge language are re-pointed at the named conditions in this same change. This keeps CD.3 DEFERRED (not ratified), so the Decision-105 candidate-decision ratified-shape / R1-R3 guard is not engaged.
-
-**Rationale:**
-The audit's core result is an asymmetry the ratify-with-conditions disposition uniquely banks: the frame is, on present evidence, the right allocation held for the wrong reason (by inheritance rather than by record). The affirmative case survives adversarial tracing (operator attention is the binding resource; the near-term platform critical path is dual-use; the interleave's payoffs shrink under scrutiny; reversal stays operationally free), AND the gap case survives (zero ratify-class artifacts, no trigger, a convention sitting unused -- 24 "Reversal conditions:" stanzas elsewhere (16 at the f4dec93 audit; the tree grew the convention since)). `resequence_interleaved` is rejected on the corrected value model; `ratify_as_is` is rejected because the bet compounds monthly against an untested load-bearing premise (NS-D); `insufficient_evidence` is rejected -- once the telemetry category error is removed the evidence discriminates. Filed as user-explicit ad-hoc governance (precedent: Decision 93 / PLAN-platform-mvp-boundary; a fresh forward Decision per the Decision 87 / Decision 126 pattern), not a new tier_item. Reversal is cheap by construction: the frame binds via one /orient scope line and ROADMAP-PRODUCT.yaml's `status: draft`, so nothing is foreclosed by sequencing longer.
-
-**Reversal conditions:**
-This sequencing is re-decided, never silently renewed, when any of the following fires: (a) the platform MVP (Decision 93 boundary) closes -- at which point a product-activation decision becomes mandatory, not optional; (b) the hard calendar review date 2026-09-30 is reached without the platform MVP having closed -- the sequencing is re-decided via /plan, not renewed by default; (c) alpha-readiness -- a candidate PySR formula artifact passing the research bar exists, collapsing the paper loop's marginal cost and re-opening the interleave question; or (d) sustained slip -- 3 consecutive orient/triage cycles show the platform-MVP date receding. Condition (b) is the top-level `review_by` in the stanza below (single source; a re-decision is a one-line diff); (a)/(c)/(d) are the enumerated conditions. On any trigger, re-decide via /plan and update or re-arm the stanza.
-
-```yaml reversal-conditions
-decision: 133
-review_by: 2026-09-30
-on_trigger: "re-decide sequencing via /plan; update or re-arm this stanza; never silently renew"
-conditions:
-  - id: platform-mvp-closes
-    kind: manual
-    description: "Platform MVP (Decision 93 boundary) closes -> a product-activation decision becomes mandatory, not optional"
-  - id: alpha-readiness
-    kind: repo_state
-    predicate: null   # manual until a formula-artifact predicate is registered (CD.3/T2.6 disposition)
-    params: {}
-    description: "a candidate PySR formula artifact passing the research bar exists -> paper-loop marginal cost collapses; re-open the interleave question"
-  - id: sustained-slip
-    kind: repo_state
-    predicate: null   # manual until orient/triage cycles snapshot the MVP date
-    params: {consecutive: 3}
-    description: "3 consecutive orient/triage cycles show the platform-MVP date receding"
-```
-
-**Related:** Decision 93 (Platform-MVP boundary + deferred_post_mvp lifecycle -- the frame this Decision reversal-conditions; its two "per the platform-first directive" lines are the annotation targets; also the user-explicit ad-hoc-governance filing precedent and the no-live-dep invariant the ROADMAP edits respect), Decision 75 (frame-lock anti-pattern -- this Decision is its mandated conscious-choice conversion), Decision 95 (session-rooted agent-telemetry trace/observation model -- the SEQ-03 category boundary), Decision 96 + Decision 97 (telemetry temporal + identity standards completing the Decision-95 trio), Decision 78 (DuckLake adoption / product-table vs ops-telemetry split that makes "absent PRODUCT tables" literal), Decision 105 (reversal-condition-drafting-as-a-plan-step convention; CD.3 stays DEFERRED so the ratified-CD guard is not engaged), Decision 84 (Single Portal Invariant / DECISIONS.md numbering authority + backfill ETL), Decision 86 (rationale routes into this Decision, not a new prose doc), Decision 67 (STRATEGIC-plan freeze / CD.17 -- plan_type is IMPLEMENTATION), Decision 87 + Decision 126 (fresh forward-Decision precedent), Decision 108 (reversal-conditions section precedent the machine-parseable stanza extends), Decision 40 (recorded-then-forgotten triggers -- the cautionary failure mode a follow-on condition-monitor prices), Decision 101 (platform-first external-brand posture -- same lineage).
-
-> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+**Superseded by: Decision 274**
 
 ---
 
@@ -12145,6 +12252,8 @@ T5.2 (teardown) was considered but excluded: it is a near-due cost-saver (grace 
 **Related:** Decision 73 (sandbox-only / forward-fix posture -- the boundary is consistent with it, not a re-derivation), Decision 75 (frame-lock anti-pattern; defer-by-exception avoids it), Decision 80 (validate.py single source of truth; the invariant lives in platform_roadmap.py model_validator, picked up by validate_platform_roadmap via load()), Decision 86 (no new prose-architecture doc; boundary semantics live in Decision 93 + ROADMAP-PLATFORM.yaml agent_instructions only), Decision 90 (four-tier workflow; parked items are excluded from the next_eligible eligibility surface, not surfaced in an orient bucket).
 
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
+> **Update (2026-11-18, rec-5273):** Decision 133 is superseded by Decision 274. The bracketed sentence above on dormant cross-roadmap edges, which cites Decision 133's named conditions, has no live subject: docs/ROADMAP-PRODUCT.yaml and its edges left this repository under Decision 178. No clause changes.
 
 ---
 

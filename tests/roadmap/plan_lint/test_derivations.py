@@ -131,6 +131,48 @@ class TestHeadroom:
         result = _derive(tmp_path, fx.make_plan(("AGENTS.md", "Modify", "p")), report=True)
         assert "NEAR_CAP" in result.advisory[0] and "ratchet" in result.advisory[0]
 
+    def test_size_headroom_reports_bytes_for_contracts(self, tmp_path: Path) -> None:
+        import subprocess  # noqa: PLC0415
+
+        rel = "docs/contracts/fixture-bytes.yaml"
+        fx.write(tmp_path, rel, "key: value\n" * 100)
+        fx.git_commit(tmp_path, date="2020-01-01T00:00:00")
+        fx.write(tmp_path, rel, "key: value\n" * 100 + "more: " + "x" * 3000 + "\n")
+        fx.git_commit(tmp_path)
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True)
+        plan = fx.make_plan((rel, "Modify", "p"))
+        line = _derive(tmp_path, plan, report=True).advisory[0]
+        assert "B per effective line" in line and "of 49152 B" in line
+        assert "30-day delta +3007 B" in line
+
+    def test_size_headroom_byte_column_states_missing_history(self, tmp_path: Path) -> None:
+        import subprocess  # noqa: PLC0415
+
+        rel = "docs/contracts/fixture-bytes.yaml"
+        fx.write(tmp_path, rel, "a: 1\n")
+        fx.git_commit(tmp_path)
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True)
+        line = _derive(tmp_path, fx.make_plan((rel, "Modify", "p")), report=True).advisory[0]
+        assert "30-day delta history unavailable" in line
+
+    def test_size_headroom_byte_column_states_a_file_new_since_the_old_commit(self, tmp_path: Path) -> None:
+        import subprocess  # noqa: PLC0415
+
+        rel = "docs/contracts/fixture-bytes.yaml"
+        fx.write(tmp_path, "docs/contracts/other.yaml", "a: 1\n")
+        fx.git_commit(tmp_path, date="2020-01-01T00:00:00")
+        fx.write(tmp_path, rel, "a: 1\n")
+        fx.git_commit(tmp_path)
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True)
+        line = _derive(tmp_path, fx.make_plan((rel, "Modify", "p")), report=True).advisory[0]
+        assert "30-day delta new" in line
+
+    def test_size_headroom_byte_near_cap_names_the_relief_valves(self, tmp_path: Path) -> None:
+        rel = "docs/contracts/fixture-bytes.yaml"
+        fx.write(tmp_path, rel, "#" + "z" * 48000 + "\nkey: value\n")
+        line = _derive(tmp_path, fx.make_plan((rel, "Modify", "p")), report=True).advisory[0]
+        assert "NEAR_CAP" in line and "relief valves:" in line
+
     def test_unbuilt_plan_older_than_thirty_days_or_declared_is_not_named(self, tmp_path: Path) -> None:
         rows = [{"file": "scripts/a.py", "action": "Modify", "purpose": "p"}]
         fx.write_yaml(tmp_path, "docs/plans/PLAN-old.yaml", {"schema_version": 4, "scope": rows})
