@@ -26,15 +26,21 @@ scope:
     purpose: >-
       (1) Optional condition key `fires` (on_true, the default, or at_review), valid on kind repo_state only; a
       condition carries `holds` (the predicate's value, None when not run) apart from `fired`; an at_review condition
-      fires only when holds and review_by <= today. (2) register_predicate(name, *, gate=True); evaluate(gate=False):
+      fires only when holds and review_by <= today. (2) register_predicate(name, *, gate=True); _PREDICATE_REGISTRY
+      stays name -> bare function and gate=False adds the name to a module set _GATE_EXEMPT, which evaluate(gate=True)
+      consults by name for injected predicates= dicts too; evaluate(gate=False), the default:
       with gate=True a predicate registered gate=False is checked for registration and that the stanza's params bind
       to its signature (inspect.signature(fn).bind) but is not called; every other predicate runs as today, so
       Decision 194 clause 2's raising roadmap predicate still reddens the PR gate. A
       predicate that declares an `as_of` parameter receives min(today, review_by), so an at-review window ends at
       review_by and the result reproduces. (3) Register decision_index_bytes_exceed(max_bytes,
       index_path="docs/decisions-index.json") and decision_entries_per_plan_exceed(window_days, max_entries_per_plan,
-      as_of=None, registered gate=False: it reads git history) as thin wrappers over corpus_measures.
-      (4) preflight_bucket gains a `computed` list (decision, condition id, fires, holds), not printed. (5) CLI flag
+      as_of=None meaning today when called directly, registered gate=False: it reads git history) as thin wrappers
+      over corpus_measures. A raising predicate under the default evaluate() makes the stanza MALFORMED, as today; a
+      shallow clone therefore surfaces Decision 179 MALFORMED once rec-5366 wires it (handoff to rec-5366, which must
+      choose MALFORMED or holds None and the acceptance of a history-raise rec; convergence-health has fetch-depth 0).
+      (4) preflight_bucket's keys are unchanged (no new bucket key, so tests/test_decision_conditions.py's shape test
+      stands); the sensor reads holds from evaluate() directly. (5) CLI flag
       --assert-not-surfaced N: evaluates with gate=True, so the verdict never depends on clone depth (a gate=False
       predicate's holds is None and its at_review condition is decided by review_by alone); exit 0 iff Decision N
       has no stanza or is not-due, 1 when fired, review-due or MALFORMED. The review-date code lives in
@@ -71,11 +77,16 @@ scope:
       --assert-not-surfaced N`, context naming the on_trigger text, each condition's kind and computed holds, and the
       review_dates --next suggestion. It never closes or edits a rec: a filed rec closes through its acceptance when
       the review re-arms or supersedes the stanza, and a closed owner on a still-due stanza gets a new rec (never
-      silently renew). Prints one `[reversal_review]` line per due stanza (filed rec-X, owned by rec-X, would-file in
-      dry-run, or a warning naming every owner when more than one is open) and a summary line `[reversal_review]
+      silently renew). Prints one line per due stanza, exactly `[reversal_review] Decision N <state> owned by rec-X`,
+      `... filed rec-X`, `... would-file` (dry-run) or `... owned by rec-X, rec-Y (warning: more than one owner)`,
+      with <state> fired, manual-review-due or MALFORMED, and a summary line `[reversal_review]
       summary due=<n> filed=<n> owned=<n> malformed=<n>`. CLI `python -m scripts.preflight.reversal_reviews [--dry-run]
       [--profile P]`; in both modes exit 0 unless a reader or portal call fails, which raises and exits 1 (Decision 84
-      I-4, no outbox); --dry-run reads but never files, so a would-file line is not a failure.
+      I-4, no outbox); --dry-run reads but never files, so a would-file line is not a failure. The two sweeps run
+      only when evaluate() reports a due stanza, so a quiet tick costs no reader call (at most 48 reads a day, against
+      Decision 215's reader-invocations-doubled condition). The file_rec payload carries the literal
+      `"source": "reversal_review"`, which check_source_registry's scan matches. scripts.rec_episode.find_recs is not
+      used because it scopes by source, and today's owners (rec-5273, rec-5082) are source planning.
   - file: scripts/checks/ops_governance/validate_reversal_stanzas.py
     action: Modify
     purpose: >-
@@ -210,9 +221,10 @@ verification_plan:
       Among the stanzas present at base 4197aa93 the spread holds on the built tree, and the gate passes, running
       every gate-safe predicate and skipping only the gate=False one.
     command: >-
-      git show 4197aa9366bb8cb824f5bcd9d3f55b71a383b550:docs/DECISIONS.md > /tmp/base-decisions.md &&
-      bin/venv-python -c "import collections; from pathlib import Path; from scripts.preflight.decision_conditions import evaluate;
-      base={x.decision_id for x in evaluate(paths=[Path('/tmp/base-decisions.md')], gate=True)};
+      BASE_MD=$(mktemp) && export BASE_MD && git show 4197aa9366bb8cb824f5bcd9d3f55b71a383b550:docs/DECISIONS.md >
+      "$BASE_MD" &&
+      bin/venv-python -c "import collections, os; from pathlib import Path; from scripts.preflight.decision_conditions import evaluate;
+      base={x.decision_id for x in evaluate(paths=[Path(os.environ['BASE_MD'])], gate=True)};
       n=collections.Counter(x.review_by for x in evaluate(gate=True) if x.decision_id in base);
       top=max(n.values()); assert top <= 3, n.most_common(3);
       from scripts.checks.ops_governance.validate_reversal_stanzas import validate_reversal_stanzas;
@@ -227,13 +239,18 @@ verification_plan:
   - step: 5
     phase: pre-deploy
     action: Dry-run the sensor against the live reader (read-only; files nothing).
-    command: AWS_PROFILE=agent_platform bin/venv-python -m scripts.preflight.reversal_reviews --dry-run --profile agent_platform
+    command: >-
+      out=$(AWS_PROFILE=agent_platform bin/venv-python -m scripts.preflight.reversal_reviews --dry-run --profile
+      agent_platform) && echo "$out" && echo "$out" | grep -qE "^\[reversal_review\] summary due=[0-9]+" && echo "$out"
+      | grep -qE "^\[reversal_review\] Decision 133 [a-zA-Z-]+ owned by rec-5273" && ! echo "$out" | grep -qE
+      "^\[reversal_review\] Decision (133|173) .*would-file"
     expected: >-
-      One `[reversal_review]` line per due stanza: Decision 133 owned by rec-5273 and, if still due, Decision 173 owned
-      by rec-5082 (or a would-file line if an owner has closed), then a summary line; exit 0.
+      Exit 0: the summary line, Decision 133 owned by rec-5273, and no would-file line for 133 or 173 (173, once due,
+      shows owned by rec-5082).
     fix_if: >-
-      A would-file line for a stanza that has an open owner means the prefix lookup is wrong; a reader error is
-      surfaced, never swallowed.
+      First read rec-5273 and rec-5082 with recs_by_ids: if one has closed, the would-file line is correct and the
+      report names the change. Otherwise a would-file line for an owned stanza means the sweep or its regex is wrong;
+      a reader error is surfaced, never swallowed.
     hermetic: false
     graduation: not-applicable
   - step: 6
@@ -260,15 +277,16 @@ verification_plan:
       convergence-health.yml, ref main, no inputs), wait for completion, save the health-check job log
       (mcp__github__get_job_logs) to $CH_LOG and the run's jobs (list_workflow_jobs, with steps) to $CH_JOBS.
     command: >-
-      grep -E "\[reversal_review\] summary due=[0-9]+ filed=[0-9]+ owned=[0-9]+ malformed=[0-9]+" "$CH_LOG" &&
-      bin/venv-python -c "import json,os; j=json.load(open(os.environ['CH_JOBS'])); j=j.get('jobs',j);
+      grep -E "\[reversal_review\] summary due=[0-9]+ filed=[0-9]+ owned=[0-9]+ malformed=[0-9]+" "$CH_LOG" && !
+      grep -qE "\[reversal_review\] Decision (133|173) .*filed rec-" "$CH_LOG" && bin/venv-python -c "import json,os; j=json.load(open(os.environ['CH_JOBS'])); j=j.get('jobs',j);
       st={x['name']: x.get('conclusion') for y in j for x in y.get('steps',[])};
       assert st.get('File reversal reviews (rec-5264)') == 'success', st; print('STEP_OK')"
     expected: >-
       One summary line, then STEP_OK. Report the summary line verbatim; malformed above 0 means a predicate raised on
       main, and the line names the rec filed for it.
     fix_if: >-
-      No line means the step did not run (check the main gate) or crashed: read the log and fix forward. A red step
+      No line means the step did not run (check the main gate) or crashed: read the log and fix forward. A filed line
+      for 133 or 173 is correct only if recs_by_ids shows its owner closed; otherwise it is a duplicate to root-cause. A red step
       with a portal error is a write failure to root-cause; never mark the step continue-on-error. A run red from
       another sensor's step is not this plan's defect: report it.
     hermetic: false
@@ -360,6 +378,7 @@ context:
   - "Ordering: docs/DECISIONS.md is merge_serial with the Decision 167 amendment build (PR #2198, Decision 272); whichever builds second rebases; no sidecar block overlaps. PLAN-scheduled-workflow-dispatch (unbuilt) also scopes source_registry.yaml, check_source_registry.py and its test: whichever builds second rebases."
   - "Cross-project: convergence-health.yml is also scoped by Agents in GitHub's SHA-pin plan (uses: lines only); whichever builds second rebases. Before merge the build posts one #1963 line: the new step, the reversal_review source, and the ceiling of 10 stanzas per review date."
   - "Graduated shards kept, node ids unchanged: actions-capacity-evaluator-and-steps (tests/ci/test_actions_capacity_steps.py, tests/checks/ops_governance/test_check_source_registry.py), backlog-health-package-suite and source-registry-guard-producer-scan (test_check_source_registry.py), dec-194-roadmap-predicate-semantics and ports-coupling-threshold-predicate (tests/test_decision_condition_predicates.py, run in VP 2, not edited)."
+  - "Critique round 2 dispositions: Decision 218 moves to 2027-04-29 while Decision 172's dated update says its 2027-04-30 matches 218; accepted (one day, both reviews still in the same week, the words are bound by the approval run). The ceiling's authoring surface is the gate's own failure message naming review_dates --next; no governing text changes here. Handoffs to rec-5366: the shallow-clone behaviour of the history predicate (scope row decision_conditions.py (3)) and re-pointing index_path to the slim rows when rec-3250 lands (Decision 179's condition text)."
   - "rec-5264's acceptance was re-pointed at planning to tests/test_reversal_reviews.py::test_overdue_stanza_yields_exactly_one_rec (tests/test_decision_conditions.py has 12 SLOC of headroom)."
   - "Approvals at build start: the Decision wording only, bound by the sidecar and its approval run (Decision 246); the build merges under standing_authorisation once validate_merge_step is green."
 gate_rounds:
@@ -369,6 +388,7 @@ gate_rounds:
   - {gate: wording-check, round: 1, verdict: FAIL, digest: c3d7fc5fd25abca1b7584164eefcfadd7c91a2edc4e54187cb7aa61f7e0ae3e7, base: 4197aa9366bb8cb824f5bcd9d3f55b71a383b550, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 2, verdict: PASS, digest: 469c3b8f51121c9616d32d82386c9050f2bc7f6422778cb7668a3f59640b5640, base: 4197aa9366bb8cb824f5bcd9d3f55b71a383b550, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 6, nits: 7}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 9}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -377,7 +397,7 @@ pre_implementation_checklist:
   - Acceptance criteria understood and verifiable
   - "Start condition: this plan and its sidecar merged with the approval run approved."
 execution_steps:
-  - "decision_conditions.py: fires key, holds, the gate flag, the two predicate wrappers, the computed bucket rows, --assert-not-surfaced. Post: its tests in VP 2 pass, and `bin/venv-python -m scripts.roadmap.plan_obligations --plan docs/plans/PLAN-computed-reversal-conditions.yaml` shows it under 500 SLOC; if it is not, move the predicate wrappers into a sibling module or decompose into a facade package (Decision 80/104/124), never a budget raise (Decision 128)."
+  - "decision_conditions.py: fires key, holds, the gate flag, the two predicate wrappers, --assert-not-surfaced (preflight_bucket unchanged). Post: its tests in VP 2 pass, and `bin/venv-python -m scripts.roadmap.plan_obligations --plan docs/plans/PLAN-computed-reversal-conditions.yaml` shows it under 500 SLOC; if it is not, move the predicate wrappers into a sibling module or decompose into a facade package (Decision 80/104/124), never a budget raise (Decision 128)."
   - "review_dates.py and tests/test_review_dates.py. Post: VP 2's review-date tests pass."
   - "corpus_measures.py and its hermetic tests. Post: VP 2's corpus tests pass."
   - "reversal_reviews.py, the source_registry row, the SCANNED_PATHS entry and their tests (including test_overdue_stanza_yields_exactly_one_rec). Post: VP 2 and VP 5 pass."
