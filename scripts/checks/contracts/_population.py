@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from scripts.checks import registry
+from scripts.checks.contracts import _evaluator_coverage as _cov
 from scripts.checks.contracts._ratchet import (  # noqa: F401 -- re-export after the ratchet split (Decision 128)
     check_pin_direction,
     check_pins_bound_to_census,
@@ -320,10 +321,15 @@ def resolve_evaluator(
     registered_checks: dict[str, Any] | None = None,
     sequenced_names: set[str] | None = None,
     check_module_resolver: Callable[[str], Path | None] | None = None,
+    live_table: _cov.LiveTable | None = None,
+    coverage: dict[str, _cov.CoverageRow] | None = None,
+    body: list[str] | None = None,
 ) -> tuple[bool, str]:
     """True + detail iff `evaluator` genuinely READS `contract_basename` -- resolution by
     evidence, never by mention. `EvaluatorSpec._exactly_one_kind` guarantees exactly one of
-    `check`/`agent_surface` is set, so this function's two branches are exhaustive."""
+    `check`/`agent_surface` is set, so this function's two branches are exhaustive. An agent_surface
+    must also be live and carry its evaluator_coverage triggers; a check's `asserts` keys are proven
+    only when `body` (the contract's top-level keys) is given."""
     if evaluator.check is not None:
         name = evaluator.check
         registered = registered_checks if registered_checks is not None else registry.all_checks()
@@ -336,20 +342,65 @@ def resolve_evaluator(
         module_path = resolver(name)
         if module_path is None or not module_path.is_file():
             return False, f"could not resolve a source module for check {name!r}"
+        hops = one_hop_scripts_imports(module_path, root)
+        detail = ""
         if module_contains_literal(module_path, contract_basename):
-            return True, f"{module_path} contains {contract_basename!r} in executable context"
-        for hop in one_hop_scripts_imports(module_path, root):
-            if module_contains_literal(hop, contract_basename):
-                return True, f"one-hop import {hop} contains {contract_basename!r} in executable context"
-        return False, f"neither {module_path} nor its one-hop scripts/ imports contain {contract_basename!r}"
+            detail = f"{module_path} contains {contract_basename!r} in executable context"
+        else:
+            for hop in hops:
+                if module_contains_literal(hop, contract_basename):
+                    detail = f"one-hop import {hop} contains {contract_basename!r} in executable context"
+                    break
+        if not detail:
+            return False, f"neither {module_path} nor its one-hop scripts/ imports contain {contract_basename!r}"
+        rows = coverage if coverage is not None else (_cov.load_coverage(root) if body is not None else {})
+        if isinstance(rows, str):
+            return False, rows
+        row = rows.get(contract_basename)
+        if body is not None and row is not None and row.asserts:
+            ok, why = _cov.asserts_resolve(contract_basename, row.asserts, body, [module_path, *hops], module_contains_literal)
+            if not ok:
+                return False, why
+        return True, detail
 
     # EvaluatorSpec._exactly_one_kind guarantees agent_surface is set whenever check is None --
     # the check branch above already returned, so this leg is unconditional, not a fallback.
     value = evaluator.agent_surface
     assert value is not None, "EvaluatorSpec guarantees exactly one of check/agent_surface is set"
-    if _agent_surface_resolves(value, contract_basename, root):
-        return True, f"agent_surface {value!r} contains {contract_basename!r}"
-    return False, f"agent_surface {value!r} does not contain {contract_basename!r}"
+    return _resolve_agent_surface(contract_basename, value, root, live_table, coverage, body)
+
+
+def _resolve_agent_surface(
+    contract_basename: str,
+    value: str,
+    root: Path,
+    live_table: _cov.LiveTable | None,
+    coverage: dict[str, _cov.CoverageRow] | None,
+    body: list[str] | None,
+) -> tuple[bool, str]:
+    if not _agent_surface_resolves(value, contract_basename, root):
+        return False, f"agent_surface {value!r} does not contain {contract_basename!r}"
+    table = live_table if live_table is not None else _cov.load_live_table(root)
+    if isinstance(table, str):
+        return False, table
+    live, live_detail = _cov.surface_liveness(contract_basename, value, root, table)
+    if not live:
+        return False, f"agent_surface {value!r} is not live: {live_detail}"
+    rows = coverage if coverage is not None else _cov.load_coverage(root)
+    if isinstance(rows, str):
+        return False, rows
+    row = rows.get(contract_basename)
+    if row is None or not row.triggers:
+        return False, f"no evaluator_coverage triggers row for {contract_basename}"
+    text = (root / value).read_text(encoding="utf-8", errors="replace")
+    ok, why = _cov.triggers_resolve(text, contract_basename, row.triggers)
+    if not ok:
+        return False, f"agent_surface {value!r}: {why}"
+    if body is not None:
+        _keys, errors = _cov.instructed_keys(contract_basename, row.triggers, body)
+        if errors:
+            return False, "; ".join(errors)
+    return True, f"agent_surface {value!r} contains {contract_basename!r} ({live_detail})"
 
 
 # ---------------------------------------------------------------------------

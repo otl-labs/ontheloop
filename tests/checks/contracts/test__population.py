@@ -10,6 +10,7 @@ import pytest
 
 import scripts.checks.hygiene.validate_placement  # noqa: F401  -- registers "validate_placement" regardless of run order
 from scripts.checks.contracts import _population
+from scripts.checks.contracts._evaluator_coverage import CoverageRow, LiveTable
 from scripts.contracts_schema import EvaluatorSpec
 
 _ROOT = Path(__file__).resolve().parents[3]
@@ -286,13 +287,15 @@ class TestResolveEvaluatorModuleBoundary:
     def test_agent_surface_pass_and_fail(self, tmp_path) -> None:
         present = tmp_path / "present.md"
         present.write_text("mentions target.yaml here\n", encoding="utf-8")
+        live = LiveTable(globs=("*.md",))
+        rows = {"target.yaml": CoverageRow(triggers=("mentions target.yaml here",))}
         resolves, _detail = _population.resolve_evaluator(
-            "target.yaml", EvaluatorSpec(agent_surface="present.md"), root=tmp_path
+            "target.yaml", EvaluatorSpec(agent_surface="present.md"), root=tmp_path, live_table=live, coverage=rows
         )
         assert resolves
 
         resolves2, detail2 = _population.resolve_evaluator(
-            "target.yaml", EvaluatorSpec(agent_surface="missing.md"), root=tmp_path
+            "target.yaml", EvaluatorSpec(agent_surface="missing.md"), root=tmp_path, live_table=live, coverage=rows
         )
         assert not resolves2
         assert "does not contain" in detail2
@@ -436,6 +439,50 @@ class TestCensus:
         assert not broken.bucket_identity_holds()
 
 
+def test_agent_surface_evaluator_must_be_live(tmp_path: Path) -> None:
+    (tmp_path / "retired.md").write_text("reads target.yaml first\n", encoding="utf-8")
+    (tmp_path / "other.txt").write_text("reads target.yaml first\n", encoding="utf-8")
+    (tmp_path / "live.md").write_text("reads target.yaml first\n", encoding="utf-8")
+    live = LiveTable(globs=("*.md",), retired=("retired.md",))
+    rows = {"target.yaml": CoverageRow(triggers=("reads target.yaml first",))}
+
+    def run(surface: str) -> tuple[bool, str]:
+        return _population.resolve_evaluator(
+            "target.yaml", EvaluatorSpec(agent_surface=surface), root=tmp_path, live_table=live, coverage=rows
+        )
+
+    ok, detail = run("retired.md")
+    assert not ok and "not live" in detail
+    ok, detail = run("other.txt")
+    assert not ok and "live table" in detail
+    ok, detail = run("live.md")
+    assert ok, detail
+    ok, detail = _population.resolve_evaluator(
+        "target.yaml", EvaluatorSpec(agent_surface="live.md"), root=tmp_path, live_table=live, coverage={}
+    )
+    assert not ok and "no evaluator_coverage triggers row" in detail
+
+
+def test_check_evaluator_asserts_need_evidence(tmp_path: Path) -> None:
+    (tmp_path / "primary.py").write_text('_A = "target.yaml"\n_K = "present_key"\n', encoding="utf-8")
+
+    def run(key: str) -> tuple[bool, str]:
+        return _population.resolve_evaluator(
+            "target.yaml",
+            EvaluatorSpec(check="synthetic_check"),
+            root=tmp_path,
+            registered_checks={"synthetic_check": object()},
+            sequenced_names={"synthetic_check"},
+            check_module_resolver=lambda _n: tmp_path / "primary.py",
+            coverage={"target.yaml": CoverageRow(asserts=(key,))},
+            body=["present_key", "missing_key"],
+        )
+
+    assert run("present_key")[0]
+    ok, detail = run("missing_key")
+    assert not ok and "no literal" in detail
+
+
 @pytest.mark.parametrize("kind", ["check", "agent_surface"])
 def test_evaluator_spec_accepts_each_kind_alone(kind: str) -> None:
     EvaluatorSpec.model_validate({kind: "value"})
@@ -502,3 +549,46 @@ class TestDeclaredSubtrees:
         root = self._tree(tmp_path, index)
         (root / "sub" / "a.yaml").write_text("persona: a\n", encoding="utf-8")
         assert _population.subtree_member_failures(root, [self.ROW]) == []
+
+
+def _surface_tree(tmp_path: Path) -> None:
+    (tmp_path / "live.md").write_text("reads target.yaml first\n", encoding="utf-8")
+
+
+def test_agent_surface_load_errors_and_trigger_failures_are_reported(tmp_path: Path) -> None:
+    _surface_tree(tmp_path)
+    spec = EvaluatorSpec(agent_surface="live.md")
+    ok, detail = _population.resolve_evaluator("target.yaml", spec, root=tmp_path)
+    assert not ok and "live table unreadable" in detail
+
+    live = LiveTable(globs=("*.md",))
+    ok, detail = _population.resolve_evaluator("target.yaml", spec, root=tmp_path, live_table=live)
+    assert not ok and "coverage table unreadable" in detail
+
+    rows = {"target.yaml": CoverageRow(triggers=("never written down target.yaml",))}
+    ok, detail = _population.resolve_evaluator("target.yaml", spec, root=tmp_path, live_table=live, coverage=rows)
+    assert not ok and "does not occur" in detail
+
+    rows = {"target.yaml": CoverageRow(triggers=("reads target.yaml first",))}
+    ok, detail = _population.resolve_evaluator("target.yaml", spec, root=tmp_path, live_table=live, coverage=rows, body=["a"])
+    assert ok, detail
+    (tmp_path / "live.md").write_text("see target.yaml#nope\n", encoding="utf-8")
+    rows = {"target.yaml": CoverageRow(triggers=("see target.yaml#nope",))}
+    ok, detail = _population.resolve_evaluator("target.yaml", spec, root=tmp_path, live_table=live, coverage=rows, body=["a"])
+    assert not ok and "anchor names no top-level key" in detail
+
+
+def test_check_evaluator_reports_a_malformed_coverage_table(tmp_path: Path) -> None:
+    (tmp_path / "primary.py").write_text('_A = "target.yaml"\n', encoding="utf-8")
+    (tmp_path / "docs" / "contracts").mkdir(parents=True)
+    (tmp_path / "docs" / "contracts" / "contract-population.yaml").write_text("evaluator_coverage: nope\n", encoding="utf-8")
+    ok, detail = _population.resolve_evaluator(
+        "target.yaml",
+        EvaluatorSpec(check="synthetic_check"),
+        root=tmp_path,
+        registered_checks={"synthetic_check": object()},
+        sequenced_names={"synthetic_check"},
+        check_module_resolver=lambda _n: tmp_path / "primary.py",
+        body=["a"],
+    )
+    assert not ok and "coverage table" in detail
