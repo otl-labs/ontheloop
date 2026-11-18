@@ -339,7 +339,7 @@ def test_module_imports_only_stdlib() -> None:
     assert "yaml" not in top and "pydantic" not in top and "from scripts" not in top
 
 
-@pytest.mark.parametrize("channel", ["ducklake", "prod"])
+@pytest.mark.parametrize("channel", ["ducklake", "prod", "telemetry-content", "persona_image"])
 def test_channel_inputs_resolve_real_functions_and_pathspecs(channel: str) -> None:
     functions, pathspecs = dg._channel_inputs(channel)
     assert functions and pathspecs and all(isinstance(f, str) for f in functions)
@@ -440,3 +440,131 @@ def test_read_record_returns_the_mapping_and_none_when_absent() -> None:
     assert dg.read_record("c", "f", run=lambda *a, **k: absent) is None
     notmap = types.SimpleNamespace(returncode=0, stdout="[1]", stderr="")
     assert dg.read_record("c", "f", run=lambda *a, **k: notmap) is None
+
+
+def _no_record(ch: str, fn: str) -> dict:
+    raise AssertionError("record_reader must not run")
+
+
+def _persona_resolve(repo: Repo, api: FakeApi, tmp_path: Path, record: Optional[str], required: tuple[str, ...]) -> int:
+    repo.git.out("update-ref", "refs/remotes/origin/main", "HEAD")
+
+    def reader(channel: str, fn: str) -> Optional[str]:
+        reads.append(fn)
+        return record
+
+    reads: list[str] = []
+    rc = dg.resolve(
+        "persona_image", False, str(tmp_path / "m.json"), api=api, git=repo.git, reader=reader,
+        inputs=(["image"], PATHSPECS), record_reader=_no_record, required_paths=required,
+    )  # fmt: skip
+    _persona_resolve.reads = reads  # type: ignore[attr-defined]
+    return rc
+
+
+def test_persona_image_inputs_are_the_pin_inputs_without_the_pin_file() -> None:
+    from src.persona_hosts import load_pin
+
+    functions, pathspecs = dg._channel_inputs("persona_image")
+    assert functions == ["image"] and pathspecs == load_pin(dg.ROOT).inputs()
+    assert "config/persona_image.yaml" not in pathspecs
+    assert "config/persona_image.yaml" in dg._persona_required()
+
+
+def test_decide_required_paths_skip_pre_channel_and_string_pre_channel_file_still_works(repo: Repo) -> None:
+    c = [repo.commit("seed.txt"), repo.commit(dg.GATE_MODULE), repo.commit("config/persona_image.yaml")]
+    assert dg.decide(c[1], {"a": None}, PATHSPECS, repo.git, False, required_paths=("config/persona_image.yaml",)) == (
+        False, "pre_channel_target",
+    )  # fmt: skip
+    assert dg.decide(c[2], {"a": None}, PATHSPECS, repo.git, False, required_paths=("config/persona_image.yaml",)) == (
+        True, "baseline_unknown",
+    )  # fmt: skip
+    assert dg.decide(c[1], {"a": None}, PATHSPECS, repo.git, False, "config/persona_image.yaml") == (
+        False,
+        "pre_channel_target",
+    )
+
+
+def test_persona_image_deploys_on_an_absent_record_and_skips_when_it_equals_the_target(
+    repo: Repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    c = [repo.commit(dg.GATE_MODULE), repo.commit("config/persona_image.yaml"), repo.commit("src/w/x.py")]
+    api = FakeApi()
+    api.add(c[-1])
+    req = ("config/persona_image.yaml",)
+    assert _persona_resolve(repo, api, tmp_path, None, req) == 0
+    assert "deploy reason=baseline_unknown" in capsys.readouterr().out
+    assert _persona_resolve(repo, api, tmp_path, c[-1], req) == 0
+    assert "skip reason=already_deployed" in capsys.readouterr().out
+
+
+def test_persona_image_pre_channel_and_no_green_skip_without_any_record_read(
+    repo: Repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    c = [repo.commit(dg.GATE_MODULE), repo.commit("src/w/x.py")]
+    api = FakeApi()
+    api.add(c[-1])
+    assert _persona_resolve(repo, api, tmp_path, None, ("config/persona_image.yaml",)) == 0
+    assert "reason=pre_channel_target" in capsys.readouterr().out and _persona_resolve.reads == []  # type: ignore[attr-defined]
+    assert _persona_resolve(repo, FakeApi(), tmp_path, None, ("config/persona_image.yaml",)) == 0
+    assert "reason=no_green_in_window" in capsys.readouterr().out and _persona_resolve.reads == []  # type: ignore[attr-defined]
+
+
+def test_first_publish_is_refused_for_other_channels_and_persona_image_is_not_a_lambda_channel(capsys: Any) -> None:
+    assert dg.main(["resolve", "--channel", "prod", "--first-publish", "--manifest", "m.json"]) == 2
+    assert "persona_image" in capsys.readouterr().err
+    for cmd in (["pathspecs"], ["freshness", "--expected-sha", "a" * 40, "f"]):
+        with pytest.raises(SystemExit) as exc:
+            dg.main([cmd[0], "--channel", "persona_image", *cmd[1:]])
+        assert exc.value.code == 2
+
+
+def test_main_binds_the_registry_reader_to_the_pin_image_and_the_env_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    import importlib
+
+    from src.persona_hosts import load_pin
+
+    registry = importlib.import_module("scripts.ci.registry_record")
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(registry, "read_record", lambda image, **kw: seen.update(image=image, **kw) or "rev")
+    monkeypatch.setenv("GITHUB_TOKEN", "tok-value")
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(dg, "resolve", lambda *a, **kw: captured.update(args=a, **kw) or 0)
+    assert dg.main(["resolve", "--channel", "persona_image", "--first-publish", "--manifest", "m.json"]) == 0
+    assert captured["reader"]("persona_image", "image") == "rev"
+    assert seen == {"image": load_pin(dg.ROOT).image, "token": "tok-value", "first_publish": True}
+    captured.clear()
+    assert dg.main(["resolve", "--channel", "ducklake", "--manifest", "m.json"]) == 0
+    assert "reader" not in captured
+
+
+def test_record_error_and_unreadable_pin_become_gate_errors_exit_2(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: Any
+) -> None:
+    import importlib
+
+    registry = importlib.import_module("scripts.ci.registry_record")
+
+    def boom(image: str, **_: Any) -> None:
+        raise registry.RecordError("denied")
+
+    monkeypatch.setattr(registry, "read_record", boom)
+    with pytest.raises(dg.GateError):
+        dg.persona_image_reader()("persona_image", "image")
+    monkeypatch.setattr(dg, "ROOT", Path("/nonexistent-root"))
+    with pytest.raises(dg.GateError):
+        dg._channel_inputs("persona_image")
+    git = Repo(tmp_path / "r").git
+    assert dg.resolve("persona_image", False, str(tmp_path / "m.json"), api=FakeApi(), git=git) == 2
+    assert "::error::DEPLOY-GATE" in capsys.readouterr().err
+
+
+def test_registry_record_imports_nothing_from_deploy_gate() -> None:
+    import ast
+
+    tree = ast.parse((Path(dg.__file__).parent / "registry_record.py").read_text(encoding="utf-8"))
+    names = [a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names]
+    names += [n.module or "" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
+    assert not [n for n in names if "deploy_gate" in n]
