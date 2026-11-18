@@ -25,6 +25,7 @@ from scripts.telemetry_verify.derive import AGENTS, OBSERVATIONS, SESSIONS, TRAN
 from src.common.ducklake_reader_client import VERB_FIELDS
 
 _MCP_SERVER = re.compile(r"^mcp__(.+?)__")
+_MERGE_SHA = re.compile(r":merge:([0-9a-f]+)#0/annotate$")
 _TOKEN_SUMS = (
     ("tokens_input", "tokens_input_total"),
     ("tokens_output", "tokens_output_total"),
@@ -86,7 +87,15 @@ class _Trees:
         self.observations = observations
         self.agents = self.scope.tables.get(AGENTS, [])
         self.last_event = {
-            pin: max(r["event_timestamp"] for r in (*sessions, *observations) if _pin(r) == pin) for pin in self.pins
+            pin: max(
+                (
+                    r["event_timestamp"]
+                    for r in (*(s for s in sessions if s["event_kind"] != "annotate"), *observations)
+                    if _pin(r) == pin
+                ),
+                default=None,
+            )
+            for pin in self.pins
         }
 
     def is_root(self, pin: Pin, session_id: str) -> bool:
@@ -225,4 +234,44 @@ def session_startup_baseline(tables: Tables, projects: Mapping[str, str], day_fr
                 "usage_missing": (call.get("tokens_input") is None or call.get("tokens_output") is None) if calls else None,
             }
             out.append((pin[2], _nulls_last(row["root_session_id"]), pin[1], not root, sid, row))
+    return trees.finish([entry[-1] for entry in sorted(out, key=lambda e: e[:-1])])
+
+
+def session_tree_rollup(tables: Tables, projects: Mapping[str, str], day_from: str, day_to: str) -> list[dict[str, Any]]:
+    trees = _Trees(tables, projects, day_from, day_to, "session_tree_rollup")
+    sessions = trees.scope.tables[SESSIONS]
+    out = []
+    for pin, sids in trees.pins.items():
+        mine = [r for r in sessions if _pin(r) == pin]
+        compacts = [r for r in mine if r["event_kind"] == "compact"]
+        links = sorted(
+            (
+                (r["event_timestamp"], match.group(1), r)
+                for r in mine
+                if r["event_kind"] == "annotate" and r["producer"] == "ci_annotate"
+                for match in [_MERGE_SHA.search(r.get("external_ref") or "")]
+                if match
+            ),
+            key=lambda e: e[:2],
+        )
+        workflows = {_first(rows, "workflow") for (p, _), rows in trees.session_rows.items() if p == pin}
+        columns = trees.tree_columns(pin)
+        row = {
+            **columns,
+            "session_count": len(sids),
+            "workflows": sorted(w for w in workflows if w is not None),
+            "compact_count": len(compacts),
+            "compacted_session_count": len({r["session_id"] for r in compacts}),
+            "merge_links": [
+                {
+                    "merge_sha": sha,
+                    "merged_at": at,
+                    "pr_url": r.get("pr_url"),
+                    "rec_ids": r.get("rec_ids"),
+                    "ci_outcome": r.get("ci_outcome"),
+                }
+                for at, sha, r in links
+            ],
+        }
+        out.append((pin[2], _nulls_last(columns["root_session_id"]), pin[1], row))
     return trees.finish([entry[-1] for entry in sorted(out, key=lambda e: e[:-1])])

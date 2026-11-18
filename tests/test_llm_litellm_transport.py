@@ -292,6 +292,90 @@ class TestContractSwap:
         assert seen.requests[0].body["model"] == "another-model" and result.record.requested_model == "deepseek/another-model"
 
 
+class TestAttemptFields:
+    @BOTH
+    def test_ok_and_failed_attempts_carry_selection_and_start(self, is_async: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(t, "_wall", lambda: 1234.5)
+        sel = cap.selection(role=PRIMARY)
+        with cap.capture([cap.error_body(503), cap.deepseek_body()]):
+            result = go(is_async)
+        assert [a.outcome for a in result.attempts] == ["outage", "ok"]
+        for attempt in result.attempts:
+            assert (attempt.provider, attempt.billing_shape, attempt.started_at_ms) == (
+                sel.provider,
+                sel.billing_shape,
+                1234500,
+            )
+        assert result.record.started_at_ms == 1234500 and result.record.responded_at_ms == 1234500
+        with cap.capture([cap.error_body(401)]):
+            with pytest.raises(TransportError) as exc:
+                go(is_async)
+        assert exc.value.attempts[0].provider == sel.provider and exc.value.attempts[0].started_at_ms == 1234500
+
+    @BOTH
+    def test_malformed_attempt_carries_fields(self, is_async: bool) -> None:
+        with cap.capture([cap.deepseek_body(content="")]):
+            with pytest.raises(TransportError) as exc:
+                go(is_async)
+        assert exc.value.attempts[0].outcome == "empty_output" and exc.value.attempts[0].billing_shape is not None
+
+
+class TestProbeRecord:
+    @BOTH
+    def test_fail_over_result_carries_the_fresh_probe_once(self, is_async: bool) -> None:
+        with cap.capture([cap.error_body(503)] * 3 + [cap.anthropic_body()]):
+            first = go(is_async, fail_over=True)
+        assert first.probe_record is not None and first.probe_record.role == FALLBACK
+        assert first.probe_record is not first.record and first.probe_record.attempt == 1
+        with cap.capture([cap.error_body(503)] * 3 + [cap.anthropic_body()]) as seen:
+            second = go(is_async, fail_over=True)
+        assert second.failed_over and second.probe_record is None and len(seen) == 3 + 1
+
+    @BOTH
+    def test_fallback_raise_after_fresh_probe_carries_it_on_the_error(self, is_async: bool) -> None:
+        with cap.capture([cap.error_body(503)] * 3 + [cap.anthropic_body(), cap.error_body(401)]):
+            with pytest.raises(TransportError) as exc:
+                go(is_async, fail_over=True)
+        assert exc.value.kind == "provider_error" and exc.value.probe_record.role == FALLBACK
+
+    @BOTH
+    def test_direct_fallback_role_carries_fresh_probe_then_none(self, is_async: bool) -> None:
+        with cap.capture([cap.anthropic_body()]):
+            first = go(is_async, role=FALLBACK)
+        assert first.probe_record is not None and first.probe_record.role == FALLBACK and first.failed_over is False
+        with cap.capture([cap.anthropic_body()]) as seen:
+            cached = go(is_async, role=FALLBACK)
+        assert cached.probe_record is None and len(seen) == 1
+
+    @BOTH
+    def test_direct_fallback_error_carries_probe(self, is_async: bool) -> None:
+        with cap.capture([cap.anthropic_body(), cap.error_body(401)]):
+            with pytest.raises(TransportError) as exc:
+                go(is_async, role=FALLBACK)
+        assert exc.value.probe_record is not None
+        with cap.capture([cap.error_body(401)]):
+            with pytest.raises(TransportError) as again:
+                go(is_async, role=FALLBACK)
+        assert again.value.probe_record is None
+
+    @BOTH
+    def test_primary_error_has_no_probe(self, is_async: bool) -> None:
+        with cap.capture([cap.error_body(401)]):
+            with pytest.raises(TransportError) as exc:
+                go(is_async)
+        assert exc.value.probe_record is None
+
+
+class TestMaxAttempts:
+    @BOTH
+    @pytest.mark.parametrize("role", [PRIMARY, FALLBACK])
+    def test_below_one_is_refused_before_any_request(self, is_async: bool, role: str) -> None:
+        with cap.capture([cap.deepseek_body()]) as seen:
+            with pytest.raises(TransportError) as exc:
+                go(is_async, role=role, max_attempts=0)
+        assert exc.value.kind == "refused" and exc.value.tag == "max_attempts_below_one" and len(seen) == 0
+
+
 class TestModuleHygiene:
     def test_import_is_cheap_and_makes_no_litellm_import(self) -> None:
         code = (

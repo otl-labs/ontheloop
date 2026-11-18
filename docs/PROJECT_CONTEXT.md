@@ -191,6 +191,6 @@ The operator deployment currently uses AWS `eu-west-2`, Python 3.12 Lambdas, Git
 
 ## File routing and operational quick reference
 
-Use `docs/contracts/file-router.yaml` as the discovery and ownership index.
+Find file homes: `bin/venv-python -m scripts.session.file_router <term>`.
 
 Recommendations are operational work items, not local JSONL edits; `get_rec_write_guidance()` carries their field semantics (Decision 66). Canonical status values are `open`, `closed`, `failed`, `declined`, and `superseded`. Acceptance proves structural change; verification proves behavior and may be warning-only depending on tier.

@@ -13,6 +13,10 @@
 # Cadence on the reserved_concurrent_executions=1 singleton: control_health :15, ops merge :30, ops gc Sun 03:45,
 # DR dump Sun 03:00, telemetry merge :50 (every 6h), telemetry gc Sun 04:05. Each minute is distinct.
 # merge-liveness is in ALARM from creation until the first :50 pass, and gc-liveness until the first Sunday pass.
+#
+# Backlog-gated telemetry merge (PLAN-telemetry-read-timeouts, rec-5247/rec-5248): the merge_gated rule ticks every
+# two to six minutes, never in the three minutes up to another rule's start minute, and runs merge_ops only once the
+# backlog gate is met (60 commits or 30 minutes); the every-6h :50 merge above stays the floor.
 # ---------------------------------------------------------------------------
 
 locals {
@@ -59,6 +63,41 @@ resource "aws_lambda_permission" "ducklake_maintenance_telemetry_merge" {
   function_name = aws_lambda_function.ducklake_maintenance.function_name
   principal     = "events.amazonaws.com"
   source_arn    = aws_cloudwatch_event_rule.ducklake_maintenance_telemetry_merge.arn
+}
+
+resource "aws_cloudwatch_event_rule" "ducklake_maintenance_telemetry_merge_gated" {
+  name                = "agent-platform-ducklake-maintenance-telemetry-merge-gated"
+  description         = "Backlog-gated production telemetry merge (PLAN-telemetry-read-timeouts, Decision 236 cl.5 amendment). Ticks every two to six minutes; merges at the backlog gate."
+  schedule_expression = "cron(0,6,8,10,16,18,20,22,24,26,32,34,36,38,40,46,52,54,56,58 * * * ? *)"
+  state               = "ENABLED"
+
+  tags = {
+    Name    = "DuckLake Maintenance Telemetry Gated Merge Schedule"
+    Purpose = "PLAN-telemetry-read-timeouts backlog-gated telemetry merge"
+  }
+}
+
+resource "aws_cloudwatch_event_target" "ducklake_maintenance_telemetry_merge_gated" {
+  rule      = aws_cloudwatch_event_rule.ducklake_maintenance_telemetry_merge_gated.name
+  target_id = "ducklake-maintenance-telemetry-merge-gated"
+  arn       = aws_lambda_function.ducklake_maintenance.arn
+  input = jsonencode({
+    action      = "merge_ops_gated"
+    data_path   = local.ducklake_telemetry_data_path
+    meta_schema = local.ducklake_telemetry_prod_meta_schema
+    backlog_gate = {
+      min_commits          = 60
+      max_unmerged_minutes = 30
+    }
+  })
+}
+
+resource "aws_lambda_permission" "ducklake_maintenance_telemetry_merge_gated" {
+  statement_id  = "AllowEventBridgeTelemetryMergeOpsGated"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.ducklake_maintenance.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.ducklake_maintenance_telemetry_merge_gated.arn
 }
 
 # ENABLED under the committed counts-only dry-run reading tests/fixtures/gc_ops_dryrun_baseline_telemetry.json
@@ -304,5 +343,31 @@ resource "aws_cloudwatch_metric_alarm" "ducklake_telemetry_catalog_stats_rows" {
   tags = {
     Name    = "DuckLake Telemetry Catalog Stats Rows Alarm"
     Purpose = "T2.36 c5 production telemetry maintenance"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "ducklake_telemetry_merge_gate_unreadable" {
+  alarm_name          = "ducklake-telemetry-merge-gate-unreadable"
+  alarm_description   = "The backlog-gated production telemetry merge could not read its CloudWatch metrics and skipped; only the every-6h floor merges until it reads again. PLAN-telemetry-read-timeouts."
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 1
+  metric_name         = "MergeOpsGateUnreadable"
+  namespace           = "DuckLakeMaintenance"
+  period              = 3600
+  statistic           = "Sum"
+  threshold           = 1
+
+  dimensions = {
+    MetaSchema = local.ducklake_telemetry_prod_meta_schema
+  }
+
+  alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
+
+  treat_missing_data = "notBreaching"
+
+  tags = {
+    Name    = "DuckLake Telemetry Merge Gate Unreadable Alarm"
+    Purpose = "PLAN-telemetry-read-timeouts backlog-gated telemetry merge"
   }
 }

@@ -37,6 +37,7 @@ import yaml
 
 from scripts.checks import _common, registry
 from scripts.checks.ci_guards import _trusted_plan_role_partition as _partition
+from scripts.checks.ci_guards._shared import is_sha_pinned
 from scripts.verify_ci_workflow import _load
 
 ENV = "tf-trusted-plan"
@@ -56,7 +57,6 @@ _SCRIPT_PATH_RE = re.compile(
 )
 _ACTION_PATH_RE = re.compile(r"\$\{\{\s*github\.action_path\s*\}\}/([\w./-]+)")
 _GIT_REF_RE = re.compile(r"(?<![\w-])git\s+(?:fetch|checkout)\b")
-_SHA_PIN_RE = re.compile(r"@[0-9a-f]{40}(?:\s|$)")
 _MODULE_RE = re.compile(r"(?<!\S)-m\s+(scripts(?:\.\w+)+)")
 _PYTHON_RE = re.compile(r"(?<![\w.-])(?:[\w./$-]*/)?(?:[\w-]*-)?python[\d.]*(?=\s|$|[;|&)\"'])(\s+\S+)?")
 _ISOLATED_FLAG_RE = re.compile(r"-[A-VYZa-z]*I[A-Za-z]*")
@@ -484,7 +484,7 @@ def check_pinned_actions(workflows: dict[str, dict[str, Any]], read: Reader = _n
     for name in sorted(ENV_WORKFLOWS & workflows.keys()):
         for jid, job in _governed(name, workflows[name]):
             for kind, text, _ in _expanded(job, read):
-                if kind == "uses" and not text.startswith("./") and not _SHA_PIN_RE.search(text + " "):
+                if kind == "uses" and not text.startswith("./") and not is_sha_pinned(text):
                     out.append(f"i: {name}:{jid} uses {text.split('#')[0].strip()} without a 40-hex commit SHA pin")
     return out
 

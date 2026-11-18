@@ -1,92 +1,26 @@
-"""Generated decisions index (audit finding DCG-08, PLAN-dcg-decisions-index, FINAL wave of
-the dcg-* audit-consolidation series; PLAN-decision-scout-bounded-retrieval adds `live`, the
-triage_excerpt fields, and `category_tags`).
+"""Generated decisions index (DCG-08; PLAN-decision-scout-bounded-retrieval; PLAN-decision-index-slim-rows).
 
-A lightweight, machine-parseable projection over BOTH docs/DECISIONS.md and
-docs/DECISIONS_ARCHIVE.md -- number, title, status, decided_date, typed
-supersedes/superseded_by/amends edges, a `live` provenance flag, and a bounded triage excerpt --
-derived SOLELY via the shared parser scripts.decisions_md (DAF-03 single-parser rule): no second
-header/title regex lives here.
+A lightweight projection over BOTH docs/DECISIONS.md and docs/DECISIONS_ARCHIVE.md, derived SOLELY via the shared
+parser scripts.decisions_md (DAF-03 single-parser rule): number, title, status, decided_date, typed
+supersedes/superseded_by/amends edges and a `live` provenance flag on every row. It excludes the parser's volatile
+timestamp/content_hash/raw_block fields, so two calls are byte-identical, and `significance`, which only checks read.
 
-build_index() projects ONLY stable fields from each parse_decisions_md() row -- it EXCLUDES the
-parser's volatile created_timestamp/last_updated_timestamp/content_hash/raw_block fields, so two
-consecutive calls are byte-identical (json.dumps(..., sort_keys=True) equal) and the committed
-docs/decisions-index.json can be compared for drift without a timestamp always tripping it.
+Slim rows (rec-3250, rec-5258): the committed docs/decisions-index.json is read whole by every decision-scout round. A
+live row adds `currency` (scripts.decisions_md.derive_currency over corpus-wide inbound edge sets built once per build);
+a live row that is not a superseded_compacted stub also adds `category_tags` (sorted tags from _CATEGORY_TAG_PATTERNS
+matched against title + excerpt, a retrieval aid), `triage_excerpt` (the text only: no source or truncation marker) and,
+when its entry has a well-formed envelope, `serves` and `kind` ({"value": ...} or null). Archive rows and
+superseded_compacted stubs are skeletons (a stub keeps `currency`). --write serialises one compact sort_keys row per
+line, the same parsed object as json.dumps.
 
-Edge derivation:
-  - amends: the row's own "amends" key -- envelope-sourced (scripts.decisions_md
-    extract_entry_envelope's `amends` field) when the entry carries a well-formed metadata
-    envelope, else the legacy title-relation extraction (extract_amends_edges). No second
-    derivation lives here: this generator consumes whichever value parse_decisions_md() already
-    resolved, unchanged (PLAN-decision-entry-flow-governance, Decision 167).
-  - superseded_by: the row's typed "superseded_by" string ('dec-NNN' or ''), coerced to
-    int | None.
-  - supersedes: the corpus-wide UNION of (a) the inverse of every OTHER row's superseded_by
-    pointing at this number, and (b) this row's own "title_supersedes" key -- likewise
-    envelope-sourced (the envelope's `supersedes` field) when present, else the legacy
-    title-borne extraction (scripts.decisions_md._extract_title_borne_supersedes).
+The excerpt is derived through the shared parser: build_triage_excerpt (Intent -> Problem -> Context -> Decision
+fallback, <=320 chars) feeds both the category tags and `--excerpts <ids | all>`, which prints one JSON line per live id
+({number, triage_excerpt, triage_excerpt_source, triage_excerpt_truncated}) and exits 2 naming every id that is not a
+live decision (build_excerpts); the markers are served only there.
 
-`significance` is a parse_decisions_md() row key (the envelope's routing claim dict, or {} when
-absent) that is DELIBERATELY NOT projected into docs/decisions-index.json -- it is parser-surfaced
-and check-read only (scripts.checks.decisions.validate_decision_entry_conformance), mirroring the
-index-only treatment of `intent`/`amends`/`title_supersedes` before them: docs/decisions-index.json
-is a read-in-full-every-/plan surface with no stock size guard of its own (Decision 179 retired the
-mechanical ceiling that used to bound it indirectly; T2.56 c1 and T1.5 c1 own the residual), so
-every projected field on every row still has a real, disclosed read cost even though nothing
-mechanically enforces it -- and significance is a per-entry authoring-time claim the index's
-consumers (decision-scout triage) have no use for.
+check_index_freshness(failed) fails on DRIFT (committed != regenerated) OR ABSENCE: a required committed artifact.
 
-`serves` and `kind` (PLAN-decision-serves-kind-grammar, Decision 243 clause 8) ARE projected, on live rows that
-carry a well-formed typed envelope only: `serves` is the envelope's north-star id list ([] when undeclared) and
-`kind` is {"value": <direction|mechanism>} (the value only, for read cost) or null when the envelope has no kind.
-Pre-envelope rows and archive rows carry neither key (Decision 179 read cost). Neither key reaches a warehouse
-surface (Decision 84).
-
-`live` derivation (PLAN-decision-scout-bounded-retrieval): whether the decision number is headed
-in docs/DECISIONS.md, via scripts.decisions_md.decision_header_numbers(paths=[docs/DECISIONS.md])
--- never a second parse of by_number's cross-file dict, which is last-occurrence-wins across the
-two files (overlap is zero today, so this is latent, not live behaviour).
-
-`currency` derivation (PLAN-decision-corpus-currency, rec-3055/rec-3056): a `currency` key is
-projected onto every live:true row (never a live:false row) via
-scripts.decisions_md.derive_currency, fed the corpus-wide inbound-supersedes and inbound-amends
-sets built ONCE per build_index() call from this generator's own supersedes_map / per-row amends
-projections -- never recomputed per row. This generator never validates the derived value against
-docs/contracts/decision-entry.yaml's vocabulary; that is scripts.checks.decisions.
-validate_decision_currency's job (invariant I3), so check_index_freshness keeps failing cleanly on
-drift instead of this module surfacing an uncaught traceback on an unexpected value. `currency`
-was already the narrowest of the five retrieval-aid keys; as of migration step 5 the other four
-(below) share its live-only scope, for the same reason (see next paragraph).
-
-`triage_excerpt` derivation, LIVE ROWS ONLY as of migration step 5 of
-audits/contract-first-governance-33c8667.yaml (decision-scout never reads it for an archived row,
-and every projected field on every row still carries a real read cost on this
-read-in-full-every-/plan surface -- the same rationale this docstring already gives above for
-excluding `significance`, Decision 179): a <=320-char excerpt for the decision-scout
-bounded-retrieval SPIRIT lane (Decision 152 gate (ii) widened to admit a Decision-clause quote),
-fallback order Intent -> Problem -> Context (the parser's Rationale/Key details/Context
-extraction) -> Decision (the decision-body marker).
-`triage_excerpt_source` names which of the four supplied the excerpt (or "" when none of the four
-markers are present at all). `triage_excerpt_truncated` is True iff the source text exceeded 320
-chars and was cut.
-
-`category_tags` derivation, LIVE ROWS ONLY (same migration-step-5 scope and rationale as
-`triage_excerpt` above): a sorted list of deterministic artifact/process-category tags (see
-_CATEGORY_TAG_PATTERNS) matched against title + triage_excerpt only. Closes a recall gap the
-excerpt alone left in decision-scout's bounded index-pass triage -- a decision that governs by
-ARTIFACT TYPE (e.g. any new Lambda) rather than shared vocabulary was being silently discarded
-before a targeted read; the scout now derives the proposed approach's own tag set once and
-shortlists by mechanical set-intersection instead of a per-entry judgment call over the whole
-index. Generator-internal and revisable without Decision ceremony -- a retrieval aid, not a
-governance taxonomy.
-
-check_index_freshness(failed) fails on DRIFT (committed != regenerated) OR ABSENCE -- unlike
-scripts.dependency_graph.check_export_freshness (Decision 80 lean posture: no-op when the export
-is absent), this index is a required committed artifact (project alignment fork 2: committed JSON +
-registered drift check, not a gitignored synced cache), so a missing file is itself a failure.
-
-CLI: --write (regenerate docs/decisions-index.json), --check (freshness, exit 1 on fail),
---print (dump the current index to stdout).
+CLI: --write, --check (exit 1 on fail), --print, --excerpts.
 """
 
 from __future__ import annotations
@@ -118,7 +52,7 @@ _TRIAGE_EXCERPT_FALLBACKS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _build_triage_excerpt(row: dict[str, Any]) -> tuple[str, str, bool]:
+def build_triage_excerpt(row: dict[str, Any]) -> tuple[str, str, bool]:
     """Derive (triage_excerpt, triage_excerpt_source, triage_excerpt_truncated) for one row.
 
     Fallback order Intent -> Problem -> Context -> Decision; the first non-empty field wins.
@@ -225,27 +159,58 @@ def build_index() -> dict[str, Any]:
             "amends": amends_map[n],
             "live": is_live,
         }
-        # Skeleton archive rows (rec-3012, migration step 5): a live:false row never derives or
-        # carries these five keys -- decision-scout only ever triages live:true rows, and every
-        # projected field on every row still has a real read cost on this read-in-full-every-/plan
-        # surface (Decision 179 retired the mechanical ceiling; the cost itself did not go away).
         if is_live:
-            excerpt, excerpt_source, excerpt_truncated = _build_triage_excerpt(by_number[n])
-            entry["triage_excerpt"] = excerpt
-            entry["triage_excerpt_source"] = excerpt_source
-            entry["triage_excerpt_truncated"] = excerpt_truncated
-            entry["category_tags"] = _derive_category_tags(by_number[n]["title"], excerpt)
+            excerpt, _source, _truncated = build_triage_excerpt(by_number[n])
             entry["currency"] = derive_currency(by_number[n], inbound_supersedes, inbound_amends)
-            if extract_entry_envelope(by_number[n]["raw_block"]) is not None:
-                kind_value = by_number[n]["kind"].get("value")
-                entry["serves"] = by_number[n]["serves"]
-                entry["kind"] = {"value": kind_value} if kind_value else None
+            if entry["currency"] != "superseded_compacted":
+                entry["category_tags"] = _derive_category_tags(by_number[n]["title"], excerpt)
+                entry["triage_excerpt"] = excerpt
+                if extract_entry_envelope(by_number[n]["raw_block"]) is not None:
+                    kind_value = by_number[n]["kind"].get("value")
+                    entry["serves"] = by_number[n]["serves"]
+                    entry["kind"] = {"value": kind_value} if kind_value else None
         decisions.append(entry)
 
     return {
         "decisions": decisions,
         "metadata": {"generated_by": "scripts.decisions_index"},
     }
+
+
+def serialize_index(index: dict[str, Any]) -> str:
+    """Serialise the index one compact sort_keys row per line (the same parsed object as json.dumps)."""
+    rows = [json.dumps(row, sort_keys=True, separators=(",", ":")) for row in index["decisions"]]
+    meta = json.dumps(index["metadata"], sort_keys=True, separators=(",", ":"))
+    body = ",\n".join(rows)
+    return '{"decisions":[\n' + body + '\n],"metadata":' + meta + "}\n"
+
+
+def build_excerpts(numbers: list[int] | None) -> list[dict[str, Any]]:
+    """On-demand triage excerpts for live decisions (None = every live id), sorted by number.
+
+    Raises ValueError naming every requested id that is not a live decision.
+    """
+    live_numbers = decision_header_numbers(paths=[_LIVE_PATH])
+    if numbers is not None:
+        unknown = sorted(set(numbers) - live_numbers)
+        if unknown:
+            raise ValueError(f"not live decisions: {', '.join(str(n) for n in unknown)}")
+        wanted = set(numbers)
+    else:
+        wanted = live_numbers
+    out: list[dict[str, Any]] = []
+    for row in sorted(parse_decisions_md(), key=lambda r: r["decision_id"]):
+        if row["decision_id"] in wanted:
+            excerpt, source, truncated = build_triage_excerpt(row)
+            out.append(
+                {
+                    "number": row["decision_id"],
+                    "triage_excerpt": excerpt,
+                    "triage_excerpt_source": source,
+                    "triage_excerpt_truncated": truncated,
+                }
+            )
+    return out
 
 
 def check_index_freshness(failed: list[str]) -> int | None:
@@ -303,12 +268,18 @@ def main() -> None:
         "--check", action="store_true", help="Check freshness against the committed export; exit 1 on drift/absence."
     )
     group.add_argument("--print", action="store_true", dest="print_", help="Print the current index to stdout.")
+    group.add_argument(
+        "--excerpts",
+        metavar="IDS",
+        nargs="+",
+        help="Print one JSON excerpt line per live decision: ids (comma or space separated) or 'all'.",
+    )
     args = parser.parse_args()
 
     if args.write:
         index = build_index()
         _EXPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _EXPORT_PATH.write_text(json.dumps(index, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        _EXPORT_PATH.write_text(serialize_index(index), encoding="utf-8")
         print(f"Decisions index written to {_EXPORT_PATH}", file=sys.stderr)
     elif args.check:
         failed: list[str] = []
@@ -318,6 +289,16 @@ def main() -> None:
                 print(msg, file=sys.stderr)
             sys.exit(1)
         print("Decisions index is current.", file=sys.stderr)
+    elif args.excerpts:
+        tokens = [t for chunk in args.excerpts for t in chunk.replace(",", " ").split()]
+        try:
+            ids = None if tokens == ["all"] else [int(t) for t in tokens]
+            lines = build_excerpts(ids)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(2)
+        for item in lines:
+            print(json.dumps(item, sort_keys=True))
     elif args.print_:
         _print_json(build_index())
     else:

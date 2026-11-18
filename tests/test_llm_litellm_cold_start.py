@@ -84,12 +84,17 @@ class TestColdStartCheck:
             cs.cold_start_check(FALLBACK, credential_holder="end_user")
 
 
+def _same_but_fresh(a: cs.ColdStartResult, b: cs.ColdStartResult) -> bool:
+    return dataclasses.replace(a, fresh=False) == dataclasses.replace(b, fresh=False)
+
+
 class TestGates:
     def test_ensure_caches_asserted(self) -> None:
         with cap.capture([cap.anthropic_body()]) as seen:
             first = cs.ensure_asserted(FALLBACK)
             again = cs.ensure_asserted(FALLBACK)
-        assert first is again and len(seen) == 1 and {r.via for r in seen.requests} == {"sync"}
+        assert first.fresh is True and again.fresh is False and first.record is not None
+        assert _same_but_fresh(first, again) and len(seen) == 1 and {r.via for r in seen.requests} == {"sync"}
 
     @pytest.mark.parametrize("response", [cap.error_body(402), cap.error_body(401)])
     def test_ensure_unavailable_is_not_cached(self, response) -> None:
@@ -106,7 +111,8 @@ class TestGates:
 
         with cap.capture([cap.anthropic_body()]) as seen:
             first, again = asyncio.run(go())
-        assert first is again and len(seen) == 1 and {r.via for r in seen.requests} == {"async"}
+        assert first.fresh is True and again.fresh is False
+        assert _same_but_fresh(first, again) and len(seen) == 1 and {r.via for r in seen.requests} == {"async"}
 
     def test_aensure_failing_probe_not_cached(self) -> None:
         async def go():
@@ -177,3 +183,80 @@ class TestGates:
         with pytest.raises(TransportError) as exc:
             cs.refuse_end_user_fail_over(True, "end_user")
         assert exc.value.kind == "refused" and exc.value.tag == "end_user_primary_only"
+
+
+def _asserted(role: str) -> cs.ColdStartResult:
+    return cs.ColdStartResult(role, "remaining_allowance", "asserted", None, "fake probe", True)
+
+
+class TestColdStartLock:
+    def _roots(self, tmp_path):
+        return cap.contracts_copy(tmp_path / "a"), cap.contracts_copy(tmp_path / "b")
+
+    def test_two_keys_probe_concurrently(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+        first_root, second_root = self._roots(tmp_path)
+        first_in, second_in, overlapped = threading.Event(), threading.Event(), []
+
+        def fake(role, *, credential_holder, root):
+            if root == first_root:
+                first_in.set()
+                overlapped.append(second_in.wait(timeout=5))
+            else:
+                second_in.set()
+            return _asserted(role)
+
+        monkeypatch.setattr(cs, "cold_start_check", fake)
+        worker = threading.Thread(target=cs.ensure_asserted, args=(FALLBACK,), kwargs={"root": first_root})
+        worker.start()
+        assert first_in.wait(timeout=5)
+        cs.ensure_asserted(FALLBACK, root=second_root)
+        worker.join(timeout=5)
+        assert overlapped == [True]
+
+    def test_one_key_probes_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[str] = []
+
+        def fake(role, *, credential_holder, root):
+            calls.append(role)
+            return _asserted(role)
+
+        monkeypatch.setattr(cs, "cold_start_check", fake)
+        results = [cs.ensure_asserted(FALLBACK) for _ in range(3)]
+        assert len(calls) == 1 and [r.fresh for r in results] == [True, False, False]
+
+    def test_two_keys_probe_concurrently_async(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+        first_root, second_root = self._roots(tmp_path)
+
+        async def go() -> list[bool]:
+            second_in = asyncio.Event()
+            overlapped: list[bool] = []
+
+            async def fake(role, *, credential_holder, root):
+                if root == first_root:
+                    await asyncio.wait_for(second_in.wait(), timeout=5)
+                    overlapped.append(True)
+                else:
+                    second_in.set()
+                return _asserted(role)
+
+            monkeypatch.setattr(cs, "acold_start_check", fake)
+            await asyncio.gather(
+                cs.aensure_asserted(FALLBACK, root=first_root), cs.aensure_asserted(FALLBACK, root=second_root)
+            )
+            return overlapped
+
+        assert asyncio.run(go()) == [True]
+
+    def test_one_key_probes_once_async(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[str] = []
+
+        async def fake(role, *, credential_holder, root):
+            calls.append(role)
+            return _asserted(role)
+
+        async def go() -> list[cs.ColdStartResult]:
+            return [await cs.aensure_asserted(FALLBACK) for _ in range(3)]
+
+        monkeypatch.setattr(cs, "acold_start_check", fake)
+        results = asyncio.run(go())
+        assert len(calls) == 1 and [r.fresh for r in results] == [True, False, False]

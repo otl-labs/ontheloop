@@ -26,6 +26,8 @@ def test_producer_identity_model_is_recorded() -> None:
         "agent-platform-session",
         "rec-4480",
         "rec-4420",
+        "telemetry-writer-principals.yaml",
+        "github_ci_persona_verdict",
     ):
         assert needle in note, needle
     assert any(entry["date"] == "2026-10-19" and entry["semantic_break"] is False for entry in tenant["amendment_log"])
@@ -35,4 +37,7 @@ def test_producer_identity_model_is_recorded() -> None:
         "github_ci_branch",
         "PlatformDev",
         "agent-platform-session",
+        "github_ci_persona_verdict",
     ]
+    registry = yaml.safe_load((_CONTRACTS / "telemetry-writer-principals.yaml").read_text(encoding="utf-8"))
+    assert list(registry["classes"]) == writer["contract"]["governance"]["principal_classes"]

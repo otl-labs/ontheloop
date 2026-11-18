@@ -200,7 +200,12 @@ class TestProductionGcRuleInvariants:
             "TelemetryCatalogDataReadWriteDelete",
             "TelemetryCatalogDataList",
             "CloudWatchMetrics",
+            "CloudWatchMetricReads",
         ], f"maintenance role IAM Sid set changed -- gc_ops must not widen it: {sids}"
+        reads = policy_block[policy_block.index('"CloudWatchMetricReads"') :]
+        assert re.findall(r'"(cloudwatch:\w+)"', reads) == ["cloudwatch:GetMetricStatistics"], (
+            "the backlog gate's read statement grants only GetMetricStatistics (PLAN-telemetry-read-timeouts)"
+        )
         telemetry = policy_block[
             policy_block.index('"TelemetryCatalogDataReadWriteDelete"') : policy_block.index('"CloudWatchMetrics"')
         ]

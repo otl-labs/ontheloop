@@ -37,9 +37,14 @@ import logging
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
+
+from scripts.ci_rca.fingerprint import FULL_TIER_SIBLING_SLUGS, compute_fingerprint_v2
 
 logger = logging.getLogger(__name__)
+
+SIBLING_FILE = "sibling-fingerprints.txt"
+Entry = Union[str, list[str]]
 
 FinderFn = Callable[[str], Optional[str]]
 BumperFn = Callable[[str], None]
@@ -91,8 +96,34 @@ def _default_closed_head_resolver(fingerprint: str, profile: Optional[str] = Non
     return classify_closed_head(current_commit_sha(), head)
 
 
+def sibling_fingerprints(bundle: dict) -> list[str]:
+    """The bundle's own fingerprint, then (for a full-tier sibling slug) its v2 fingerprint under each other sibling.
+
+    Decision 142 cl.1 keeps the fingerprint itself unchanged; a bundle missing its fingerprint yields [], and one
+    missing workflow_name, failure_category or error_signature is looked up on its own fingerprint only.
+    """
+    own = str(bundle.get("fingerprint") or "")
+    if not own:
+        return []
+    name, category, signature = (str(bundle.get(k) or "") for k in ("workflow_name", "failure_category", "error_signature"))
+    if not (name and category and signature):
+        return [own]
+    from scripts.ci_rca.evidence._bundle_core import _slugify_workflow  # noqa: PLC0415
+
+    slug = _slugify_workflow(name)
+    if slug not in FULL_TIER_SIBLING_SLUGS:
+        return [own]
+    out = [own]
+    for other in FULL_TIER_SIBLING_SLUGS:
+        if other != slug:
+            fp = compute_fingerprint_v2(other, category, signature)
+            if fp not in out:
+                out.append(fp)
+    return out
+
+
 def decide(
-    fingerprints: list[str],
+    fingerprints: list[Entry],
     *,
     force_rca: bool = False,
     finder: Optional[FinderFn] = None,
@@ -139,29 +170,33 @@ def decide(
 
     verdicts: list[BundleVerdict] = []
     any_novel = False
-    for fp in fingerprints:
+    for entry in fingerprints:
+        fps = [entry] if isinstance(entry, str) else list(entry)
+        fp = fps[0] if fps else ""
         if not fp:
             verdicts.append(BundleVerdict(fingerprint=fp, matched_rec_id=None, run_agent=True))
             any_novel = True
             continue
-        rec_id = resolved_finder(fp)
+        rec_id = next((found for found in (resolved_finder(f) for f in fps) if found), None)
         if rec_id:
             resolved_bumper(rec_id)
             verdicts.append(BundleVerdict(fingerprint=fp, matched_rec_id=rec_id, run_agent=False))
             continue
-        if closed_head_resolver is not None and closed_head_resolver(fp) == "drop":
-            # Closed head, ancestry-proven stale-code rerun: skip the agent, never bump, never
-            # reopen (a closed head is never mutated).
-            verdicts.append(BundleVerdict(fingerprint=fp, matched_rec_id=None, run_agent=False))
-            continue
+        if closed_head_resolver is not None:
+            readings = [closed_head_resolver(f) for f in fps]
+            if "drop" in readings and "regression" not in readings:
+                # Closed head, ancestry-proven stale-code rerun: skip the agent, never bump, never
+                # reopen (a closed head is never mutated). Any regression reading runs the agent.
+                verdicts.append(BundleVerdict(fingerprint=fp, matched_rec_id=None, run_agent=False))
+                continue
         verdicts.append(BundleVerdict(fingerprint=fp, matched_rec_id=None, run_agent=True))
         any_novel = True
 
     return DedupResult(run_agent=any_novel, verdicts=verdicts)
 
 
-def _load_fingerprints(bundles_dir: Path) -> list[str]:
-    fingerprints: list[str] = []
+def _load_fingerprints(bundles_dir: Path) -> list[Entry]:
+    fingerprints: list[Entry] = []
     for f in sorted(bundles_dir.glob("*.json")):
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
@@ -169,8 +204,17 @@ def _load_fingerprints(bundles_dir: Path) -> list[str]:
             logger.warning("Could not parse bundle %s: %s", f, exc)
             fingerprints.append("")
             continue
-        fingerprints.append(str(data.get("fingerprint") or ""))
+        fps = sibling_fingerprints(data)
+        fingerprints.append(fps[0] if len(fps) == 1 else fps or "")
     return fingerprints
+
+
+def _write_sibling_file(bundles_dir: Path, fingerprints: list[Entry]) -> None:
+    lines = [e if isinstance(e, str) else " ".join(e) for e in fingerprints if e]
+    try:
+        (bundles_dir / SIBLING_FILE).write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Could not write %s: %s", SIBLING_FILE, exc)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -181,6 +225,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     fingerprints = _load_fingerprints(args.bundles_dir) if args.bundles_dir.exists() else []
+    if args.bundles_dir.exists():
+        _write_sibling_file(args.bundles_dir, fingerprints)
     result = decide(
         fingerprints,
         force_rca=args.force_rca,

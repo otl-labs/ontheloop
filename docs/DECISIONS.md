@@ -2,6 +2,265 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 274: Decision 133's allocation of the operator's build capacity is retired with no successor rule -- this repository holds only On The Loop's source, so each adopter product sets its own order in the monorepo that holds it (supersedes Decision 133) (Decided)
+
+```yaml
+number: 274
+status: Decided
+decided_date: "2026-11-18"
+supersedes: [133]
+kind:
+  value: direction
+  justification: >-
+    Clause 1 removes a standing allocation of the operator's build capacity, the goal-level commitment Decision 133
+    made; undoing it would restore that allocation and its review.
+significance:
+  value: numbered_decision
+  justification: >-
+    It retires a ratified, reversal-conditioned allocation and its monitored stanza, and names where sequencing now
+    sits. Not amendment_forms (considered): a note cannot retire a Decision (Decision 247). Not a contract note
+    (considered): no contract owns build-capacity allocation, and decision-entry.yaml's work_item row orders work, it
+    does not retire a ratified allocation. Not a stub pointing at Decision 178 (considered): 178 never names 133, so it
+    fails compaction's subsumption test.
+```
+
+**Status:** Decided
+**Date:** 2026-11-18
+**Warehouse ID:** dec-274 (per Decision 84 backfill)
+
+**Problem:** Decision 133 (2026-07-16) gave the sole operator's build capacity to this repository's work rather than
+interleave a manual paper-trading loop for the trading adopter product, while the Decision 93 MVP boundary stayed open,
+with a review due 2026-09-30. The review passed with the boundary still open, and the condition monitor has shown it as
+due in every session since. Its premises have left: under Decision 178 (2026-08-27) this repository holds only On The
+Loop's source, docs/ROADMAP-PRODUCT.yaml was removed, CD.3 retired and T2.6 reserved; Decisions 209 and 220 put the
+trading adopter product in the private monorepo and the first showcase in the public monorepo for open-code adopter products (Decision 220
+keeps only the showcase's purpose and selection rationale here).
+
+**Intent:** No standing rule splits the operator's build capacity between On The Loop and its adopter products; each
+is ordered where its work lives.
+
+**Decision:**
+1. **Retirement.** Decision 133's allocation is retired with no successor rule. Work in this repository is ordered by
+   its roadmap and recs through the planning workflow (decision-entry.yaml significance.routing.work_item). The trading
+   adopter product and the first showcase set their own order in the monorepos that hold them (Decision 209
+   clause 3; Decision 220 clause 1).
+2. **Clauses accounted for.** Decision 133's examined paper-loop alternative and its telemetry correction (SEQ-03) are
+   analysis with no live clause. Its CD.3 / T2.6 disposition was discharged when both left this repository
+   (2026-08-26). Its conditions (a), (c) and (d) lapse with it, including (a)'s mandatory activation decision for an
+   adopter product at MVP close. Decision 93's sentence on dormant cross-roadmap edges cites Decision 133's conditions
+   and has no live subject; a dated note there says so.
+3. **Reopen trigger.** If an adopter product's code or roadmap moves into this repository, or the operator wants a
+   standing split of build capacity between this repository and an adopter product, a new Decision decides it via
+   /plan. No reversal stanza: a record that sets no rule has nothing to review.
+
+**Related:** Decision 133 (superseded; compacted to a stub), 93 (dated note), 178, 209, 220, 149, 177, 247 (the
+supersede-and-compact precedent), 240.
+
+---
+
+## Decision 273: The verdict GitHub App's key lives in one SSM /secret/ parameter that only the post job's own role reads, and the CI apply boundary refuses that read to every other carrier -- an accepted residual against Decision 143 clause 1 (amends Decisions 258 and 270) (Decided)
+
+```yaml
+number: 273
+status: Decided
+decided_date: "2026-11-18"
+kind:
+  value: direction
+  justification: >-
+    Clause 5 accepts a merge-gating credential held inside the agent merge loop, an exception to Decision 143 cl.1,
+    and clause 6 re-decides where a boundary fence lives; clauses 1-4 are the means.
+amends: [258, 270]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable and reversal-relevant: the custody of what Decision 271 calls the persona verdicts' trust root, a new
+    credential path, a boundary Deny and a moved trigger. Not a project-configuration or inventory row, which record
+    a home and an owner, never a Deny or a residual. Not amendment_forms on 263 or 271: neither holds this role or lock.
+```
+
+**Status:** Decided
+**Date:** 2026-11-18
+**Warehouse ID:** dec-273 (per Decision 84 backfill)
+
+**Problem:** Whoever reads the verdict App's private key can pass the persona leg of the agent merge gate (Decision 271 cl.5), and Decision 271's dated Update leaves the App, its key home and its reader to PLAN-persona-verdict-app-grant. An in-budget inline-policy update in terraform/personal auto-applies after an agent merge (Decision 92 pt 5), so a grant naming the key's ARN would add a reader unattended.
+
+**Decision:**
+1. App. An organisation-owned GitHub App with Checks write and Metadata read only, no webhook, installed on this repository only, created by the operator. Its ids and the token mint are PLAN-persona-verdict-app-post's.
+2. Key home. The private key lives only in the SSM SecureString /secret/agent-platform-persona-verdict-app-key, put by the operator (Decision 237 cl.3), never in an Actions or Environment secret: an accepted exception to Decision 224 cl.2, as Decision 263 cl.3 is.
+3. Reader. The role agent-platform-github-ci-persona-verdict-app carries the CI apply boundary and one StringEquals trust statement: the audience, the persona-verdict-app Environment's subject in each repository form and job_workflow_ref persona-verdict.yml at refs/heads/main (the Decision 263 cl.2 shape). Its one grant is ssm:GetParameter on the key by literal ARN. The Environment admits main only, has no reviewers, allows no admin bypass and is never destroyed; only that workflow's post job may name it, so no model-running job can assume the role (the operator's 2026-11-17 ruling). PlatformAdmin keeps its /secret/ admin read (Decision 237 cl.2).
+4. Lock. The CI apply boundary's DenyVerdictAppKeyRead refuses every carrier but that role, by aws:PrincipalArn, the value reads of the key and by-path reads of its ancestors. The boundary is in the protected set (Decision 257 cl.3), outside the agent merge loop.
+5. Accepted residual against Decision 143 cl.1. persona-verdict.yml and the post job's code are agent-mergeable: a merged change to that job can post any persona verdict, and a role replace waits only for the gated apply's approval (an in-place trust edit is an admin split-apply, Decision 223 cl.4). Accepted, forged verdicts included, in Decision 267 cl.5's preventive half only (the operator chose prevention on 2026-11-18; rec-5363 tracks a sensor): the token holds checks: write only, so it approves no deployment and changes no setting, and clause 4 shuts the IAM door a Decision 248 cl.5 resource policy would. PLAN-persona-verdict-app-post's first run proves the token cannot approve a pending deployment (Decision 248 cl.8).
+6. Trigger (amends Decision 270 cl.5). The operator re-decided on 2026-11-18 that this fence lives in the boundary. Decisions 230 and 239's headroom conditions fire when the minified PROD rendering passes its size with this Deny, as the build landing this entry measures it; SIT's on the same growth. Decision 258 cl.1 and cl.3 stand. SIT holds no key (Decision 252).
+7. Coverage (Decision 181 cl.2). Clauses 2-4: tests/checks/iam_tf/test_persona_verdict_app_role.py and validate_secret_parameter_grants; clause 6: the boundary's byte pin; clause 1: the operator's settings read-back. The live assume, a refusal outside the Environment and the probe are app-post's, unproven until then. Residuals: clause 5, unsensed; PlatformAdmin's read.
+
+**Rationale:** One home, one declared reader, as Decisions 263 and 267. The Deny stops a second reader before any read; a CloudTrail alarm fires after the key has left and needs the actor filter Decision 202 cl.6 forbids.
+
+**Options considered:** Secrets Manager under a resource policy (Decision 248 cl.5), the IAM door clause 4 shuts at the cost of a second store and a protected-set role, the post job still open; a repository test alone, which agents can edit.
+
+```yaml reversal-conditions
+decision: 273
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: probe-approves
+    kind: manual
+    description: "The App's token approves a pending deployment: move the key to the Decision 248 cl.5 form and re-decide clause 5."
+  - id: key-exposed
+    kind: manual
+    description: "A principal other than the role or PlatformAdmin reads the key, or a check run the chain did not post carries the App: the operator makes a new key in the App's settings, puts it, deletes the old one, and clauses 3-5 are re-decided."
+  - id: workflow-lock-available
+    kind: manual
+    description: "A change to persona-verdict.yml or the post job's code needs the operator's merge (rec-4624, rec-2827): re-decide clause 5."
+  - id: boundary-headroom
+    kind: manual
+    description: "The boundary's minified PROD rendering passes clause 6's size: re-decide where the fences live."
+  - id: secret-scp
+    kind: manual
+    description: "Decision 252 cl.8's /secret/* SCP lands: move clause 4 into it."
+```
+
+**Related:** Decisions 92, 143, 144, 202, 223, 224, 230, 237, 239, 248, 252, 257, 258, 263, 267, 270, 271; T4.2, T4.32; rec-2827, rec-4624, rec-5271, rec-5363.
+
+---
+
+## Decision 271: A persona verdict check counts only when the dedicated verdict GitHub App posted it -- the merge gate pins persona checks to the App id read from origin/main and ignores same-named runs from any other source (amends Decisions 264 and 205) (Decided)
+
+```yaml
+number: 271
+status: Decided
+decided_date: "2026-11-17"
+kind:
+  value: direction
+  justification: >-
+    Clause 1 changes what the merge gate accepts as a persona verdict and clause 3 adds a refusal only the operator
+    can release, which moves a gate; undone, any branch workflow passes the persona leg.
+amends: [264, 205]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable, reversal-relevant: the trust rule for every persona verdict and the verdict identity every later
+    persona plan builds on. Not a project-configuration.yaml or ports.yaml note: a contract records a row and a
+    coupling, not the authority to refuse a merge (Decision 264's rejected home). Not amendment_forms on Decision
+    264: it also changes Decision 205 clause 2's verdict identity, and a dated note amends one body only.
+```
+
+**Status:** Decided
+**Date:** 2026-11-17
+**Warehouse ID:** dec-271 (per Decision 84 backfill)
+
+**Problem:** Decision 264 clauses 1 and 4 accept a persona check as the newest check run by the GitHub Actions app. Any workflow on an in-repo branch whose token holds checks: write runs as that app and can post a run with a persona's name and conclusion success on any head (rec-5241), so once a persona's row reads actions an agent could pass the persona leg without the persona running. The verdict chain posts its check through the Checks API from a workflow_run run whose own check suite is on main's commit, so nothing about a check run's suite ties it to the chain.
+
+**Intent:** A persona verdict counts only when the verdict chain on main posted it.
+
+**Decision:**
+1. **Verdict App pin.** For a check named persona-verdict/<persona>, the merge gate counts only check runs whose app id equals the gates.verdict_app.app_id row of docs/contracts/project-configuration.yaml on origin/main, read with the persona rows; Decision 264 clause 1's rules then apply to the newest such run. Required checks that are not persona checks keep clause 1's GitHub Actions rule. The app id is on the check runs the gate already reads, so no read is added.
+2. **Same-named runs from another source.** A persona-named run from any other app, the GitHub Actions app included, is ignored for the verdict and is never a refusal on its own, so a branch pusher can neither pass nor wedge an agent merge with one. Tracing and removing each such run is rec-5271.
+3. **Fail closed.** While the row is empty, absent or unreadable on origin/main, a persona check an actions row adds refuses (Decision 264 clause 3), and a PR head whose row does not read refuses. An agent merge of a pull request whose own change alters the row's value, adding or removing it included, is refused, so the operator merges it in the GitHub UI (the Decision 264 clause 5 pattern).
+4. **Verdict identity (amends Decision 205 clause 2).** On Actions too, the verdict check run is created under the dedicated verdict App, not the job's GITHUB_TOKEN; the executor App still holds no checks: write. The App, its key home, the role that reads the key and the post job's token mint belong to PLAN-persona-verdict-egress, under its own Decision, which widens Decision 263 clause 2's grant list and records the key-custody residual in the Decision 267 clause 5 form. Until then the row stays empty, so a persona row switched to actions refuses every agent merge of its class.
+5. **Coverage (Decision 181 cl.2).** Clauses 1-3: the merge gate and its hook tests (rec-5241). Clause 4: PLAN-persona-verdict-egress, a residual until built. Residuals: any principal that can read the App key can post as the App, so the key's custody is the trust root; GitHub UI merges and the ruleset, which require no persona check until rec-4624, which should require them from the App; persona-named runs from other sources are ignored but not yet reported (rec-5271). docs/contracts/ports.yaml PC-10 records the gate's coupling.
+
+**Rationale:** A dedicated App rather than a pointer the gate verifies: only the App's key can create its check runs, the pin costs no read at merge time, and the ruleset can later require the same App, which also covers operator UI merges. Rejected: rec-5241's check-suite predicate (the chain's suite is on main's commit, so it would refuse every genuine verdict); a check run naming its workflow run, verified through public run data (about two more reads per persona, a redesign of the post job, nothing for the ruleset); signed attestations (a signature verifier inside a fail-closed hook); refusing any foreign same-named run (a free wedge on agent merges for anyone who can push a branch).
+
+```yaml reversal-conditions
+decision: 271
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan; never add an agent override"
+conditions:
+  - id: app-key-exposed
+    kind: manual
+    description: "A principal outside the egress plan's declared readers reads the App key, or a check run the verdict chain did not post carries the App: rotate the key and re-decide clause 1."
+  - id: native-pin-available
+    kind: manual
+    description: "rec-4624 lets the ruleset require the persona checks from the App: retire the clauses GitHub then enforces."
+  - id: foreign-runs-recur
+    kind: manual
+    description: "rec-5271 records repeated persona-named runs from other sources: re-decide clause 2 (refuse rather than ignore)."
+```
+
+**Related:** Decisions 83, 143, 181, 203, 205, 212, 224, 229, 237, 245, 263, 264, 267; T4.2, T4.32; rec-4624, rec-5241, rec-5271.
+
+> **Update (2026-11-17):** PLAN-persona-verdict-egress re-cut T4.32's egress hint into five plans, and the operator ruled on 2026-11-17 that the verdict App's key gets its own Environment and role. So "PLAN-persona-verdict-egress" in clause 4 and the Coverage line reads as two plans: PLAN-persona-verdict-app-grant holds the App, its key home and the role that reads the key (a separate role, used only by the post job, under its own Decision in the Decision 267 clause 5 form, so Decision 263 clause 2's grant list does not widen), and PLAN-persona-verdict-app-post holds the post job's token mint; the app-key-exposed reversal's "the egress plan's declared readers" reads as PLAN-persona-verdict-app-grant's declared readers, and the gates.verdict_app.app_id row's note in docs/contracts/project-configuration.yaml reads the same way (rec-5351).
+
+---
+
+## Decision 272: The telemetry content reader's deploy channel asks the operator only when the reader's protective code changes (amends Decision 249 clause 2) (Decided)
+
+```yaml
+number: 272
+status: Decided
+decided_date: "2026-11-17"
+kind:
+  value: direction
+  justification: >-
+    Yes: clause 1 sets which changes reach the content reader only through an operator approval and which wait for the
+    next one, a standing rule on what production runs; undone, every bundled change asks the operator again.
+amends: [249]
+serves: [NS.9]
+significance:
+  value: numbered_decision
+  justification: >-
+    It narrows Decision 249 cl.2 for one channel, and 249's own envelope says an annotation cannot change a ratified
+    clause's meaning; build-lambda.yaml's deploy_channels row (considered) records the channel's mechanism, not which
+    changes may wait for the operator.
+```
+
+**Status:** Decided
+**Date:** 2026-11-17
+**Warehouse ID:** dec-272 (per Decision 84 backfill)
+
+**Problem:** Decision 239 cl.5 lets only an operator-approved job change the content reader, and Decision 249 cl.2
+ships every queued change with the next green commit. The reader bundles about 45 files, most of them shared DuckLake
+modules that 29 commits touched in the month to 2026-11-17, so the operator would approve a deploy about once a day;
+an approval given near-always stops telling anything apart (NS.9).
+
+**Intent:** The operator approves a content reader deploy only when the code that protects transcript text changes,
+and every approval names everything that ships.
+
+**Decision:**
+1. **Watched set (amends 249 cl.2 for this channel).** deploy-telemetry-content.yml deploys the last-green commit
+   (Decision 254 cl.5) only when the reader's protective set changed since its deployed commit: the reader's package,
+   its deploy_config.json included, src/common/ducklake_content_read_verbs.py and src/sensitive_values. Its other
+   bundled files ship with the next deploy the operator approves, and a workflow_dispatch redeploys on demand (249
+   cl.4). The approval screen leads with what ships and its evidence (the green run, the built digest, the hold state,
+   the layer pins), then lists every bundled or build-tooling commit going out, counted from the deployed commit only
+   once that commit is shown to build the live code. A drift sensor built for this channel watches the same set; none
+   is wired yet.
+2. **Record and pins.** agent-platform-github-ci-deploy writes the channel's deploy record after the gated job, from
+   that job's read-back, so the locked role keeps Decision 270 cl.2's grant. deploy_config.json pins each layer's
+   version and CodeSha256, and the gated job re-verifies them before it deploys.
+
+**Rationale:** The approval is the one step an agent holding the operator's GitHub identity cannot take for itself
+(Decision 239), so it should fall where a refusal is plausible: masking, the access line, the served verbs and the
+reader's settings. Shared modules still reach production only inside an approved deploy that lists them. Rejected
+(operator, 2026-11-17): asking on every bundled change (daily approvals), dropping the approval (reverses 239 cl.5),
+and a record write by the locked role (amends 270 cl.2 and needs a CloudShell apply).
+
+**Coverage (Decision 181 cl.2):** cl.1 -- validate_content_reader_lock, tests/ci/test_deploy_gate.py and the
+summary tests in tests/ci/test_telemetry_content_deploy_script.py; cl.2 -- that script's deploy tests and
+tests/checks/iam_tf/test_ci_deploy_record_prefixes.py. Residuals: a shared module waits for the next approval and the
+reader runs older shared code meanwhile (accepted); a plan touching only the shared modules still owes Decision 79's
+deploy step until rec-5333 decides the operator-gated case; the layers are CI-published, so a pin proves which bytes
+run, not who built them (rec-4742), and a layer republish can delete a pinned version (rec-4738); the protected-path
+edit hook and the golden replay's masked read-back are owed by rec-5322 (239 cl.5); Decision 267's lock-available
+condition fires, and rec-5323 re-decides its clause 5.
+
+```yaml reversal-conditions
+decision: 272
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: stale-shared-code
+    kind: manual
+    description: "A content read fails because the reader runs older shared code than main: re-decide clause 1's watched set."
+  - id: codeowners-binds
+    kind: manual
+    description: "rec-2827 closes: re-decide whether the approval still needs a narrowed set."
+```
+
+**Related:** Decisions 79, 125, 126, 154, 238, 239, 249, 254, 267, 270.
+
+---
+
 ## Decision 270: The telemetry content reader is reached through a fifth DuckLake API route, and its change lock lives in the CI apply boundary, paid for by prefix-named URL-only Denies (amends Decisions 144, 202, 213, 230, 239, 255, 256, 257 and 258) (Decided)
 
 ```yaml
@@ -87,6 +346,8 @@ conditions:
 ```
 
 **Related:** Decisions 101, 126, 143, 154, 172, 177, 181, 202, 223, 236, 237, 238, 246, 248.
+
+> **Amended by Decision 273 (2026-11-18):** Clause 5's size reads as the boundary's minified PROD rendering with Decision 273's DenyVerdictAppKeyRead, as the build that lands that entry measures it; the operator re-decided on 2026-11-18 that the new fence also lives in the boundary.
 
 ---
 
@@ -484,6 +745,8 @@ conditions:
 
 **Related:** Decisions 73, 76, 83, 89, 100, 163, 181, 203, 205, 212, 217, 224, 229, 234, 245, 246; T4.32; rec-2827, rec-4080, rec-4085, rec-4087, rec-4624, rec-4874, rec-4891.
 
+> **Amended by Decision 271 (2026-11-17):** Clauses 1 and 4 count a persona check only from the verdict App that gates.verdict_app.app_id names on origin/main, ignoring same-named runs from any other source, and an agent merge changing that row is refused. Clause 6's residual for a workflow posting a run named like a persona check narrows to custody of the App's key.
+
 ---
 
 ## Decision 263: The verdict personas' GitHub jobs read their inference keys from SSM under one role that only main's persona-verdict.yml in the persona-verdict Environment can assume -- an accepted exception to the Actions-secret CI home (Decided)
@@ -544,6 +807,8 @@ conditions:
 ```
 
 **Related:** Decisions 144, 172, 205, 212, 213, 223, 224, 237, 238, 248, 252; T4.32.
+
+> **Update (2026-11-17):** "The verdict-jobs plan" in clause 4 and the Coverage line reads as the PLAN-persona-verdict-* plans of T4.32's decomposition_hints. PLAN-persona-verdict-egress records clause 4's coupling as ports.yaml PC-12, and the telemetry writer principal registry (docs/contracts/telemetry-writer-principals.yaml, rec-4420) holds this role's principal row. PLAN-persona-verdict-first-key-read is to prove the live assume and decryption under the role, and that a job holding id-token: write without the Environment is refused; a pull_request job's refusal stays with the fixture run (T4.32 c3). The verdict App's key is to be read by a separate role in its own Environment under PLAN-persona-verdict-app-grant's own Decision (the operator's 2026-11-17 ruling), so this role's grant list does not change.
 
 ---
 
@@ -666,6 +931,8 @@ conditions:
 
 > **Amended by Decision 270 (2026-11-17):** The operator re-decided under clause 3: every fence stays in the boundary, the URL-only Denies use prefix names, and clause 2's trigger size becomes 5427 bytes. Clauses 1 and 3 stand.
 
+> **Amended by Decision 273 (2026-11-18):** The operator re-decided under clause 3 on 2026-11-18: the verdict App key's Deny also lives in the boundary, and clause 2's trigger size becomes Decision 273 cl.6's. Clauses 1 and 3 stand.
+
 ---
 
 ## Decision 257: terraform/bootstrap is CI-applied behind one operator approval; its protected set and root of trust stay the operator's (amends Decisions 92, 126, 144, 223, 225 and 238) (Decided)
@@ -780,6 +1047,13 @@ conditions:
 > policies; other AWS-managed attachments, documents and trusts unknown until apply, IAM group policies, resource
 > policies (the API route, App key and trail policies) and policy blocks inside a role are not checked; a trust is
 > checked for public access only.
+
+> **Update (2026-11-17):** CheckNoPublicAccess rejects a trust statement whose principal is a federated OIDC
+> provider (the GitHub Actions roles), so the analyzer checks each federated statement other than SAML by its own
+> rule: one that allows access refuses the run unless it names only OIDC providers of the account and pins its sub
+> condition to exact repository subjects, with no wildcard or policy variable. The document's other statements
+> still go to Access Analyzer. Which repository a subject names is not checked; 'a trust is checked for public
+> access only' stands for every other trust statement.
 
 > **Amended by Decision 270 (2026-11-17):** Clause 3's protected set gains the telemetry-content-* roles and their policies: bootstrap-apply's DenyProtectedRoleWrite and the apply classifier name role/telemetry-content-*, and bootstrap-apply holds no Lambda write on the content function.
 
@@ -1452,6 +1726,8 @@ conditions:
 **Related:** Decisions 24, 55, 73, 77, 125, 126, 166, 181, 205, 226, 236, 239, 245; rec-4874, rec-4912.
 
 > **Amended by Decision 254 (2026-11-12):** Decision 254 fires canary-model-decided and re-scopes clause 2: the green signal becomes the last-green ref, the newest first-parent main commit whose own run passed the full tier, which under batching is a batch head, and clause 4's "newest green commit" reads the same. Clauses 3 and 5 hold (Decision 254 cl.2, cl.5).
+
+> **Amended by Decision 272 (2026-11-17):** For the telemetry content reader's channel only, clause 2's watched paths are the reader's protective set; its other bundled files ship with the next deploy the operator approves (Decision 272 cl.1).
 
 > **Update (2026-11-10):** Decision 252 fires the tier-stood-up condition ahead of the tier and replaces the green-streak train that clause 1 calls future state (see the note on Decision 73): the PROD promotion item re-decides clause 1. Until then clause 2 holds, and SIT deploys keep it (Decision 252 cl.6).
 
@@ -2481,6 +2757,8 @@ conditions:
 **Related:** Decisions 230, 81, 91, 199, 200 (amended), 143, 188, 192, 209, 213, 216, 88, 181, 177.
 
 [Amendment 2026-10-29, Decision 239: cl.3's content consumer exists; agents read production transcript text masked, only through the telemetry content reader; cl.2 and cl.6 count two production telemetry readers, so the closed read boundary is three readers.]
+
+[Amendment 2026-11-17, PLAN-telemetry-read-timeouts: cl.5's every-6h merge_ops on the production telemetry catalog stays as the floor, and a backlog-gated pass is added, as Decision 88 cl.1(iii) sizes cadence to write rate: a rule ticks every two to six minutes, never in the three minutes up to another maintenance job's start, reads CloudWatch only, and merges when at least 60 telemetry commits have landed since the last pass or a commit has waited 30 minutes; a gate that cannot read its metrics skips and alarms. Each telemetry write lands as its own small files, and on every busy day the 6-hour backlog pushed cold reads of the newest days past the reader's deadline (rec-5247, rec-5248). The weekly guarded gc_ops, the guards and every existing alarm are unchanged.]
 
 ---
 
@@ -4532,6 +4810,8 @@ conditions:
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
 > **Amended by Decision 254 (2026-11-12):** Clause 5's plans-only test reads the batch range prev..head, never the head commit alone, so a batch holding any non-plans commit runs the full tier (Decision 254 cl.1).
+
+> **Amended by Decision 271 (2026-11-17):** Clause 2's verdict identity on Actions is the dedicated verdict App, not the job's GITHUB_TOKEN; the merge gate counts a persona check only from that App (Decision 271 cl.1, cl.4).
 
 ---
 
@@ -9450,57 +9730,12 @@ Ratifies the `ratify-prose-with-size-governance` disposition of the decisions-au
 
 ## Decision 133: Platform-first sequencing of build capacity (ratified with reversal conditions) (Decided)
 
-**Status:** Decided
+**Status:** Superseded
 **Date:** 2026-07-16
-**Warehouse ID:** dec-133 (keyed on the decision number; synced to ops_decisions via `ops_data_portal --backfill-decisions-md` post-merge, per Decision 84)
 
-**Problem:**
-All of the sole operator's build capacity flows to the platform plane under a "platform-first" directive that, until now, existed nowhere as a ratified decision. The audit `audits/platform-first-sequencing-f4dec93.yaml` (executive summary `audits/platform-first-sequencing-f4dec93.md`) census found 41 citations of the frame and ZERO ratify-class artifacts: the frame was cited as a given by Decision 93 ("per the platform-first directive", twice) and recorded only as a user steer in one plan's scoping fields (`docs/plans/PLAN-platform-mvp-boundary.yaml:17`, restated `:146`, ~2026-06-20). None of the live Decision headers ratified plane sequencing; no alternative was recorded as examined; the only end-condition language was circular ("until product work begins" / "revisited when the product roadmap is activated" / T2.6 "when product formula-discovery work begins"). This is the system's single most consequential standing allocation carried as an inherited premise while materially smaller choices (file formats, provider routing, size ceilings) carry full ratification + reversal machinery (SEQ-01).
+**Decision:** Superseded by Decision 274, which retires this entry's allocation of the operator's build capacity with no successor rule after its review fell due on 2026-09-30 (rec-5273); its premises left this repository with Decision 178. Kept live rather than archived because scripts/preflight/decision_conditions.py, scripts/checks/ops_governance/validate_reversal_stanzas.py and their tests still cite "Decision 133" by name (Decision 146's still-cited-live carve-out; compacted under docs/contracts/decision-entry.yaml's `compaction:` section).
 
-**Decision:**
-Ratify platform-first sequencing of build capacity as a CONSCIOUS, reversal-conditioned choice: while the platform-MVP boundary (Decision 93) is open, the sole operator's build capacity is sequenced to the platform plane rather than interleaved with a manual product/paper trading loop. This is a governance-record change ONLY -- it reallocates no build capacity, changes no code or infra, and leaves `docs/ROADMAP-PRODUCT.yaml` at `status: draft`. The allocation is held for a recorded reason (below), not by inheritance, and is bounded by the observable reversal/review conditions in the stanza below -- it is never silently renewed.
-
-**Frame provenance (conscious choice, not agent inertia):**
-The frame is a conscious human steer, dated ~2026-06-20 in `docs/plans/PLAN-platform-mvp-boundary.yaml:17` (restated `:146`) as "the user's 'complete the full platform first' directive", and cited-as-given in Decision 93 (the two "per the platform-first directive" lines). The pivot transcript settles the ARCHITECTURAL platform/product plane SEPARATION (contracts, sibling roadmaps, validation lenses) but never weighs build-capacity TIMING between the planes -- so the sequencing rationale was genuinely absent from the record, not merely unindexed. The stronger "frame-locked" reading (Decision 75) was examined and REJECTED: the operator consciously restated the steer in a dated artifact and the owned /audit chain re-asked the question, so Decision 75's "silently constrains, nobody re-asks" limb does not hold. This Decision is the Decision-75-mandated conversion of an inherited, cited-as-given premise into a conscious, reversal-conditioned choice.
-
-**Examined alternative (the interleaved manual/paper L1+L3 loop):**
-The alternative -- interleaving platform work with a manual paper-trading loop today -- is FEASIBLE (human operations bypass every absent code surface: the operator is the broker adapter, order lifecycle, and reconciliation loop, over a production-grade data plane) but HIGH-COST in the binding resource (the sole operator's attention). Costed in operator units (audit Q2): one-time setup ~20-40 hours (paper brokerage account, daily signal-extraction path, sizing rule, pre-registered promotion criteria, logging/reconciliation runbook); recurring ~2-5 hours/week of market-hours-coupled, interrupt-driven attention sustained >= 13 weeks; calendar >= one quarter before promotion-grade evidence. The load-bearing qualifier: an honest ALPHA-premise test needs a discovered-formula artifact, and the discovery substrate is parked (CD.3 pending, T2.6 deferred_post_mvp) -- without a formula artifact the loop exercises operations plumbing, not the edge.
-
-**Corrected value model (SEQ-03 -- telemetry category separation):**
-The interleave's strongest stated payoff -- "real trading telemetry feeding the T2.36/T3.x chain" -- is a CATEGORY ERROR. The Decision-95 telemetry chain (T2.36 relands the agent-telemetry write path; T3.20 captures agent turns) is the session-rooted AGENT trace/observation model; a manual paper loop does not feed the Decision-95 agent-telemetry chain (it emits none of it). Paper-trading data would land in PRODUCT tables (strategy_runs, tca_events, fills) that `current_state` lists as ABSENT (the Decision-78 / Decision-95-97 ops/telemetry vs product-table split makes this literal) -- so "real telemetry sooner" does not hold, and building those product tables early IS the resequencing decision, circularly. Net (audit Q3): on the corrected value model the interleave's headline payoff evaporates, the near-term platform critical path (T2.26 -> T2.36 -> T3.2 -> T3.3) is dual-use substrate the product's evaluation funnel needs later, and reversal stays operationally ~free -- so sequencing is favored, CONDITIONALLY on the triggers below. Full costing and category analysis: `audits/platform-first-sequencing-f4dec93.yaml` (Q2/Q3, findings SEQ-03/SEQ-04).
-
-**CD.3 / T2.6 disposition (SEQ-04 -- alpha-premise test path):**
-CD.3 (compute node for PySR formula discovery) is DEFERRED, gated on the named reversal conditions below -- specifically alpha-readiness (c) and platform-MVP close (a). No compute-node stand-up date is committed and no substitute discovery substrate is named; the PySR discovery substrate and T2.6 stay parked. CD.3's re-entry trigger BECOMES condition (c): a candidate PySR formula artifact passing the research bar. This de-circularizes the prior note (T2.6 reactivating "when product formula-discovery work begins", an event nothing defined): T2.6's reactivation clause and Decision 93's product-edge language are re-pointed at the named conditions in this same change. This keeps CD.3 DEFERRED (not ratified), so the Decision-105 candidate-decision ratified-shape / R1-R3 guard is not engaged.
-
-**Rationale:**
-The audit's core result is an asymmetry the ratify-with-conditions disposition uniquely banks: the frame is, on present evidence, the right allocation held for the wrong reason (by inheritance rather than by record). The affirmative case survives adversarial tracing (operator attention is the binding resource; the near-term platform critical path is dual-use; the interleave's payoffs shrink under scrutiny; reversal stays operationally free), AND the gap case survives (zero ratify-class artifacts, no trigger, a convention sitting unused -- 24 "Reversal conditions:" stanzas elsewhere (16 at the f4dec93 audit; the tree grew the convention since)). `resequence_interleaved` is rejected on the corrected value model; `ratify_as_is` is rejected because the bet compounds monthly against an untested load-bearing premise (NS-D); `insufficient_evidence` is rejected -- once the telemetry category error is removed the evidence discriminates. Filed as user-explicit ad-hoc governance (precedent: Decision 93 / PLAN-platform-mvp-boundary; a fresh forward Decision per the Decision 87 / Decision 126 pattern), not a new tier_item. Reversal is cheap by construction: the frame binds via one /orient scope line and ROADMAP-PRODUCT.yaml's `status: draft`, so nothing is foreclosed by sequencing longer.
-
-**Reversal conditions:**
-This sequencing is re-decided, never silently renewed, when any of the following fires: (a) the platform MVP (Decision 93 boundary) closes -- at which point a product-activation decision becomes mandatory, not optional; (b) the hard calendar review date 2026-09-30 is reached without the platform MVP having closed -- the sequencing is re-decided via /plan, not renewed by default; (c) alpha-readiness -- a candidate PySR formula artifact passing the research bar exists, collapsing the paper loop's marginal cost and re-opening the interleave question; or (d) sustained slip -- 3 consecutive orient/triage cycles show the platform-MVP date receding. Condition (b) is the top-level `review_by` in the stanza below (single source; a re-decision is a one-line diff); (a)/(c)/(d) are the enumerated conditions. On any trigger, re-decide via /plan and update or re-arm the stanza.
-
-```yaml reversal-conditions
-decision: 133
-review_by: 2026-09-30
-on_trigger: "re-decide sequencing via /plan; update or re-arm this stanza; never silently renew"
-conditions:
-  - id: platform-mvp-closes
-    kind: manual
-    description: "Platform MVP (Decision 93 boundary) closes -> a product-activation decision becomes mandatory, not optional"
-  - id: alpha-readiness
-    kind: repo_state
-    predicate: null   # manual until a formula-artifact predicate is registered (CD.3/T2.6 disposition)
-    params: {}
-    description: "a candidate PySR formula artifact passing the research bar exists -> paper-loop marginal cost collapses; re-open the interleave question"
-  - id: sustained-slip
-    kind: repo_state
-    predicate: null   # manual until orient/triage cycles snapshot the MVP date
-    params: {consecutive: 3}
-    description: "3 consecutive orient/triage cycles show the platform-MVP date receding"
-```
-
-**Related:** Decision 93 (Platform-MVP boundary + deferred_post_mvp lifecycle -- the frame this Decision reversal-conditions; its two "per the platform-first directive" lines are the annotation targets; also the user-explicit ad-hoc-governance filing precedent and the no-live-dep invariant the ROADMAP edits respect), Decision 75 (frame-lock anti-pattern -- this Decision is its mandated conscious-choice conversion), Decision 95 (session-rooted agent-telemetry trace/observation model -- the SEQ-03 category boundary), Decision 96 + Decision 97 (telemetry temporal + identity standards completing the Decision-95 trio), Decision 78 (DuckLake adoption / product-table vs ops-telemetry split that makes "absent PRODUCT tables" literal), Decision 105 (reversal-condition-drafting-as-a-plan-step convention; CD.3 stays DEFERRED so the ratified-CD guard is not engaged), Decision 84 (Single Portal Invariant / DECISIONS.md numbering authority + backfill ETL), Decision 86 (rationale routes into this Decision, not a new prose doc), Decision 67 (STRATEGIC-plan freeze / CD.17 -- plan_type is IMPLEMENTATION), Decision 87 + Decision 126 (fresh forward-Decision precedent), Decision 108 (reversal-conditions section precedent the machine-parseable stanza extends), Decision 40 (recorded-then-forgotten triggers -- the cautionary failure mode a follow-on condition-monitor prices), Decision 101 (platform-first external-brand posture -- same lineage).
-
-> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+**Superseded by: Decision 274**
 
 ---
 
@@ -11921,6 +12156,8 @@ T5.2 (teardown) was considered but excluded: it is a near-due cost-saver (grace 
 **Related:** Decision 73 (sandbox-only / forward-fix posture -- the boundary is consistent with it, not a re-derivation), Decision 75 (frame-lock anti-pattern; defer-by-exception avoids it), Decision 80 (validate.py single source of truth; the invariant lives in platform_roadmap.py model_validator, picked up by validate_platform_roadmap via load()), Decision 86 (no new prose-architecture doc; boundary semantics live in Decision 93 + ROADMAP-PLATFORM.yaml agent_instructions only), Decision 90 (four-tier workflow; parked items are excluded from the next_eligible eligibility surface, not surfaced in an orient bucket).
 
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
+> **Update (2026-11-18, rec-5273):** Decision 133 is superseded by Decision 274. The bracketed sentence above on dormant cross-roadmap edges, which cites Decision 133's named conditions, has no live subject: docs/ROADMAP-PRODUCT.yaml and its edges left this repository under Decision 178. No clause changes.
 
 ---
 

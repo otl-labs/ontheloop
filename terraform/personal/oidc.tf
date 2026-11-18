@@ -193,7 +193,9 @@ data "aws_iam_policy_document" "ci_full_refresh_read" {
       # rec-4638: the trusted terraform/github plan role (oidc_trusted_github_plan_role.tf).
       "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-trusted-github-plan",
       # PLAN-persona-verdict-credential: the verdict persona role (oidc_persona_verdict_role.tf).
-      "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-persona-verdict"
+      "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-persona-verdict",
+      # PLAN-persona-verdict-app-grant: the verdict App key role (oidc_persona_verdict_app_role.tf).
+      "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-persona-verdict-app"
     ]
   }
 

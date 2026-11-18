@@ -44,6 +44,9 @@ CLI_TIMEOUT = 120
 ACCESS_CHUNK = 100
 _SID_RE = re.compile(r"[A-Za-z0-9]{1,64}")
 _ERR_RE = re.compile(r"[A-Za-z]+(?:Exception|Error)")
+_OIDC_ARN = re.compile(r"arn:aws:iam::([0-9]{12}):oidc-provider/([A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*)")
+_REPO_PIN = re.compile(r"repo:[^/*?:$]+/[^/*?:$]+(?::[^*?$]*)?")
+_SAML_ARN = re.compile(r"arn:aws:iam::[0-9]{12}:saml-provider/[A-Za-z0-9+=,.@_-]+")
 
 
 def run_cli(args: list[str]) -> tuple[int, str, str]:
@@ -216,6 +219,53 @@ def _simple(cli: Cli, args: list[str], docs: dict[str, Any]) -> str:
     return str(result)
 
 
+def _statements(doc: dict[str, Any]) -> list[Any]:
+    stmts = doc.get("Statement")
+    return stmts if isinstance(stmts, list) else [stmts] if isinstance(stmts, dict) else []
+
+
+def _federated(stmt: Any) -> list[Any]:
+    principal = stmt.get("Principal") if isinstance(stmt, dict) else None
+    value = principal.get("Federated") if isinstance(principal, dict) else None
+    return value if isinstance(value, list) else [] if value is None else [value]
+
+
+def _oidc_statement(stmt: Any) -> bool:
+    """A statement held to the local rule: any Federated value but a SAML provider ARN (an OIDC provider is rejected, VP 9)."""
+    return any(not (isinstance(v, str) and _SAML_ARN.fullmatch(v)) for v in _federated(stmt))
+
+
+def _pins_repo(stmt: dict[str, Any], host: str) -> bool:
+    """Every value under every StringEquals or StringLike entry for <host>:sub meets the exact-repo grammar, and one exists."""
+    block = stmt.get("Condition")
+    if not isinstance(block, dict):
+        return False
+    found = []
+    for op in ("StringEquals", "StringLike"):
+        entries = block.get(op)
+        for key, value in entries.items() if isinstance(entries, dict) else ():
+            if key.casefold() == f"{host}:sub":
+                found.append(value if isinstance(value, list) else [value])
+    return bool(found) and all(v and all(isinstance(x, str) and _REPO_PIN.fullmatch(x) for x in v) for v in found)
+
+
+def _host(value: Any, account: str) -> str:
+    match = _OIDC_ARN.fullmatch(value) if isinstance(value, str) else None
+    return match.group(2).casefold() if match and match.group(1) == account else ""
+
+
+def _oidc_trust(doc: dict[str, Any], account: str) -> tuple[str, str]:
+    """The local rule for a web-identity trust: each Allow names a provider of the account alone and pins a repo on its sub."""
+    for index, stmt in enumerate(_statements(doc)):
+        if not _oidc_statement(stmt) or stmt.get("Effect") == "Deny":
+            continue
+        hosts = [_host(v, account) for v in _federated(stmt)]
+        sole = set(stmt["Principal"]) == {"Federated"} and "NotPrincipal" not in stmt
+        if not (all(hosts) and sole and all(_pins_repo(stmt, h) for h in hosts)):
+            return "FAIL", _loc(doc, index)
+    return "PASS", ""
+
+
 def unit_checks(
     cli: Cli, inv: dict[str, Any], plan: Any, unit: Any, cache: dict[Any, tuple[str, str]]
 ) -> list[dict[str, str]]:
@@ -235,18 +285,14 @@ def unit_checks(
         checks.append({"check": "managed-on-session", "verdict": "FAIL" if hit else "UNCHECKED", "loc": ""})
         return checks
     if unit.kind == "trust":
-        run(
-            "no-public-access",
-            ("trust", unit.digest),
-            lambda: (
-                _simple(
-                    cli,
-                    ["check-no-public-access", "--resource-type", "AWS::IAM::AssumeRolePolicyDocument"],
-                    {"--policy-document": unit.doc},
-                ),
-                "",
-            ),
-        )
+        stmts = _statements(unit.doc)
+        keep = [s for s in stmts if not _oidc_statement(s)]
+        if len(keep) != len(stmts):
+            run("oidc-trust-pin", ("oidc", unit.digest), lambda: _oidc_trust(unit.doc, cli.account))
+        if keep or len(keep) == len(stmts):
+            send = unit.doc if len(keep) == len(stmts) else {**unit.doc, "Statement": keep}
+            api = ["check-no-public-access", "--resource-type", "AWS::IAM::AssumeRolePolicyDocument"]
+            run("no-public-access", ("trust", unit.digest), lambda: (_simple(cli, api, {"--policy-document": send}), ""))
         return checks
     ceiling = sel.is_ceiling(inv, plan, unit)
     classes = [] if ceiling else sel.classes_of(inv, unit)

@@ -173,6 +173,12 @@ resource "aws_iam_role_policy" "ducklake_maintenance" {
           }
         }
       },
+      {
+        Sid      = "CloudWatchMetricReads"
+        Effect   = "Allow"
+        Action   = ["cloudwatch:GetMetricStatistics"]
+        Resource = "*"
+      },
     ]
   })
 }

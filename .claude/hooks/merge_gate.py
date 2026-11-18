@@ -8,7 +8,8 @@ The third, scripts.session.merge_checks (rec-4080, Decision 264), requires every
 Actions run to have succeeded on the exact head, under one 40 s deadline (rec-4891). The persona leg (T4.32 c5,
 Decision 264 cl.4-5) adds each persona-verdict/<persona> check that an actions gates.<persona>.verdict_source row on
 origin/main selects for the PR's class to that required set, and refuses an agent merge that returns a row from actions
-to in_session. Later predicates (rec-4755,
+to in_session. A persona-named check counts only from the verdict GitHub App that gates.verdict_app.app_id names on
+origin/main (rec-5241, Decision 271), and an agent merge changing that row is refused. Later predicates (rec-4755,
 rec-4451) extend this seam.
 Fails closed: exit 2 on overlap, an attribution mismatch, a red or unknown check, an unavailable verdict, a failed
 fetch, a spent deadline, malformed input. No override exists.
@@ -207,20 +208,33 @@ def _get_json(api: tuple[str, str], rel: str, label: str, dl: _Deadline) -> obje
 
 
 def _checks_verdict(
-    root: Path, owner: str, repo: str, sha: str, dl: _Deadline, extra: Sequence[str] = ()
+    root: Path,
+    owner: str,
+    repo: str,
+    sha: str,
+    dl: _Deadline,
+    extra: Sequence[str] = (),
+    *,
+    app: int | None | str = None,
 ) -> merge_checks.Verdict:
     try:
         api = _origin_api(root, owner, repo, dl)
         required = _required(_get_json(api, "rules/branches/main?per_page=100", "rules", dl))
+        pins: dict[str, int | None] | None = None
         if required is not None:
             required = required | set(extra)
+            if isinstance(app, str):
+                if merge_checks.persona_pins(required, None):
+                    raise _Unavailable(f"{merge_checks.VERDICT_APP_ROW} on origin/main does not read: {app}")
+            else:
+                pins = merge_checks.persona_pins(required, app)
         rel = f"commits/{sha}/check-runs?per_page=100&filter=all"
         body = _get_json(api, rel if api[0] == "https" else f"check-runs/{sha}.json", "check-runs", dl)
         if not isinstance(body, dict) or not isinstance(body.get("check_runs"), list):
             raise _Unavailable("check-runs answer has no check_runs list")
         runs = [r for r in body["check_runs"] if isinstance(r, dict)]
         total = body.get("total_count")
-        return merge_checks.verdict(required, runs, total if isinstance(total, int) else None)
+        return merge_checks.verdict(required, runs, total if isinstance(total, int) else None, pins=pins)
     except _Unavailable as exc:
         return merge_checks.Verdict(merge_checks.UNAVAILABLE, (str(exc),))
     except (OSError, subprocess.SubprocessError) as exc:
@@ -246,8 +260,10 @@ def _with_fallback(reason: str, extra: Sequence[str]) -> str:
     return reason
 
 
-def _checks_denial(root: Path, owner: str, repo: str, head: str, dl: _Deadline, extra: Sequence[str] = ()) -> int:
-    verdict = _checks_verdict(root, owner, repo, head, dl, extra)
+def _checks_denial(
+    root: Path, owner: str, repo: str, head: str, dl: _Deadline, extra: Sequence[str] = (), *, app: int | None | str = None
+) -> int:
+    verdict = _checks_verdict(root, owner, repo, head, dl, extra, app=app)
     if verdict.kind == merge_checks.CLEAR:
         return 0
     why = "; ".join(_with_fallback(r, extra) for r in verdict.reasons)
@@ -265,7 +281,17 @@ def _show(root: Path, rev: str, dl: _Deadline) -> str | None:
 
 
 def _persona_leg(root: Path, head: str, merge_base: str, dl: _Deadline) -> tuple[list[str], str | None]:
-    """The persona checks an actions row adds to this PR's class, or a denial reason."""
+    """Kept for the deadline suite's unedited asserts (Decision 235); delegates to _persona_leg_app."""
+    extra, _app, refusal = _persona_leg_app(root, head, merge_base, dl)
+    return extra, refusal
+
+
+def _app_row(text: str | None, missing: str) -> int | None | str:
+    return merge_checks.verdict_app_id(text) if text is not None else missing
+
+
+def _persona_leg_app(root: Path, head: str, merge_base: str, dl: _Deadline) -> tuple[list[str], int | None | str, str | None]:
+    """The persona checks an actions row adds, the verdict App id main names, or a denial reason."""
     unavailable = "verdict-source: UNAVAILABLE: {}; retry later, or the operator merges in the GitHub UI"
     text = _show(root, "refs/remotes/origin/main", dl)
     sources = (
@@ -274,10 +300,10 @@ def _persona_leg(root: Path, head: str, merge_base: str, dl: _Deadline) -> tuple
         else "docs/contracts/project-configuration.yaml is unreadable on origin/main"
     )
     if isinstance(sources, str):
-        return [], unavailable.format(sources)
+        return [], None, unavailable.format(sources)
     diff = _git(root, "diff", "--name-only", "--no-renames", merge_base, head, dl=dl, step="persona diff")
     if diff.returncode != 0:
-        return [], unavailable.format(f"the PR's changed files could not be read: {diff.stderr.strip()[:200]}")
+        return [], None, unavailable.format(f"the PR's changed files could not be read: {diff.stderr.strip()[:200]}")
     changed = [line for line in diff.stdout.splitlines() if line]
     if _CONFIG in changed:
         base_text, head_text = _show(root, merge_base, dl), _show(root, head, dl)
@@ -287,17 +313,37 @@ def _persona_leg(root: Path, head: str, merge_base: str, dl: _Deadline) -> tuple
             else "the merge base's configuration is unreadable"
         )
         if isinstance(base, str):
-            return [], unavailable.format(base)
+            return [], None, unavailable.format(base)
         new = merge_checks.verdict_sources(head_text) if head_text is not None else "the file is gone"
         if isinstance(new, str):
-            return [], f"verdict-source: REFUSE: the PR head's gates rows do not read: {new}"
+            return [], None, f"verdict-source: REFUSE: the PR head's gates rows do not read: {new}"
         back = merge_checks.switch_backs(base, new)
         if back:
-            return [], (
-                f"verdict-source: REFUSE: this PR returns {', '.join(back)} from actions to in_session; "
-                "the operator merges it in the GitHub UI (Decision 264 cl.5)"
+            return (
+                [],
+                None,
+                (
+                    f"verdict-source: REFUSE: this PR returns {', '.join(back)} from actions to in_session; "
+                    "the operator merges it in the GitHub UI (Decision 264 cl.5)"
+                ),
             )
-    return merge_checks.persona_checks(sources, merge_checks.pr_class(changed)), None
+        head_app = _app_row(head_text, "the file is gone")
+        if isinstance(head_app, str):
+            return [], None, f"verdict-source: REFUSE: the PR head's {merge_checks.VERDICT_APP_ROW} does not read: {head_app}"
+        base_app = _app_row(base_text, "the merge base's configuration is unreadable")
+        if isinstance(base_app, str):
+            return [], None, unavailable.format(f"{merge_checks.VERDICT_APP_ROW} on the merge base does not read: {base_app}")
+        if merge_checks.app_id_changed(base_app, head_app):
+            return (
+                [],
+                None,
+                (
+                    f"verdict-source: REFUSE: this PR changes {merge_checks.VERDICT_APP_ROW}; "
+                    "the operator merges it in the GitHub UI (Decision 271 cl.3)"
+                ),
+            )
+    app = merge_checks.verdict_app_id(text) if text is not None else None
+    return merge_checks.persona_checks(sources, merge_checks.pr_class(changed)), app, None
 
 
 @dataclass(frozen=True)
@@ -349,10 +395,10 @@ def _judge(root: Path, call: _Call, dl: _Deadline) -> int:
             )
         if not _HEX40.match(head):
             return _deny(f"checks: UNAVAILABLE: fetched head {head!r} is not a 40-hex sha")
-        extra, refusal = _persona_leg(root, head, verdict.merge_base, dl)
+        extra, app, refusal = _persona_leg_app(root, head, verdict.merge_base, dl)
         if refusal is not None:
             return _deny(refusal)
-        return _checks_denial(root, call.owner, call.repo, head, dl, extra)
+        return _checks_denial(root, call.owner, call.repo, head, dl, extra, app=app)
     if verdict.kind == merge_overlap.OVERLAP:
         sys.stderr.write(
             _OVERLAP_MSG.format(files=", ".join(verdict.files), base=verdict.merge_base[:12], behind=verdict.behind) + "\n"

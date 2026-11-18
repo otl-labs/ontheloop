@@ -7,16 +7,20 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import os
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, TextIO
 
 from jsonschema import Draft202012Validator
 
 from src.persona_backends import events as ev
 from src.persona_backends import output, read_input
 from src.persona_backends.contract import LoadedContract, RunRefused, load
+
+if TYPE_CHECKING:
+    from mcp.client.stdio import StdioServerParameters
 
 Transport = Callable[..., Awaitable[Any]]
 _FALLBACK = "warm_fetched_escape_hatch"
@@ -43,8 +47,14 @@ def _input_check(loaded: LoadedContract, materialised_input: dict[str, Any]) -> 
     return output.failure(failure_id, "; ".join(paths))
 
 
+def _open_devnull() -> TextIO:
+    return open(os.devnull, "w", encoding="utf-8")
+
+
 def _opening(loaded: LoadedContract, materialised_input: dict[str, Any]) -> str:
-    lines = ["Your input is attached as blobs you read with the read_input tool:"]
+    lines: list[str] = []
+    if loaded.blob_names:
+        lines.append("Your input is attached as blobs you read with the read_input tool:")
     for name in loaded.blob_names:
         lines.append(f"{name}: {len(read_input.blob_text(materialised_input.get(name, '')).split(chr(10)))} lines")
     for key in ("change_id", "head_sha"):
@@ -64,6 +74,7 @@ class _Run:
         clock: Callable[[], float],
         wall: Callable[[], float],
         head: dict[str, Any],
+        tools: list[dict[str, Any]],
     ) -> None:
         self.loaded = loaded
         self.blobs = {name: materialised_input[name] for name in loaded.blob_names if name in materialised_input}
@@ -81,7 +92,10 @@ class _Run:
             {"role": "system", "content": loaded.prompt},
             {"role": "user", "content": _opening(loaded, materialised_input)},
         ]
-        self.tools = [read_input.tool_spec(loaded.blob_names)]
+        self.tools = tools
+        self.bridge: Any = None
+        self.bridge_errors: tuple[type[BaseException], ...] = ()
+        self.deadline = 0.0
         self.emit(head)
 
     def emit(self, record: dict[str, Any]) -> None:
@@ -113,10 +127,40 @@ class _Run:
     def budget_failure(self, detail: str) -> dict[str, Any]:
         return self.end(output.failure("budget_exhausted", detail))
 
+    async def run_with_bridge(
+        self, mcp_server: Callable[[], StdioServerParameters] | None, errlog: TextIO | None
+    ) -> dict[str, Any]:
+        if mcp_server is None:
+            raise RunRefused("warehouse_read needs the MCP server")
+        try:
+            from src.persona_backends import mcp_bridge  # noqa: PLC0415 -- lazy: a run without warehouse_read never loads mcp
+
+            server = mcp_server()
+        except Exception as exc:  # intentionally broad: an image without mcp or a failing factory ends the run cleanly
+            raise self.abort("tool_server_unavailable", type(exc).__name__) from exc
+        log = errlog if errlog is not None else _open_devnull()
+        try:
+            async with mcp_bridge.open_bridge(
+                server, self.loaded.warehouse_verbs, errlog=log, startup_timeout=self.deadline - self.clock()
+            ) as bridge:
+                self.bridge = bridge
+                self.bridge_errors = (mcp_bridge.BridgeFailed,)
+                self.tools = [*self.tools, *bridge.tool_specs()]
+                self.events[0]["tools_sha256"] = ev.tools_sha256(self.tools)
+                if self.on_event is not None:
+                    self.on_event(self.events[0])
+                return await self.go()
+        except mcp_bridge.BridgeTimeout:
+            return self.budget_failure("max_wall_clock_seconds reached while the MCP server started")
+        except mcp_bridge.BridgeUnavailable as exc:
+            raise self.abort("tool_server_unavailable", str(exc)) from exc
+        finally:
+            if errlog is None:
+                log.close()
+
     async def go(self) -> dict[str, Any]:
-        deadline = self.clock() + self.loaded.max_wall_clock_seconds
         while True:
-            remaining = deadline - self.clock()
+            remaining = self.deadline - self.clock()
             if self.turns_used >= self.loaded.max_turns:
                 return self.budget_failure("max_turns reached")
             if remaining <= 0:
@@ -137,7 +181,7 @@ class _Run:
                     self.loaded.persona,
                     list(self.messages),
                     max_tokens=self.max_tokens,
-                    tools=self.tools,
+                    tools=self.tools or None,
                     response_format={"type": "json_object"},
                     timeout=min(600, remaining),
                     role=self.role,
@@ -158,10 +202,17 @@ class _Run:
                 raise self.abort("transport_exception", type(exc).__name__) from exc
             return self.on_transport_error(kind, attempts, fail_over, allowed, upper, started, exc)
         self.first = False
-        return self.on_result(result, started)
+        return await self.on_result(result, started)
 
     def transport_turn(
-        self, attempts: tuple[Any, ...], known: bool, probe: int, started: int, kind: str, **extra: Any
+        self,
+        attempts: tuple[Any, ...],
+        known: bool,
+        probe: int,
+        started: int,
+        kind: str,
+        source: Any = None,
+        **extra: Any,
     ) -> dict[str, Any]:
         fields: dict[str, Any] = {
             "turn": len([e for e in self.events if "turn" in e]) + 1,
@@ -177,6 +228,7 @@ class _Run:
             "started_at_ms": started,
             "ended_at_ms": self.now_ms(),
             "kind": kind,
+            "probe_record": _probe(getattr(source, "probe_record", None)),
         }
         fields.update(extra)
         return self.turn(**fields)
@@ -193,9 +245,9 @@ class _Run:
         if failed_over:
             self.role = _FALLBACK
         if kind not in _REPAIRABLE:
-            self.transport_turn(attempts, known, probe, started, "transport_error")
+            self.transport_turn(attempts, known, probe, started, "transport_error", exc)
             raise self.abort(kind, str(exc))
-        self.transport_turn(attempts, known, probe, started, "terminal_invalid", failed_over=failed_over)
+        self.transport_turn(attempts, known, probe, started, "terminal_invalid", exc, failed_over=failed_over)
         return self.invalid([f"$: the transport returned {kind}"], None)
 
     def invalid(self, errors: list[str], message: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -207,7 +259,8 @@ class _Run:
         self.messages.append({"role": "user", "content": output.repair_message(errors)})
         return None
 
-    def on_result(self, result: Any, started: int) -> dict[str, Any] | None:
+    async def on_result(self, result: Any, started: int) -> dict[str, Any] | None:
+        returned = self.now_ms()
         probe = 1 if result.failed_over else 0
         self.turns_used += len(result.attempts) + probe
         if result.failed_over:
@@ -219,33 +272,58 @@ class _Run:
             "message": result.message,
         }
         if result.tool_calls:
-            texts = [self.tool_text(call) for call in result.tool_calls]
-            self.transport_turn(
-                result.attempts,
-                True,
-                probe,
-                started,
-                "tool",
-                tool_calls=[str(call["function"]["name"]) for call in result.tool_calls],
-                tool_result_bytes=[len(text.encode("utf-8")) for text in texts],
-                **common,
-            )
-            self.messages.append(result.message)
-            for call, text in zip(result.tool_calls, texts, strict=True):
-                self.messages.append({"role": "tool", "tool_call_id": call["id"], "content": text})
-            return None
+            return await self.on_tools(result, probe, started, returned, common)
         checked = output.check(result.content, result.finish_reason, self.loaded)
         kind = "terminal_valid" if checked.value is not None else "terminal_invalid"
-        self.transport_turn(result.attempts, True, probe, started, kind, **common)
+        self.transport_turn(result.attempts, True, probe, started, kind, result, **common)
         if checked.value is not None:
             return self.end(checked.value)
         return self.invalid(checked.errors, result.message)
 
-    def tool_text(self, call: dict[str, Any]) -> str:
+    async def on_tools(
+        self, result: Any, probe: int, started: int, returned: int, common: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        texts: list[str] = []
+        problem: BaseException | None = None
+        tool_errors: tuple[type[BaseException], ...] = (asyncio.TimeoutError, *self.bridge_errors)
+        try:
+            for call in result.tool_calls:
+                texts.append(await self.tool_text(call))
+        except tool_errors as exc:
+            problem = exc
+        self.transport_turn(
+            result.attempts,
+            True,
+            probe,
+            started,
+            "tool",
+            result,
+            tool_calls=[str(call["function"]["name"]) for call in result.tool_calls],
+            tool_result_bytes=[len(text.encode("utf-8")) for text in texts],
+            ended_at_ms=returned,
+            **common,
+        )
+        if problem is not None and not isinstance(problem, asyncio.TimeoutError):
+            raise self.abort("tool_server_error", str(problem)) from problem
+        if problem is not None:
+            return self.budget_failure("max_wall_clock_seconds reached during a warehouse call")
+        self.messages.append(result.message)
+        for call, text in zip(result.tool_calls, texts, strict=True):
+            self.messages.append({"role": "tool", "tool_call_id": call["id"], "content": text})
+        return None
+
+    async def tool_text(self, call: dict[str, Any]) -> str:
         function = call["function"]
-        if function["name"] != "read_input":
-            return "error: unknown tool"
-        return read_input.serve(function["arguments"], self.blobs)
+        name = function["name"]
+        if name == "read_input" and self.loaded.blob_names:
+            return read_input.serve(function["arguments"], self.blobs)
+        if self.bridge is not None and name in self.loaded.warehouse_verbs:
+            return await asyncio.wait_for(self.bridge.call(name, function["arguments"]), self.deadline - self.clock())
+        return "error: unknown tool"
+
+
+def _probe(record: Any) -> dict[str, Any] | None:
+    return None if record is None else dataclasses.asdict(record)
 
 
 async def run_persona(
@@ -259,12 +337,15 @@ async def run_persona(
     max_tokens: int = 32000,
     clock: Callable[[], float] = time.monotonic,
     wall: Callable[[], float] = time.time,
+    mcp_server: Callable[[], StdioServerParameters] | None = None,
+    mcp_errlog: TextIO | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     if backend != "litellm":
         raise RunRefused(f"backend {backend} is not built by this backend (claude_cli is T4.27's, codex_cli is reserved)")
     if workspace is not None:
         raise RunRefused("no workspace capability is built (T4.15:c3)")
     loaded = load(Path(contract_path))
+    tools = [read_input.tool_spec(loaded.blob_names)] if loaded.blob_names else []
     head = ev.header(
         str(contract_path),
         loaded.persona,
@@ -272,8 +353,15 @@ async def run_persona(
         loaded.prompt_sha256,
         ev.input_sha256(materialised_input),
         int(wall() * 1000),
+        ev.tools_sha256(tools),
     )
-    run = _Run(loaded, materialised_input, transport, on_event, max_tokens, clock, wall, head)
+    run = _Run(loaded, materialised_input, transport, on_event, max_tokens, clock, wall, head, tools)
     refusal = _input_check(loaded, materialised_input)
-    result = run.end(refusal) if refusal is not None else await run.go()
+    if refusal is not None:
+        return run.end(refusal), run.events
+    run.deadline = clock() + loaded.max_wall_clock_seconds
+    if loaded.warehouse_verbs:
+        result = await run.run_with_bridge(mcp_server, mcp_errlog)
+    else:
+        result = await run.go()
     return result, run.events
