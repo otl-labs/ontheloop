@@ -9,6 +9,7 @@ _BY_VERB = {
     "model_usage_rollup": fields.MODEL_USAGE_FIELDS,
     "tool_use_rollup": fields.TOOL_USE_FIELDS,
     "session_startup_baseline": fields.STARTUP_BASELINE_FIELDS,
+    "session_tree_rollup": fields.TREE_ROLLUP_FIELDS,
 }
 
 

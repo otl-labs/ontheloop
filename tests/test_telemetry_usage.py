@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import io
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +17,7 @@ import pytest
 import yaml
 
 from scripts import telemetry_usage as cli
+from scripts.telemetry_verify.session_presence import Commit
 from src.common.ducklake_event_read_verbs import EVENT_READS, MAX_WINDOW_DAYS
 from src.common.ducklake_reader_client import (
     VERB_FIELDS,
@@ -281,3 +282,121 @@ def test_main_exits_with_the_run_status(monkeypatch: pytest.MonkeyPatch) -> None
     with pytest.raises(SystemExit) as info:
         cli.main()
     assert info.value.code == 3
+
+
+def test_tree_rollup_is_registered_agent_facing_window_verb() -> None:
+    entry = EVENT_READS["session_tree_rollup"]
+    assert (entry.binding, entry.max_window_days, entry.agent_facing, entry.paginable) == ("window", 7, True, False)
+    assert entry.params == ("day_from", "day_to")
+    assert VERB_FIELDS["session_tree_rollup"][-3:] == ("generations", "conflicted_grain_keys", "derivation_conflicted")
+    assert not any("tokens" in column for column in VERB_FIELDS["session_tree_rollup"])
+
+
+def _tree_row(day: str, root: str, compacts: int, workflows: list[str], shas: tuple[str, ...] = ()) -> dict[str, Any]:
+    return {
+        "root_session_id": root,
+        "harness_session_key": f"session_{root}",
+        "session_started_at": f"{day}T10:00:00+00:00",
+        "session_count": 2,
+        "compact_count": compacts,
+        "compacted_session_count": min(compacts, 1),
+        "workflows": workflows,
+        "merge_links": [{"merge_sha": sha} for sha in shas],
+    }
+
+
+def test_trees_summarises_compactions_per_day() -> None:
+    rows = [
+        _tree_row("2026-10-01", "a", 2, ["plan"]),
+        _tree_row("2026-10-01", "b", 0, ["implement"]),
+        _tree_row("2026-10-02", "c", 3, ["decision-scout"]),
+    ]
+    code, result, _ = _run(["trees", "--from", "2026-10-01", "--to", "2026-10-02"], FakeReader(rows))
+    assert code == 0 and result is not None and result["verb"] == "session_tree_rollup"
+    assert result["rows"] == [
+        {"day": "2026-10-01", "trees": 2, "compact_count": 2, "compacted_trees": 1, "planning_trees": 1},
+        {"day": "2026-10-02", "trees": 1, "compact_count": 3, "compacted_trees": 1, "planning_trees": 1},
+    ]
+
+
+def test_trees_by_root_keeps_one_row_per_tree() -> None:
+    rows = [_tree_row("2026-10-01", "a", 2, ["plan"]), _tree_row("2026-10-01", "b", 0, [])]
+    _, result, _ = _run(["trees", "--from", "2026-10-01", "--to", "2026-10-01", "--by-root"], FakeReader(rows))
+    assert result is not None
+    assert [(r["root_session_id"], r["compact_count"], r["workflows"]) for r in result["rows"]] == [
+        ("a", 2, ["plan"]),
+        ("b", 0, []),
+    ]
+
+
+class PlansReader(FakeReader):
+    def named(self, verb: str, day_from: str, day_to: str) -> list[dict[str, Any]]:
+        rows = {"session_tree_rollup": self.rows, "model_usage_rollup": self.errors["usage"]}[verb]  # type: ignore[index]
+        self.calls.append((verb, day_from, day_to))
+        return [r for r in rows if day_from <= r["session_started_at"][:10] <= day_to]
+
+
+_SHA1, _SHA2 = "1" * 40, "2" * 40
+
+
+def _commits(*shas: str) -> Any:
+    stamp = datetime(2026, 10, 10, 12, tzinfo=timezone.utc)
+    found = [Commit(sha, stamp, f"plan(x{n}): thing", "") for n, sha in enumerate(shas)]
+    found.append(Commit("f" * 40, stamp, "feat(y): other", ""))
+    return lambda root, ref: found
+
+
+def _plans(rows: list[dict[str, Any]], usage: list[dict[str, Any]], *shas: str, extra: tuple[str, ...] = ()) -> Any:
+    out, err = io.StringIO(), io.StringIO()
+    reader = PlansReader(rows, {"usage": usage})  # type: ignore[arg-type]
+    code = cli.run(["plans", *extra], reader=reader, out=out, err=err, commits=_commits(*shas))
+    return code, (json.loads(out.getvalue()) if out.getvalue() else None), err.getvalue(), reader
+
+
+def test_plans_passes_when_every_linked_tree_is_planning() -> None:
+    rows = [_tree_row("2026-10-05", "a", 2, ["plan", "decision-scout"], (_SHA1,))]
+    code, result, _, reader = _plans(rows, [_model_row("2026-10-05", "a", "opus")], _SHA1)
+    assert code == 0 and result is not None and result["summary"]["verdict"] == "PASS"
+    (merge,) = result["merges"]
+    assert merge["merge_sha"] == _SHA1 and merge["planning"] is True and merge["mixed"] is False
+    assert result["floor"] == "2026-08-15" and {v for v, _, _ in reader.calls} == {"session_tree_rollup", "model_usage_rollup"}
+
+
+def test_plans_fails_on_an_uncaught_merge() -> None:
+    rows = [_tree_row("2026-10-05", "a", 0, ["plan"], (_SHA1,)), _tree_row("2026-10-06", "b", 0, ["implement"], (_SHA2,))]
+    code, result, err, _ = _plans(rows, [], _SHA1, _SHA2)
+    assert code == 1 and result is not None and result["summary"]["uncaught"] == [_SHA2]
+    assert _SHA2 in err and result["summary"]["caught"] == 1
+
+
+def test_plans_fails_when_no_merge_is_linked() -> None:
+    rows = [_tree_row("2026-10-05", "a", 0, ["plan"])]
+    code, result, _, _ = _plans(rows, [], _SHA1)
+    assert code == 1 and result is not None
+    assert result["summary"]["linked"] == 0 and result["summary"]["planning_trees_unlinked"] == 1
+    assert result["summary"]["verdict"] == "FAIL"
+
+
+def test_plans_sums_token_classes_separately_and_flags_mixed() -> None:
+    rows = [
+        _tree_row("2026-10-05", "a", 2, ["plan", "implement"], (_SHA1, _SHA2)),
+        _tree_row("2026-10-06", "b", 1, ["plan"], (_SHA1,)),
+    ]
+    usage = [
+        _model_row("2026-10-05", "a", "opus"),
+        _model_row("2026-10-05", "a", "fable"),
+        _model_row("2026-10-06", "b", "opus"),
+    ]
+    code, result, _, _ = _plans(rows, usage, _SHA1, _SHA2)
+    assert code == 0 and result is not None
+    first, second = result["merges"]
+    assert first["trees"] == 2 and first["mixed"] is True and first["compact_count"] == 3
+    assert (first["tokens_input_total"], first["tokens_cache_read_total"], first["model_call_count"]) == (30, 180, 9)
+    assert "tokens_total" not in first and second["trees"] == 1 and second["tokens_input_total"] == 20
+    assert _plans(rows, usage, _SHA1, extra=("--last", "0"))[0] == 2
+
+
+def test_plans_call_cap_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "MAX_CALLS", 1)
+    code, result, err, _ = _plans([], [], _SHA1)
+    assert code == 1 and result is None and "call_cap_exceeded" in err
