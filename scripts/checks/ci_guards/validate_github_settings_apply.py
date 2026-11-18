@@ -37,6 +37,7 @@ import yaml
 
 from scripts.checks import _common, registry
 from scripts.checks.ci_guards._github_settings_mirror import MIRROR_ARN, check_mirror_wiring
+from scripts.checks.ci_guards._shared import is_sha_pinned
 from scripts.checks.ci_guards.validate_trusted_plan_environment import (
     _arg,
     _blocks,
@@ -72,6 +73,7 @@ OWNED = (
     "scripts/ci/environment_reviewer_preflight.py",
     "scripts/checks/ci_guards/validate_github_settings_apply.py",
     "scripts/checks/ci_guards/_github_settings_mirror.py",
+    "scripts/checks/ci_guards/_shared.py",
     "scripts/ci/terraform_github_apply_mirror.sh",
 )
 SETTINGS_TF = "github_settings_apply.tf"
@@ -101,7 +103,6 @@ _PREVIEW_GRANTS = {
 _SUB_RE = re.compile(r'^flatten\(\[for repo in local\.github_repos : \["repo:\$\{repo\}:environment:([^"]+)"\]\]\)$')
 _INTERP_RE = re.compile(r"\$\{local\.(\w+)\}")
 _MAIN_REF = "github.ref == 'refs/heads/main'"
-_SHA_PIN_RE = re.compile(r"@[0-9a-f]{40}$")
 _SECRETS_WHOLE_RE = re.compile(r"secrets\s*\[|tojson\(\s*secrets\s*\)", re.IGNORECASE)
 
 
@@ -438,7 +439,7 @@ def _step_violations(jobs: dict[str, Any]) -> list[str]:
                 "ref" in with_ or "repository" in with_ or str(with_.get("persist-credentials")).lower() != "false"
             ):
                 out.append(f"e: {jid} checkout must take no ref or repository and set persist-credentials false")
-            if uses and not uses.startswith("./") and not _SHA_PIN_RE.search(uses.split("#")[0].strip()):
+            if uses and not uses.startswith("./") and not is_sha_pinned(uses.split("#")[0].strip()):
                 out.append(f"f: {jid} uses {uses} without a 40-hex commit SHA pin")
             if isinstance(s.get("run"), str) and "${{" in s["run"]:
                 out.append(f"j: {jid} interpolates an expression in a run body")

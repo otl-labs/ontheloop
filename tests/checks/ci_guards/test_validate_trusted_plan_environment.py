@@ -438,7 +438,9 @@ def test_comment_lines_in_run_bodies_name_no_executed_path(wfs) -> None:
     assert not any("other.py" in x for x in out)
 
 
-@pytest.mark.parametrize("uses", ["actions/checkout@v7", "actions/checkout@" + "a" * 39, "docker://alpine:3", "o/r@main"])
+@pytest.mark.parametrize(
+    "uses", ["actions/checkout@v7", "actions/checkout@" + "a" * 39, "docker://alpine:3", "o/r@main", "o/r@" + "a" * 40 + " x"]
+)
 def test_tag_or_short_sha_pinned_action_in_a_governed_job(wfs, uses) -> None:
     _job(wfs, "plan")["steps"].append({"uses": uses})
     assert any("40-hex" in x for x in v.check_pinned_actions(wfs))

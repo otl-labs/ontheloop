@@ -18,13 +18,13 @@ from typing import Any
 import yaml
 
 from scripts.checks import _common, registry
+from scripts.checks.ci_guards._shared import is_sha_pinned
 
 TRIGGER = ".github/workflows/persona-verdict-trigger.yml"
 VERDICT = ".github/workflows/persona-verdict.yml"
 OVERRIDE = ".github/workflows/persona-verdict-override.yml"
 EVIDENCE = "docs/contracts/github-actions-evidence.yaml"
 PR_TYPES = ["opened", "ready_for_review", "reopened", "synchronize"]
-PINNED = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 MKDIR = 'mkdir -p "$RUNNER_TEMP/work"'
 RUN_PREFIX = 'python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" '
 VERBS = frozenset({"resolve", "route", "fetch", "materialise", "execute", "post", "wake"})
@@ -138,7 +138,7 @@ def _common_problems(rel: str, doc: dict[str, Any], environments: frozenset[str]
     for name, job in jobs.items():
         for step in _steps(job):
             uses = step.get("uses")
-            if uses is not None and not PINNED.match(str(uses)):
+            if uses is not None and not is_sha_pinned(str(uses)):
                 out.append(f"{rel}: job {name} uses {uses!r}, which is not pinned to a 40-hex SHA")
         if "environment" in job and name not in environments:
             out.append(f"{rel}: job {name} names an Environment")
