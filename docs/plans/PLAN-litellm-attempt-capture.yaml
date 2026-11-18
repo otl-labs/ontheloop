@@ -57,13 +57,14 @@ scope:
         production; the clamp covers a fake wall); record = the captured record as a dict (an attempt that returned ok
         before the cancel keeps its CallRecord, so no ok entry ever lacks one); probe_record = the captured probe
         record and probe_turn 1 when it is set; attempts_known true. failed_over is true when the turn began on role
-        primary and any written entry or the probe record is warm_fetched_escape_hatch's, and then the record's role
-        is warm_fetched_escape_hatch, as on_result writes a fail-over turn; otherwise role is the turn's starting role
-        and failed_over false. turns_used adds one per entry written plus one for the probe record. A deadline during
+        primary and the probe record is set or any written entry with attempt 1 or more is warm_fetched_escape_hatch's
+        (a fallback call was sent); then the record's role is warm_fetched_escape_hatch, as on_result writes a
+        fail-over turn. Otherwise (a probe entry, attempt 0, alone cancelled or raised) role is the turn's starting role
+        and failed_over false, as the fallback_unavailable rule below. turns_used adds one per entry written plus one for the probe record. A deadline during
         a retry backoff has no in-flight entry. When capture.filled is false (a transport that ignores capture=), the
         branch keeps today's values: attempts [], attempts_known false, turns_used the upper bound.
-      - on_transport_error for kind fallback_unavailable: no fallback call was answered, so the turn record keeps role
-        primary and failed_over false, self.role is not switched (the run aborts), probe_turn is 0 (a raised probe is
+      - on_transport_error for kind fallback_unavailable: no fallback call was sent, so the turn record keeps the
+        turn's starting role and failed_over false, self.role is not switched (the run aborts), probe_turn is 0 (a raised probe is
         already an attempt entry) and turns_used adds the attempts alone, or the upper bound when there are none.
         Other kinds are unchanged.
       Stays under 500 SLOC.
@@ -119,7 +120,8 @@ scope:
         during the fallback call; probe_record set, probe_turn 1, the fallback call a cancelled entry, role
         warm_fetched_escape_hatch and failed_over true (PLAN-litellm-producer-envelope critique r3 B1).
       - test_deadline_during_probe_records_cancelled_probe_entry: the probe in flight is an entry with role
-        warm_fetched_escape_hatch, attempt 0 and outcome cancelled at its position.
+        warm_fetched_escape_hatch, attempt 0 and outcome cancelled at its position; the turn record's role is primary,
+        failed_over false, probe_turn 0 and turns_used = entries written.
       - test_deadline_after_returned_call_keeps_its_record: wait_for patched to run the call to completion and then
         raise TimeoutError; the ok entry is written with its CallRecord.
       - test_deadline_with_unfilled_capture_keeps_unknown: a transport that ignores capture= gives attempts [],
@@ -281,15 +283,25 @@ verification_plan:
     graduation: not-applicable
 test_obligations:
   - source: src/persona_backends/litellm_backend.py
-    behavior: The deadline branch writes the captured attempts, the cancelled in-flight entry, the record and the probe record; the header is final at its first write.
+    behavior: The deadline branch writes the captured attempts, the cancelled in-flight entry, the record and the probe record.
     verification_step: 1
     test_selector: tests/persona_backends/test_litellm_backend.py::test_deadline_mid_call_records_cancelled_in_flight
     red_green_expectation: red before (node absent; on main the timeout branch writes attempts [] and attempts_known false), green after.
+  - source: src/persona_backends/litellm_backend.py
+    behavior: The events header is emitted once and is final at its first write.
+    verification_step: 1
+    test_selector: tests/persona_backends/test_litellm_backend.py::test_first_written_header_is_final
+    red_green_expectation: red before (node absent; on main a warehouse_read run emits the head twice), green after.
   - source: src/persona_backends/events.py
-    behavior: Schema 2, the Capture defaults and the cancelled entry shape.
+    behavior: Schema 2 and the Capture defaults.
     verification_step: 1
     test_selector: tests/persona_backends/test_events.py::test_header_schema_two_and_capture_defaults
     red_green_expectation: red before (Capture absent, schema 1), green after.
+  - source: src/persona_backends/events.py
+    behavior: The cancelled entry shape (outcome cancelled, the given latency).
+    verification_step: 1
+    test_selector: tests/persona_backends/test_events.py::test_cancelled_dict_overrides_outcome_and_latency
+    red_green_expectation: red before (cancelled_dict absent), green after.
   - source: scripts/llm/litellm_transport.py
     behavior: The capture holds every attempt in send order; a cancelled call leaves in_flight set and is never retried.
     verification_step: 2
@@ -331,6 +343,11 @@ context:
     budget sizing, consult s7) land before any persona run writes a litellm row (the egress and first-key-read plans
     carry that order); neither is a dependency of this plan.
   - >-
+    Probe marker for rec-5396: attempt 0 is an events-file marker only (a raised or cancelled probe entry); the
+    producer maps it to the probe's own row identity (LL-2 positional ref) and never writes 0 into
+    telemetry_observations.attempt (1-based, NULL where not applicable). An asserted probe stays a probe_record whose
+    CallRecord carries attempt 1, as today.
+  - >-
     closes_criteria is empty: a part leg of T4.32 c1, the accepted precedent (PLAN-litellm-producer-envelope critique
     r6, r8, r9). Critique r1: B1 role and failed_over stated and tested on both branches; B2 the probe's cancelling()
     node added; nits fixed (capture.filled for attempts_known, attempt 0 probe marker, latency clamp, capture forwarded
@@ -342,6 +359,7 @@ gate_rounds:
   - {gate: decision-scout, round: 1, verdict: NO_FLAGS, scout_input_fingerprint: "v1:9b636b0f7e9aaf6bd0bf2c3cf7a13b4ed989a2fabb550fea90b0660289e31e3f"}
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 8}
   - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: "v1:dc29031fe309a7263378d694bae833d92bb71b9a1e8504097152c412f3417d34"}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 4}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -359,11 +377,23 @@ execution_steps:
   - Run bin/venv-python -m scripts.validate --pre and fix; git add the changed files.
   - Execute Verification Plan steps 1-4. Run each step and loop until it passes; on an unrecoverable failure stop and RCA (Decision 55).
   - >-
-    CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml handoff_sequence): run
-    bin/venv-python -m scripts.session.github_readiness; run /implement's Verification Graduation walk (shards
-    litellm-attempt-capture-backend and litellm-attempt-capture-transport); record weakening_dispositions as
-    planned-change, citing this plan's scope rows, for the re-specified test_header_tools_sha256_covers_bridge_specs; set
-    implementation_declared true in this plan with the code; commit (feat(litellm-attempt-capture): ...) with the trailer `Resolves: rec-5395` in the commit body; git fetch
-    origin main && git rebase origin/main; run VP step 5 on that committed, rebased tree; push, open the PR and merge
-    it on green (2026-11-16 ruling), keeping the Resolves trailer in the squash body; then run VP step 6.
-  - 'Report: what was implemented, verification results, and the PR and merge SHA.'
+    CLOSURE. Report each outcome separately: readiness, parent-validator evidence, postflight evidence, and the real
+    push, PR and merge outcome (implement skill Commit Flows; docs/contracts/git-ops.yaml handoff_sequence).
+    - Run bin/venv-python -m scripts.session.github_readiness; report its states independently, and an unknown state
+      as unproven, never a pass.
+    - Run /implement's Verification Graduation walk, which writes the registry shards litellm-attempt-capture-backend
+      and litellm-attempt-capture-transport.
+    - Record weakening_dispositions as planned-change, citing this plan's scope row, for the re-specified
+      tests/persona_backends/test_litellm_backend.py::test_header_tools_sha256_covers_bridge_specs. Then set
+      implementation_declared: true in this plan, in the same commit as the code.
+    - Commit (feat(litellm-attempt-capture): ...) with the trailer `Resolves: rec-5395` in the commit body.
+    - git fetch origin main && git rebase origin/main.
+    - Run VP step 5 on that committed, rebased tree (the full tier, then --verify-head): the parent-validator evidence.
+    - Write /tmp/implementation-retrospective.json with the scripts.session.postflight_evidence.CATEGORIES keys, then
+      run bin/venv-python -m scripts.session.postflight --evidence /tmp/implementation-retrospective.json.
+    - Push (git push -u origin HEAD as its own call). Open the PR, and report it as opened only with the returned PR
+      number. Subscribe to it; never poll.
+    - On green CI (event-driven wake), squash-merge with the Resolves trailer in the commit message (2026-11-16 ruling:
+      no operator word needed). Report the merge SHA, then run VP step 6.
+    - No roadmap edit (T4.32 c1 stays open).
+  - 'Report, as separate facts: readiness, parent-validator evidence, postflight evidence, PR number and merge SHA, VP results, and anything UNPROVEN.'
