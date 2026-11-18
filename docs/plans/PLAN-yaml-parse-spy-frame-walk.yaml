@@ -21,27 +21,31 @@ scope:
     purpose: >-
       _scripts_frames walks sys._getframe(1) and f_back, reading f_code.co_filename and f_code.co_name, instead of
       inspect.stack() (which builds source-context lines for every frame on every YAML loader construction). The
-      filename-to-"scripts/ relative path" step moves into a module-level functools.lru_cache helper, so each distinct
-      file is resolved once. The returned tuple keeps the same entries, in the same innermost-first order, in the same
+      filename-to-"scripts/ relative path" step moves into a module-level functools.lru_cache helper keyed on both the
+      filename and scripts_dir, so each distinct file is resolved once per scripts root. The returned tuple keeps the same entries, in the same innermost-first order, in the same
       "path:function" form. Recording still never raises. The inspect import goes; functools and sys come in. The module
       docstring's description of the spy is unchanged.
     new_imports: []
   - file: tests/session/preflight/test_yaml_parse_budget.py
     action: Modify
     purpose: >-
-      Two new nodes in TestYamlParseSpy. test_records_scripts_frames_without_inspect_stack: with inspect.stack patched to
-      raise, a contract_rules.parse_yaml call still records a libyaml entry whose stack holds a frame starting
-      contract_rules.py:parse_yaml (red before: the old spy catches the error and records an empty stack).
-      test_frames_are_innermost_first: a parse reached through two scripts/ frames records them innermost first (the
-      order inspect.stack gave). The existing nodes and the 512 KB budget are unchanged.
+      Two new nodes in TestYamlParseSpy. test_records_scripts_frames_without_inspect_stack: with inspect.stack and
+      inspect.getframeinfo (the costly part inspect.stack, getouterframes and trace share) patched to raise, a
+      contract_rules.parse_yaml call still records a libyaml entry whose stack holds a frame starting
+      contract_rules.py:parse_yaml (red before: the old spy catches the error and records an empty stack). A regression
+      to traceback.extract_stack is accepted scope; VP 2 would show its cost. test_frames_are_innermost_first: with
+      tests.fixtures.yaml_parse_spy._SCRIPTS_DIR monkeypatched to tmp_path, two tiny modules written there (outer.py's
+      outer() calls inner.py's inner(), which calls yaml.safe_load on a one-line string) and imported through
+      monkeypatch.syspath_prepend; the pure entry's stack is exactly ("inner.py:inner", "outer.py:outer"), the order
+      inspect.stack gave. No corpus walk. The existing nodes and the 512 KB budget are unchanged.
     new_imports: []
 bundled_recommendations: [rec-5355]
 followon_recs: []
 infrastructure_dependencies: []
 acceptance_criteria:
   - "The spy records the same scripts/ frames, in the same order, without calling inspect.stack()."
-  - "test_plan_walkers_stay_under_budget runs in well under half its former time locally under the CI pytest flags, and its budget assertions are unchanged."
-  - "After merge, the first completed main-validate run whose range holds the merge commit is green, and its walker test duration is far below the 120 s timeout."
+  - "test_plan_walkers_stay_under_budget runs in in under 10 s locally under the CI pytest flags with -n 1 (VP 2; 21.3 s before), and its budget assertions are unchanged."
+  - "After merge, the first completed main-validate run whose range holds the merge commit is green, and its walker test's start-to-PASSED gap is under 60 s (VP 5; 36-113 s before, against the 120 s timeout)."
   - "rec-5355 is closed by the merge's Resolves trailer."
 verification_plan:
   - step: 1
@@ -64,7 +68,7 @@ verification_plan:
       Measured 2026-11-18 in a 4 vCPU container: 21.3 s before, 4.3 s with the frame walk prototyped.
     command: >-
       bin/venv-python -m pytest tests/session/preflight/test_yaml_parse_budget.py::TestPlanCorpusWalkerBudget -q -n 1
-      --cov=src --cov-report= --timeout 15 --timeout-method=thread --durations=1
+      --cov=src --cov-report= --cov-fail-under=0 --timeout 15 --timeout-method=thread --durations=1
     expected: exit 0, 1 passed, call duration under 10 s; red before (killed at 15 s)
     fix_if: still near 20 s; profile the spy before anything else
     hermetic: false
@@ -98,7 +102,10 @@ verification_plan:
     action: >-
       Read the first completed main-validate run whose range holds the merge commit (Decision 254 cl.1 and cl.4; today
       that is the merge push's own ci.yml run, which the command finds): it is green and the walker test's PASSED line
-      comes far sooner than 120 s after its start line (it took 36-113 s before; record both timestamps).
+      comes under 60 s after its start line (it took 36-113 s before; record both timestamps). The command finds the
+      run; the agent then reads the full-tier job's log with mcp__github__get_job_logs and greps
+      test_plan_walkers_stay_under_budget for the two timestamped lines. gh is used only as a lookup here and needs the
+      session's GitHub auth; mcp__github__actions_list with the merge SHA is the equivalent.
     command: >-
       SHA=$(git fetch -q origin main && git log origin/main -1 --format=%H -E --grep='^(build|fix|test)\(yaml-parse-spy-frame-walk\)') && test -n "$SHA" &&
       gh run list --repo otl-labs/ontheloop --workflow ci.yml --commit "$SHA" --json databaseId,conclusion
@@ -134,13 +141,14 @@ context:
   - "Margin: passing CI runs of the same node on main took 36, 94, 105 and 113 s (runs 44206109881, 44219257758, 44204764421, 44198027348); siblings in the file took 51 s and 30 s in the failing run. Locally, -n 1 --cov=src: 21.3 s today, 4.3 s with the frame walk prototyped (the prototype was reverted; nothing is committed)."
   - "Cause: tests/fixtures/yaml_parse_spy.py _scripts_frames calls inspect.stack() on each of about 770 YAML loader constructions; under pytest plus coverage each call costs tens of ms. No single PR introduced it; the plan corpus (about 800 files, 39 MB) grew the construction count. The fixture dates from #1528."
   - "Advisor (blind Fable consult, /mnt/project-files/main-reds-2026-11-18/ADVICE.md): cheapen the spy; no sampling, no timeout raise; a structural regression test, not wall-clock. Adopted."
-  - "Graduated shards kept unchanged: preflight-yaml-parse-budget."
+  - "Graduated shards kept unchanged: preflight-yaml-parse-budget (it runs the whole TestYamlParseSpy class, so the two new nodes also run there; the new shard pins only them, so a rename of either still has a named owner)."
   - "Decision-scout verdict FLAGS_FOUND (round 1). CITE: 226, 235. CONTRADICT: 254 NOTE (post-merge verdict is the first completed run whose range holds the merge commit; VP 5 and acceptance_criteria[2] reworded). SPIRIT: none. RELATED: 55, 72, 73, 131, 132, 189, 244, 163, 181, 142, 117. Decisions triaged: 220 of 220. Roadmap items intersected: 1; CONFLICT: 0; RELATED: 1 (T4.23, bare tests/ prefix only). Serves: NS.8 2/5 -- fixing the cost without loosening the guard keeps Decision 235's no-weakening-to-green bar intact."
-  - "Red overlap (scripts.ci_rca.red_overlap, 2026-11-18): blocked by rec-5364 (overlap on tests/session/preflight/test_yaml_parse_budget.py and tests/roadmap/plan_document/test_loader_cli.py through the test selector). Deferral rationale: rec-5364 is repaired by the sibling plan PLAN-vp-replay-base-flag-pr-relative (same owner, same thread); this plan edits none of its files, and both are red repairs."
+  - "Red overlap (scripts.ci_rca.red_overlap, 2026-11-18): rec-5355 never blocks this plan, which bundles it as its repair (Decision 226 cl.3). The checker reports an overlap with open red rec-5364 (on tests/session/preflight/test_yaml_parse_budget.py and tests/roadmap/plan_document/test_loader_cli.py through the test selector). Deferral rationale: rec-5364 is repaired by the sibling plan PLAN-vp-replay-base-flag-pr-relative (same owner, same thread), this plan edits none of its files, and both are red repairs. Past the 4 h SLO, cl.4's global block still exempts this plan, which repairs an open red."
   - "Not bundled: rec-5381 (filed 2026-11-18) makes ci-rca's log evidence tell a pytest-timeout kill from an OOM, the misreading behind rec-5355's suggested fixes."
   - "Approval: the operator wrote write the plans in this plan's thread 2026-11-18T14:25Z after the alignment presentation. No always-ask wording and no new Decision, so no approved-text sidecar."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:a9a977832bdeaa1e06d5da9d0f7dbcdfa7b7c2d27407f6e3b9a5215b9e86ee18"}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 1, nits: 7}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
