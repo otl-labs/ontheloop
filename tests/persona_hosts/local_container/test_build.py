@@ -15,7 +15,9 @@ ROOT = Path(__file__).resolve().parents[3]
 
 def test_plain_build() -> None:
     argv = build_argv("d/Dockerfile", "/t/iid", BuildOptions(ca_bundle=None, http_proxy=None))
-    assert argv == ["docker", "build", "-f", "d/Dockerfile", "--iidfile", "/t/iid", "."]
+    assert argv == [
+        "docker", "build", "-f", "d/Dockerfile", "--iidfile", "/t/iid", "--provenance=false", "--sbom=false", "."
+    ]  # fmt: skip
 
 
 def test_ca_bundle_is_a_secret_never_a_build_arg() -> None:
@@ -79,3 +81,16 @@ def test_missing_docker_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(build.subprocess, "run", boom)
     with pytest.raises(RuntimeError, match="docker unreachable"):
         build.build_image(ROOT, BuildOptions(ca_bundle=None, http_proxy=None))
+
+
+def test_labels_are_sorted_label_pairs() -> None:
+    options = BuildOptions(ca_bundle=None, http_proxy=None, labels={"b.k": "2", "a.k": "1"})
+    argv = build_argv("d/Dockerfile", "/t/iid", options)
+    pairs = [argv[i + 1] for i, a in enumerate(argv) if a == "--label"]
+    assert pairs == ["a.k=1", "b.k=2"]
+
+
+def test_no_labels_by_default_and_attestation_attachments_always_off() -> None:
+    argv = build_argv("d/Dockerfile", "/t/iid", BuildOptions(ca_bundle=None, http_proxy=None))
+    assert "--label" not in argv
+    assert "--provenance=false" in argv and "--sbom=false" in argv
