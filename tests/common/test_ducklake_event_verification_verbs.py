@@ -280,3 +280,41 @@ def test_root_sessions_returns_host_run_ref_for_top_level_roots_only() -> None:
     with chain.loaded("corpus:subagent_sync", True) as (con, _rows, _ids):
         (with_children,) = _roots(con)
         assert with_children["host_run_ref"] is None
+
+
+def test_a_link_row_leaves_the_tree_last_event() -> None:
+    tree = "corpus:close_cancelled_mid_stream"
+    with chain.loaded(tree, True) as (con, rows, ids):
+        planted = next(r for r in rows["telemetry_observations"] if r["project_id"] == PROJECT)
+        db.insert_rows(
+            con,
+            "telemetry_observations",
+            [
+                dict(
+                    planted,
+                    event_id="01ARZ3NDEKTSV4RRFFQ69G5FAX",
+                    observation_id="01ARZ3NDEKTSV4RRFFQ69G5FAY",
+                    parent_observation_id="01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+                )
+            ],
+        )
+        rows = chain.stored_rows(con)
+        last = max(r["event_timestamp"] for t in chain.TABLES for r in rows[t] if r["project_id"] == PROJECT)
+        opener = next(r for r in rows["telemetry_sessions"] if r["project_id"] == PROJECT and r["event_kind"] == "open")
+        db.insert_rows(
+            con,
+            "telemetry_sessions",
+            [
+                dict(
+                    opener,
+                    event_id="01ARZ3NDEKTSV4RRFFQ69G5FB2",
+                    event_kind="annotate",
+                    event_timestamp=last + timedelta(hours=1),
+                )
+            ],
+        )
+        assert chain.canonical(_roots(con)[0]["last_event_timestamp"]) == chain.canonical(last)
+        as_of = (last + timedelta(seconds=IDLE_THRESHOLD_SECONDS + 1)).isoformat()
+        got = {r["join_id"]: r for r in _verb_equals_oracle(con, as_of)}
+        join = "parent_observation_id_join_observations_self_tree"
+        assert (got[join]["orphans_quiescent"], got[join]["orphans_pending"]) == (1, 0)

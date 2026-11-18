@@ -421,3 +421,17 @@ def test_a_skewed_structural_verb_skips_what_depends_on_it(world: World, verb: s
         assert report.window_agree == (0, 0) and report.agree
     else:
         assert report.orphan_child_rows == {} and report.window_agree[1] > 0
+
+
+def test_a_link_row_never_reads_as_moved(world: World) -> None:
+    tree = "corpus:subagent_sync"
+    base = world.run(quiet_day=QUIET_DAY)
+    g.clone_row(
+        world.con,
+        "telemetry_sessions",
+        world.project(tree),
+        {"event_id": "merge-link", "event_kind": "annotate", "event_timestamp": datetime(2026, 1, 3, 12, tzinfo=timezone.utc)},
+    )
+    report = world.run(quiet_day=QUIET_DAY)
+    assert report.tree_moved == 0
+    assert (report.quiet, report.compared_trees) == (base.quiet, base.compared_trees)
