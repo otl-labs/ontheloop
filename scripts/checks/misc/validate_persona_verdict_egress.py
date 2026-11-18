@@ -79,8 +79,9 @@ def _load_list(root: Path, out: list[str]) -> dict[str, Any] | None:
         out.append(f"{LIST_FILE} does not parse: {type(exc).__name__}")
         return None
     filt = data.get("filter") if isinstance(data, dict) else None
-    ok = isinstance(filt, dict) and all(isinstance(filt.get(k), str) for k in ("action", "sha", "version", "agent_sha256"))
-    if not ok:
+    if not isinstance(filt, dict) or not all(
+        isinstance(filt.get(k), str) for k in ("action", "sha", "version", "agent_sha256")
+    ):
         out.append(f"{LIST_FILE}: filter needs action, sha, version and agent_sha256")
         return None
     if not HEX40.match(filt["sha"]):
@@ -225,7 +226,8 @@ def _job_problems(rel: str, name: str, workflow: dict[str, Any], data: dict[str,
 
 def _probe_problems(workflow: dict[str, Any]) -> list[str]:
     out: list[str] = []
-    triggers = workflow.get("on", workflow.get(True))
+    flags: dict[Any, Any] = workflow
+    triggers = flags.get("on", flags.get(True))
     if workflow.get("name") != "persona-verdict-egress-probe":
         out.append(f"{PROBE}: name must be persona-verdict-egress-probe")
     if triggers != PROBE_TRIGGER:
