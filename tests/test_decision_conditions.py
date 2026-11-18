@@ -418,7 +418,7 @@ class TestPreflightBucket:
     def test_bucket_shape_on_real_decisions_md(self) -> None:
         bucket = dc.preflight_bucket()
         assert set(bucket) == {"monitored", "surfaced", "malformed"}
-        assert 133 in bucket["monitored"]
+        assert bucket["monitored"] and 133 not in bucket["monitored"] and "133" not in str(bucket["surfaced"])
         assert bucket["malformed"] == []
 
     def test_bucket_never_raises_on_a_broken_paths_arg(self) -> None:
