@@ -226,6 +226,21 @@ def _run_ducklake_build(args: argparse.Namespace) -> None:
         print("[4/4] DuckLake build complete.")
 
 
+CONTENT_READER_SLUG = "ducklake_telemetry_content_reader"
+CONTENT_READER_ZIP = "ducklake-telemetry-content-reader.zip"
+
+
+def _run_content_reader_build() -> None:
+    """Build only the telemetry content reader zip; no AWS profile, upload or deploy (Decision 239 cl.5)."""
+    import hashlib  # noqa: PLC0415
+
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="lambda-build-") as tmp:
+        zip_path = build_ducklake_function_package(Path(tmp), CONTENT_READER_SLUG, CONTENT_READER_ZIP)
+        assert_within_size_limit(zip_path)
+    print(f"CONTENT_READER_SHA256 {hashlib.sha256(zip_path.read_bytes()).hexdigest()}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build Lambda deployment packages")
     parser.add_argument("--skip-upload", action="store_true", help="Build zips only, skip S3 upload")
@@ -256,6 +271,13 @@ def build_parser() -> argparse.ArgumentParser:
         "ARTIFACT_SLUG is the src/lambdas/<name>/ directory name (e.g. data-pipeline).",
     )
     parser.add_argument(
+        "--content-reader-only",
+        action="store_true",
+        help="Build ONLY the telemetry content reader zip (lambda-packages/ducklake-telemetry-content-reader.zip) and "
+        "print CONTENT_READER_SHA256. Resolves no AWS profile; uploads and deploys nothing; refuses --deploy, "
+        "--ducklake-only and --ducklake-functions beside it (Decision 239 cl.5).",
+    )
+    parser.add_argument(
         "--ducklake-functions",
         default=None,
         metavar="FN1,FN2,...",
@@ -283,7 +305,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    args = build_parser().parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
+    if args.content_reader_only:
+        if args.deploy or args.ducklake_only or args.ducklake_functions:
+            parser.error("--content-reader-only refuses --deploy, --ducklake-only and --ducklake-functions")
+        _run_content_reader_build()
+        return
     if args.profile is None:
         args.profile = resolve_aws_profile() or ""
 

@@ -114,6 +114,23 @@ def is_persona_gate_refusal(jobs_payload: dict, failed_log_text: str) -> bool:
     return failing > 0
 
 
+REJECTED_DEPLOYMENT_WORKFLOW = "deploy-telemetry-content"
+REJECTED_DEPLOYMENT_JOB = "deploy"
+
+
+def is_rejected_deployment(workflow_slug: str, jobs_payload: dict) -> bool:
+    """True iff the run is deploy-telemetry-content and its only failing job is a deploy job that ran no step.
+
+    A rejected Environment review leaves the deploy job without a start, so no steps (inferred, not verified: the
+    shape is fixed forward from the first rejected run's jobs JSON). Fail-closed: any step failure after approval,
+    another failing job, an empty failing set or an unexpected shape returns False, so the ci-rca agent files.
+    """
+    if workflow_slug != REJECTED_DEPLOYMENT_WORKFLOW or resolve_failing_jobs(jobs_payload) != {REJECTED_DEPLOYMENT_JOB}:
+        return False
+    deploys = [j for j in jobs_payload.get("jobs") or [] if isinstance(j, dict) and j.get("name") == REJECTED_DEPLOYMENT_JOB]
+    return len(deploys) == 1 and not deploys[0].get("steps")
+
+
 def _load_failed_log(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8", errors="replace")
@@ -153,9 +170,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=Path("/tmp/ci-rca-failed.log"),
         help="Path to the failed-step log written before this step; read for the persona gate refusal marker.",
     )
+    parser.add_argument(
+        "--rejected-deployment-only",
+        action="store_true",
+        help="Print skip from is_rejected_deployment alone; reads no log (the step that precedes the log fetch).",
+    )
     args = parser.parse_args(argv)
 
     jobs_payload = _load_jobs_payload(args.jobs_json)
+    if args.rejected_deployment_only:
+        print(f"skip={'true' if is_rejected_deployment(args.workflow_slug, jobs_payload) else 'false'}")
+        return 0
     skip = is_designed_refusal(args.workflow_slug, jobs_payload) or is_persona_gate_refusal(
         jobs_payload, _load_failed_log(args.failed_log)
     )

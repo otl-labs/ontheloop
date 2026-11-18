@@ -46,7 +46,8 @@ def _load(name: str) -> dict[Any, Any]:
 
 
 def _on(doc: dict[Any, Any]) -> dict[str, Any]:
-    return doc.get("on", doc.get(True))
+    on: Any = doc.get("on", doc.get(True))
+    return on
 
 
 def _watched(path: str, pathspecs: tuple[str, ...]) -> bool:
@@ -129,7 +130,7 @@ def test_deploy_gate_is_workflow_call_only_with_outputs_and_manifest() -> None:
     assert set(trigger) == {"workflow_call"}
     assert trigger["workflow_call"]["inputs"]["channel"]["required"] is True
     assert trigger["workflow_call"]["inputs"]["force"]["default"] is False
-    assert set(trigger["workflow_call"]["outputs"]) == {"sha", "deploy", "reason"}
+    assert set(trigger["workflow_call"]["outputs"]) == {"sha", "deploy", "reason", "record_sha", "record_code_sha256"}
     steps = doc["jobs"]["gate"]["steps"]
     resolve = next(s for s in steps if s.get("id") == "resolve")
     assert "inputs.force && '--force' || ''" in resolve["run"] and "FORCE" not in resolve["run"]

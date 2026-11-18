@@ -280,3 +280,31 @@ def test_facade_reexports_complete():
     # Locally-defined (not re-exports): confirm they still resolve on the facade too.
     for name in ("build_parser", "main", "_run_prod_build", "_run_ducklake_build"):
         assert hasattr(bl, name), f"{name} missing from scripts.build_lambda"
+
+
+class TestContentReaderOnly:
+    """--content-reader-only builds only the content reader zip, with no AWS profile, upload or deploy."""
+
+    def _build(self, monkeypatch, capsys):
+        for var in ("AWS_PROFILE", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setattr("sys.argv", ["build_lambda", "--content-reader-only"])
+        with (
+            patch("scripts.build_lambda.resolve_aws_profile", side_effect=AssertionError("no profile")),
+            patch("scripts.build_lambda.subprocess.run", side_effect=AssertionError("no aws call")),
+        ):
+            bl.main()
+        return capsys.readouterr().out.strip().splitlines()[-1]
+
+    def test_builds_twice_to_identical_bytes_with_no_aws(self, monkeypatch, capsys) -> None:
+        first = self._build(monkeypatch, capsys)
+        second = self._build(monkeypatch, capsys)
+        assert first == second and first.startswith("CONTENT_READER_SHA256 ")
+        assert len(first.split()[1]) == 64
+
+    @pytest.mark.parametrize("extra", ["--deploy", "--ducklake-only", "--ducklake-functions=a"])
+    def test_refuses_deploy_style_flags_beside_it(self, monkeypatch, extra) -> None:
+        monkeypatch.setattr("sys.argv", ["build_lambda", "--content-reader-only", extra])
+        with pytest.raises(SystemExit) as exc:
+            bl.main()
+        assert exc.value.code == 2
