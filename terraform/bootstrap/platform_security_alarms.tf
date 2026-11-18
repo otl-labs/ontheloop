@@ -105,6 +105,7 @@ resource "aws_cloudwatch_metric_alarm" "platform_security_platform_role_iam_chan
   comparison_operator = "GreaterThanOrEqualToThreshold"
   treat_missing_data  = "notBreaching"
   alarm_actions       = [local.platform_security_alerts_topic_arn]
+  ok_actions          = [local.platform_security_alerts_topic_arn]
 }
 
 resource "aws_cloudwatch_metric_alarm" "platform_security_denied_iam_write" {
@@ -119,6 +120,7 @@ resource "aws_cloudwatch_metric_alarm" "platform_security_denied_iam_write" {
   comparison_operator = "GreaterThanOrEqualToThreshold"
   treat_missing_data  = "notBreaching"
   alarm_actions       = [local.platform_security_alerts_topic_arn]
+  ok_actions          = [local.platform_security_alerts_topic_arn]
 }
 
 resource "aws_cloudwatch_metric_alarm" "platform_security_detector_tamper" {
@@ -133,6 +135,7 @@ resource "aws_cloudwatch_metric_alarm" "platform_security_detector_tamper" {
   comparison_operator = "GreaterThanOrEqualToThreshold"
   treat_missing_data  = "notBreaching"
   alarm_actions       = [local.platform_security_alerts_topic_arn]
+  ok_actions          = [local.platform_security_alerts_topic_arn]
 }
 
 resource "aws_cloudwatch_metric_alarm" "platform_security_alerts_topic_change" {
@@ -147,6 +150,7 @@ resource "aws_cloudwatch_metric_alarm" "platform_security_alerts_topic_change" {
   comparison_operator = "GreaterThanOrEqualToThreshold"
   treat_missing_data  = "notBreaching"
   alarm_actions       = [local.platform_security_alerts_topic_arn]
+  ok_actions          = [local.platform_security_alerts_topic_arn]
 }
 
 resource "aws_cloudwatch_metric_alarm" "platform_security_ducklake_api_change" {
@@ -161,6 +165,7 @@ resource "aws_cloudwatch_metric_alarm" "platform_security_ducklake_api_change" {
   comparison_operator = "GreaterThanOrEqualToThreshold"
   treat_missing_data  = "notBreaching"
   alarm_actions       = [local.platform_security_alerts_topic_arn]
+  ok_actions          = [local.platform_security_alerts_topic_arn]
 }
 
 resource "aws_cloudwatch_metric_alarm" "platform_security_agent_session_iam_change" {
@@ -175,6 +180,7 @@ resource "aws_cloudwatch_metric_alarm" "platform_security_agent_session_iam_chan
   comparison_operator = "GreaterThanOrEqualToThreshold"
   treat_missing_data  = "notBreaching"
   alarm_actions       = [local.platform_security_alerts_topic_arn]
+  ok_actions          = [local.platform_security_alerts_topic_arn]
 }
 
 resource "aws_cloudwatch_metric_alarm" "platform_security_telemetry_content_change" {
@@ -189,6 +195,7 @@ resource "aws_cloudwatch_metric_alarm" "platform_security_telemetry_content_chan
   comparison_operator = "GreaterThanOrEqualToThreshold"
   treat_missing_data  = "notBreaching"
   alarm_actions       = [local.platform_security_alerts_topic_arn]
+  ok_actions          = [local.platform_security_alerts_topic_arn]
 }
 
 # Missing data is breaching by design: StopLogging, DeleteTrail, a multi-region or global-events

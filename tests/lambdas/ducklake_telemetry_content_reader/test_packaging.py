@@ -1,4 +1,4 @@
-"""Packaging scope for the content reader: a stub with a complete import closure; the telemetry reader bundle is unchanged."""
+"""Packaging scope for the content reader: an active artifact, complete import closure, unchanged telemetry reader bundle."""
 
 from __future__ import annotations
 
@@ -36,11 +36,11 @@ def _manifest(rel: str) -> dict:
     return yaml.safe_load((_ROOT / rel / "manifest.yaml").read_text(encoding="utf-8"))
 
 
-def test_manifest_is_a_stub_bundling_the_content_closure() -> None:
+def test_manifest_is_active_bundling_the_content_closure() -> None:
     manifest = _manifest(_PKG)
     for rel in _PRESENT:
         assert rel in manifest["includes"], rel
-    assert manifest["status"] == "stub" and manifest["handlers"] == [_HANDLER]
+    assert manifest["status"] == "active" and manifest["handlers"] == [_HANDLER]
     assert manifest["artifact"] == "ducklake-telemetry-content-reader.zip"
     assert manifest["functions"] == ["agent-platform-ducklake-telemetry-content"]
     assert manifest["runtime_config"] == ["/agent-platform/ducklake/api_url/telemetry/content"]
@@ -62,8 +62,21 @@ def test_data_pipeline_excludes_the_package_and_the_verbs() -> None:
     assert _PKG in excludes and _VERBS in excludes
 
 
-def test_stub_affects_no_artifact() -> None:
-    assert compute_affected_artifacts([_HANDLER, _VERBS]) == {}
+def test_active_manifest_names_the_content_artifact() -> None:
+    affected = compute_affected_artifacts([_HANDLER, _VERBS])
+    assert "ducklake_telemetry_content_reader" in affected
+
+
+def test_manifest_is_active_with_the_gated_channel() -> None:
+    manifest = _manifest(_PKG)
+    assert manifest["status"] == "active"
+    assert "deploy-telemetry-content.yml" in manifest["notes"]
+
+
+def test_contract_names_the_deploy_channel() -> None:
+    text = (_ROOT / "docs/contracts/ducklake_telemetry_content_reader.yaml").read_text(encoding="utf-8")
+    for token in ("deploy-telemetry-content.yml", "deploy_config.json", "go_live", "Decision 272"):
+        assert token in text, token
 
 
 def test_staged_import_closure_is_complete(tmp_path: Path) -> None:

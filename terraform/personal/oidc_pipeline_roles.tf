@@ -274,9 +274,10 @@ resource "aws_iam_role_policy" "github_ci_planner" {
 #   - lambda:UpdateFunctionCode on function:agent-platform-* ONLY. No
 #     UpdateFunctionConfiguration, no InvokeFunction*, no PublishVersion, no AddPermission, no
 #     other lambda: action.
-#   - S3: GetObject/PutObject on lambda-packages/* (build + upload), PutObject on BOTH
-#     deploy-records/ducklake/* and deploy-records/prod/* (union of the two deploy-record
-#     prefixes), GetObject on the two vendored build-input prefixes, ListBucket (head-bucket).
+#   - S3: GetObject/PutObject on lambda-packages/* (build + upload), PutObject on
+#     deploy-records/ducklake/*, deploy-records/prod/* and deploy-records/telemetry-content/* (the
+#     content channel's record job, Decision 272 cl.2), GetObject on the two vendored build-input
+#     prefixes, ListBucket (head-bucket).
 #   - No terraform:*, no iam:* of any kind.
 #
 # Trust mirrors github_ci_branch: StringEquals aud + StringLike sub refs/heads/main ONLY (no
@@ -349,14 +350,16 @@ data "aws_iam_policy_document" "github_ci_deploy" {
   }
 
   statement {
-    # Union of the two deploy-record prefixes: write the per-function deployment record
-    # (function -> CodeSha256 -> source git SHA) for BOTH the ducklake and prod classes.
+    # Write the per-function deployment record (function -> CodeSha256 -> source git SHA) for the
+    # ducklake and prod classes, and for the telemetry content channel, whose record job runs after the
+    # operator-approved deploy and records that job's read-back (Decision 272 cl.2).
     sid     = "DeployRecordWrite"
     effect  = "Allow"
     actions = ["s3:PutObject"]
     resources = [
       "${aws_s3_bucket.data_lake.arn}/deploy-records/ducklake/*",
       "${aws_s3_bucket.data_lake.arn}/deploy-records/prod/*",
+      "${aws_s3_bucket.data_lake.arn}/deploy-records/telemetry-content/*",
     ]
   }
 
