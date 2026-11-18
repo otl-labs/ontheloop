@@ -570,3 +570,21 @@ STARTUP_BASELINE_SQL = compose(
     + STAMPS_JOIN.format(sid="ses.session_id")
     + " ORDER BY tx.session_started_at, tx.root_session_id, tx.project_id, ses.is_root DESC, ses.session_id",
 )
+
+TREE_ROLLUP_SQL = compose(
+    (SESSIONS, OBSERVATIONS),
+    (
+        "{T}, sc AS (SELECT {K}, count(*) AS session_count FROM st GROUP BY ALL), wf AS (SELECT {K}, "
+        "list_sort(list_distinct(list(workflow))) AS workflows FROM ses GROUP BY ALL), cp AS (SELECT {K}, count(*) AS "
+        "compact_count, count(DISTINCT session_id) AS compacted_session_count FROM s WHERE event_kind = 'compact' GROUP BY "
+        "ALL), ml AS (SELECT {K}, list(struct_pack(merge_sha := merge_sha, merged_at := event_timestamp, pr_url := pr_url, "
+        "rec_ids := rec_ids, ci_outcome := ci_outcome) ORDER BY event_timestamp, merge_sha) AS merge_links FROM (SELECT *, "
+        "regexp_extract(external_ref, ':merge:([0-9a-f]+)#0/annotate$', 1) AS merge_sha FROM s WHERE event_kind = 'annotate' "
+        "AND producer = 'ci_annotate') GROUP BY ALL) SELECT tx.root_session_id, tx.harness_session_key, tx.branch, "
+        "tx.workflow, tx.session_started_at, tx.last_event_timestamp, tx.roots_in_tree, sc.session_count, "
+        "coalesce(wf.workflows, []) AS workflows, coalesce(cp.compact_count, 0) AS compact_count, "
+        "coalesce(cp.compacted_session_count, 0) AS compacted_session_count, coalesce(ml.merge_links, []) AS merge_links, {S}"
+        " FROM tx JOIN sc{U} LEFT JOIN wf{U} LEFT JOIN cp{U} LEFT JOIN ml{U} ORDER BY tx.session_started_at, "
+        "tx.root_session_id, tx.project_id"
+    ).format(T=_USAGE_TREE, K=_TREE_KEY, S=_TREE_STAMPS, U=_TREE_USING),
+)
