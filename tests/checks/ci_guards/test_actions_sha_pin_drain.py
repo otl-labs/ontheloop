@@ -32,9 +32,10 @@ def test_no_baseline_entry_outside_codeowners_paths() -> None:
 
 def test_baseline_is_empty() -> None:
     root = Path(_common.ROOT)
-    path = root / _BASELINE
-    if path.exists():
-        drains = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("drains") or {}
-        assert not any(bucket for bucket in drains.values()), drains
     live, unreadable, _ = scan(root)
-    assert not live and not unreadable, (sorted(live), unreadable)
+    assert not live, dict(live)
+    assert not unreadable, unreadable
+    baseline = root / _BASELINE
+    if baseline.is_file():
+        drains = (yaml.safe_load(baseline.read_text(encoding="utf-8")) or {}).get("drains") or {}
+        assert not any(drains.values()), {k: sorted(v) for k, v in drains.items() if v}
