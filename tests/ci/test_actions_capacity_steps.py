@@ -41,7 +41,8 @@ def _steps() -> list[dict[str, Any]]:
 def test_capacity_steps_are_last_and_run_unless_cancelled() -> None:
     steps = _steps()
     assert [s.get("name") for s in steps[-2:]] == [MEASURE, UPLOAD]
-    assert steps[-3]["name"] == "Assert scheduled loop liveness (LSA-02)"
+    assert steps[-3]["name"] == "File reversal reviews (rec-5264)"
+    assert steps[-4]["name"] == "Assert scheduled loop liveness (LSA-02)"
     assert all(s["if"] == GATE for s in steps[-2:])
     assert "scripts.ci.actions_capacity_gauge --reading-out actions-capacity-reading.json" in steps[-2]["run"]
     assert steps[-2]["run"].splitlines()[0] == "set -euo pipefail"
