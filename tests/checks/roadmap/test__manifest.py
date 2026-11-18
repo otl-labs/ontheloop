@@ -150,6 +150,10 @@ _CLOSURE_INPUTS: dict[str, tuple[str, ...]] = {
     ),
     "validate_plan_documents": (
         "scripts/roadmap/plan_document.py",
+        "scripts/roadmap/plan_decision_drafts.py",
+        "scripts/checks/decisions/envelope_rules.py",
+        "scripts/north_star_models.py",
+        "docs/DECISIONS_ARCHIVE.md",
         "scripts/checks/_common.py",
         "scripts/checks/registry.py",
     ),
