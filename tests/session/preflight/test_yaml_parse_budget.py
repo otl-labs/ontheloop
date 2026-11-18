@@ -5,6 +5,8 @@ controls and a package-fixture wiring check.
 
 from __future__ import annotations
 
+import importlib
+import inspect
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,6 +17,7 @@ boto3 = pytest.importorskip("boto3")
 
 from scripts import contract_rules  # noqa: E402
 from scripts.preflight import recs_cache  # noqa: E402
+from tests.fixtures import yaml_parse_spy  # noqa: E402
 from tests.fixtures.session_preflight_module import preflight as _preflight  # noqa: E402
 from tests.fixtures.yaml_parse_spy import install as install_yaml_parse_spy  # noqa: E402
 
@@ -114,6 +117,37 @@ class TestYamlParseSpy:
         libyaml_entries = [e for e in log.entries if e.kind == "libyaml"]
         assert len(libyaml_entries) == 1
         assert any(frame.startswith("contract_rules.py:parse_yaml") for frame in libyaml_entries[0].stack)
+
+    def test_records_scripts_frames_without_inspect_stack(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        log = install_yaml_parse_spy(monkeypatch)
+
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise AssertionError("inspect stack machinery must not be used")
+
+        monkeypatch.setattr(inspect, "stack", _boom)
+        monkeypatch.setattr(inspect, "getframeinfo", _boom)
+
+        contract_rules.parse_yaml("a: 1\n")
+
+        libyaml_entries = [e for e in log.entries if e.kind == "libyaml"]
+        assert len(libyaml_entries) == 1
+        assert any(frame.startswith("contract_rules.py:parse_yaml") for frame in libyaml_entries[0].stack)
+
+    def test_frames_are_innermost_first(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        suffix = tmp_path.name.replace("-", "_")
+        (tmp_path / f"inner_{suffix}.py").write_text("import yaml\n\n\ndef inner():\n    return yaml.safe_load('a: 1')\n")
+        (tmp_path / f"outer_{suffix}.py").write_text(
+            f"import inner_{suffix}\n\n\ndef outer():\n    return inner_{suffix}.inner()\n"
+        )
+        monkeypatch.setattr(yaml_parse_spy, "_SCRIPTS_DIR", tmp_path.resolve())
+        monkeypatch.syspath_prepend(str(tmp_path))
+        log = install_yaml_parse_spy(monkeypatch)
+
+        outer_module = importlib.import_module(f"outer_{suffix}")
+        outer_module.outer()
+
+        assert len(log.pure_entries) == 1
+        assert log.pure_entries[0].stack == (f"inner_{suffix}.py:inner", f"outer_{suffix}.py:outer")
 
     def test_guard_sees_a_disabled_libyaml_loader(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Mutation proof: with the libyaml loader disabled, the same seam list goes OVER budget
