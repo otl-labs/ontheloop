@@ -83,8 +83,8 @@ scope:
       never on main: after the build PR has merged and the branch was restarted from main (no PR open from it), one
       commit on the build's harness branch changes only the analyze job's actions/checkout line from its pinned SHA
       to the tag @v7 (deliberately floating); CodeQL is dispatched with ref set to that branch before and after the
-      apply; then one commit restores the line byte for byte. codeql.yml runs on push only for main, so the branch
-      push starts nothing by itself. Nothing else in the file changes.
+      apply; then the branch is deleted from the remote, so the edit leaves no trace on any ref. codeql.yml runs on
+      push only for main, so the branch push starts nothing by itself. Nothing else in the file changes.
 bundled_recommendations: [rec-5290]
 followon_recs: []
 infrastructure_dependencies:
@@ -231,11 +231,16 @@ verification_plan:
     action: >-
       Full tier on the ready head, started in the background from the top-level session with a 2 h limit, and its
       verdict, before the PR is opened (handoff_policy).
-    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    command: >-
+      bin/venv-python -c "print('start in the background, 2 h limit: bin/venv-python -m scripts.validate')" &&
+      bin/venv-python -m scripts.checks.validation_result --verify-head
     expected: verify-head reports ok for HEAD.
     fix_if: Any failure, or a timeout; the handoff is blocked; fix and re-run from the start (handoff_policy).
     hermetic: false
-    graduation: not-applicable
+    graduation: waive
+    graduation_waiver_reason: >-
+      A validate run on this branch's transient tree, the same class as VP 9; the PR's own CI and the post-merge full
+      tier re-run it authoritatively, and a validate run can never be a graduated record.
   - step: 11
     phase: post-deploy
     action: >-
@@ -261,16 +266,20 @@ verification_plan:
   - step: 13
     phase: post-deploy
     action: >-
-      Canary, before the apply: restart the build's branch from main after the merge (git fetch origin main, git reset
-      --hard origin/main, git fetch --prune origin, then git push --force-with-lease -u origin HEAD as its own call (a plain git push -u origin HEAD if the merge deleted the remote branch); the branch then holds only
-      merged history and no pull request is open from it). Commit the one-line codeql.yml change (analyze job checkout
-      to actions/checkout@v7). The handoff evidence gate needs full-tier evidence for that tree: run the full tier in
-      the background (2 h limit) and validation_result --verify-head, expecting failed_run (validate_actions_sha_pinned
-      refuses the floating checkout; the gate passes failed_run with a warning). Push it; dispatch CodeQL with ref set
-      to the branch. Its run succeeds (the policy is still off). Start this right after the merge so the apply is not
-      delayed past Monday 2026-11-23 07:00 UTC.
+      Canary, before the apply. Restart the build's branch locally from main after the merge, with no push yet (git
+      fetch origin main, git reset --hard origin/main, git fetch --prune origin). Commit the one-line codeql.yml change
+      (analyze job checkout to actions/checkout@v7). The handoff evidence gate needs full-tier evidence for that exact
+      tree (a zero-diff push is never exempt, so there is exactly one push): start the full tier in the background
+      (2 h limit), then validation_result --verify-head, expecting failed_run (validate_actions_sha_pinned refuses the
+      floating checkout; the gate passes failed_run with a warning). Push once, as its own call: git push
+      --force-with-lease -u origin HEAD, or git push -u origin HEAD if the merge deleted the remote branch. The branch
+      then holds merged history plus the canary, and no pull request is open from it. Dispatch CodeQL with ref set to
+      the branch; its run succeeds (the policy is still off). Expected side effect: with security-events write, each
+      branch dispatch uploads a code-scanning analysis for that branch ref; it goes stale when VP 16 deletes the
+      branch and touches no main alert. Start this right after the merge so the apply is not delayed past Monday
+      2026-11-23 07:00 UTC.
     command: >-
-      bin/venv-python -m scripts.validate; bin/venv-python -m scripts.checks.validation_result --verify-head; bin/venv-python -c "print('expect failed_run only for validate_actions_sha_pinned; then git push -u origin HEAD as its own call; MCP: mcp__github__actions_run_trigger(method=run_workflow, workflow_id=codeql.yml, ref=<branch>); actions_get(get_workflow_run) conclusion success')"
+      bin/venv-python -c "print('start in the background, 2 h limit: bin/venv-python -m scripts.validate')"; bin/venv-python -m scripts.checks.validation_result --verify-head; bin/venv-python -c "print('expect failed_run only for validate_actions_sha_pinned; then git push --force-with-lease -u origin HEAD as its own call; MCP: mcp__github__actions_run_trigger(method=run_workflow, workflow_id=codeql.yml, ref=<branch>); actions_get(get_workflow_run) conclusion success')"
     expected: verify-head reports failed_run whose failing checks are validate_actions_sha_pinned plus, at most, the open main reds rec-5355 and rec-5364; the branch CodeQL run concludes success.
     fix_if: >-
       The CodeQL run fails for another reason, or verify-head names another failing check: stop and report; never
@@ -303,16 +312,17 @@ verification_plan:
     action: >-
       Enforcement proof. Dispatch CodeQL again with ref set to the branch (same commit as VP 13); its run fails with
       GitHub's refusal of an action not pinned to a full-length commit SHA. Record the run id and the message, then
-      commit the restore of codeql.yml (byte for byte equal to main's) and push it. The branch never opens a pull
-      request carrying the change.
+      delete the branch from the remote as its own call, git push origin :<branch> (an agent-branch delete, which the
+      handoff evidence gate passes), and read the remote back. The branch never opens a pull request carrying the
+      change; no restore commit is pushed.
     command: >-
-      bin/venv-python -c "print('MCP: mcp__github__actions_run_trigger(method=run_workflow, workflow_id=codeql.yml, ref=<branch>); actions_get conclusion failure or startup_failure; get_job_logs or the run annotations naming full-length commit SHA pinning; then restore the file from the restart commit (the merge-base of the branch and main), commit, and git push -u origin HEAD as its own call')" && git fetch origin main --quiet && git diff --exit-code "$(git merge-base HEAD origin/main)" -- .github/workflows/codeql.yml
-    expected: The run fails with the pinning refusal message; after the restore, git diff against the merge-base for codeql.yml is empty.
+      bin/venv-python -c "print('MCP: mcp__github__actions_run_trigger(method=run_workflow, workflow_id=codeql.yml, ref=<branch>); actions_get conclusion failure or startup_failure; get_job_logs or the run annotations naming full-length commit SHA pinning; then git push origin :<branch> as its own call')" && git ls-remote --exit-code origin "refs/heads/$(git branch --show-current)"; test $? -eq 2
+    expected: The run fails with the pinning refusal message; after the delete, git ls-remote exits 2 (the branch is gone from the remote).
     fix_if: >-
       It succeeds: the stored setting does not enforce; stop and report to the plan owner and the operator (the
       native control is then a no-op; the presubmit check is the only control). The dispatch call is refused or no run
-      appears: record the API response as the evidence, restore the file all the same, and report. The diff leg is
-      non-empty: restore from origin/main again before reporting.
+      appears: record the API response as the evidence, delete the branch all the same, and report. ls-remote still finds
+      the branch: the delete was refused; read the refusal, fix the call form, and delete again before reporting.
     hermetic: false
   - step: 17
     phase: post-deploy
@@ -354,18 +364,18 @@ test_obligations:
     test_selector: tests/checks/misc/test_validate_ghas_probe.py::TestValidateGhasProbe::test_check_fails_when_sha_pinning_field_absent
     red_green_expectation: red before (the node is absent; the probe ignores the field), green after
   - source: .github/workflows/codeql.yml
-    behavior: the branch-only canary edit is restored byte for byte and never reaches main
+    behavior: the branch-only canary edit never reaches main and leaves no remote ref once VP 16 deletes the branch
     verification_step: 16
-    command: git diff --exit-code "$(git merge-base HEAD origin/main)" -- .github/workflows/codeql.yml
+    command: git ls-remote --exit-code origin "refs/heads/$(git branch --show-current)"; test $? -eq 2
     waiver_reason: >-
-      Branch-only, post-merge canary that appears in no PR diff and is restored at VP 16; the file's behaviour on main
-      never changes, so no standing test applies; VP 16's empty diff is the evidence.
+      Branch-only, post-merge canary that appears in no PR diff and is removed with the branch at VP 16; the file's
+      behaviour on main never changes, so no standing test applies; VP 16's remote read-back is the evidence.
 constraints:
   - "One build PR: repo.tf, the gate extractor, the probe, their tests and the Decision 83 annotation. ghas-probe.yml and terraform-github-apply.yml are not edited. Named residual: ghas-probe.yml's header still says three confidential-data-boundary controls; its third, Actions permissions, now covers enablement and required pinning, so the header stays true; a comment-only edit would pull the workflow's run: bodies into scope for no behaviour."
-  - "The canary is a branch-only edit of codeql.yml (operator's choice 2026-11-18 16:03 UTC over a new canary file, which would need a ci_rca_taxonomy row in a file at its cap that then goes stale on main): it exists only in post-merge commits on the build's harness branch while no pull request is open from it, is restored at VP 16, and appears in no PR diff."
-  - "Merge: on green checks once the plan is approved (operator ruling 2026-11-16); the operator's review point is the apply preview he approves in Actions (VP 14). No Resolves trailer: rec-5290 closes through the portal after VP 15, because the setting is not live at merge."
+  - "The canary is a branch-only edit of codeql.yml (operator's choice 2026-11-18 16:03 UTC over a new canary file, which would need a ci_rca_taxonomy row in a file at its cap that then goes stale on main): it exists only in one post-merge commit on the build's harness branch while no pull request is open from it, the branch is deleted from the remote at VP 16, and it appears in no PR diff."
+  - "Merge: on green checks once the plan is approved (standing operator ruling 2026-11-16 12:33 UTC, cmsg_01YbaDZWowGfXCn2WtobCVVoNkoksprjGv5Mz9HrYSDG27, also cited by PLAN-telemetry-content-reader-api-lock; it covers the Decision 246 cl.4 final-diff word for the CODEOWNERS paths here); the operator's review point is the apply preview he approves in Actions (VP 14). No Resolves trailer: rec-5290 closes through the portal after VP 15, because the setting is not live at merge."
   - "The apply dispatch is an admin step: it waits for the operator's own words naming it in the build thread (Decision 248 cl.1); approval in this plan or from another thread does not carry over."
-  - "The codeql.yml canary edit lives only on the build's harness branch with no open pull request and is restored at VP 16; it never reaches main and is never pushed to any other branch. No other line of codeql.yml changes."
+  - "The codeql.yml canary edit lives only on the build's harness branch with no open pull request, and that branch is deleted from the remote at VP 16; it never reaches main and is never pushed to any other branch. No other line of codeql.yml changes."
   - "If, at build time, a check gates the Decision 83 annotation as approved wording (the unbuilt wording-approval-routing plan adds one), stop and return to the plan owner for a sidecar; never merge it around the gate."
   - "Test fixtures build SHAs from repeated characters, never a literal 40-hex string (detect-secrets)."
   - No rescue agents or workaround loops (Decision 55); never skip or loosen a test to get green (Decision 235).
@@ -378,7 +388,7 @@ context:
   - "ghas-probe: weekly Monday 07:00 UTC plus dispatch; ci_rca_taxonomy marks it not_a_gate, ci_rca excluded, so a red blocks nothing. Between merge and apply the scheduled run fails naming sha_pinning_required, a true alarm: apply before Monday 2026-11-23 07:00 UTC or expect it. Its if: skips only otl-workflow-dispatcher[bot]; MCP dispatches run as the operator's account."
   - "Overlap: no open PR edits a scope file (checked 2026-11-18 15:30 UTC; #2221 and #2198 touch neither the gate script nor the probe). Unbuilt plans on main that scope the same files are named by plan_obligations; whichever builds second rebases."
   - "rec-5288, rec-5289, rec-5341 and rec-5342 read closed (critique round 2, 2026-11-18). The physical premise is met: config/actions_sha_pin_baseline.yaml is gone on main and VP 6 passed (336 references, both composites pinned) when the critic re-ran it."
-  - "Decision 83 annotation (choice, stated): it points to rec-5290's closure for the first live read-back run id rather than carrying the run id itself, because the run happens after the merge that carries the annotation; Decision 83's reversal stanza is satisfied at its next re-verification. VP 4 waives on whole-file re-runs; Pushes run as their own canonical call: the handoff evidence gate (git-ops.yaml handoff_evidence_gate, Decision 203) admits only canonical forms, and a non-exempt tree needs full-tier evidence for that exact tree, so the canary commit gets its own full-tier run (VP 13); the restore push changes no path against the merge-base and passes as exempt; VP 16's diff leg compares against that merge-base, so a later change to codeql.yml on main does not make it fail."
+  - "Decision 83 annotation (choice, stated): it points to rec-5290's closure for the first live read-back run id rather than carrying the run id itself, because the run happens after the merge that carries the annotation; Decision 83's reversal stanza is satisfied at its next re-verification. VP 4 waives on whole-file re-runs; Pushes run as their own canonical call: the handoff evidence gate (git-ops.yaml handoff_evidence_gate, Decision 203) admits only canonical forms, and a non-exempt tree needs full-tier evidence for that exact tree, and a zero-diff push is never exempt (handoff_evidence._is_exempt), so the restart is local and the canary commit gets its own full-tier run before its single push (VP 13); VP 16 removes the canary with an agent-branch delete, which the gate passes (_decide_delete), and its evidence leg reads the remote, not the local tree."
   - "Graduated shards kept, not edited: ghas-probe-401-raises-auth-error (names test_validate_ghas_probe.py), terraform-github-apply-non-push-fails-closed and terraform-github-apply-push-neutral (name test_terraform_github_apply_gate.py); their nodes are unchanged."
   - "Related-work check (scripts.ci_rca.red_overlap, 2026-11-18 15:20 UTC): blocked by rec-5355 (plan-corpus walker budget xdist crash, Critical, 15 h old) and rec-5364 (vp-replay base-collapse, Critical, 13 h old), both past SLO, owner named: CI Reform; shared files none. Deferral rationale: neither is this plan's repair and neither overlaps a scope source, so Decision 226 does not halt this work beyond the SLO rule; the gate is the handoff_policy's own: validation_result --verify-head ok on the PR head."
   - "Cross-project files: scripts/ci/terraform_github_apply_gate.py and its test (Decision 248 apply fence, CODEOWNERS) and scripts/checks/misc/validate_ghas_probe.py and its test. Operator OK to edit them and their tests: given 2026-11-18 15:41 UTC in the plan thread."
@@ -391,6 +401,7 @@ gate_rounds:
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 3, nits: 12, escalated: true, escalation_choice: re-scope}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 9}
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 2, nits: 7}
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 6}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -400,11 +411,11 @@ pre_implementation_checklist:
 execution_steps:
   - "Pre: rebase on origin/main; VP 6 (nothing in use would break). A floating ref anywhere stops the build before any edit."
   - "repo.tf: add sha_pinning_required = true and rewrite the block comment as the scope row says; create the static test; VP 1 red on the base, green on the branch; VP 5."
-  - "Gate: add the extractor and the two test nodes; VP 2 red on the base, green on the branch."
+  - "Gate: add the extractor and the two test nodes; VP 2 red on the base, green on the branch. tests/test_terraform_github_apply_gate.py is at 446 of 500 SLOC (54 headroom, measured 2026-11-18): keep the two nodes compact and re-measure; past 500, decompose, never raise."
   - "Probe: add _pin_label, the state key, the disabled-control leg, the summary field and the docstring lines (examined stays 3); update _actions_body and add the three nodes; VP 3 red on the base, green on the branch."
   - "DECISIONS.md: append after Decision 83's last Update line exactly: '> **Update (<the build commit's UTC date, YYYY-MM-DD>, PLAN-actions-sha-pin-native-policy):** the ghas-probe's Actions-permissions control also checks sha_pinning_required, GitHub's required SHA pinning (rec-5290, Decision 100), so the three controls named in the reversal conditions include it. The first live read-back run is cited in rec-5290's closure.' Run the decisions-index generator and expect no diff (the index holds number, title, status and amends); a diff is a stop for the plan owner."
   - "VP 4, VP 8, VP 9; commit; git fetch origin main and bin/venv-python -m scripts.session.rebase_resolve; VP 10 (full tier in the background, 2 h limit, then verify-head ok; a timeout blocks the handoff and reruns from the start); push as its own call (git push -u origin HEAD); open the PR with the attribution header; VP 7 from its PR-time plan comment; merge (squash) on green checks."
-  - "After merge: VP 11; VP 12; VP 13 (branch restart, canary commit, its full tier, push, dispatch); ask the operator for VP 14 in the words it gives and wait; on his words VP 14; VP 15; VP 16; VP 17."
+  - "After merge: VP 11; VP 12; VP 13 (local branch restart, canary commit, its full tier, one push, dispatch); ask the operator for VP 14 in the words it gives and wait; on his words VP 14; VP 15; VP 16; VP 17."
   - "Close rec-5290: bin/venv-python -m scripts.ops_data_portal --update-rec rec-5290 --status closed --execution_result success --resolution '<merge SHA>; native SHA pinning applied (VP 14 run <id>), read back by ghas-probe (VP 15 run <id>), enforced (VP 16 canary run <id>)' (no --closure-artifact or --closure-fix-sha: rec-5290 has no context_v2_json, so closure stamps do not apply and update_rec refuses them); VP 18."
   - "Report: what was implemented, verification results with every run id, and any pending VP 17 workflow."
 rollback: >-
