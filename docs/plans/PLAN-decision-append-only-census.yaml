@@ -30,7 +30,9 @@ scope:
       memo and delegates its miss to file_text_at(root, "origin/main", rel), so the shared single read and every --pre
       consumer are unchanged. Add decision_bodies_at(root, rev) -> Optional[BaselineBodies] built on file_text_at: the
       per-corpus-file {number -> heading-inclusive block} through the same iter_decision_sections grammar; a corpus file
-      absent at rev yields {} for that path; a rev that `git rev-parse --verify rev^{commit}` rejects returns None.
+      that `git cat-file -e rev:path` reports absent yields {} for that path; a rev that `git rev-parse --verify
+      rev^{commit}` rejects, or a present file whose read fails, returns None, so a failed read never becomes an empty
+      baseline.
       baseline_decision_bodies is not touched. No new first-party import.
     new_imports: []
   - file: scripts/checks/decisions/append_only_rule.py
@@ -58,11 +60,15 @@ scope:
       docs/DECISIONS_ARCHIVE.md` and compares each commit with its first parent through _baseline.decision_bodies_at. A
       finding is (merge sha, decision, digest, first unmatched line, PR number parsed from the subject's trailing
       '(#N)' when present); digest is the first 16 hex of sha256 over the parent's prepared block, a NUL line and the
-      merge's prepared block. (2) LEDGER. Reads config/agent/decision_census.yaml's top-level `acknowledged:` list of rows {merge, decision, digest}. A row
+      merge's prepared block; a grammar change in scripts/decisions_md.py or decision_conditions.py can move every
+      digest, and the census then reports each row as stale with its new digest, so a digest-refresh PR rewrites those
+      digests only and is not a new acknowledgement. (2) LEDGER. Reads config/agent/decision_census.yaml's top-level `acknowledged:` list of rows {merge, decision, digest}. A row
       acknowledges a finding when all three match. A row that matches no finding (stale or never flagged), or whose
-      decision body at head holds no line beginning '> **Update (' that contains the merge's first 8 hex characters
-      (the disposition annotation), is a ledger defect. (3) SELF-TEST. Every run asserts that, with acknowledgements
-      ignored, 660d5b54 is flagged for Decisions 65 and 210; if not, the detector is blind. (4) CLI. `python -m
+      decision body at head, in docs/DECISIONS.md or docs/DECISIONS_ARCHIVE.md, holds no line beginning '> **Update ('
+      that contains the merge's first 8 hex characters (the disposition annotation), is a ledger defect. (3) SELF-TEST.
+      Every run asserts that, with acknowledgements ignored, the module constant SELF_TEST_FIXTURE (merge 660d5b54,
+      Decisions 65 and 210) is flagged; if not, the detector is blind. The constant is the only seam: tests monkeypatch
+      it to a fixture merge in their throwaway history, and there is no CLI or config switch. (4) CLI. `python -m
       scripts.checks.decisions.append_only_census [--head REV] [--summary PATH]` prints one line per finding, then
       'CENSUS merges=<n> findings=<f> acknowledged=<a> open=<o> self_test=ok'; --summary appends the same as Markdown.
       Exit 0 when open is 0 and the ledger is clean; exit 1 on an open finding or a ledger defect; exit 2, never a pass,
@@ -76,27 +82,42 @@ scope:
       pre=True, pre_globs (docs/DECISIONS.md, docs/DECISIONS_ARCHIVE.md, scripts/decisions_md.py,
       scripts/preflight/decision_conditions.py, scripts/checks/decisions/**, scripts/checks/_common.py,
       scripts/checks/registry.py), no full_segment: a WARN has no post-merge reader, and the census owns main.
+  - file: tests/checks/decisions/test_append_only_rule.py
+    action: Create
+    purpose: >-
+      The rule module's mirror (map_source_to_test; validate_red_case_floor and the per-file coverage read it). TestRule
+      ports every classification case of the retired guard's tests (a50ee8de
+      tests/checks/decisions/test_validate_live_entry_immutability.py, each FAIL paired with its nearest PASS, the
+      fence-grammar agreement and unterminated-fence cases included) onto compare, with positive assertions on the
+      flagged (decision, line) pairs. TestNoWaiverRoute ports the guard's no-waiver-vocabulary cases onto
+      append_only_rule (its source holds no allow, waive, skip or config read, and the WARN check takes no such input).
+      TestWarnCheck runs validate_decision_append_only through an injected baseline reader: a rewritten ratified line
+      prints WARN and leaves failed empty; an append-only edit prints no WARN; an unreachable baseline skips. Covers
+      append_only_rule.py to 100% on its own.
   - file: tests/checks/decisions/test_append_only_census.py
     action: Create
     purpose: >-
-      rec-5266's acceptance file. TestRule ports every classification case of the retired guard's tests (a50ee8de
-      tests/checks/decisions/test_validate_live_entry_immutability.py, each FAIL paired with its nearest PASS, the
-      fence-grammar agreement and unterminated-fence cases included) onto append_only_rule.compare, and TestNoWaiverRoute
-      ports the guard's no-waiver-vocabulary cases onto append_only_rule (its source holds no allow, waive, skip or config
-      read, and the WARN check takes no such input). TestReplay (rec-5266's acceptance node) builds throwaway git repos with ANCHOR monkeypatched to their
-      first commit: an append-only history gives open=0 and exit 0; an in-place rewrite of a line added by an earlier
+      rec-5266's acceptance file; covers append_only_census.py to 100% on its own. TestReplay (rec-5266's acceptance
+      node) builds throwaway git repos with ANCHOR and SELF_TEST_FIXTURE monkeypatched to commits in them, every history
+      carrying one acknowledged, annotated fixture rewrite so the self-test holds: otherwise append-only history gives
+      open=0 and exit 0; an in-place rewrite of a line added by an earlier
       merge is flagged at the rewriting merge, with its digest and PR number, while a comparison of the anchor with head
       alone does not flag it; a matching ledger row plus its annotation acknowledges it (exit 0); the same row without
       the annotation, with a wrong digest, or naming an unflagged merge exits 1; an anchor that is not an ancestor exits
-      2; the self-test exits 2 when the fixture is not flagged (ANCHOR and the fixture sha monkeypatched). TestWarnCheck
-      runs validate_decision_append_only through an injected baseline reader: a rewritten ratified line prints WARN and
-      leaves failed empty; an append-only edit prints no WARN; an unreachable baseline skips. TestWiring reads
-      .github/workflows/decision-census.yml (triggers exactly push with the eight paths, schedule and workflow_dispatch;
+      2; a parent read that fails exits 2; an annotation found only in the archive still acknowledges; a row whose digest
+      no longer matches is reported stale with the new digest; the self-test exits 2 when the fixture is not flagged.
+      TestWiring reads
+      .github/workflows/decision-census.yml (triggers exactly push with the ten paths, schedule and workflow_dispatch;
       no pull_request; permissions contents: read only; no id-token anywhere; checkout fetch-depth 0 and
       persist-credentials false; the run line invokes the module with --summary), config/ci_rca_taxonomy.yaml (the
-      decision-census row is not_a_gate and excluded; function_to_category maps validate_decision_append_only), the
-      decisions _manifest Entry (pre, no full_segment) and config/agent/decision_census.yaml (both #1568 rows are present,
+      decision-census row is not_a_gate and excluded; function_to_category maps validate_decision_append_only) and
+      config/agent/decision_census.yaml (both #1568 rows are present,
       a membership floor, never an exact count).
+  - file: tests/checks/decisions/test__manifest.py
+    action: Modify
+    purpose: >-
+      Add validate_decision_append_only to the _REQUIRED_ENTRY_NAMES membership floor, and one case that its Entry is
+      pre=True with no full_segment.
   - file: tests/checks/decisions/test__baseline.py
     action: Modify
     purpose: >-
@@ -109,7 +130,8 @@ scope:
     purpose: >-
       The acknowledgement ledger, top-level key `acknowledged:`. A header comment names Decision 177's 2026 Update from this plan as its rule: rows
       are post-hoc acknowledgements of merges already on main, one per (merge, decision), each with its digest, and each
-      needs a dated annotation on that Decision naming the merge. Seeded with two rows, merge
+      needs a dated annotation on that Decision naming the merge; a digest-refresh after a grammar change rewrites
+      digests only. Seeded with two rows, merge
       660d5b54cb841110a1ae375a66f26cd3bf67a50d (#1568) for Decisions 65 and 210, digests as the census prints them at
       build time.
   - file: .github/workflows/decision-census.yml
@@ -117,8 +139,8 @@ scope:
     purpose: >-
       Alarm, not gate (Decision 83 non-wedging). on: push to main with paths docs/DECISIONS.md,
       docs/DECISIONS_ARCHIVE.md, config/agent/decision_census.yaml, scripts/checks/decisions/append_only_census.py,
-      scripts/checks/decisions/append_only_rule.py, scripts/checks/decisions/_baseline.py, scripts/decisions_md.py and
-      scripts/preflight/decision_conditions.py (the grammar and digest inputs, so a parser change reds at its own merge);
+      scripts/checks/decisions/append_only_rule.py, scripts/checks/decisions/_baseline.py, scripts/decisions_md.py,
+      scripts/preflight/decision_conditions.py, scripts/checks/_common.py and scripts/checks/registry.py (the grammar and digest inputs, so a parser change reds at its own merge);
       schedule '43 11 * * *' (daily, the self-test heartbeat the liveness sensor watches); workflow_dispatch. Never
       pull_request; not a required check. concurrency group decision-census, cancel-in-progress false. permissions
       contents: read, no id-token; the dispatcher-bot refusal `if:` its peers carry. Steps: actions/checkout pinned as in
@@ -166,8 +188,9 @@ verification_plan:
     phase: pre-deploy
     action: Rule, replay, ledger, self-test, exit codes, WARN check and wiring.
     command: >-
-      bin/venv-python -m pytest tests/checks/decisions/test_append_only_census.py tests/checks/decisions/test__baseline.py
-      -q
+      bin/venv-python -m pytest tests/checks/decisions/test_append_only_rule.py
+      tests/checks/decisions/test_append_only_census.py tests/checks/decisions/test__baseline.py
+      tests/checks/decisions/test__manifest.py -q
     expected: Exit 0, every node passes. Red before (target_absent on the plan-only tree, Decision 189).
     expected_literals:
       - ' passed'
@@ -245,10 +268,12 @@ verification_plan:
     phase: post-deploy
     action: The merge's own push run, or one dispatch on main, reads green with the census line.
     command: >-
-      Read the decision-census run for the merge commit (mcp__github__actions_list on the workflow, filtered to the merge
-      sha), or dispatch it on main with mcp__github__actions_run_trigger; read it with mcp__github__actions_get and its
-      log with mcp__github__get_job_logs.
-    expected: Conclusion success; the log holds the CENSUS line with acknowledged=2 open=0 self_test=ok.
+      mcp__github__actions_list (list_workflow_runs, workflow decision-census.yml, head_sha the merge sha); if none, one
+      mcp__github__actions_run_trigger (run_workflow, decision-census.yml, ref main) from this session, never the
+      dispatcher bot, which the workflow's own if: refuses; then mcp__github__actions_get on the run and
+      mcp__github__get_job_logs on its job.
+    expected: >-
+      Conclusion success; the log holds a line starting 'CENSUS ' that contains 'acknowledged=2 open=0 self_test=ok'.
     fix_if: 'Red after a clean local run: check the checkout depth and Python version first; never add a ledger row to pass.'
     hermetic: false
   - step: 8
@@ -265,7 +290,7 @@ test_obligations:
   - source: scripts/checks/decisions/append_only_rule.py
     behavior: Decision 177 cl.1-4 compare, the non-failing WARN check and no waiver route.
     verification_step: 1
-    test_selector: tests/checks/decisions/test_append_only_census.py
+    test_selector: tests/checks/decisions/test_append_only_rule.py
     red_green_expectation: red before (absent), green after
   - source: scripts/checks/decisions/append_only_census.py
     behavior: Replay per merge since the anchor, ledger matching and annotation check, self-test, exit codes.
@@ -280,7 +305,7 @@ test_obligations:
   - source: scripts/checks/decisions/_manifest.py
     behavior: validate_decision_append_only is a pre-only Entry.
     verification_step: 1
-    test_selector: tests/checks/decisions/test_append_only_census.py::TestWiring
+    test_selector: tests/checks/decisions/test__manifest.py
     red_green_expectation: red before (absent), green after
   - source: .github/workflows/decision-census.yml
     behavior: Push, daily and dispatch; credential-free; non-gating; full-history checkout; runs the census.
@@ -305,12 +330,13 @@ constraints:
   - No rescue agents or workaround loops (Decision 55).
 context:
   - >-
-    Decision-scout r3: FLAGS_FOUND. NOTE 177, narrowed from r2: the config-free append_only_rule module meets cl.5 by
+    Decision-scout r4: FLAGS_FOUND. NOTE 177 at r3's narrowness: the config-free append_only_rule module meets cl.5 by
     construction for the only merge-time surface; the residual is the census ledger, and approving the 177 Update's
-    words is that ruling; fallback if rejected: annotation-only acknowledgement with no ledger file, or a Decision
-    amending cl.5. CITE 177, 178, 246. RELATED 163, 151, 167, 244, 170, 187, 169, 55, 83, 226, 72, 267, 117, 146, 149,
-    150, 181, 128, 166, 210, 65, 268, 101, 75, 233, 235, 245. Decisions triaged: 224 of 224. Roadmap items
-    intersected: 6; CONFLICT: 0; RELATED: 6. Serves: NS.9 3/5.
+    words is that ruling; a digest-refresh is not a waiver route (rows stay keyed to merges on main and each run holds
+    every row to the same rule); fallback if rejected: annotation-only acknowledgement with no ledger file, or a
+    Decision amending cl.5. CITE 177, 178, 246. RELATED 163, 55, 83, 170, 169, 244, 226, 72, 149, 146, 151, 167, 65,
+    210, 187, 117, 181, 128, 166, 150, 101, 75, 233, 235, 245, 262, 268, 267. Decisions triaged: 224 of 224. Roadmap
+    items intersected: 6; CONFLICT: 0; RELATED: 6. Serves: NS.9 3/5.
   - >-
     Evidence (prototype, main 4bbb09b9, 2026-11-18): replaying the retired guard over 146 corpus-touching merges since
     7b67e21d takes 6.5 s and flags one merge, #1568 (660d5b54, 2026-10-18), which shortened in place Decision 210's
@@ -340,6 +366,8 @@ gate_rounds:
   - {gate: wording-check, round: 1, verdict: PASS, digest: c2153c132e53aa4ce832b8d41ab0f420c2a982af6fb3091237bcaa3b5df73aed, base: 4bbb09b90f4384f4dcc16664a9086a373e309287, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 3, nits: 8}
   - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:bbd8a1535192466477398d2bb84a551a6b3536d144f29cc077647d84f5283c9d"}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 7}
+  - {gate: decision-scout, round: 4, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:8c00bf0faecad47006b4db3096275197eabefadcb2cb610689323a29a53442f5"}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
