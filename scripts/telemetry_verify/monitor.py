@@ -326,7 +326,12 @@ def _compare_sessions(
 
 def _last_event(tables: Mapping[str, list[dict[str, Any]]]) -> datetime | None:
     scope = Scope(tables, "telemetry_root_sessions")
-    stamps = [row["event_timestamp"] for rows in scope.tables.values() for row in rows]
+    stamps = [
+        row["event_timestamp"]
+        for name, rows in scope.tables.items()
+        for row in rows
+        if not (name == "telemetry_sessions" and row["event_kind"] == "annotate")
+    ]
     return max(stamps) if stamps else None
 
 

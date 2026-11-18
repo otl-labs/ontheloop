@@ -37,6 +37,7 @@ def orphan_counts(
 ) -> list[dict[str, Any]]:
     """The rows telemetry_orphan_counts answers over *rows_by_table* (one window's raw rows), ordered by day then join_id.
 
+    A telemetry_sessions annotate row (a merge link) is a post-close fact and never counts as tree activity.
     *projects* maps project_id to purpose; when given, only real-purpose projects count (the verb's structural filter).
     """
     tables = {name: [normalise_row(r) for r in rows_by_table.get(name) or []] for name in _TABLES}
@@ -47,6 +48,8 @@ def orphan_counts(
     last: dict[TreeKey, datetime] = {}
     for name in _TABLES:
         for row in scope.tables[name]:
+            if name == "telemetry_sessions" and row["event_kind"] == "annotate":
+                continue
             key = _tree(row)
             last[key] = max(last.get(key, row["event_timestamp"]), row["event_timestamp"])
     trees = {key: (when - stamp).total_seconds() > idle_seconds for key, stamp in last.items() if keep(key[1])}

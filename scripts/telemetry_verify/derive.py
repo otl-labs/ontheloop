@@ -124,7 +124,12 @@ def _close_key(row: Row) -> tuple[Any, ...]:
 
 
 def _last_event(scope: Scope, session_id: str) -> datetime | None:
-    stamps = [row["event_timestamp"] for table in scope.tables for row in scope.rows(table, session_id)]
+    stamps = [
+        row["event_timestamp"]
+        for table in scope.tables
+        for row in scope.rows(table, session_id)
+        if not (table == "telemetry_sessions" and row["event_kind"] == "annotate")
+    ]
     return max(stamps) if stamps else None
 
 
