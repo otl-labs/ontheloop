@@ -78,8 +78,7 @@ class TestGatedEntryInputClosures:
             ".claude/agents/scheduled/ci-rca.md",
             "scripts/verify_ci_workflow/_shared.py",
             "scripts/checks/ci_guards/validate_ci_rca_trigger.py",
-            "scripts/checks/_common.py",
-            "scripts/checks/registry.py",
+            "scripts/checks/*.py",
         ],
     )
     def test_a_diff_touching_only_a_ci_rca_trigger_input_still_matches_the_gate(self, path: str) -> None:
@@ -128,8 +127,7 @@ class TestGatedEntryInputClosures:
             ".github/dependabot.yml",
             "scripts/ci/dependabot_auto_merge.sh",
             "scripts/checks/ci_guards/validate_dependabot_config.py",
-            "scripts/checks/_common.py",
-            "scripts/checks/registry.py",
+            "scripts/checks/*.py",
         } <= self._globs("validate_dependabot_config")
 
     def test_actions_sha_pinned_entry_closes_over_its_inputs(self) -> None:
@@ -140,8 +138,7 @@ class TestGatedEntryInputClosures:
             ".github/actions/**",
             "config/actions_sha_pin_baseline.yaml",
             "scripts/checks/ci_guards/validate_actions_sha_pinned.py",
-            "scripts/checks/_common.py",
-            "scripts/checks/registry.py",
+            "scripts/checks/*.py",
         } <= self._globs("validate_actions_sha_pinned")
 
     def test_persona_github_agnosticism_entry_closes_over_its_inputs(self) -> None:
@@ -164,8 +161,7 @@ class TestGatedEntryInputClosures:
             "src/persona_hosts/__init__.py",
             "src/persona_hosts/image_pin.py",
             "scripts/checks/ci_guards/validate_persona_github_agnosticism.py",
-            "scripts/checks/_common.py",
-            "scripts/checks/registry.py",
+            "scripts/checks/*.py",
         ]
         root = Path(__file__).resolve().parents[3]
         for entry_path in load_pin(root).copy:
@@ -181,3 +177,26 @@ class TestGatedEntryInputClosures:
         assert entry.pre is True
         assert entry.pre_globs is None
         assert entry.full_segment == "full_after_lint"
+
+
+class TestContentReaderLockEntry:
+    """validate_content_reader_lock reads the channel's workflow, contracts, manifest and protective paths."""
+
+    def test_entry_is_fast_tier_and_pins_every_input(self) -> None:
+        entry = next(e for e in _manifest.ENTRIES if e.name == "validate_content_reader_lock")
+        assert entry.pre is True and entry.full_segment == "full_after_lint"
+        globs = set(entry.pre_globs or ())
+        assert {
+            ".github/workflows/**",
+            "src/lambdas/ducklake_telemetry_content_reader/**",
+            "src/sensitive_values/**",
+            "src/common/ducklake_content_read_verbs.py",
+            "scripts/convergence_health/code_drift.py",
+        } <= globs
+        for path in (
+            "scripts/checks/ci_guards/validate_content_reader_lock.py",
+            "docs/contracts/actions-capacity.yaml",
+            "docs/contracts/build-lambda.yaml",
+            "docs/contracts/github-actions-evidence.yaml",
+        ):
+            assert any(fnmatch(path, glob) for glob in globs), path
