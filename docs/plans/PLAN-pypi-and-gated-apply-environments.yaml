@@ -44,7 +44,7 @@ scope:
   - file: scripts/checks/ci_guards/validate_environment_reviewer_preflight.py
     action: Modify
     purpose: >-
-      UI_MANAGED becomes an empty dict (predicate (b) itself is unchanged and still fails a name in both places); the
+      UI_MANAGED becomes an empty dict annotated dict[str, str] (predicate (b) itself is unchanged and still fails a name in both places); the
       docstring's (b) line is unchanged. Without this the real tree fails (b) once pypi is declared in HCL.
     new_imports: []
   - file: tests/checks/ci_guards/test_validate_environment_reviewer_preflight.py
@@ -66,9 +66,11 @@ scope:
     purpose: >-
       rec-4651's acceptance test. Static over terraform/github/*.tf via tests/fixtures/terraform_hcl_blocks, with an
       EXEMPT set {"deployment_approval_probe"}: (a) test_every_environment_but_the_probe_is_main_only -- at least two
-      environments are examined (fail closed on an empty parse), and every github_repository_environment not exempt sets protected_branches = false and
+      environments are examined (fail closed on an empty parse), the examined set includes tf-gated-apply and pypi, and
+      every github_repository_environment not exempt sets protected_branches = false and
       custom_branch_policies = true and has exactly one github_repository_environment_deployment_policy referencing it
-      with branch_pattern "main" and no tag_pattern; (b) test_gated_environments_keep_their_reviewer -- tf_gated_apply and pypi each keep a reviewers block bound to
+      with branch_pattern "main" and no tag_pattern; (b) test_gated_environments_keep_their_reviewer -- tf_gated_apply and pypi must both be declared (a missing block
+      fails, never skips) and each keeps a reviewers block bound to
       var.gated_apply_reviewer_user_ids, prevent_self_review = false and prevent_destroy = true; (c)
       test_pypi_has_no_admin_bypass -- pypi sets can_admins_bypass = false and environment "pypi". Red cases run the same predicates on synthetic HCL
       (protected_branches = true, a "*" pattern, a missing policy, a policy bound to another Environment, a missing
@@ -142,7 +144,9 @@ verification_plan:
     graduation: not-applicable
   - step: 2
     phase: pre-deploy
-    action: The new and changed static tests pass on the branch and fail on main's HCL.
+    action: >-
+      The new and changed static tests pass on the branch. On main's HCL the three test_tf_gated_apply_branch_policy.py
+      nodes and test_pypi_is_declared_in_hcl are red; test_real_tree_is_green passes on main and stays green.
     command: >-
       bin/venv-python -m pytest
       tests/checks/iam_tf/test_tf_gated_apply_branch_policy.py::test_every_environment_but_the_probe_is_main_only
@@ -228,7 +232,10 @@ verification_plan:
     command: >-
       bin/venv-python -c "print('MCP: mcp__github__actions_run_trigger(run_workflow, ref=<build branch>) for both workflows (publish with inputs proof_only=true); mcp__github__actions_get(get_workflow_run) each: conclusion failure, never status waiting; mcp__github__actions_list(list_workflow_jobs) shows no step ran')"
     expected: The publish run concluded failure with no step executed and no pending deployment; the prototype run the same, or a recorded rec-4965 finding.
-    fix_if: The publish run enters waiting (the pypi policy is not live) or any run enters waiting; cancel it at once (mcp__github__actions_run_trigger cancel_workflow_run), never approve it, and report that the policy is not live.
+    fix_if: >-
+      The publish run enters waiting (the pypi policy is not live), or the prototype run enters waiting while VP 6's
+      re-plan did not show tf_gated_apply with custom_branch_policies true (policy not live; otherwise the rec-4965
+      path in the action applies); cancel the run at once (mcp__github__actions_run_trigger cancel_workflow_run), never approve it, and report that the policy is not live.
     hermetic: false
     graduation: not-applicable
   - step: 8
@@ -284,8 +291,10 @@ verification_plan:
     action: >-
       Fast tier on the PR head (advisory locally; PR CI is authoritative, Decision 73), then the full tier before the
       hand-off (handoff_policy), started in the background from the top-level session with a 2 h limit.
-    command: bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
-    expected: Both tiers pass and validation_result verifies the head sha.
+    command: >-
+      bin/venv-python -m scripts.validate --pre; echo "full tier: start bin/venv-python -m scripts.validate in the
+      background with a 2 h limit"; bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: The fast tier passes; after the backgrounded full tier completes, validation_result --verify-head verifies the head sha (never a pipe's exit status).
     fix_if: A failure caused by this diff is fixed on the branch; one that reproduces on origin/main is cited by its existing rec in the PR body, never fixed inline.
     hermetic: false
     graduation: not-applicable
@@ -301,10 +310,10 @@ verification_plan:
     graduation_waiver_reason: Already graduated as shard terraform-github-import-blocks (kept, node id unchanged); this step only re-runs it.
 test_obligations:
   - source: terraform/github/environments.tf
-    behavior: every Environment but the probe is main-only by an explicit policy; pypi is reviewer-gated, no admin bypass, never destroyed
+    behavior: every Environment but the probe is main-only by an explicit policy, and tf-gated-apply and pypi are both declared (VP 2's other two nodes assert pypi's reviewer, no bypass and prevent_destroy)
     verification_step: 2
     test_selector: tests/checks/iam_tf/test_tf_gated_apply_branch_policy.py::test_every_environment_but_the_probe_is_main_only
-    red_green_expectation: red before (tf_gated_apply protected_branches true, pypi absent), green after
+    red_green_expectation: red before (tf_gated_apply has protected_branches true and no main policy; pypi is not in the examined set), green after
   - source: terraform/github/imports.tf
     behavior: pypi is imported, the two new policies are exempt creates
     verification_step: 13
@@ -383,6 +392,7 @@ gate_rounds:
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 6}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 9}
   - {gate: decision-scout, round: 4, verdict: NO_FLAGS, scout_input_fingerprint: "v1:48e90c7192d1864b6d9b1f430d8044c41b443704a5270115401fb6d5ff0cb448"}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 6}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -397,4 +407,5 @@ execution_steps:
   - "VP 3; full tier per the handoff policy; open the PR; VP 4 from its plan report; ask the operator for his word on the final diff."
   - "Merge on code review PROCEED, green CI and his word, with Resolves: rec-4549, rec-4651, rec-3151, rec-5098."
   - "VP 5 to VP 9."
+  - "Follow-on: if no open rec already covers them, file one rec (get_rec_write_guidance, then file_rec) for environment_fail_open.locations listing every Environment workflow and import blocks for the two new deployment policies; name its id in the report and to the plan owner."
   - "Report: what was implemented, verification results."
