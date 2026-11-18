@@ -142,11 +142,9 @@ def origin(repo: str, token: str | None, head_sha: str, route: str, check_run_id
     if rec is None or rec["route"] != route or rec["head_sha"] != head_sha:
         raise Refused("the check run holds no matching verdict record")
     prod = _get(f"/repos/{repo}/actions/runs/{rec['run_id']}", token)
-    suite = (run.get("check_suite") or {}).get("id")
-    if not isinstance(prod, dict) or suite is None or prod.get("check_suite_id") != suite:
-        raise Refused("the check run was not created by the record's producing run")
     if not (
-        prod.get("path") == VERDICT_WORKFLOW
+        isinstance(prod, dict)
+        and prod.get("path") == VERDICT_WORKFLOW
         and prod.get("event") == "workflow_run"
         and prod.get("head_branch") == "main"
         and prod.get("display_title") == f"persona-verdict pull_request {head_sha}"

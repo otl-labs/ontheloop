@@ -86,7 +86,15 @@ class _Trees:
         self.observations = observations
         self.agents = self.scope.tables.get(AGENTS, [])
         self.last_event = {
-            pin: max(r["event_timestamp"] for r in (*sessions, *observations) if _pin(r) == pin) for pin in self.pins
+            pin: max(
+                (
+                    r["event_timestamp"]
+                    for r in (*(s for s in sessions if s["event_kind"] != "annotate"), *observations)
+                    if _pin(r) == pin
+                ),
+                default=None,
+            )
+            for pin in self.pins
         }
 
     def is_root(self, pin: Pin, session_id: str) -> bool:

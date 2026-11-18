@@ -104,3 +104,20 @@ def test_non_real_projects_and_out_of_window_trees_are_excluded() -> None:
         assert _verb(con, day_from="2026-01-02", day_to="2026-01-02") == []
         assert _verb(con, day_from="2025-12-26", day_to="2026-01-01") == _verb(con)
         assert datetime(2026, 1, 1, tzinfo=timezone.utc) <= _verb(con)[0]["session_started_at"]
+
+
+def test_a_link_row_leaves_usage_last_event() -> None:
+    with chain.loaded(_SUBAGENT_TREE, True) as (con, rows, _):
+        (before,) = _verb(con)
+        opener = next(r for r in rows["telemetry_sessions"] if r["event_kind"] == "open" and r["parent_session_id"] is None)
+        later = before["last_event_timestamp"] + (datetime(2026, 1, 1, 1) - datetime(2026, 1, 1))
+        link = {"event_id": "01ARZ3NDEKTSV4RRFFQ69G5FB3", "event_kind": "annotate", "event_timestamp": later}
+        chain.clone_row(con, "telemetry_sessions", PROJECT, link, where="parent_session_id IS NULL")
+        (after,) = _verb(con)
+        assert chain.canonical(after["last_event_timestamp"]) == chain.canonical(before["last_event_timestamp"])
+        stored = chain.stored_rows(con)
+        oracle = derive_usage.model_usage_rollup(stored, {PROJECT: "real"}, **chain.DAY)
+        assert chain.canonical(_verb(con)) == chain.canonical(oracle)
+        only_links = {t: [] for t in stored}
+        only_links["telemetry_sessions"] = [dict(opener, **link)]
+        assert derive_usage.model_usage_rollup(only_links, {PROJECT: "real"}, **chain.DAY) == []
