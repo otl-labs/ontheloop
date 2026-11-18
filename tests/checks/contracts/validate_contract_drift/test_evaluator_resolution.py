@@ -13,7 +13,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from scripts.checks.contracts import _population
+from scripts.checks.contracts._evaluator_coverage import CoverageRow, LiveTable
 from scripts.contracts_schema import EvaluatorSpec
+
+from .conftest import validate_contract_drift
 
 _ROOT = Path(__file__).resolve().parents[4]
 
@@ -98,20 +101,32 @@ class TestEvaluatorResolution:
         skill_path = tmp_path / "SKILL.md"
         skill_path.write_text("This skill reads some-contract.yaml directly.\n", encoding="utf-8")
         resolves, detail = _population.resolve_evaluator(
-            "some-contract.yaml", EvaluatorSpec(agent_surface="SKILL.md"), root=tmp_path
+            "some-contract.yaml",
+            EvaluatorSpec(agent_surface="SKILL.md"),
+            root=tmp_path,
+            live_table=LiveTable(globs=("SKILL.md",)),
+            coverage={"some-contract.yaml": CoverageRow(triggers=("reads some-contract.yaml directly",))},
         )
         assert resolves, detail
 
     def test_agent_surface_evaluator_fails_when_target_missing_or_silent(self, tmp_path) -> None:
         resolves, _detail = _population.resolve_evaluator(
-            "some-contract.yaml", EvaluatorSpec(agent_surface="MISSING.md"), root=tmp_path
+            "some-contract.yaml",
+            EvaluatorSpec(agent_surface="MISSING.md"),
+            root=tmp_path,
+            live_table=LiveTable(globs=("*.md",)),
+            coverage={},
         )
         assert not resolves
 
         present = tmp_path / "SILENT.md"
         present.write_text("No mention of the target here.\n", encoding="utf-8")
         resolves2, _detail2 = _population.resolve_evaluator(
-            "some-contract.yaml", EvaluatorSpec(agent_surface="SILENT.md"), root=tmp_path
+            "some-contract.yaml",
+            EvaluatorSpec(agent_surface="SILENT.md"),
+            root=tmp_path,
+            live_table=LiveTable(globs=("*.md",)),
+            coverage={},
         )
         assert not resolves2
 
@@ -126,3 +141,148 @@ class TestEvaluatorResolution:
             check_module_resolver=lambda _name: tmp_path / "primary.py",
         )
         assert not resolves
+
+
+_TRIGGER = "Always consult cd-alpha.yaml before editing."
+
+
+def _arch_text(*, retired: str = "paths:\n    - .claude/skills/old/SKILL.md\n") -> str:
+    return f"layers:\n  - layer: 1\n    content_locations:\n      - LIVE.md\nretired_surfaces:\n  {retired}"
+
+
+def _population_text() -> str:
+    return (
+        "ratchet:\n  grandfathered_max: 2\n  status_active_max: 0\n"
+        f"evaluator_coverage:\n  cd-alpha.yaml: {{triggers: ['{_TRIGGER}']}}\n"
+    )
+
+
+def _gate_tree(
+    tmp_path, monkeypatch, install_fake_git, FakeGit, write_contract, class_d_yaml, *, surface, population=None, arch=None
+):
+    from scripts.checks import _common
+
+    monkeypatch.setattr(_common, "ROOT", tmp_path)
+    install_fake_git(FakeGit(merge_base_rc=1))
+    contracts = tmp_path / "docs" / "contracts"
+    contracts.mkdir(parents=True)
+    (tmp_path / "LIVE.md").write_text(_TRIGGER + "\n", encoding="utf-8")
+    skill = tmp_path / ".claude" / "skills" / "old"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(f"---\nname: old\ndescription: Being retired.\n---\n{_TRIGGER}\n", encoding="utf-8")
+    write_contract(contracts, "instruction-architecture.yaml", arch if arch is not None else _arch_text())
+    write_contract(contracts, "contract-population.yaml", population if population is not None else _population_text())
+    if surface is not None:
+        write_contract(
+            contracts,
+            "cd-alpha.yaml",
+            class_d_yaml(evaluator={"agent_surface": surface}, extra={"rules": {"a": 1}}),
+        )
+    return contracts
+
+
+def test_gate_fails_a_retired_surface_and_prints_coverage(
+    tmp_path, monkeypatch, capsys, install_fake_git, FakeGit, write_contract, class_d_yaml
+) -> None:
+    contracts = _gate_tree(
+        tmp_path,
+        monkeypatch,
+        install_fake_git,
+        FakeGit,
+        write_contract,
+        class_d_yaml,
+        surface=".claude/skills/old/SKILL.md",
+    )
+    failed: list[str] = []
+    validate_contract_drift(failed, contracts_dir=contracts)
+    assert len(failed) == 1, failed
+    assert "not in instruction-architecture.yaml's live table" in failed[0]
+    assert "does not contain" not in failed[0]
+
+    write_contract(contracts, "cd-alpha.yaml", class_d_yaml(evaluator={"agent_surface": "LIVE.md"}, extra={"rules": {"a": 1}}))
+    failed = []
+    validate_contract_drift(failed, contracts_dir=contracts)
+    assert failed == []
+    out = capsys.readouterr().out
+    assert "Coverage: cd-alpha.yaml asserted=[] instructed=[rules] neither=[]" in out
+    assert "Coverage totals: contracts=1 asserted=0 instructed=1 neither=0" in out
+
+
+def test_gate_fails_agent_surface_without_coverage_row(
+    tmp_path, monkeypatch, install_fake_git, FakeGit, write_contract, class_d_yaml
+) -> None:
+    contracts = _gate_tree(
+        tmp_path,
+        monkeypatch,
+        install_fake_git,
+        FakeGit,
+        write_contract,
+        class_d_yaml,
+        surface="LIVE.md",
+        population="ratchet:\n  grandfathered_max: 2\n  status_active_max: 0\n",
+    )
+    failed: list[str] = []
+    validate_contract_drift(failed, contracts_dir=contracts)
+    evaluator = [f for f in failed if f.startswith("Contract drift (evaluator):")]
+    assert len(evaluator) == 1 and "no evaluator_coverage triggers row" in evaluator[0]
+    assert not [f for f in failed if f.startswith("Contract drift (coverage):")]
+
+
+def test_gate_fails_unlisted_retired_marker(
+    tmp_path, monkeypatch, install_fake_git, FakeGit, write_contract, class_d_yaml
+) -> None:
+    contracts = _gate_tree(tmp_path, monkeypatch, install_fake_git, FakeGit, write_contract, class_d_yaml, surface="LIVE.md")
+    second = tmp_path / ".claude" / "skills" / "second"
+    second.mkdir(parents=True)
+    (second / "SKILL.md").write_text("---\nname: second\ndescription: Being retired soon.\n---\nbody\n", encoding="utf-8")
+    failed: list[str] = []
+    validate_contract_drift(failed, contracts_dir=contracts)
+    assert len(failed) == 1, failed
+    assert failed[0].startswith("Contract drift (coverage):") and "skills/second/SKILL.md" in failed[0]
+
+
+def test_gate_fails_closed_on_malformed_table(
+    tmp_path, monkeypatch, install_fake_git, FakeGit, write_contract, class_d_yaml
+) -> None:
+    contracts = _gate_tree(
+        tmp_path,
+        monkeypatch,
+        install_fake_git,
+        FakeGit,
+        write_contract,
+        class_d_yaml,
+        surface=None,
+        population="ratchet:\n  grandfathered_max: 2\n  status_active_max: 0\n",
+        arch="retired_surfaces:\n  paths: a-string\n",
+    )
+    failed: list[str] = []
+    validate_contract_drift(failed, contracts_dir=contracts)
+    assert len(failed) == 1, failed
+    assert failed[0].startswith("Contract drift (coverage):") and "retired_surfaces.paths" in failed[0]
+
+
+def test_gate_fails_closed_on_malformed_coverage_table_and_unknown_row(
+    tmp_path, monkeypatch, install_fake_git, FakeGit, write_contract, class_d_yaml
+) -> None:
+    contracts = _gate_tree(
+        tmp_path,
+        monkeypatch,
+        install_fake_git,
+        FakeGit,
+        write_contract,
+        class_d_yaml,
+        surface=None,
+        population="ratchet:\n  grandfathered_max: 2\n  status_active_max: 0\nevaluator_coverage: nope\n",
+    )
+    failed: list[str] = []
+    validate_contract_drift(failed, contracts_dir=contracts)
+    assert len(failed) == 1 and failed[0].startswith("Contract drift (coverage):"), failed
+
+    write_contract(
+        contracts,
+        "contract-population.yaml",
+        "ratchet:\n  grandfathered_max: 2\n  status_active_max: 0\nevaluator_coverage:\n  ghost.yaml: {triggers: [x]}\n",
+    )
+    failed = []
+    validate_contract_drift(failed, contracts_dir=contracts)
+    assert len(failed) == 1 and "ghost.yaml" in failed[0], failed
