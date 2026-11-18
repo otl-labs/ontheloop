@@ -2,6 +2,98 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 274: Contracts are budgeted in bytes as well as lines, and a contract at its budget compacts its amendment_log or splits off a second subject before any raise (amends Decisions 166 and 240) (Decided)
+
+```yaml
+number: 274
+status: Decided
+decided_date: "2026-11-18"
+kind:
+  value: direction
+  justification: >-
+    Clause 2 adds a human gate: a grandfathered contract grows past its seeded bytes only with Decision text added in
+    the same change naming it; undone, contract bytes grow with no one approving.
+amends: [166, 240]
+significance:
+  value: numbered_decision
+  justification: >-
+    It adds a unit and a roster to Decision 166's engine under reversal conditions; a field-semantics note in
+    config/structural_size_budgets.yaml (considered) holds the values but cannot authorize the roster's raise
+    markers (Decision 165), and citing Decision 166 (considered) authorizes by path mention only, after its one-time
+    clause 5 grandfather.
+```
+
+**Status:** Decided
+**Date:** 2026-11-18
+**Warehouse ID:** dec-274 (per Decision 84 backfill)
+
+**Problem:** The contracts budget counts lines while readers pay in bytes. At the limit, edits arrive line-neutral
+(sampled commits kept or lost lines while adding 1,190 to 5,297 bytes), and bytes per effective line rose from 63 to
+84 (audits/contract-first-retrospective-177c8f37.yaml, CFR-05). amendment_log rows are about a sixth of the class's
+bytes and refill the budget after every trim (rec-4119). The 2,000-character long-line companion has never bound.
+
+**Intent:** A contract that reaches its budget sheds history or splits by subject, and the budget's unit tracks what
+an agent pays to read it.
+
+**Decision:**
+1. **Byte companion.** The contracts class keeps its 500-effective-line budget (Decisions 128, 166) and gains a
+   per-file limit in raw bytes, held at config/structural_size_budgets.yaml's contracts row (max_bytes, today
+   49,152). Its permitted maximum is pinned in code, so a raise is a reviewed code edit and a new Decision.
+2. **Seed and raises.** At install, each contract over the limit has its amendment_log compacted (clause 4); those
+   still over are seeded in the byte_budgets roster at their size on main, citing this Decision. Only these
+   docs/contracts files, each over 44 KiB when this was decided, may be seeded: ci-rca-lifecycle.yaml,
+   data-modeling-standard.yaml, deploy-paths.yaml, ducklake_maintenance.yaml, ducklake_telemetry_writer.yaml,
+   file-router.yaml, git-ops.yaml, github-org-transfer.yaml, iam-simulate-fixture.yaml, ports.yaml,
+   telemetry-event-envelope.yaml, telemetry_agents.yaml, telemetry_observations.yaml and telemetry_sessions.yaml.
+   An entry may always shrink. A raise or a new entry needs a marker citing a Decision whose text added in that
+   change names the contract (Decision 165).
+3. **Relief, in order.** Compact amendment_log rows (clause 4); move detail to the owning plan or Decision by
+   citation; split a second subject into a sibling contract with its own evaluator and reader (Decision 168); a loud
+   cited raise last. Splitting one subject across files, and history or prose companions, stay forbidden (Decision
+   86). Pointer keys to forward intent (status, residual_owner, flips_to_hard_fail_when) are never compacted away.
+4. **Retention.** A contract's top-level amendment_log keeps at most its newest N rows in full, N held at
+   docs/contracts/contract-population.yaml amendment_log_retention (today 5); older rows become one-line terse rows
+   naming the plan, rec or Decision, which git history and the plan expand. A change that adds a row leaves no more
+   full rows than N, or than the base had if that is more. Rows marking a semantic break, field-level logs and
+   north-star.yaml (its Tier A guard reads an append-only log) are exempt. A reworded or compacted old row never
+   counts as a new row.
+5. **Amends Decisions 166 and 240.** Decision 166 clause 3's limits gain this companion for contracts, and its
+   reversal condition (d) counts byte_budgets from its install seed. Compacting a top-level amendment_log row to a
+   terse row is the one rewrite of a record Decision 240 clause 4 allows; its full wording stays in git history.
+
+**Options considered:** lowering the long-line companion with present lines grandfathered -- rejected: 500 long
+lines still pass; seeding every contract at its size -- rejected: most contracts grow monthly, so raises become
+routine; dropping old rows -- rejected: tests and readers cite them, and a terse row keeps the trail; a history file
+outside the census -- rejected: a second surface (AGENTS.md); 40 KiB -- rejected: 15 contracts stay seeded after
+compaction, against about 7; naming only those over 48 KiB today -- rejected: contracts grew about 700 lines in a
+day, so the list would go stale before the build.
+
+**Coverage (Decision 181 cl.2):** cl.1-2 -- validate_structural_size_limits and
+validate_structural_size_budget_raises; cl.4 -- validate_contract_drift; cl.3 -- plan_obligations' headroom line,
+which also reports each contract's 30-day byte growth (advisory); cl.5 -- the dated notes on Decisions 166 and 240
+and glossary.yaml's read_as rule. Residual: which subject to split, and whether a row marks a semantic break, is
+judgement, owned by rec-5298.
+
+```yaml reversal-conditions
+decision: 274
+review_by: 2027-02-17
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: seed-too-tight
+    kind: manual
+    description: "More than three byte raises land in the 30 days after install (splits and compactions do not count): reseed the limit once, then stop."
+  - id: density-still-rising
+    kind: manual
+    description: "Bytes per effective line for the contracts class rises across two boundaries 30 days apart: re-decide the unit or the limit."
+  - id: read-by-section
+    kind: manual
+    description: "Agents come to load contracts by section rather than whole: retire the byte limit, as Decision 179 retired the corpus byte ceilings."
+```
+
+**Related:** Decisions 166 and 240 (amended), 86, 128, 165, 168, 179, 181 cl.2; rec-5262, rec-4119.
+
+---
+
 ## Decision 274: Decision 133's allocation of the operator's build capacity is retired with no successor rule -- this repository holds only On The Loop's source, so each adopter product sets its own order in the monorepo that holds it (supersedes Decision 133) (Decided)
 
 ```yaml
@@ -2393,6 +2485,8 @@ conditions:
 **Related:** Decisions 77, 84, 86, 177, 178, 181, 184, 195, 196, 198, 200, 205, 209, 211, 220, 226, 232, 233; rec-3925, rec-4560, rec-4676.
 
 > **Update (2026-11-02):** clause 4's older text is now the records: the files glossary.yaml's read_as.records lists (Decision bodies older than this entry, plans, audit prompts, the roadmap below its header, the two archives), amendment_log rows, and recs filed before this entry. Records keep their wording and read through the read_as rows. PLAN-glossary-sweep (rec-4676) rewrote the rest to glossary names, README.md and the roadmap's header included; no other clause's meaning changes. Coverage: the reads-through note on each Decision in read_as.noted_decisions -- validate_glossary's note leg; clause 3's other files -- its whole-file leg; records -- the read_as rows. The reversal stanza's read-as-misread was re-armed to match.
+
+> **Amended by Decision 274 (2026-11-18):** a top-level amendment_log row may be compacted to a terse row naming its plan, rec or Decision (Decision 274 cl.4); that is the one rewrite of a record clause 4 allows, and the full wording stays in git history.
 
 > **Amended by Decision 269 (2026-11-16):** Clause 5's portal leg reports, never refuses: the rec portal runs glossary_lint on a rec title, context or verification and reports each finding while the write proceeds; the Coverage line's "the portal's glossary_lint rule" reads as that report plus rec-5239's scheduled re-run, an unenforced residual until it runs (Decision 269 cl.1).
 
@@ -7866,6 +7960,8 @@ removed), rec-3021 (open -- code-review round 1 LOW finding: `_marker_guard.py`'
 T1.5 (the STRATEGIC, CD.17-frozen portal cutover that eventually retires `docs/decisions-index.json` entirely, named in point 9 as the surface's actual successor).
 
 [Amendment 2026-08-24: Decision 176 supersedes point 6's CD.29 archival pre-commitment and reversal condition (f)'s response for `config/agent/verification_registry/registry.yaml` -- the file is re-grained to one record per file under `entries/<check_id>.yaml` and its calibrated 6,000-effective-line / 2,315-character ceiling is retired outright (no replacement roster entry). Both `budgets:`/`long_line_budgets:` roster entries this point seeded are removed from `config/structural_size_budgets.yaml`. See Decision 176 for the full path selection and rationale.]
+
+[Amendment 2026-11-18: Decision 274 adds a per-file byte companion to the contracts class (clause 3) and counts the byte_budgets roster from its install seed for reversal condition (d).]
 
 ---
 

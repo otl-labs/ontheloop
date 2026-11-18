@@ -56,6 +56,56 @@ def _structural(rel: str, text: str) -> tuple[int, int, str] | None:
     return _classify.effective_lines(text), int(limit), f"effective lines ({slug})"
 
 
+def _git_out(root: Path, *args: str) -> str | None:
+    done = subprocess.run(
+        ["git", *args], cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30
+    )
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
+def _byte_delta(root: Path, rel: str, size: int) -> str:
+    """The file's byte change since the newest origin/main commit at least 30 days old."""
+    sha = _git_out(root, "rev-list", "-1", "--before=30.days", "origin/main")
+    if not sha:
+        return "history unavailable"
+    old = _git_out(root, "cat-file", "-s", f"{sha}:{rel}")
+    return "new" if old is None else f"{size - int(old):+d} B"
+
+
+def _byte_note(root: Path, rel: str, text: str) -> tuple[str, bool]:
+    """(headroom column text, near-cap) for a structural row carrying max_bytes; ("", False) otherwise."""
+    from scripts.checks.structural import _classify  # noqa: PLC0415
+
+    reg = _classify.load_registry()
+    row = next((r for r in reg.get("classes") or [] if r.get("slug") == _classify.classify_path(rel, text=text)), None)
+    if row is None or not isinstance(row.get("max_bytes"), int):
+        return "", False
+    size = len(text.encode("utf-8"))
+    limit = int(row["max_bytes"])
+    directory, _, name = rel.rpartition("/")
+    roster = reg.get("byte_budgets") or {}
+    if directory == "docs/contracts" and isinstance(roster.get(name), int):
+        limit = int(roster[name])
+    per_line = size // max(1, _classify.effective_lines(text))
+    near = (limit - size) * _NEAR_CAP_DENOMINATOR < limit
+    note = f"; {size} of {limit} B, {per_line} B per effective line, 30-day delta {_byte_delta(root, rel, size)}"
+    return note, near
+
+
+def _relief(rel: str, text: str) -> str:
+    from scripts.checks.structural import _classify  # noqa: PLC0415
+
+    row = next(
+        (
+            r
+            for r in _classify.load_registry().get("classes") or []
+            if r.get("slug") == _classify.classify_path(rel, text=text)
+        ),
+        {},
+    )
+    return f"; relief valves: {row.get('relief_valve', '')}"
+
+
 def size_headroom(ctx: Ctx) -> list[str]:
     prose = _prose_budgets(ctx.root)
     lines = []
@@ -76,8 +126,11 @@ def size_headroom(ctx: Ctx) -> list[str]:
             continue
         size, limit, unit = measured
         room = limit - size
-        near = " NEAR_CAP" if room * _NEAR_CAP_DENOMINATOR < limit else ""
-        lines.append(f"{rel}: {size} of {limit} {unit}, headroom {room}{near}{note}")
+        near_lines = room * _NEAR_CAP_DENOMINATOR < limit
+        byte_note, near_bytes = ("", False) if rel.endswith(".py") or rel in prose else _byte_note(ctx.root, rel, text)
+        near = " NEAR_CAP" if near_lines or near_bytes else ""
+        relief = _relief(rel, text) if byte_note and near else ""
+        lines.append(f"{rel}: {size} of {limit} {unit}, headroom {room}{near}{note}{byte_note}{relief}")
     return lines
 
 
