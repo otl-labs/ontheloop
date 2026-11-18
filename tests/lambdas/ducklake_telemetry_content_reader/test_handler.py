@@ -208,6 +208,23 @@ def test_unserved_verbs_are_400_before_any_connect(wiring: dict[str, Any], verb:
     assert _HOSTILE not in json.dumps(body) and wiring["opened"] == 0 and wiring["secrets"] == []
 
 
+def test_a_named_read_without_caller_fields_is_403_with_one_access_line(
+    wiring: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    capsys.readouterr()
+    for event in (
+        {"body": json.dumps(_row_read(ulid_aged(1)))},
+        {"body": json.dumps(_row_read(ulid_aged(1))), "requestContext": {"authorizer": {"iam": {"userArn": "x"}}}},
+    ):
+        response = h.handler(event, None)
+        assert response["statusCode"] == 403 and json.loads(response["body"])["error_type"] == "missing_caller_identity"
+        (line,) = _lines(capsys.readouterr().out)
+        assert line["status"] == 403 and line["role"] == "unknown"
+    assert wiring["opened"] == 0 and wiring["secrets"] == []
+    describe = h.handler({"body": json.dumps({"action": "describe"})}, None)
+    assert describe["statusCode"] == 200
+
+
 def test_caller_deadline_and_window_are_refused_before_connect(wiring: dict[str, Any]) -> None:
     for key in ("deadline_ms", "window", "limit"):
         status, body = _call({**_row_read(ulid_aged(1)), key: 5})
@@ -431,7 +448,8 @@ def test_include_tool_output_true_and_dict_bodies_are_served(wiring: dict[str, A
     event = caller_event(_session_read(ulid_aged(1)))
     event["body"] = _session_read(ulid_aged(1))
     assert h.handler(event)["statusCode"] == 200
-    assert h.handler(_session_read(ulid_aged(91)))["statusCode"] == 404
+    bare = {**_session_read(ulid_aged(91)), "requestContext": caller_event({})["requestContext"]}
+    assert h.handler(bare)["statusCode"] == 404
 
 
 def test_version_mismatch_is_a_value_free_500(wiring: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:

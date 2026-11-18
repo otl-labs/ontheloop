@@ -23,6 +23,7 @@ _ALL_VERBS_APPLY_TRUE = {
     "merge_ops": {"apply": True, "reason": "standard"},
     "reconcile_partitions": {"apply": True, "reason": "standard"},
     "rewrite_partition_layout": {"apply": True, "reason": "standard"},
+    "rewrite_current_deletes": {"apply": True, "reason": "standard"},
 }
 _EXHAUSTIVE_MATRIX = {
     "scd2": dict(_ALL_VERBS_APPLY_TRUE),
@@ -30,7 +31,7 @@ _EXHAUSTIVE_MATRIX = {
     "control": dict(_ALL_VERBS_APPLY_TRUE),
 }
 _UNIVERSE = {"scd2", "append_only", "control"}
-_VERBS = ("merge_ops", "reconcile_partitions", "rewrite_partition_layout")
+_VERBS = ("merge_ops", "reconcile_partitions", "rewrite_partition_layout", "rewrite_current_deletes")
 
 # The live registry's class universe includes smoke_harness (field_semantics.yaml declares a
 # `tables:` block, Decision 191 amendment) -- a matrix exhaustive against the LIVE default
@@ -155,3 +156,11 @@ def test_real_sidecar_is_exhaustive() -> None:
     failed: list[str] = []
     check.validate_maintenance_policy_matrix(failed)
     assert failed == []
+
+
+def test_missing_rewrite_current_deletes_cell_fails(tmp_path: Path) -> None:
+    scd2 = {k: v for k, v in _ALL_VERBS_APPLY_TRUE.items() if k != "rewrite_current_deletes"}
+    path = _write_sidecar(tmp_path, {**_EXHAUSTIVE_MATRIX, "scd2": scd2})
+    failed: list[str] = []
+    check.validate_maintenance_policy_matrix(failed, sidecar_path=path, class_universe=_UNIVERSE, verb_universe=_VERBS)
+    assert failed == ["Maintenance policy matrix exhaustiveness"]

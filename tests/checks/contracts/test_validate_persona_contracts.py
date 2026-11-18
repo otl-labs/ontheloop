@@ -107,8 +107,20 @@ def test_compute_plane_contract_needs_no_skill_tether(tree: Path) -> None:
     from tests.persona_contracts.fixture_tree import INDEX_REL, edit_text
 
     edit_text(tree, INDEX_REL, "    kind: verdict\n    contract:", "    kind: compute_plane\n    contract:")
-    edit_contract(tree, lambda c: (c.pop("skill_tether"), c.__setitem__("kind", "compute_plane")), rerender=True)
+    edit_contract(
+        tree,
+        lambda c: (c.pop("skill_tether"), c.pop("verdict_consistency"), c.__setitem__("kind", "compute_plane")),
+        rerender=True,
+    )
     assert _run(tree) == []
+
+
+def test_compute_plane_contract_with_verdict_rule_is_refused(tree: Path) -> None:
+    from tests.persona_contracts.fixture_tree import INDEX_REL, edit_text
+
+    edit_text(tree, INDEX_REL, "    kind: verdict\n    contract:", "    kind: compute_plane\n    contract:")
+    edit_contract(tree, lambda c: (c.pop("skill_tether"), c.__setitem__("kind", "compute_plane")), rerender=True)
+    assert any("verdict_consistency on a compute_plane contract" in f for f in _run(tree))
 
 
 def test_row_without_registry_key_is_refused(tree: Path) -> None:
@@ -127,3 +139,14 @@ def test_registry_is_not_read_when_the_index_has_no_rows(tree: Path) -> None:
     index.write_text(head + "\npersonas: []\n", encoding="utf-8")
     (tree / REGISTRY_REL).unlink()
     assert not any("source_registry" in f or "registry_key" in f for f in _run(tree))
+
+
+def test_array_only_rule_is_accepted(tree: Path) -> None:
+    rule = {"cases": [{"verdict": "REVISE", "any": [{"array": "findings"}]}], "otherwise": "PROCEED"}
+    edit_contract(tree, lambda c: c.__setitem__("verdict_consistency", rule), rerender=True)
+    assert _run(tree) == []
+
+
+def test_verdict_contract_without_rule_is_refused(tree: Path) -> None:
+    edit_contract(tree, lambda c: c.pop("verdict_consistency"), rerender=True)
+    assert any("missing required field(s)" in f for f in _run(tree))

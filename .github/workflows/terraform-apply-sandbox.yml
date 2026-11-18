@@ -6,7 +6,8 @@ name: terraform-apply-sandbox
 # runs scripts/terraform_apply_guard.py (deterministic, fail-closed) over the plan JSON, then a
 # subagent plan review, then applies the SAME plan file the guard inspected (no re-plan -- avoids
 # TOCTOU). Branch protection is now active (main-protection ruleset, Decision 83 / CD.20), but
-# deliberately non-wedging -- the guard plus the subagent review ARE the plan-content gate, and both fail closed.
+# deliberately non-wedging -- the guard plus the subagent review ARE the plan-content gate; the
+# guard fails closed and a push REVISE routes to tf-gated-apply (Decision 265).
 #
 # CD.35 / T2.20 (Wave 1) adds the server-side convergence anchor on top of the above:
 #   - A read-PRECONDITION before apply REFUSES (distinguishable marker CONVERGENCE_RED, record NOT
@@ -99,7 +100,7 @@ jobs:
   # NOT pull_request (PRs get the read-only advisory job below; a PR cannot assume the apply role).
   # ---------------------------------------------------------------------------
   apply-sandbox:
-    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ (github.event_name != 'workflow_dispatch' || github.actor != 'otl-workflow-dispatcher[bot]') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
@@ -107,7 +108,7 @@ jobs:
       # job to fetch the SAME plan (saved, on push; the fresh SANDBOX_FRESH_PLAN_ARTIFACT, on a
       # routed workflow_dispatch) and wait for human approval. The convergence record is NOT
       # touched while routed (anti-masking, T2.22 / Decision 55).
-      routed: ${{ steps.guard.outputs.routed }}
+      routed: ${{ steps.guard.outputs.routed == 'true' || (github.event_name == 'push' && steps.review.outcome == 'success' && steps.review.outputs.outcome == 'revise') }}
       # artifact_sha: the SAME content-addressed sha the plan.bin (saved or fresh) was built
       # against -- gated-apply's artifact_sha step echoes this verbatim instead of re-resolving it
       # (Decision 183; a re-resolution would fail on a dispatch commit with no originating PR).
@@ -136,12 +137,12 @@ jobs:
       WORKDIR: terraform/personal
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: ./.github/actions/aws-region
 
       - name: Configure AWS credentials (OIDC -- apply role, main only)
-        uses: aws-actions/configure-aws-credentials@v6
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-apply
           aws-region: ${{ env.AWS_REGION }}
@@ -151,13 +152,13 @@ jobs:
         run: echo "version=$(cat config/terraform-version)" >> "$GITHUB_OUTPUT"
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v4
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: ${{ steps.tfver.outputs.version }}
           terraform_wrapper: false
 
       - name: Setup Python 3.12
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
 
@@ -358,20 +359,21 @@ jobs:
         # reviewer exactly ONCE at the SAME budget (never a larger one, T2.39 c2); a still-STARVED
         # outcome after the retry blocks apply and is surfaced via steps.review.outputs.outcome so
         # the record-write step below can skip the red write (Decision 55 anti-masking --
-        # starvation is a reviewer-infra failure, not a plan rejection). An explicit REVISE always
-        # fails closed and reds the record, exactly as before.
+        # starvation is a reviewer-infra failure, not a plan rejection). An explicit REVISE on a push
+        # routes to tf-gated-apply (Decision 265, revise-routes); on a dispatch it fails closed and reds the record.
         id: review
         if: success() && steps.guard.outputs.routed != 'true' && steps.persona_gate.outputs.refused != 'true'
         uses: ./.github/actions/subagent-plan-review
         with:
           claude-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           working-directory: ${{ env.WORKDIR }}
+          revise-routes: ${{ github.event_name == 'push' }}
 
       - name: Terraform apply (same plan file the guard inspected)
         id: apply
         # Gated on success() of all prior steps (precondition + guard + subagent review). Applies
         # plan.bin -- the exact artefact the guard parsed via plan.json -- with no intervening
-        # re-plan (no TOCTOU). Skipped when routed=true: the gated-apply job handles the apply
+        # re-plan (no TOCTOU). Runs only on an explicit PROCEED (Decision 265). Skipped when routed=true: the gated-apply job handles the apply
         # after human approval via the tf-gated-apply Environment (Decision 92).
         #
         # Wrapped via scripts/ci/stale_plan_signature.py's --wrap mode (Decision 59 scope
@@ -387,7 +389,7 @@ jobs:
         # instead of a generic failure_category=unknown. FAILS CLOSED exactly as before this
         # wrapper existed -- no same-run fresh-replan fallthrough is added (Decision 77 no-TOCTOU
         # is preserved by design at this push-path site).
-        if: success() && steps.guard.outputs.routed != 'true'
+        if: success() && steps.guard.outputs.routed != 'true' && steps.review.outputs.outcome == 'proceed'
         working-directory: ${{ env.WORKDIR }}
         run: bash "$GITHUB_WORKSPACE/scripts/ci/neon_api_key.sh" run -- python3 "$GITHUB_WORKSPACE/scripts/ci/stale_plan_signature.py" --wrap -- terraform apply -input=false -lock-timeout=120s plan.bin
 
@@ -409,7 +411,7 @@ jobs:
         # is the ephemeral_handoff class maximum (docs/contracts/github-actions-evidence.yaml),
         # giving the human approval two days before the hand-off expires.
         if: success() && github.event_name == 'workflow_dispatch' && steps.guard.outputs.routed == 'true'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sandbox-fresh-plan-${{ github.run_id }}
           path: ${{ env.WORKDIR }}/plan.bin
@@ -422,7 +424,7 @@ jobs:
         # `if: always()`; it SKIPS the S3 write when the precondition refused, the guard routed, OR
         # the subagent reviewer was STARVED (T2.39 / rec-2658 -- see below), so none of those cases
         # overwrite/corrupt the record. green iff apply succeeded; red on any genuine non-success
-        # (plan/guard internal error/an explicit REVISE/apply failure). Guard BLOCK (exit 2 ->
+        # (plan/guard internal error/a dispatch REVISE/apply failure; a push REVISE routes, Decision 265). Guard BLOCK (exit 2 ->
         # routed=true) is NOT a failure -- the record is not latched red on this path; the
         # gated-apply job writes the record after the human-approved apply (Decision 55 anti-masking).
         # Decision 154 / rec-2862: pre-apply-failure is the CLOSED-allow-list conjunction, computed
@@ -430,7 +432,7 @@ jobs:
         # critical: if it ran, infrastructure may have been mutated and the record must latch red)
         # AND (b) one of {artifact_sha, tfvars, tf_init, build_ducklake, fetch_plan} reports
         # 'failure'. `plan` and `guard`/`review` are deliberately EXCLUDED -- they must keep
-        # latching red (a plan failure, a fail-closed guard verdict, or an explicit reviewer
+        # latching red (a plan failure, a fail-closed guard verdict, or a fail-closed reviewer
         # REVISE are not infra errors).
         if: always()
         uses: ./.github/actions/write-convergence-record
@@ -439,7 +441,7 @@ jobs:
           apply-outcome: ${{ steps.apply.outcome }}
           refused: ${{ steps.precond.outputs.refused }}
           dispatch-refused: ${{ steps.persona_gate.outputs.refused }}
-          routed: ${{ steps.guard.outputs.routed }}
+          routed: ${{ steps.guard.outputs.routed == 'true' || (github.event_name == 'push' && steps.review.outcome == 'success' && steps.review.outputs.outcome == 'revise') }}
           review-outcome: ${{ steps.review.outputs.outcome }}
           review-step-outcome: ${{ steps.review.outcome }}
           pre-apply-failure: >-
@@ -462,7 +464,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.event_name == 'push' && github.sha || github.event.inputs.acknowledge_red_commit }}
-          ROUTED: ${{ steps.guard.outputs.routed }}
+          ROUTED: ${{ (github.event_name == 'push' && steps.review.outcome == 'success' && steps.review.outputs.outcome == 'revise') && 'revise' || steps.guard.outputs.routed }}
           APPLY_OUTCOME: ${{ steps.apply.outcome }}
           HEAD_SHA: ${{ github.sha }}
         run: python3 -m scripts.ci.apply_wake --job apply-sandbox
@@ -495,7 +497,7 @@ jobs:
   # required_status_checks.
   # ---------------------------------------------------------------------------
   ducklake-artifacts:
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+    if: ${{ (github.event_name != 'workflow_dispatch' || github.actor != 'otl-workflow-dispatcher[bot]') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -503,7 +505,7 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: ./.github/actions/aws-region
 
@@ -516,7 +518,7 @@ jobs:
         # green-with-skipped rather than hard-failing during the bootstrap window.
         id: oidc_plan
         continue-on-error: true
-        uses: aws-actions/configure-aws-credentials@v6
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-planner
           role-session-name: terraform-plan-pr
@@ -530,7 +532,7 @@ jobs:
           echo "::warning::OIDC_ASSUME_FAILED could not assume agent-platform-github-ci-planner (PR-sub). The DuckLake artifact build is SKIPPED, so no per-sha artifacts are uploaded for this PR head sha."
 
       - name: Setup Python 3.12
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
 
@@ -554,7 +556,7 @@ jobs:
   # (fork PRs cannot mint the OIDC token / write statuses; mirrors ci-rca.yml's fork gate).
   # ---------------------------------------------------------------------------
   advisory-status:
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+    if: ${{ (github.event_name != 'workflow_dispatch' || github.actor != 'otl-workflow-dispatcher[bot]') && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -565,7 +567,7 @@ jobs:
       # Required for `python3 -m scripts.ci.convergence_advisory` below to resolve: this job
       # previously had no checkout (it was two steps -- assume + inline body). scripts/ci/ has no
       # __init__.py; the -m form works via PEP 420 from the repo root, but ONLY after checkout.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: ./.github/actions/aws-region
 
@@ -577,7 +579,7 @@ jobs:
         # assume as error/UNVERIFIED -- "could not read the record" is not evidence of convergence.
         id: oidc_advisory
         continue-on-error: true
-        uses: aws-actions/configure-aws-credentials@v6
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-pr
           aws-region: ${{ env.AWS_REGION }}
@@ -639,10 +641,7 @@ jobs:
   # ---------------------------------------------------------------------------
   gated-apply:
     needs: [apply-sandbox]
-    if: >-
-      always() &&
-      needs.apply-sandbox.result == 'success' &&
-      needs.apply-sandbox.outputs.routed == 'true'
+    if: (github.event_name != 'workflow_dispatch' || github.actor != 'otl-workflow-dispatcher[bot]') && (always() && needs.apply-sandbox.result == 'success' && needs.apply-sandbox.outputs.routed == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: tf-gated-apply
@@ -656,7 +655,7 @@ jobs:
       WORKDIR: terraform/personal
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Check the reviewer approval for tf-gated-apply
         # Fail closed (rec-4979): runs before any credential. A refusal fails before OIDC, so the red record write
@@ -669,7 +668,7 @@ jobs:
       - uses: ./.github/actions/aws-region
 
       - name: Configure AWS credentials (OIDC -- apply role, main only)
-        uses: aws-actions/configure-aws-credentials@v6
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-apply
           aws-region: ${{ env.AWS_REGION }}
@@ -679,13 +678,13 @@ jobs:
         run: echo "version=$(cat config/terraform-version)" >> "$GITHUB_OUTPUT"
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v4
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: ${{ steps.tfver.outputs.version }}
           terraform_wrapper: false
 
       - name: Setup Python 3.12
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
 
@@ -735,7 +734,7 @@ jobs:
         # saved plan from S3 (there is none on this route). GitHub-native artifact transport only
         # (workflow token) -- no new IAM/S3.
         if: needs.apply-sandbox.outputs.fresh_plan_pending == 'true'
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: sandbox-fresh-plan-${{ github.run_id }}
           path: ${{ env.WORKDIR }}

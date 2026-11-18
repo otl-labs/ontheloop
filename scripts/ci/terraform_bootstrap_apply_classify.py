@@ -10,6 +10,7 @@ Fail closed: anything the classifier cannot resolve is protected.
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import importlib.util
 import json
 import re
@@ -45,6 +46,7 @@ PROTECTED_NAME_PATTERNS = frozenset(
         "role/bootstrap-*",
         "role/platform-security-*",
         "role/ducklake-api-*",
+        "role/telemetry-content-*",
         f"policy/{BOUNDARY_NAME}",
         "policy/agent-platform-session-*",
         "policy/platform-security-*",
@@ -151,7 +153,7 @@ def _resolve(plan: Plan, address: str, key: str, marker: str = "") -> str | None
         return known
     for ref in plan.refs(address, key):
         target = ".".join(ref.split(".")[:2])
-        if target in plan.by_address and _row_type(target) in ("aws_iam_role", "aws_iam_policy"):
+        if target in plan.by_address and _row_type(target) in ("aws_iam_role", "aws_iam_policy", "aws_iam_user"):
             name = _name_part(plan.value(target, "name"), "")
             if name:
                 return name
@@ -166,6 +168,10 @@ def target_names(plan: Plan, address: str) -> list[str | None]:
         return [_resolve(plan, address, "role")]
     if kind == "aws_iam_role_policy_attachment":
         return [_resolve(plan, address, "role"), _resolve(plan, address, "policy_arn", ":policy/")]
+    if kind == "aws_iam_user_policy":
+        return [_resolve(plan, address, "user")]
+    if kind == "aws_iam_user_policy_attachment":
+        return [_resolve(plan, address, "user"), _resolve(plan, address, "policy_arn", ":policy/")]
     return [None]
 
 
@@ -374,8 +380,8 @@ def _deny_changes(before: Any, after: Any) -> list[str]:
     return sorted(sids)
 
 
-def build_rows(plan: Plan) -> list[dict[str, Any]]:
-    """One row per normalised address with a change; a keyed group prints its address and count only."""
+def kept_groups(plan: Plan) -> dict[str, list[dict[str, Any]]]:
+    """The changed resource instances build_rows keeps, grouped on the normalised address."""
     groups: dict[str, list[dict[str, Any]]] = {}
     for rc in plan.changes:
         change = _dict(rc.get("change"))
@@ -383,6 +389,12 @@ def build_rows(plan: Plan) -> list[dict[str, Any]]:
         if _core.action_bucket(actions, bool(change.get("importing"))) is None and not rc.get("previous_address"):
             continue
         groups.setdefault(_core.normalise_address(str(rc.get("address", ""))), []).append(rc)
+    return groups
+
+
+def build_rows(plan: Plan) -> list[dict[str, Any]]:
+    """One row per normalised address with a change; a keyed group prints its address and count only."""
+    groups = kept_groups(plan)
     protected = protected_arns(plan)
     rows: list[dict[str, Any]] = []
     for address in sorted(groups):
@@ -424,6 +436,7 @@ def build_rows(plan: Plan) -> list[dict[str, Any]]:
                 "resources": sorted({_shown_resource(g[1]) for g in gained if not g[0].startswith("!")}),
                 "sids": deny_sids,
                 "protected": reasons,
+                "digest": row_digest(plan, members),
             }
         )
     return rows
@@ -432,3 +445,79 @@ def build_rows(plan: Plan) -> list[dict[str, Any]]:
 def _attached_to(plan: Plan, address: str, role: str) -> bool:
     name = _resolve(plan, address, "name")
     return any(r == role and p == name and k == "aws_iam_role_policy_attachment" for k, r, p in _attachments(plan))
+
+
+POLICY_DOC_TYPES = ("aws_iam_policy", "aws_iam_role_policy", "aws_iam_user_policy")
+ATTACH_DOC_TYPES = ("aws_iam_role_policy_attachment", "aws_iam_user_policy_attachment")
+MANAGED_ARN_MARK = ":aws:policy/"
+
+
+def _parsed(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None
+    return value if isinstance(value, dict) else None
+
+
+def document_digest(doc: Any) -> str:
+    """sha256 hex of the canonical JSON of a parsed document; empty for an absent or unknown one."""
+    if doc is None or doc == "":
+        return ""
+    return hashlib.sha256(json.dumps(doc, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def group_digest(digests: list[str]) -> str:
+    present = sorted(d for d in digests if d)
+    return document_digest(present) if present else ""
+
+
+def is_managed_arn(arn: Any) -> bool:
+    return isinstance(arn, str) and MANAGED_ARN_MARK in arn
+
+
+def policy_address(plan: Plan, address: str) -> str | None:
+    """The aws_iam_policy address an attachment row attaches: by the known ARN's name, else by a configuration reference."""
+    name = _name_part(plan.value(address, "policy_arn"), ":policy/")
+    if name:
+        for target in plan.by_address:
+            if _row_type(target) == "aws_iam_policy" and plan.value(target, "name") == name:
+                return target
+        for r in plan.prior:
+            if str(r.get("type")) == "aws_iam_policy" and _dict(r.get("values")).get("name") == name:
+                return _core.normalise_address(str(r.get("address", "")))
+    for ref in plan.refs(address, "policy_arn"):
+        target = ".".join(ref.split(".")[:2])
+        if _row_type(target) == "aws_iam_policy":
+            return target
+    return None
+
+
+def checked_document(plan: Plan, rc: dict[str, Any]) -> dict[str, Any] | None:
+    """The one document the analyzer checks for a kept change row, or None (the single selection predicate)."""
+    address = _core.normalise_address(str(rc.get("address", "")))
+    change = _dict(rc.get("change"))
+    actions = [str(a) for a in change.get("actions") or []]
+    importing, moved = bool(change.get("importing")), bool(rc.get("previous_address"))
+    if _core.action_bucket(actions, importing) is None and not moved:
+        return None
+    kind, after, unknown = _row_type(address), _dict(change.get("after")), _dict(change.get("after_unknown"))
+    if kind in POLICY_DOC_TYPES:
+        return None if unknown.get("policy") else _parsed(after.get("policy"))
+    if kind == "aws_iam_role":
+        trust = None if unknown.get("assume_role_policy") else _parsed(after.get("assume_role_policy"))
+        unchanged = trust == _parsed(_dict(change.get("before")).get("assume_role_policy"))
+        return None if (actions == ["update"] and not importing and not moved and unchanged) else trust
+    if kind in ATTACH_DOC_TYPES and ("create" in actions or importing or moved):
+        if is_managed_arn(plan.value(address, "policy_arn")):
+            return None
+        target = policy_address(plan, address)
+        return _parsed(plan.value(target, "policy")) if target else None
+    return None
+
+
+def row_digest(plan: Plan, members: list[dict[str, Any]]) -> str:
+    digests = [document_digest(checked_document(plan, m)) for m in members]
+    keyed = any("[" in str(m.get("address", "")) for m in members)
+    return group_digest(digests) if keyed else digests[0]

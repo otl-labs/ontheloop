@@ -92,6 +92,8 @@ CASES = (
     "hook_status_message_shape.json",
     "hook_denial_cloud_shape.json",
     "hook_denial_attachment_twin.json",
+    "subagent_persona_sync.json",
+    "subagent_persona_background.json",
 )
 
 

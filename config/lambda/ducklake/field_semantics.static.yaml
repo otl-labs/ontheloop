@@ -38,7 +38,8 @@
 # scope.resolve_scope, called from src/lambdas/ducklake_maintenance/handler.py's merge_ops
 # dispatch (verb="merge_ops") and src/lambdas/ducklake_maintenance/partition_actions.py's
 # action_reconcile_partitions / action_rewrite_partition_layout (verb="reconcile_partitions" /
-# verb="rewrite_partition_layout", Decision 204). gc_ops (the production destructive-GC pass,
+# verb="rewrite_partition_layout", Decision 204) and src/common/ducklake_current_compaction.py's
+# compact_current_tables, called from merge_ops (verb="rewrite_current_deletes"). gc_ops (the production destructive-GC pass,
 # src/common/ducklake_gc_ops.py) is
 # CATALOG-WIDE: its live-set collection enumerates every table unconditionally and its destructive
 # primitives (expire_snapshots/cleanup_old_files/delete_orphaned_files) take a catalog, not a table
@@ -66,6 +67,12 @@ maintenance_policy:
         declared calendar-day scheme under a row-preserving, digest-proven transaction; the verb
         itself refuses a non-history table (current projections rebuild from history, Decision 81
         cl.8).
+    rewrite_current_deletes:
+      apply: true
+      reason: >-
+        Decision 88 amended (PLAN-ops-current-table-compaction, rec-5179): the current side's
+        delete-bearing files are rewritten at an explicit delete threshold, proved row- and
+        digest-preserving, before the merge consolidates them; the verb itself skips a history side.
   append_only:
     merge_ops:
       apply: true
@@ -82,6 +89,10 @@ maintenance_policy:
       reason: >-
         Decision 204: the append-only table's history-class rows are re-laid onto the declared
         calendar-day scheme by the same row-preserving, digest-proven transaction as scd2 history.
+    rewrite_current_deletes:
+      apply: false
+      reason: >-
+        An append-only table has no current projection and so no delete files to rewrite.
   control:
     merge_ops:
       apply: true
@@ -106,6 +117,12 @@ maintenance_policy:
         (Decision 84 I-2); its identity partition spec never drifts, and a delete-all rewrite
         transaction would contend with the same-table allocation serialization the counter exists
         to provide.
+    rewrite_current_deletes:
+      apply: false
+      reason: >-
+        ops_entity_counters is the writer-internal entity-id allocation counter (Decision 84 I-2);
+        a rewrite would contend with the allocation serialization the counter exists to provide
+        (rec-5201).
   smoke_harness:
     merge_ops:
       apply: true
@@ -127,6 +144,12 @@ maintenance_policy:
       reason: >-
         Same as reconcile_partitions: the pair's layout is owned by its creator's
         create_scd2_tables force_recreate, never re-laid by this verb.
+    rewrite_current_deletes:
+      apply: true
+      reason: >-
+        Decision 88 amended (PLAN-ops-current-table-compaction): the production-resident smoke-harness
+        current table is the in-pass canary, compacted first; a probe overlapping the pass may fail
+        that one table under per-table isolation, surfacing as MergeOpsPassFailed -- accepted.
 
 # ---------------------------------------------------------------------------
 # Smoke table definitions (smoke schema drives the test harness)
@@ -354,17 +377,21 @@ contract_table_ops:
     migration_columns:
       history:
         context_v2_json: {role: input, sql_type: VARCHAR, nullable: true}
+        provenance_json: {role: input, sql_type: VARCHAR, nullable: true}
         _contract_version: {role: input, sql_type: VARCHAR, nullable: true}
       current:
         context_v2_json: {role: input, sql_type: VARCHAR, nullable: true}
+        provenance_json: {role: input, sql_type: VARCHAR, nullable: true}
         _contract_version: {role: input, sql_type: VARCHAR, nullable: true}
     reconcile_scope: ducklake
     pending_reconcile:
       history: []
       current: []
     reconciled:
-      history: {}
-      current: {}
+      history:
+        provenance_json: {at: "2026-11-17", evidence: "reconcile_columns(table=ops_recommendations) response: {\"ok\": true, \"action\": \"reconcile_columns\", \"table\": \"ops_recommendations\", \"meta_schema\": \"ducklake_ops\", \"data_path\": \"s3://agent-platform-data-lake/ducklake/\", \"added_history\": [\"provenance_json\"], \"added_current\": [\"provenance_json\"], \"columns_pre_existing\": {\"history\": false, \"current\": false}}"}
+      current:
+        provenance_json: {at: "2026-11-17", evidence: "reconcile_columns(table=ops_recommendations) response: {\"ok\": true, \"action\": \"reconcile_columns\", \"table\": \"ops_recommendations\", \"meta_schema\": \"ducklake_ops\", \"data_path\": \"s3://agent-platform-data-lake/ducklake/\", \"added_history\": [\"provenance_json\"], \"added_current\": [\"provenance_json\"], \"columns_pre_existing\": {\"history\": false, \"current\": false}}"}
 
   # Control-class table (T2.26 control-table-class-and-counter-conformance): NO entity_id_prefix/
   # id_keyspace -- this table has no writer-owned entity keyspace of its own (it IS the keyspace

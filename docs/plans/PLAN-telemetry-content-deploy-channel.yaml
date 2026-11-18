@@ -1,0 +1,948 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "telemetry-content-deploy-channel"
+implementation_declared: true
+intent: >-
+  Plan A of rec-5246 (plan 2 of rec-4696; plan 1 is PLAN-telemetry-content-reader-api-lock, Decision 270, live since
+  ddb28a40). Take the masked telemetry content reader live, so the feedback loop's forensic reads can read production
+  transcripts masked through the DuckLake API's telemetry/content route. deploy-telemetry-content.yml is woken like
+  every governed code-deploy channel (Decisions 249 and 254: the last-green main commit) but, by the operator's ruling
+  of 2026-11-17 recorded as a new Decision, only when the reader's protective set changed. A credential-free build job
+  builds the reader zip and records its digest; the deploy job waits in the reviewer-gated telemetry-content-deploy
+  Environment and, as telemetry-content-deploy, deploys exactly that digest with the handler, layers and environment
+  pinned in deploy_config.json, then reads back the live CodeSha256 and configuration (Decision 239 cl.5, Decision 154).
+  A record job writes the channel's deploy record under the CI deploy role, so the gate's skip rules and the deploy
+  history cover the reader. A repo check keeps the channel's premises; the new files join PROTECTED, CODEOWNERS and
+  boundary_patterns; the manifest flips to active. The protected-path edit hook and the golden replay's masked
+  read-back leg are plan B (rec-5322). Closes rec-4696 and rec-5246.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-telemetry-content-deploy-channel.yaml
+phase: >-
+  ad_hoc_rec (soft-warn category; no tier_item claimed, so the Tier Item Freshness Gate is skipped): rec-5246 (High)
+  and rec-4696 (High), a prerequisite on the operator's feedback-loop gate before T3.3/T3.4 waves 2-4. closes_criteria
+  is empty.
+cites: [dec:239, dec:270, dec:249, dec:254, dec:154, dec:125, dec:126, dec:79, dec:238, dec:232, dec:246, dec:267, dec:162]
+closes_criteria: []
+amends:
+  - dec:249#2
+introduces:
+  - deploy-telemetry-content
+  - validate_content_reader_lock
+  - TELEMETRY_CONTENT_SOURCE_PATHSPECS
+scope:
+  - file: docs/plans/approved/telemetry-content-deploy-channel.yaml
+    action: Create
+    purpose: >-
+      The approved-text sidecar (Decision 246): every word this plan lands in a bound file, verbatim, with {{N}} and
+      {{DATE}} the only placeholders. It binds the new Decision and Decision 249's dated note (docs/DECISIONS.md), the
+      DeployRecordWrite edit (terraform/personal/oidc_pipeline_roles.tf) and its pin test; the build edits nothing
+      else in those files.
+  - file: docs/DECISIONS.md
+    action: Modify
+    purpose: Its two sidecar blocks verbatim (the new Decision at the top; the dated note under Decision 249's 254 note).
+  - file: terraform/personal/oidc_pipeline_roles.tf
+    action: Modify
+    purpose: >-
+      Its two sidecar blocks verbatim: DeployRecordWrite gains deploy-records/telemetry-content/* and the header comment
+      says so. An in-budget inline-policy update on a boundary-carrying managed role, applied by terraform-apply-sandbox
+      on merge (environment-taxonomy.yaml Axis A); not the bootstrap apply.
+  - file: tests/checks/iam_tf/test_ci_deploy_record_prefixes.py
+    action: Create
+    purpose: Its sidecar block verbatim (the statement grants s3:PutObject on exactly the three record prefixes).
+  - file: .github/workflows/deploy-telemetry-content.yml
+    action: Create
+    purpose: >-
+      name: deploy-telemetry-content (the slug ci-rca.yml derives, the taxonomy key and the evidence rows'
+      workflow_name). Header comment naming Decisions 239 cl.5, 249, 254, 270 and {{N}}. on: workflow_run (workflows [CI], types
+      [completed], branches [main]) and workflow_dispatch (inputs force and rebaseline, boolean, default false; rebaseline is the recovery
+      for a BASELINE_UNPROVEN run: the summary lists every bundled commit since ddb28a40 and both baseline checks are
+      skipped for that run only). Top-level permissions contents: read.
+      concurrency: group deploy-telemetry-content, cancel-in-progress false (a newer pending run replaces an older
+      pending one; an in-flight deploy always completes). Every non-local uses: is pinned to a 40-hex commit SHA with a
+      version comment. Jobs, in order:
+        - gate: the deploy-prod-lambdas.yml gate job's if: expression verbatim (dispatch on main by a non-bot actor, or a
+          successful same-repo push run of CI), uses ./.github/workflows/deploy-gate.yml with channel telemetry-content
+          and force set to force || rebaseline (a rebaseline dispatch is never skipped as already_deployed), secrets inherit, permissions id-token write, contents read, actions read.
+        - build: needs gate, if needs.gate.outputs.deploy == 'true'. No environment and no id-token; permissions
+          contents read and actions read. Steps: checkout with ref needs.gate.outputs.sha, fetch-depth 0 and
+          persist-credentials false; "Check the telemetry-content-deploy Environment has reviewers" (python3 -I
+          scripts/ci/environment_reviewer_preflight.py environment --environment telemetry-content-deploy
+          --require-no-admin-bypass, GH_TOKEN and REVIEWER_LOGINS from vars.TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS);
+          setup-python 3.12 and pip install -c requirements.txt pyyaml pydantic; the telemetry hold (python -m
+          scripts.checks.ops_governance.validate_reconcile_pending_gate --telemetry-hold, held exported as an output,
+          held=true writing a TELEMETRY_PRODUCTION_HOLD notice, a green skip); python -m scripts.build_lambda
+          --content-reader-only with its CONTENT_READER_SHA256 exported as output sha256; upload
+          lambda-packages/ducklake-telemetry-content-reader.zip as artifact telemetry-content-<sha256>, retention-days
+          30, if-no-files-found error; "List the watched and bundled paths" (python -m scripts.ci.deploy_gate pathspecs
+          --channel telemetry-content > protective-paths.txt; python -m scripts.build_lambda --list-bundle
+          ducklake_telemetry_content_reader > bundle-paths.txt); "Prove the recorded baseline" when needs.gate.outputs.record_sha is non-empty and
+          rebaseline is not true (git worktree add at record_sha, python -m scripts.build_lambda --content-reader-only
+          there, and fail with BASELINE_UNPROVEN unless base64 of that digest equals needs.gate.outputs.record_code_sha256:
+          the deploy record is writable by agent-reachable identities, so the summary's commit range is trusted only
+          once the recorded commit is shown to build the recorded code; decision-scout r3 NOTE); "Write the approval
+          summary" (bash scripts/ci/telemetry_content_deploy.sh summary with GATE_SHA, HEAD_SHA (github.sha), RECORD_SHA
+          (empty, or rebaseline, means the range starts at ddb28a40), RUN_URL of the waking CI run, CONTENT_SHA256 and
+          HELD through env).
+        - deploy: needs [gate, build], if needs.build.outputs.held == 'false', environment telemetry-content-deploy,
+          permissions id-token write, contents read and actions read. Steps: checkout (ref gate sha, persist-credentials
+          false) for the scripts and deploy_config.json, then a second checkout at path .dispatch-tooling (the
+          workflow's own ref, persist-credentials false), as validate_environment_reviewer_preflight (c) requires of a
+          job whose first checkout takes a ref; "Check the reviewer approval for telemetry-content-deploy" (python3 -I
+          scripts/ci/environment_reviewer_preflight.py approvals, working-directory .dispatch-tooling, before any other
+          non-checkout step; the job's only python, stdlib, before any credential); ./.github/actions/aws-region;
+          download the artifact by its digest name; configure-aws-credentials with role-to-assume
+          arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/telemetry-content-deploy, aws-region env.AWS_REGION and
+          MASK_AWS_ROLE_ID_ACCOUNT_PART from secrets.AWS_ROLE_ID_ACCOUNT_PART in the step env; bash
+          scripts/ci/telemetry_content_deploy.sh deploy with ZIP, CONTENT_SHA256, RECORD_CODE_SHA256
+          (needs.gate.outputs.record_code_sha256) and REBASELINE through env, exporting code_sha256.
+          It runs no pip install and no repo Python while it holds the role.
+        - record: needs [gate, deploy], if needs.deploy.result == 'success'. permissions id-token write, contents read.
+          Checkout at the gate sha; aws-region; setup-python and pip install -c requirements.txt pyyaml pydantic, before
+          any credential; configure-aws-credentials for agent-platform-github-ci-deploy (the deploy-prod-lambdas.yml
+          form); python -m
+          scripts.ci.telemetry_content_record with CODE_SHA256 (needs.deploy.outputs.code_sha256) and
+          LAMBDA_ARTIFACT_SHA (gate sha) through env, which refuses an empty or non-base64 digest and writes
+          deploy-records/telemetry-content/agent-platform-ducklake-telemetry-content.json through
+          scripts.build_lambda_deploy._write_ducklake_deploy_record (schema_version 2 run facts).
+  - file: scripts/ci/telemetry_content_deploy.sh
+    action: Create
+    purpose: >-
+      Bash, set -euo pipefail, using only aws, jq, sha256sum, base64, git and the two path-list files; every error names
+      a step, never a value. aws calls use --query and --output text (or json piped to jq for the read-back
+      comparison), so no full function configuration or ARN is printed.
+      Subcommands:
+        - summary: reads two path lists the build job wrote before it with no credential (PROTECTIVE_PATHS_FILE from
+          python -m scripts.ci.deploy_gate pathspecs --channel telemetry-content, BUNDLE_PATHS_FILE from python -m
+          scripts.build_lambda --list-bundle ducklake_telemetry_content_reader, which lists the bundled .py files and
+          assets), and writes $GITHUB_STEP_SUMMARY, intent and evidence first (Decision 232 cl.4): the protective-set
+          commits since RECORD_SHA (git log --oneline over the protective list, or "first deploy" with the range from
+          ddb28a40), the waking CI run URL, the built digest, the hold state and the deploy_config.json layer pins;
+          then every commit going out over the bundle list, the build tooling that assembles the zip
+          (scripts/build_lambda.py, scripts/build_lambda_packaging.py, scripts/build_lambda_config.py,
+          scripts/lambda_manifest.py; decision-scout r4 NOTE) and the deploy path that applies it
+          (.github/workflows/deploy-telemetry-content.yml, scripts/ci/telemetry_content_deploy.sh,
+          scripts/ci/telemetry_content_record.py, scripts/build_lambda_deploy.py, scripts/ci/deploy_gate.py,
+          .github/workflows/deploy-gate.yml, scripts/ci/environment_reviewer_preflight.py, .github/actions/aws-region,
+          scripts/checks/ops_governance/validate_reconcile_pending_gate.py; decision-scout r7 NOTE, r8 advisory) -- neither wakes the channel, both are shown on the next approval; then
+          deploy_config.json's diff over the range; then the line "CI
+          publishes the layers: a pin proves which bytes run, not who built them (rec-4742)". It prints gate and HEAD
+          shas. It reads no credential.
+        - deploy: fails unless sha256sum(ZIP) equals CONTENT_SHA256; adds a mask for the STS account; when
+          RECORD_CODE_SHA256 is non-empty and REBASELINE is not true, fails at step baseline unless get-function's live
+          Configuration.CodeSha256 equals it (the live reader is the recorded one, so the approved summary listed
+          everything that changes); for each
+          deploy_config.json layer resolves its version ARN and fails unless get-layer-version's Content.CodeSha256
+          equals the pin; update-function-configuration with exactly --handler, --layers and --environment from
+          deploy_config.json, wait function-updated-v2; update-function-code --zip-file, wait again; fails unless the
+          live CodeSha256 equals base64 of the digest bytes (Decision 154) and get-function-configuration reads back
+          the handler, the resolved layer ARNs and the environment exactly; writes code_sha256 to GITHUB_OUTPUT. Nothing
+          prints a value from the environment block.
+  - file: tests/ci/test_telemetry_content_deploy_script.py
+    action: Create
+    purpose: >-
+      Literal-argv tests of telemetry_content_deploy.sh with a fake aws on PATH (the Decision 162 R2 precedent): a
+      digest mismatch, a live-versus-record baseline mismatch, a layer pin mismatch and a read-back mismatch each exit
+      non-zero naming the step and printing no
+      environment value; the happy path calls update-function-configuration before update-function-code and writes
+      code_sha256; summary writes the evidence block before the commit lists; a commit touching only
+      scripts/build_lambda_packaging.py, one touching only scripts/ci/telemetry_content_deploy.sh, one touching only
+      src/common/ducklake_runtime.py (a bundle-list entry) and one touching only
+      config/lambda/ducklake/field_semantics.yaml (an asset) each appear in its going-out list; no aws call prints
+      without --query.
+  - file: scripts/ci/telemetry_content_record.py
+    action: Create
+    purpose: >-
+      Entry point for the record job: validates CODE_SHA256 (non-empty base64 of 32 bytes) and LAMBDA_ARTIFACT_SHA (40
+      hex), then calls scripts.build_lambda_deploy._write_ducklake_deploy_record("agent-platform-ducklake-telemetry-content",
+      json.dumps({"CodeSha256": code_sha256}), "agent-platform-data-lake", "", os.environ["AWS_REGION"],
+      channel="telemetry-content"), the existing writer, which parses CodeSha256 from an update-function-code-shaped
+      JSON string, reads LAMBDA_ARTIFACT_SHA and the run facts, and writes with aws s3 cp (an empty profile omits
+      --profile). Exits 2 on a refused input; the writer exits 1 on a failed write.
+  - file: tests/ci/test_telemetry_content_record.py
+    action: Create
+    purpose: >-
+      An empty, short or non-base64 digest and a short sha are refused before any write; a valid pair calls the writer
+      once (subprocess.run patched, as tests/build_lambda_deploy/test_deploy_records.py does) with key
+      deploy-records/telemetry-content/agent-platform-ducklake-telemetry-content.json, an argv with no --profile, and a
+      record whose code_sha256 and source_git_sha are the inputs.
+  - file: src/lambdas/ducklake_telemetry_content_reader/deploy_config.json
+    action: Create
+    purpose: >-
+      handler src.lambdas.ducklake_telemetry_content_reader.handler.handler; layers [{name, version, code_sha256}] for
+      ducklake-deps and ducklake-extensions, the values the operator's VP 6 one-liner prints (the versions the
+      telemetry reader runs); environment TELEMETRY_META_SCHEMA ducklake_telemetry, TELEMETRY_DATA_PATH
+      s3://agent-platform-data-lake/ducklake-telemetry/, TELEMETRY_BLOB_ROOT
+      s3://agent-platform-data-lake/telemetry-blobs/ducklake_telemetry/, DUCKLAKE_EXTENSION_DIRECTORY
+      /opt/duckdb_extensions, DUCKLAKE_FIELD_SEMANTICS_PATH /var/task/config/lambda/ducklake/field_semantics.yaml and
+      TELEMETRY_DSN_PARAMETER /secret/agent-platform-ducklake-telemetry-reader-dsn. No account id.
+  - file: tests/lambdas/ducklake_telemetry_content_reader/test_deploy_config.py
+    action: Create
+    purpose: >-
+      Shape (three keys, two layers, 64-hex-free base64 digests), environment equal to the telemetry reader's HCL
+      values minus TELEMETRY_DSN_SECRET_ID, plus TELEMETRY_BLOB_ROOT matching the content role's blob prefix, no 12-digit number anywhere.
+  - file: tests/checks/contracts/test_validate_actions_capacity.py
+    action: Modify
+    purpose: >-
+      Scope amendment (build found it): its scratch tree copies the live workflows the ledger names, so it gains
+      deploy-telemetry-content.yml, and its examined-count assertion is derived from the contract's raw ledger rows
+      instead of the literal 4 (a growth-safe pin, never a loosened one).
+  - file: tests/ci/test_actions_capacity_contract.py
+    action: Modify
+    purpose: >-
+      Scope amendment (build found it): the pinned ledger row count goes from 4 to 5 and the last row id is asserted,
+      for the new telemetry-content-deploy-per-merge row.
+  - file: tests/lambdas/ducklake_telemetry_writer/test_packaging.py
+    action: Modify
+    purpose: >-
+      Scope amendment (build found it): two nodes compare the writer's bundle with the content reader's while the reader
+      was a stub; the reader going active changes the set they compare, so a helper selects the writer and the active
+      content reader and the node names stay.
+  - file: tests/verify_ci_workflow/test_ducklake_row_rules_wiring.py
+    action: Modify
+    purpose: >-
+      Scope amendment (build found it): the affected-set node adds the content reader, which is an active artifact once
+      its manifest status flips, with the exclusion it pins unchanged.
+  - file: config/agent/verification_registry/entries/telemetry-reader-bundle.yaml
+    action: Modify
+    purpose: >-
+      Scope amendment (build found it): this graduated guard pins the artifacts the event-read modules affect to the
+      telemetry reader alone, which held while the content reader was a stub; once its manifest is active it bundles
+      those modules too, so the pinned set gains ducklake_telemetry_content_reader and nothing else, and the identity.py
+      assertion is unchanged.
+  - file: src/lambdas/ducklake_telemetry_content_reader/manifest.yaml
+    action: Modify
+    purpose: status stub -> active; notes name deploy-telemetry-content.yml, Decision 239 cl.5, Decision {{N}} and deploy_config.json. Includes and assets unchanged.
+  - file: tests/lambdas/ducklake_telemetry_content_reader/test_packaging.py
+    action: Modify
+    purpose: >-
+      The stub pins become active pins (status active; artifact, functions, handlers and runtime_config unchanged);
+      compute_affected_artifacts over the handler names the content artifact. New node
+      test_manifest_is_active_with_the_gated_channel (rec-4696's acceptance, red on the stub) asserts status active and
+      that the notes name deploy-telemetry-content.yml. A new node asserts the content contract
+      names deploy-telemetry-content.yml, deploy_config.json, its go-live field and the Decision. Planned changes named
+      here (Decision 181).
+  - file: scripts/build_lambda.py
+    action: Modify
+    purpose: >-
+      --content-reader-only: build_ducklake_function_package for ducklake_telemetry_content_reader into
+      lambda-packages/ducklake-telemetry-content-reader.zip and print "CONTENT_READER_SHA256 <hex>". It resolves no AWS
+      profile, uploads and deploys nothing, and refuses --deploy, --ducklake-only and --ducklake-functions beside it.
+  - file: tests/test_build_lambda.py
+    action: Modify
+    purpose: The flag builds twice to identical bytes with AWS env unset and no boto3 or aws call, and refuses --deploy beside it.
+  - file: docs/contracts/build-lambda.yaml
+    action: Modify
+    purpose: >-
+      deploy_channels gains telemetry_content_function (root terraform/bootstrap, channel_class operator_gated,
+      governed_channel .github/workflows/deploy-telemetry-content.yml with the Decision {{N}} watched set, no
+      break_glass_only: the operator's admin tier is the fallback); cli_flags gains --content-reader-only; an
+      amendment_log row.
+  - file: docs/contracts/deploy-paths.yaml
+    action: Modify
+    purpose: >-
+      deploy_code names the operator-gated content channel and its recovery: a held run clears with the sidecar; a
+      BASELINE_UNPROVEN or a baseline step failure means the reader or its record changed outside the channel, or (for
+      BASELINE_UNPROVEN only) a runner image change altered the deflated bytes of an unchanged tree: the operator checks
+      Decision 270 cl.3's content-change alarm history, then dispatches with rebaseline, whose summary
+      lists every bundled commit since ddb28a40; a
+      layer republish that deleted a pinned version fails the next deploy until a deploy_config.json pin commit
+      (rec-4738); break-glass is the operator's admin tier (Decision 125 cl.3's command is refused by Decision 270
+      cl.3). An amendment_log row. NEAR_CAP (482 of 500 effective lines at 163d90b1 per plan_obligations; re-measure on
+      the build's rebased base): written flow-style; if the rows would pass 500, compact the amendment_log per the
+      contracts-class relief valve (Decision 166), never a raise.
+  - file: docs/contracts/ducklake_telemetry_content_reader.yaml
+    action: Modify
+    purpose: Names the deploy channel and deploy_config.json, the go-live date field and Decision {{N}}.
+  - file: docs/contracts/github-actions-evidence.yaml
+    action: Modify
+    purpose: >-
+      governed_jobs rows for the deploy and record jobs (critical step assume) and an artifact_uploads row for
+      telemetry-content-<sha256> (governed_deployment, 30 days); an amendment_log row. NEAR_CAP (492 of 500 effective
+      lines at 163d90b1; re-measure on the rebased base): each row flow-style on one line; if they would pass 500, compact the amendment_log per the
+      contracts-class relief valve (Decision 166), never a raise.
+  - file: docs/contracts/actions-capacity.yaml
+    action: Modify
+    purpose: >-
+      One new ledger row, flow-style (not the SIT projection rows, whose analog lists stay as they are):
+      {id: telemetry-content-deploy-per-merge, items: [rec-5246], unit: per_merge, source: assumed,
+      job_minutes_per_unit: 1.0, basis: "One gate job per CI completion on main, billed one minute (the sibling
+      gate / gate job took 33 s in deploy-ducklake-lambdas run 44171155178); build and deploy run only on a
+      protective-set change or a dispatch, rare by design (Decision {{N}} cl.1).", live_signal: {workflow:
+      .github/workflows/deploy-telemetry-content.yml, job: "*"}}. Not analog: a reusable-workflow job reports as
+      "gate / gate", so an analog or live_signal naming job gate never matches the gauge. A new amendment_log entry
+      (Class D contract) names the row.
+  - file: scripts/ci/deploy_gate.py
+    action: Modify
+    purpose: >-
+      Channel telemetry-content: _channel_inputs names [agent-platform-ducklake-telemetry-content] and
+      TELEMETRY_CONTENT_SOURCE_PATHSPECS; ducklake and prod keep theirs; any other channel raises GateError (no
+      fall-through to prod); the CLI choices gain it. read_record(channel, function) returns the record mapping or None
+      (read_record_sha keeps its signature and wraps it); resolve also emits record_sha and record_code_sha256, set
+      only for a channel with exactly one function and a present record, else empty. resolve keeps its reader
+      parameter and type (a sha-returning callable) and gains a separate record_reader parameter defaulting to
+      read_record, so the deploy-gate-decisions shard's existing injections stay unedited. record_reader runs only when
+      the channel has exactly one function and reader returned a non-None sha, and _emit omits record_sha and
+      record_code_sha256 when they are empty (GitHub reads an absent output as empty), so the exact-output node
+      test_resolve_writes_manifest_and_github_output and the single-function None-record tests stay green unedited. A pathspecs subcommand prints a
+      channel's pathspecs one per line (stdlib only). A telemetry-content rule 0,
+      pre_channel_target: skip (deploy false) when the target commit lacks
+      src/lambdas/ducklake_telemetry_content_reader/deploy_config.json, so a wake whose newest green commit predates this
+      channel never builds a tree without its flag, script or config.
+  - file: .github/workflows/deploy-gate.yml
+    action: Modify
+    purpose: >-
+      The workflow and gate-job outputs gain record_sha and record_code_sha256 from steps.resolve. The ducklake and
+      prod callers ignore them; nothing else changes.
+  - file: tests/verify_ci_workflow/test_deploy_gate_wiring.py
+    action: Modify
+    purpose: >-
+      test_deploy_gate_is_workflow_call_only_with_outputs_and_manifest also requires the record_sha and
+      record_code_sha256 outputs. deploy-telemetry-content.yml does not join _CHANNELS (its deploy job's two-checkout
+      order, required by environment-reviewer check (c), differs from the siblings'); its wiring has its own file.
+      Nodes are extended, none renamed.
+  - file: tests/verify_ci_workflow/test_deploy_telemetry_content_workflow.py
+    action: Create
+    purpose: >-
+      rec-5246's acceptance is its node test_channel_wakes_on_completed_ci_on_main_and_dispatch_only. The channel's
+      wiring over the parsed workflow: wakes on completed CI on main and on dispatch only (no workflow_call or
+      pull_request); the gate job calls deploy-gate.yml with channel
+      telemetry-content and force || rebaseline; build has no environment and no id-token; deploy needs build, runs
+      only when held is 'false', names Environment telemetry-content-deploy, checks out the gate sha then
+      .dispatch-tooling and runs the approvals preflight first; record needs deploy and installs before it assumes;
+      every non-local uses: is pinned to 40 hex.
+  - file: tests/ci/test_deploy_gate.py
+    action: Modify
+    purpose: The new channel resolves its function and pathspecs; an unknown channel raises; a single-function channel
+      emits record_sha and record_code_sha256 from its record, a two-function channel and an absent record emit them
+      empty; a telemetry-content target without deploy_config.json gives pre_channel_target and deploy false; the
+      pathspecs subcommand prints exactly TELEMETRY_CONTENT_SOURCE_PATHSPECS; a change under src/common outside the protective set gives no_source_change, one under src/sensitive_values gives source_changed.
+  - file: scripts/convergence_health/code_drift.py
+    action: Modify
+    purpose: >-
+      TELEMETRY_CONTENT_SOURCE_PATHSPECS, Decision {{N}} cl.1's set: src/lambdas/ducklake_telemetry_content_reader,
+      src/common/ducklake_content_read_verbs.py and src/sensitive_values. No drift sensor is wired here (rec-5322's
+      plan or a later one may); the constant is the gate's only input.
+  - file: tests/convergence_health/code_drift/test_ducklake.py
+    action: Modify
+    purpose: >-
+      TELEMETRY_CONTENT_SOURCE_PATHSPECS is the three paths; every .py file it matches is bundled by the content
+      manifest, and its only unbundled matches are the package's manifest.yaml and deploy_config.json.
+  - file: scripts/checks/ci_guards/validate_content_reader_lock.py
+    action: Create
+    purpose: >-
+      Predicates over parsed workflows, the build-lambda and actions-capacity contracts and the pathspecs, each red on
+      synthetic input:
+        (a) only deploy-telemetry-content.yml names Environment telemetry-content-deploy, never as an expression;
+        (b) that file declares no workflow_call, pull_request or pull_request_target trigger, and its deploy job is
+            defined in it (not a reusable call);
+        (c) no other workflow, and no build-lambda.yaml ducklake_function_zip_keys entry, names
+            agent-platform-ducklake-telemetry-content or ducklake-telemetry-content-reader.zip;
+        (d) the deploy job runs only when needs.build.outputs.held is 'false', passes the digest through env (no
+            ${{ }} inside a run body) together with RECORD_CODE_SHA256 from needs.gate.outputs.record_code_sha256, and
+            no step after configure-aws-credentials invokes python or pip (the only python is the stdlib -I approvals
+            preflight before it); the build job's baseline step precedes its summary step;
+        (e) TELEMETRY_CONTENT_SOURCE_PATHSPECS covers the protective set, every .py file it matches is bundled by the
+            content manifest, and its only unbundled matches are the package's manifest.yaml and deploy_config.json;
+        (f) build-lambda.yaml deploy_channels.telemetry_content_function.governed_channel names the workflow, its
+            cli_flags name --content-reader-only, and actions-capacity.yaml has the ledger row
+            telemetry-content-deploy-per-merge whose live_signal is {workflow: deploy-telemetry-content.yml, job: "*"},
+            and github-actions-evidence.yaml has governed_jobs rows for the workflow's deploy and record jobs (no
+            standing check reads these rows; validate_actions_evidence checks only declared governed_jobs rows).
+      An early warning (Decision 239 cl.5): an agent PR can edit the check itself.
+  - file: scripts/checks/ci_guards/validate_environment_reviewer_preflight.py
+    action: Modify
+    purpose: UPSTREAM gains "deploy-telemetry-content.yml" ("build", "deploy"), so predicate (d) enforces the build job's environment --require-no-admin-bypass preflight.
+  - file: tests/checks/ci_guards/test_validate_environment_reviewer_preflight.py
+    action: Modify
+    purpose: A synthetic deploy-telemetry-content.yml whose build job lacks the environment preflight is red under (d); the real tree stays green.
+  - file: scripts/checks/ci_guards/_manifest.py
+    action: Modify
+    purpose: >-
+      Entry validate_content_reader_lock, pre=True, pre_globs over every input its predicates read:
+      .github/workflows/**, src/lambdas/ducklake_telemetry_content_reader/**, src/sensitive_values/**,
+      src/common/ducklake_content_read_verbs.py, scripts/ci/telemetry_content_deploy.sh, scripts/ci/deploy_gate.py,
+      scripts/convergence_health/code_drift.py, scripts/build_lambda_config.py, scripts/lambda_manifest.py (the
+      manifest loader predicate (e) uses), docs/contracts/build-lambda.yaml,
+      docs/contracts/actions-capacity.yaml and the check itself; full_segment full_after_lint.
+  - file: tests/checks/ci_guards/test__manifest.py
+    action: Modify
+    purpose: The mirror test names the new entry and pins its pre_globs, including src/sensitive_values/**, src/common/ducklake_content_read_verbs.py and docs/contracts/actions-capacity.yaml.
+  - file: tests/checks/ci_guards/test_validate_content_reader_lock.py
+    action: Create
+    purpose: Green on the real tree, red for each predicate (a)-(f) on synthetic input.
+  - file: config/ci_rca_taxonomy.yaml
+    action: Modify
+    purpose: >-
+      function_to_category row for validate_content_reader_lock; workflows row deploy-telemetry-content (tier
+      not_a_gate; ci_rca watched like both sibling channels: the gate, build and record jobs run unattended on every
+      CI completion, and a gate fail-closed, a failed reviewer preflight or BASELINE_UNPROVEN must reach an owner; the
+      deploy job's rejected review, a job that never started, is skipped by is_rejected_deployment; every step failure files). NEAR_CAP (493 of 500 effective lines at 163d90b1; re-measure on the rebased
+      base): both rows flow-style on one line each; if they would pass 500, fold one block-style workflows entry into
+      a single flow-style line with identical keys and values (the #2120 precedent), never a raise or a dropped word.
+  - file: .github/workflows/ci-rca.yml
+    action: Modify
+    purpose: >-
+      The workflow_run filter gains "deploy-telemetry-content" (validate_ci_rca_adjudication (b) pins it equal to the
+      taxonomy's watched set). "Fetch jobs JSON" moves, byte-identical, ahead of "Fetch failed run logs", followed by a
+      new step "Rejected-deployment check" (id rejected_deployment) that runs designed_refusal
+      --rejected-deployment-only and reads no log. The step fails closed on any non-zero exit
+      (OUTPUT=$(... --rejected-deployment-only ...) || OUTPUT="skip=false", no continue-on-error): ci-rca checks out the
+      failing commit, so a failure on a commit from before this merge runs an older designed_refusal.py that rejects the
+      flag (argparse exit 2), and that run must still fetch its log and file. Both new positions sit above the Decision 72 / "local YAML-side
+      fail-closed guard" comment block, which stays directly above "Fetch failed run logs" (_ci_rca_fetch_source_comment);
+      that step's env and run stay byte-identical and its only change is an added if:
+      steps.rejected_deployment.outputs.skip != 'true' (inferred, not verified this session: a rejected review's deploy
+      job never started and has no log, so fetch_logs would otherwise fail ci-rca). "Designed-refusal check" stays
+      after the log fetch unchanged, so the persona-gate refusal still reads /tmp/ci-rca-failed.log (#2053, Decision
+      205 cl.1); it and every later step through "Run ci-rca agent" add the same rejected_deployment condition.
+      NEAR_CAP check at build: re-measure against its budget on the rebased base; the edit adds about twelve lines.
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: >-
+      r3_workflows gains one entry per new inline run: body (Decision 162 cl.3), each at its exactly measured count
+      with no padding and no marker (the ordinary registration path for a new body): every inline body in
+      deploy-telemetry-content.yml's build, deploy and record jobs, and ci-rca.yml's new Rejected-deployment check.
+      Keys follow _step_identity, which prefers the step id: the moved Fetch jobs JSON keeps ci-rca.yml::rca::jobs_json
+      and its count, and the new step registers as ci-rca.yml::rca::rejected_deployment. The build measures each count with the
+      guard's own parser at the final head; validate_composite_action_shell_bodies (VP 5) is the check.
+  - file: docs/contracts/ci-rca-lifecycle.yaml
+    action: Modify
+    purpose: >-
+      designed_refusal.rule gains the rejected-deployment case (deploy-telemetry-content only, a stepless deploy job,
+      classified by a log-free step before the log fetch, which it alone gates; the declared-jobs check still gates only
+      the agent steps, so the deploy-ducklake-lambdas reconcile-gate refusal still fetches its log and builds its
+      evidence as today), and amendment_log gains a dated field_add row, semantic_break false. NEAR_CAP (499 of 500
+      effective lines at ac5872a8; re-measure on the rebased base): the rule addition is one folded sentence and the
+      log row is flow-style on one line; if the file would pass 500, compact amendment_log entries into flow-style rows
+      with identical keys and values under the contracts-class relief (Decision 166), never a raise or a dropped word.
+  - file: tests/verify_ci_workflow/test_ci_rca_and_canary.py
+    action: Modify
+    purpose: >-
+      New nodes: in ci-rca.yml "Fetch jobs JSON" and "Rejected-deployment check" precede "Fetch failed run logs", which
+      is conditioned on steps.rejected_deployment.outputs.skip != 'true'; "Designed-refusal check" (the persona-capable
+      one) still follows "Fetch failed run logs"; the Rejected-deployment step's body carries the || OUTPUT="skip=false"
+      fallback (red if removed); the filter names deploy-telemetry-content. TestCiRcaAuthorityAnchor
+      and test_production_step_runtime_is_unchanged stay green unedited. Existing order assertions that the move
+      breaks are updated to the new order, never deleted. Headroom is 47 SLOC (453 of 500): the order, condition and
+      fallback assertions go into one compact node (or one parametrized node) re-measured at build; if it would pass 500,
+      the build trims within the new node, never a sibling file or a raise.
+  - file: scripts/ci_rca/designed_refusal.py
+    action: Modify
+    purpose: >-
+      A new predicate is_rejected_deployment(workflow_slug, jobs_payload): true only for deploy-telemetry-content when
+      every failing job is deploy and that job ran no step (an empty or absent steps list: the Environment review was
+      rejected, so the job never started). Any step failure after approval (digest, baseline, layer pin, read-back,
+      the approvals preflight itself) still files a ci_rca rec (Decision 55), as does any gate, build or record
+      failure. A new --rejected-deployment-only flag prints skip from is_rejected_deployment alone and reads no log;
+      the default path (is_designed_refusal OR is_persona_gate_refusal over the fetched log) is unchanged, and
+      DESIGNED_REFUSAL_JOBS is unchanged. The stepless shape of a rejected review is inferred; the predicate fails
+      closed, so if GitHub records it otherwise a ci_rca rec files (noise, never a hidden failure) and the shape is
+      fixed forward from that run's jobs JSON. Accepted residual: a stepless failed deploy job also arises from a
+      deployment-protection refusal (the main-only branch policy) or an approval wait that expired; both are skipped
+      without a rec. The gate's main-only if: makes the first unlikely, and an expired wait is a non-approval like a
+      rejection. If the first rejected run's jobs JSON tells them apart, the build narrows the rule to the rejection.
+  - file: tests/test_ci_rca_designed_refusal.py
+    action: Modify
+    purpose: >-
+      A deploy-telemetry-content run whose only failing job is deploy with no steps is a rejected deployment; a deploy
+      job failing at a step, a build failure, and the same no-step shape under another workflow slug are not.
+      --rejected-deployment-only opens no log file; a terraform-apply-sandbox persona-refusal payload is still skipped by
+      the default path with its log present and is not skipped by --rejected-deployment-only (red if the persona leg
+      were moved ahead of the log). Planned change (Decision 181), stricter than today:
+      test_live_designed_refusal_command_uses_only_declared_arguments checks every ci-rca.yml line that invokes
+      scripts.ci_rca.designed_refusal, not only the first; the Rejected-deployment step's line may carry
+      --rejected-deployment-only besides the declared {--jobs-json, --workflow-slug}, and the persona-capable
+      Designed-refusal check's line must not carry it; its declared-in-main() half also asserts
+      "--rejected-deployment-only" is declared in main().
+  - file: scripts/checks/misc/sensitive_value_detectors.py
+    action: Modify
+    purpose: PROTECTED gains .github/workflows/deploy-telemetry-content.yml, scripts/ci/telemetry_content_deploy.sh and scripts/checks/ci_guards/validate_content_reader_lock.py (deploy_config.json is under the protected package path).
+  - file: tests/checks/misc/test_sensitive_value_detectors.py
+    action: Modify
+    purpose: The three paths are in PROTECTED and the real tree's ownership legs stay green.
+  - file: .github/CODEOWNERS
+    action: Modify
+    purpose: Three lines owned by @benjamin-blake for the three new PROTECTED paths, under the Decision 239 cl.5 comment. Procedural until rec-2827.
+  - file: config/agent/executor/capabilities.yaml
+    action: Modify
+    purpose: boundary_patterns gain scripts/ci/telemetry_content_deploy.sh and scripts/checks/ci_guards/validate_content_reader_lock.py under the Decision 239 cl.5 comment (the workflow is covered by .github/workflows/).
+bundled_recommendations: [rec-5246, rec-4696]
+followon_recs: [rec-5322, rec-5323, rec-5333]
+infrastructure_dependencies:
+  - "terraform/personal/oidc_pipeline_roles.tf: in-budget inline-policy UPDATE on agent-platform-github-ci-deploy (DeployRecordWrite gains one prefix). PR-time speculative plan, applied at merge by terraform-apply-sandbox (Decision 77 same-artifact apply). Must apply before the first record job runs (terraform/CLAUDE.md IAM precedence): VP 8 reads it back before the operator approves the first deploy."
+  - "No terraform/bootstrap or terraform/github change: the function, both roles, the route, the Environment and its main-only policy exist (plan 1, VP 7 and VP 8 there)."
+  - "Layers: ducklake-deps and ducklake-extensions as terraform/personal published them; deploy_config.json pins the versions the telemetry reader runs (VP 6)."
+acceptance_criteria:
+  - "The sidecar's words are in the tree verbatim with {{N}} and {{DATE}} filled, and its approval run is approved (VP 4)."
+  - "test_ci_deploy_record_prefixes.py, test_validate_content_reader_lock.py, test_deploy_gate.py, test_telemetry_content_deploy_script.py, test_telemetry_content_record.py, test_deploy_config.py, test_packaging.py and test_build_lambda.py pass, and the new assertions fail on the unchanged tree (VP 1)."
+  - "build_lambda --content-reader-only builds byte-identical zips twice with no AWS credential (VP 2)."
+  - "After merge the sandbox apply shows DeployRecordWrite applied (VP 8), the channel's first run asks the operator, and after his approval the deploy job's read-back passes and the record job writes the record (VP 9)."
+  - "As agent-platform-session, describe through telemetry/content names exactly the two masked verbs and session_transcript_masked returns masked text for a real session, never 503 content_reader_not_deployed (VP 10)."
+  - "The operator's Logs Insights query shows the VP 10 reads under role agent-platform-session and the unexpected-caller alarm stays OK (VP 11)."
+  - "rec-5246 and rec-4696 read closed (VP 12)."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: Run the new and changed tests.
+    command: >-
+      bin/venv-python -m pytest tests/checks/iam_tf/test_ci_deploy_record_prefixes.py
+      tests/checks/ci_guards/test_validate_content_reader_lock.py tests/checks/ci_guards/test__manifest.py
+      tests/ci/test_deploy_gate.py tests/ci/test_telemetry_content_deploy_script.py tests/ci/test_telemetry_content_record.py
+      tests/lambdas/ducklake_telemetry_content_reader/test_deploy_config.py
+      tests/lambdas/ducklake_telemetry_content_reader/test_packaging.py tests/test_build_lambda.py
+      tests/convergence_health/code_drift/test_ducklake.py tests/checks/misc/test_sensitive_value_detectors.py
+      tests/verify_ci_workflow/test_deploy_gate_wiring.py tests/checks/ci_guards/test_validate_ci_rca_taxonomy_accounting.py
+      tests/checks/ops_governance/test_validate_deploy_channel_conformance.py
+      tests/checks/ci_guards/test_validate_actions_evidence.py tests/checks/contracts/test_validate_actions_capacity.py
+      tests/checks/ci_guards/test_validate_environment_reviewer_preflight.py
+      tests/verify_ci_workflow/test_deploy_telemetry_content_workflow.py tests/test_build_lambda_config.py
+      tests/test_ci_rca_designed_refusal.py tests/verify_ci_workflow/test_ci_rca_and_canary.py -q
+    expected: All pass, and the same files against the unchanged tree fail on the new assertions.
+    fix_if: A failure is fixed in the code, never by narrowing an assertion (Decision 235).
+    hermetic: true
+    expected_literals: ["passed"]
+    graduation: waive
+    graduation_waiver_reason: >-
+      PR CI's diff-selected pytest runs these files; the test_obligations nodes pin each behaviour and the gate test is
+      rec-5246's acceptance surface.
+  - step: 2
+    phase: pre-deploy
+    action: The content zip is byte-reproducible and built with no AWS credential.
+    command: >-
+      env -u AWS_PROFILE -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN bin/venv-python -m
+      scripts.build_lambda --content-reader-only | grep CONTENT_READER_SHA256 > /tmp/a.sha && env -u AWS_PROFILE -u
+      AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN bin/venv-python -m scripts.build_lambda
+      --content-reader-only | grep CONTENT_READER_SHA256 > /tmp/b.sha && cmp /tmp/a.sha /tmp/b.sha && echo REPRODUCIBLE
+    expected: REPRODUCIBLE prints.
+    fix_if: Two digests differ; find the nondeterministic input in the staged bundle.
+    hermetic: true
+    expected_literals: ["REPRODUCIBLE"]
+    graduation: waive
+    graduation_waiver_reason: tests/test_build_lambda.py's reproducibility node graduates the same property.
+  - step: 3
+    phase: pre-deploy
+    action: Fast and full tiers before handoff.
+    command: >-
+      bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.validate && bin/venv-python -m
+      scripts.checks.validation_result --verify-head
+    expected: >-
+      Both tiers pass and validation_result verifies the head sha. The full tier starts in the background with a 2 h
+      limit from the top-level session; its verdict is --verify-head's. test_aws_profile's known container failure
+      (rec-5196) is cited, not fixed.
+    fix_if: >-
+      A failure caused by this diff is fixed on the branch; one that reproduces on origin/main is cited by its existing
+      rec in the PR body, never fixed inline.
+    hermetic: false
+    graduation: not-applicable
+  - step: 4
+    phase: pre-deploy
+    action: >-
+      The build's tree holds exactly the sidecar's words with {{N}} and {{DATE}} filled, and the approval run the
+      planning session dispatched (Decision 246) is approved; a changed word needs a new run before merge.
+    command: bin/venv-python -m scripts.roadmap.plan_wording_check --slug telemetry-content-deploy-channel --tree .
+    expected: PASS, naming the sidecar digest that the approval run recorded.
+    fix_if: A mismatch is fixed toward the sidecar; a needed word change goes back to the planning session and a new run.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      Its digest is specific to this sidecar and PR CI's approved-text binding re-checks the same words on every later
+      change, so a standing rerun would duplicate that gate.
+  - step: 5
+    phase: pre-deploy
+    action: The new workflow and script pass the standing workflow guards and actionlint-equivalent checks.
+    command: >-
+      bin/venv-python -c "import importlib; f=[]; [getattr(importlib.import_module('scripts.checks.ci_guards.' + n),
+      n)(f) for n in ('validate_content_reader_lock', 'validate_environment_reviewer_preflight',
+      'validate_actions_account_id_masking', 'validate_workflow_dependency_install', 'validate_project_region',
+      'validate_ci_rca_adjudication', 'validate_actions_evidence', 'validate_composite_action_shell_bodies')];
+      import scripts.checks.contracts.validate_ci_rca_lifecycle_projection as c; c.validate_ci_rca_lifecycle_projection(f);
+      print('FAILED', f); raise SystemExit(1 if f else 0)" && bash -n scripts/ci/telemetry_content_deploy.sh && echo
+      GUARDS_OK
+    expected: FAILED [] and GUARDS_OK print (each module's validate_<name>(failed) entry runs over the real tree; the modules have no __main__).
+    fix_if: A finding names the workflow line; fix the workflow, never the check.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Each is a standing fast-tier check; this step runs them early on the new files.
+  - step: 6
+    phase: pre-deploy
+    action: >-
+      Operator one-liner in AWS CloudShell (no admin action; reads only): the layer versions and digests the telemetry
+      reader runs, which the build writes into deploy_config.json. Asked once, with the exact block, before the first
+      commit of deploy_config.json.
+    command: >-
+      for a in $(aws lambda get-function-configuration --function-name agent-platform-ducklake-telemetry-reader --query
+      'Layers[].Arn' --output text); do n=$(echo "$a" | cut -d: -f7); v=$(echo "$a" | cut -d: -f8); echo "$n $v
+      $(aws lambda get-layer-version --layer-name "$n" --version-number "$v" --query Content.CodeSha256 --output text)";
+      done
+    expected: Two lines, ducklake-deps and ducklake-extensions, each with a version and a base64 digest; no ARN or account id printed.
+    fix_if: A missing layer or an error; the operator pastes the error text with any account id removed, and the build waits.
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: pre-deploy
+    action: Related-work and red overlap before the first commit.
+    command: bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-telemetry-content-deploy-channel.yaml
+    expected: Exit 0, or exit 1 only for reds this plan's context already defers; the build waits while a new overlapping red reports blocked.
+    fix_if: A new overlapping red; record it and wait, never fix it inline.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      A point-in-time red census at build start; its verdict depends on the live red set, so it cannot be a standing
+      check.
+  - step: 8
+    phase: post-deploy
+    action: >-
+      After the squash merge, the terraform-apply-sandbox run on the merge sha applied the DeployRecordWrite update and
+      nothing else in IAM; read back by the run's conclusion and its apply log summary.
+    command: >-
+      mcp__github__actions_list method list_workflow_runs, resource_id terraform-apply-sandbox.yml, branch main; take
+      the run whose head_sha is the merge sha, then mcp__github__get_job_logs on its apply job and read the plan line
+      plan's change addresses.
+    expected: >-
+      conclusion success and the run link; aws_iam_role_policy.github_ci_deploy is among the in-place changes, no other
+      IAM address changes, and nothing is destroyed (a batched merge may add unrelated non-IAM changes).
+    fix_if: A red apply follows deploy-paths.yaml's reconcile row; the operator is not asked to approve a deploy until it is green.
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: post-deploy
+    action: >-
+      The first channel run: the next CI completion on main wakes it, the gate reports baseline_unknown and deploy true,
+      the build job is green with held false, the deploy job waits for the operator. The build posts the run link and
+      the summary's evidence block in the thread and asks him to approve; after approval the deploy job's read-back and
+      the record job pass. The content-change alarm email is expected (Decision 270 cl.3).
+    command: >-
+      mcp__github__actions_list method list_workflow_jobs on the run id the build posted (never the newest run): the
+      deploy and record jobs must be success; then mcp__github__get_job_logs on each (sessions hold no S3 read grant,
+      so the record is proven from its writer's log and the next gate run): the deploy job's read-back line, the record
+      job's "OK deploy record written: deploy-records/telemetry-content/agent-platform-ducklake-telemetry-content.json",
+      and the next channel run's gate line DEPLOY-GATE skip reason=already_deployed (or no_source_change) with the same
+      sha.
+    expected: >-
+      deploy and record success on the posted run; the deploy log reads back a live CodeSha256 equal to base64 of the
+      posted digest; the record log names the telemetry-content key; the next gate run skips on that record.
+    fix_if: >-
+      A failed deploy job leaves the previous (placeholder) code live; diagnose from the step name in its error and
+      re-dispatch after the fix merges (Decision 249 cl.4); no local deploy.
+    hermetic: false
+    graduation: not-applicable
+  - step: 10
+    phase: post-deploy
+    action: >-
+      Masked read-back as agent-platform-session through telemetry/content: describe names exactly the two masked verbs,
+      then session_transcript_masked for one session, its id from the telemetry reader's sessions_window over a single
+      UTC day two days back (a one-day window, not the 7-day roots read rec-5247 times out on), printing counts only.
+    command: >-
+      D=$(date -u -d '2 days ago' +%F); OTL_OPS_VERBS_TRANSPORT=execute_api bin/venv-python -c "import sys; from
+      scripts.telemetry_capture.read_route import TelemetryReader, content_reader; d=sys.argv[1];
+      s=TelemetryReader(profile='agent_platform').named('sessions_window', day_from=d, day_to=d)[0]['session_id'];
+      c=content_reader('agent_platform'); print('VERBS', sorted(c.describe())); r=c.named('session_transcript_masked',
+      session_id=s); print('ROWS', len(r), 'MASKED', all('masked_sha256' in x for x in r))" "$D"
+    expected: VERBS ['session_transcript_masked', 'transcript_row_masked'], then ROWS above 0 and MASKED True. A 503 content_reader_not_deployed is red.
+    fix_if: >-
+      503 means the deploy did not land (VP 9); another error names its verb and status. A read deadline on
+      sessions_window is rec-5247's, not this plan's: re-run with an earlier day; the content leg is what this step
+      proves.
+    hermetic: false
+    graduation: not-applicable
+  - step: 11
+    phase: post-deploy
+    action: >-
+      Access-log proof: the operator runs one Logs Insights query in CloudShell over the last hour; the build reads the
+      unexpected-caller alarm's state itself.
+    command: >-
+      q=$(aws logs start-query --log-group-name platform-security-telemetry-content-access --start-time $(($(date +%s)-3600))
+      --end-time $(date +%s) --query-string "filter event = 'telemetry_content_read' | stats count() by role, verb"
+      --query queryId --output text); sleep 10; aws logs get-query-results --query-id "$q" --query 'results' --output text
+    expected: Rows only for role agent-platform-session with the verbs VP 10 used; the alarm platform-security-telemetry-content-unexpected-caller reads OK (aws cloudwatch describe-alarms as agent_platform).
+    fix_if: A missing line means the access log is not written; stop and RCA (Decision 55). Another role is the alarm's case; tell the operator at once.
+    hermetic: false
+    graduation: not-applicable
+  - step: 12
+    phase: post-deploy
+    action: rec-5246 and rec-4696 read closed after the squash merge's Resolves trailer runs.
+    command: >-
+      OTL_OPS_VERBS_TRANSPORT=execute_api bin/venv-python -c "from src.common.ducklake_reader_client import
+      fetch_recs_by_ids, make_reader; rows, _ = fetch_recs_by_ids(make_reader(profile='agent_platform'), ['rec-5246',
+      'rec-4696']); print(sorted((r['id'], r['status']) for r in rows))"
+    expected: "[('rec-4696', 'closed'), ('rec-5246', 'closed')]"
+    fix_if: >-
+      An open rec after the closure job means its acceptance verdict refused: follow git-ops.yaml's acceptance-verdict
+      route (fix forward or strengthen the acceptance, then re-run the closure); a manual close is forbidden.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: terraform/personal/oidc_pipeline_roles.tf
+    behavior: DeployRecordWrite grants s3:PutObject on exactly the ducklake, prod and telemetry-content record prefixes.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_ci_deploy_record_prefixes.py
+    red_green_expectation: red before (two prefixes), green after
+  - source: .github/workflows/deploy-telemetry-content.yml
+    behavior: Only this workflow names the Environment; no reusable or PR trigger; the deploy job is held on held, takes the digest through env and runs no python or pip; the build proves the recorded baseline before the summary unless rebaseline.
+    verification_step: 1
+    test_selector: tests/checks/ci_guards/test_validate_content_reader_lock.py
+    red_green_expectation: red before (the check and the workflow are absent), green after
+  - source: scripts/checks/ci_guards/validate_content_reader_lock.py
+    behavior: Each predicate (a)-(f) is red on its synthetic violation and green on the real tree.
+    verification_step: 1
+    test_selector: tests/checks/ci_guards/test_validate_content_reader_lock.py
+    red_green_expectation: red before, green after
+  - source: scripts/ci/telemetry_content_deploy.sh
+    behavior: Digest, live-versus-record baseline, layer-pin and read-back mismatches fail naming the step and printing no value; configuration precedes code; the summary leads with evidence.
+    verification_step: 1
+    test_selector: tests/ci/test_telemetry_content_deploy_script.py
+    red_green_expectation: red before, green after
+  - source: scripts/ci/telemetry_content_record.py
+    behavior: A bad digest or sha is refused before any write; a valid pair writes one telemetry-content record.
+    verification_step: 1
+    test_selector: tests/ci/test_telemetry_content_record.py
+    red_green_expectation: red before, green after
+  - source: scripts/ci/deploy_gate.py
+    behavior: telemetry-content resolves its own function and pathspecs; an unknown channel raises; a shared-module change gives no_source_change and a masking change gives source_changed; a single-function channel emits record_sha and record_code_sha256, an absent record emits them empty; a target without deploy_config.json gives pre_channel_target.
+    verification_step: 1
+    test_selector: tests/ci/test_deploy_gate.py
+    red_green_expectation: red before (the channel falls through to prod), green after
+  - source: scripts/convergence_health/code_drift.py
+    behavior: TELEMETRY_CONTENT_SOURCE_PATHSPECS is the three-path protective set; the manifest bundles every matched .py and leaves only manifest.yaml and deploy_config.json unbundled.
+    verification_step: 1
+    test_selector: tests/convergence_health/code_drift/test_ducklake.py
+    red_green_expectation: red before, green after
+  - source: scripts/build_lambda.py
+    behavior: --content-reader-only builds byte-identical zips with no AWS call and refuses --deploy beside it.
+    verification_step: 1
+    test_selector: tests/test_build_lambda.py
+    red_green_expectation: red before (the flag is absent), green after
+  - source: src/lambdas/ducklake_telemetry_content_reader/deploy_config.json
+    behavior: Three keys, two pinned layers, the telemetry reader's production environment plus the blob root, no account id.
+    verification_step: 1
+    test_selector: tests/lambdas/ducklake_telemetry_content_reader/test_deploy_config.py
+    red_green_expectation: red before (the file is absent), green after
+  - source: src/lambdas/ducklake_telemetry_content_reader/manifest.yaml
+    behavior: status active with the bundle unchanged.
+    verification_step: 1
+    test_selector: tests/lambdas/ducklake_telemetry_content_reader/test_packaging.py
+    red_green_expectation: red before (stub), green after
+  - source: scripts/checks/misc/sensitive_value_detectors.py
+    behavior: PROTECTED names the workflow, the script and the check, each code-owned and in boundary_patterns.
+    verification_step: 1
+    test_selector: tests/checks/misc/test_sensitive_value_detectors.py
+    red_green_expectation: red before, green after
+  - source: .github/workflows/deploy-gate.yml
+    behavior: The shared gate workflow exposes record_sha and record_code_sha256.
+    verification_step: 1
+    test_selector: tests/verify_ci_workflow/test_deploy_gate_wiring.py
+    red_green_expectation: red before (the outputs are absent), green after
+  - source: .github/workflows/deploy-telemetry-content.yml
+    behavior: The channel wakes on completed CI on main and dispatch only, passes force || rebaseline to the gate, and orders its jobs and checkouts as scoped.
+    verification_step: 1
+    test_selector: tests/verify_ci_workflow/test_deploy_telemetry_content_workflow.py
+    red_green_expectation: red before (the workflow is absent), green after
+  - source: scripts/checks/ci_guards/_manifest.py
+    behavior: The ci_guards manifest registers validate_content_reader_lock in the fast tier.
+    verification_step: 1
+    test_selector: tests/checks/ci_guards/test__manifest.py
+    red_green_expectation: red before (the entry is absent), green after
+  - source: config/ci_rca_taxonomy.yaml
+    behavior: validate_content_reader_lock has a function_to_category row and deploy-telemetry-content a not_a_gate, watched workflows row.
+    verification_step: 1
+    test_selector: tests/checks/ci_guards/test_validate_ci_rca_taxonomy_accounting.py
+    waiver_reason: >-
+      The taxonomy rows are registrations that the standing validate_ci_rca_taxonomy accounting check enforces over the
+      real tree in the fast tier; a new check or workflow without its row is already red there, so a new node would
+      duplicate that gate.
+  - source: .github/CODEOWNERS
+    behavior: The new workflow, deploy script and check are code-owned.
+    verification_step: 1
+    test_selector: tests/checks/misc/test_sensitive_value_detectors.py
+    red_green_expectation: red before (the PROTECTED paths lack an owner), green after
+  - source: config/agent/executor/capabilities.yaml
+    behavior: boundary_patterns name the deploy script and the check.
+    verification_step: 1
+    test_selector: tests/checks/misc/test_sensitive_value_detectors.py
+    red_green_expectation: red before (the PROTECTED paths are outside boundary_patterns), green after
+  - source: docs/contracts/build-lambda.yaml
+    behavior: deploy_channels names telemetry_content_function as operator_gated with its governed channel; cli_flags names --content-reader-only.
+    verification_step: 1
+    test_selector: tests/checks/ci_guards/test_validate_content_reader_lock.py
+    red_green_expectation: red before (predicate (f) finds no telemetry_content_function row or flag), green after
+  - source: docs/contracts/deploy-paths.yaml
+    behavior: deploy_code names the operator-gated content channel and its recovery rows.
+    verification_step: 3
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: >-
+      Agent-read routing prose with no machine consumer of the new rows; the fast tier's contract schema and line-budget
+      checks cover its shape, and critique reads the words.
+  - source: docs/contracts/ducklake_telemetry_content_reader.yaml
+    behavior: The contract names the deploy channel, deploy_config.json and the Decision.
+    verification_step: 1
+    test_selector: tests/lambdas/ducklake_telemetry_content_reader/test_packaging.py
+    red_green_expectation: red before (the contract names no channel and the manifest is a stub), green after
+  - source: docs/contracts/github-actions-evidence.yaml
+    behavior: The deploy and record jobs and the artifact upload are governed rows.
+    verification_step: 1
+    test_selector: tests/checks/ci_guards/test_validate_content_reader_lock.py
+    red_green_expectation: >-
+      red before (predicate (f) finds no governed_jobs rows for the deploy and record jobs); the upload row is also
+      enforced by validate_actions_evidence's upload inventory, which compares with.name verbatim, so the row carries
+      the workflow's literal name expression; green after
+  - source: docs/contracts/actions-capacity.yaml
+    behavior: The new workflow_run workflow has its deploy-channel capacity row.
+    verification_step: 1
+    test_selector: tests/checks/ci_guards/test_validate_content_reader_lock.py
+    red_green_expectation: red before (predicate (f) finds no telemetry-content-deploy-per-merge row), green after
+  - source: scripts/checks/ci_guards/validate_environment_reviewer_preflight.py
+    behavior: UPSTREAM names deploy-telemetry-content.yml (build, deploy); its build job without the environment preflight is red.
+    verification_step: 1
+    test_selector: tests/checks/ci_guards/test_validate_environment_reviewer_preflight.py
+    red_green_expectation: red before (the workflow is not in UPSTREAM), green after
+  - source: scripts/ci_rca/designed_refusal.py
+    behavior: Only a deploy-telemetry-content run whose sole failing job is a stepless deploy (a rejected review) is skipped; every step failure files.
+    verification_step: 1
+    test_selector: tests/test_ci_rca_designed_refusal.py
+    red_green_expectation: red before (the slug is undeclared), green after
+  - source: .github/workflows/ci-rca.yml
+    behavior: The filter watches deploy-telemetry-content; a rejected run is classified before, and never reaches, the log fetch; the persona-capable designed-refusal check still follows the log fetch.
+    verification_step: 1
+    test_selector: tests/verify_ci_workflow/test_ci_rca_and_canary.py
+    red_green_expectation: red before (no rejected-deployment step precedes the log fetch and the filter lacks the workflow), green after
+  - source: config/composite_action_body_baseline.yaml
+    behavior: r3_workflows registers each new inline run body (deploy-telemetry-content.yml's jobs and ci-rca.yml's rejected_deployment) at its measured count.
+    verification_step: 3
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: >-
+      Registrations the standing validate_composite_action_shell_bodies ratchet enforces over the real tree in the fast
+      tier (VP 3 and VP 5 run it): a new body with no entry, or one past its count, is already red there, so a new node would
+      duplicate that gate.
+  - source: docs/contracts/ci-rca-lifecycle.yaml
+    behavior: designed_refusal.rule states the rejected-deployment case and amendment_log records it.
+    verification_step: 3
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: >-
+      Agent-read rule prose with no new machine consumer; validate_ci_rca_lifecycle_projection (VP 3 and VP 5) and the contract
+      drift and line-budget checks cover the file's shape, the behavior itself is pinned by
+      tests/test_ci_rca_designed_refusal.py, and critique reads the words.
+  - source: config/agent/verification_registry/entries/telemetry-reader-bundle.yaml
+    behavior: The event-read modules affect exactly the telemetry reader and the active content reader, and identity.py still reaches the telemetry reader and never the ducklake reader.
+    verification_step: 1
+    test_selector: tests/lambdas/ducklake_telemetry_content_reader/test_packaging.py::test_manifest_is_active_bundling_the_content_closure
+    red_green_expectation: green after; the graduated record replays red against the unchanged pinned set once the manifest is active
+
+constraints:
+  - "No rescue agents or workaround loops (Decision 55). No local Lambda deploy: the channel is the only path (Decision 239 cl.5, Decision 270 cl.3)."
+  - "Never write an account id, ARN with an account, ExternalId, key, API id or host into the repo, a PR, a comment or the shared folder (Decision 101). The operator's VP 6 and VP 11 output is pasted with any account id removed."
+  - "Governed words are the sidecar's, verbatim; any change goes back to the planning session and a new approval run (Decision 246)."
+  - "No assertion is loosened (Decision 235)."
+  - "The deploy job holds the locked role only for aws calls in telemetry_content_deploy.sh: no python or pip after configure-aws-credentials (the stdlib -I approvals preflight runs before it), no third-party action other than the SHA-pinned checkout, download-artifact and configure-aws-credentials."
+context:
+  - "Decision-scout r1 FLAGS_FOUND (NOTEs: 249 SPIRIT on the protective-set pathspecs -> the new Decision amends 249 cl.2 for this channel; 232/NS.9 SPIRIT -> the summary leads with intent and evidence). r2 FLAGS_FOUND (NOTEs: Decision 267's lock-available condition fires when this closes rec-4696 -> rec-5323 re-decides 267 cl.5; Decision 181 cl.2 residual owners -> rec-5322 named in the Decision and followon_recs). Spirit flags: none at r2. Decisions triaged: 219 of 219. Roadmap items intersected: 10; CONFLICT: 0; RELATED: 10. Serves: NS.9 4/5. CITE: 239, 270, 249, 254, 154, 125, 126, 79, 238, 232."
+  - "Decision-scout r3 FLAGS_FOUND (r1 and r2 flags resolved; one new NOTE: 232 SPIRIT, github_ci_branch can write deploy-records/telemetry-content/, so a forged record could make the approval summary under-list what ships -> the build proves the recorded commit builds the recorded digest and the deploy step proves the live CodeSha256 equals the record before any change, with a rebaseline dispatch as the recovery). Decisions triaged: 219 of 219. Roadmap items intersected: 10; CONFLICT: 0; RELATED: 10. Serves: NS.9 4/5. CITE: 239, 270, 249, 254, 154, 125, 126, 79, 238, 232, 246, 267."
+  - "Decision-scout r4 FLAGS_FOUND (r3 NOTE resolved: a forged record passes the baseline checks only when it matches what is live, and an empty record or rebaseline over-lists, never under-lists; the shared deploy-gate.yml outputs raise no flag). One new NOTE: 239 SPIRIT, the build tooling (build_lambda.py, build_lambda_packaging.py, build_lambda_config.py, lambda_manifest.py) assembles the approved zip but sits outside the manifest paths -> the approval summary also lists every tooling commit going out; it does not wake the channel, consistent with Decision {{N}} cl.1's bundled-files rule. Decisions triaged: 219 of 219. Roadmap items intersected: 10; CONFLICT: 0; RELATED: 10. Serves: NS.9 4/5."
+  - "Operator rulings 2026-11-17 (this planning thread): the split into plan A (this) and plan B (rec-5322: protected-path edit hook, golden masked read-back leg); the channel asks only when the protective set changes or on a deliberate dispatch (his words: the daily asks would be ceremony); 'write the plan' 19:47Z. Blind Fable consult: /mnt/project-files/content-reader-lock/advisor-brief-plan2/ (adopted: 249 gate, record via the CI deploy role, pinned layers, no invoke, narrow watched set)."
+  - "Live grants read at planning (main 163d90b1): telemetry-content-deploy holds GetFunction/GetFunctionConfiguration/UpdateFunctionCode/UpdateFunctionConfiguration on the function and GetLayerVersion on both layers (terraform/bootstrap/telemetry_content_deploy_role.tf); its trust names deploy-telemetry-content.yml@refs/heads/main and the Environment sub; github_ci_branch's S3ReadWrite (bucket/*) covers the gate's read of deploy-records/telemetry-content/; the execution role already reads the data and blob prefixes and the reader DSN parameter. Whether a run waiting on Environment approval holds the workflow concurrency group is UNPROVEN; VP 9's first run shows it."
+  - "Bootstrap apply is red on main since #2076 (Access Analyzer preview, unowned per the coordinator 2026-11-17); this plan changes no bootstrap file. The sandbox apply was green on ddb28a40."
+  - "Telemetry hold: validate_reconcile_pending_gate --telemetry-hold printed held=false on 2026-11-17 18:50Z; a held run is a green skip that never asks the operator."
+  - "Reds: rec-5247 and rec-5248 (telemetry read timeouts) are owned by the read-timeouts thread; the content verbs read one row or one session tree, not the 7-day roots read. red_overlap (2026-11-17, base 163d90b1) BLOCKED: rec-5247 slo_breached (20.3 h, product_regression), shared paths none. Deferral rationale (Decision 226): this plan does not repair it, shares no file with it, and its words do not depend on it; the operator ruled 2026-11-17 that builds may proceed past reds that share no files. VP 7 runs red_overlap again before the first commit."
+  - "Overlapping open work: #2148 (actions SHA-pinning) and #2071 touch config/ci_rca_taxonomy.yaml and scripts/checks/ci_guards/_manifest.py; whichever lands second rebases. T4.28 c6 also edits capabilities.yaml boundary_patterns (additive). Unbuilt plans on the same files: PLAN-persona-image-channel (deploy_gate.py, test_deploy_gate.py; it adds a channel too, so whichever builds second adds its own explicit branch beside the other, since unknown channels now raise) and PLAN-scheduled-workflow-dispatch (code_drift.py, build-lambda.yaml, test_deploy_gate_wiring.py); whichever builds second rebases."
+  - "Layer pins: the planning and build sessions cannot read Lambda layers (probe 2026-11-17 exit 254), so VP 6 is the operator's read. A layer republish deletes the old version (no skip_destroy in terraform/personal/ducklake_lambdas.tf), so the next approved deploy fails at the pin check until a pin commit; owned by rec-4738, named in deploy-paths.yaml."
+  - "Graduated shards kept, node ids unchanged: dependabot-config-guard-is-pre-tier-on-config-edits (test__manifest.py), deploy-gate-decisions (test_deploy_gate.py), ops-row-rules-wiring, telemetry-writer-packaging and telemetry-writer-smoke-gate (test_ducklake.py), telemetry-writer-stub-handler (test_build_lambda.py), deploy-gate-wiring (test_deploy_gate_wiring.py), ci-rca-designed-refusal-fail-closed (test_ci_rca_designed_refusal.py), ci-rca-authority-anchor, ci-rca-bounded-retrieval-envelope, ci-rca-fetch-classification-guard-rejects-log-body-grep and ci-rca-filter-guard-full-required-set (test_ci_rca_and_canary.py, 47 SLOC of budget headroom). Each of those files gains nodes only; the build renames and deletes none of a shard's named nodes, and VP 1 runs each file."
+  - "Rec closure (critique r2, r3): at planning (2026-11-17) both recs' acceptance was strengthened through ops_data_portal --update-rec to one decidable node each, red on the unchanged tree: rec-5246 tests/verify_ci_workflow/test_deploy_telemetry_content_workflow.py::test_channel_wakes_on_completed_ci_on_main_and_dispatch_only, rec-4696 tests/lambdas/ducklake_telemetry_content_reader/test_packaging.py::test_manifest_is_active_with_the_gated_channel (lint_acceptance_command require_decidable True for both). The build confirms both resolve holds with scripts.rec_trailer_acceptance at the PR head before the squash merge. Both close at merge, before VP 9 and VP 10 prove the reader live; that is accepted, and a VP 9 or VP 10 failure is fixed forward through the channel under git-ops.yaml (never a manual close or reopen workaround)."
+  - "Decision-scout r5 FLAGS_FOUND (r4 NOTE resolved; advisory adopted: a script-test node shows a tooling-only commit in the summary). One CONTRADICT NOTE, Decision 246 cl.4 (the final-diff word stays for CODEOWNERS, security code, IAM and deploys no sidecar binds), disposition accept-with-deferral as in the precedent plans: the operator's 2026-11-16 standing rule (no final-diff ask on work he has approved; rec-5206 narrows cl.4) governs, and the approval request names the CODEOWNERS, PROTECTED, boundary_patterns, lock-check and workflow changes this plan makes; a diff beyond this scope needs his fresh word. Decisions triaged: 219 of 219. Roadmap items intersected: 10; CONFLICT: 0; RELATED: 10. Serves: NS.9 4/5. CITE: 239, 270, 249, 254, 154, 125, 126, 79, 238, 232, 246, 267."
+  - "Plan-critique r1 REVISE (8 blocking, 5 nits), all adopted: record via the existing private writer with its exact call; .dispatch-tooling side checkout and predicate (d) reworded; predicate (e) allows the two unbundled package files; pre_channel_target rule 0; VP 10 pinned to read_route's TelemetryReader/ContentReader named() and a one-day window; waivers replaced by predicate (f); a contract node in test_packaging.py; the Decision's drift-sensor sentence reworded (new approval run); nits: branches [main], UPSTREAM entry, DSN secret id excluded, VP 8 via the GitHub tools, overlap list, pip before the credential. Its human note (Decision 79 for shared-include plans) first became a manifest note, withdrawn after scout r6."
+  - "Decision-scout r6 FLAGS_FOUND. WARN Decision 79: after the flip, every later plan touching one of the reader's shared includes owes a content-reader deploy and smoke step under the planning skill and plan-critique 12b, which the channel defers by design; a manifest note cannot narrow 79. Disposition: the note is dropped and rec-5333 (filed 2026-11-17) carries a Decision amending 79 for operator_gated channels plus the skill and critic carve-outs, before the next shared-include plan; until then such a plan names this channel's next approved deploy and asks the operator. NOTE 246 cl.4 carried with the r5 disposition, and the approval request also names validate_environment_reviewer_preflight.py's UPSTREAM entry and the shared deploy_gate.py / deploy-gate.yml change (rule 0 and two outputs the ducklake and prod channels also receive). Advisory adopted: cl.1 now counts from the deployed commit only once it is shown to build the live code (a first deploy or rebaseline over-lists). Decisions triaged: 219 of 219. Roadmap items intersected: 10; CONFLICT: 0; RELATED: 10. Serves: NS.9 4/5. CITE: 239, 270, 249, 254, 154, 125, 126, 79, 238, 232, 246, 267."
+  - "Decision-scout r7 FLAGS_FOUND (r6 WARN resolved via rec-5333; NOTE 246 cl.4 carried, same disposition). New NOTE 239 SPIRIT: the deploy path itself (the workflow, the deploy and record scripts, the gate) can change between approvals unshown -> the summary's going-out list also names those files' commits; they do not wake the channel. Decisions triaged: 219 of 219. Roadmap items intersected: 10; CONFLICT: 0; RELATED: 10. Serves: NS.9 4/5. CITE: 239, 270, 249, 254, 154, 125, 126, 79, 238, 232, 246, 267."
+  - "Plan-critique r2 REVISE (6 blocking, 4 nits), all adopted: rec closure at merge stated and rec-5246's acceptance file created in scope; the summary reads its path lists from files the build writes (deploy_gate pathspecs, build_lambda --list-bundle) with test nodes for a bundled module and an asset; ci_rca watched with the deploy job a designed refusal; a capacity ledger row of its own; VP 9 reads the posted run's jobs and logs; rollback is a revert PR through the channel or the admin tier; nits: force || rebaseline, test_build_lambda_config.py in VP 1, the content workflow kept out of _CHANNELS, --query on aws output; the zlib cause named in deploy-paths."
+  - "Actions capacity (consumer_rule): the latest reading, convergence-health run 44160571767 (2026-11-17 19:43Z), is red_projected (peak slot demand 10.12, projected peak 18.65 from the planned SIT and persona rows; alarm none). This plan adds about one gate job per CI completion on main (the sibling channels' gate analog) and a rare build/deploy; the operator is told the reading and the trigger_response options with the plan approval ask, before merge."
+  - "Decision-scout r8 FLAGS_FOUND (r7 NOTE resolved; 246 cl.4 NOTE carried with the same disposition, the approval request also naming the ci_rca refusal predicate). New NOTE 55 SPIRIT: declaring the whole deploy job a designed refusal hid post-approval step failures -> narrowed to is_rejected_deployment (a stepless deploy job, the rejected review only). Advisories adopted: the remaining deploy-path files join the going-out list; the capacity reading and its trigger_response options go to the operator with the plan approval ask, before merge."
+  - "Plan-critique r3 REVISE (3 blocking, 3 nits), all adopted: both recs' acceptance strengthened now to single decidable nodes and checked at the PR head before merge, VP 12 follows git-ops.yaml's verdict route; the capacity row is source assumed with live_signal job '*' (a reusable-workflow job reports as 'gate / gate', seen in run 44171155178); pre_globs cover every predicate input; nits: VP 8 tolerates batched non-IAM changes, rollback of a shared-module revert dispatches with force, VP 7 waived with a reason."
+  - "Plan-critique r4 REVISE (1 blocking, 2 nits), all adopted: ci-rca.yml in scope (filter entry; the refusal check runs before the log fetch, which a never-started deploy job could not satisfy) with its test; the workflow's name stated; VP 5 calls each guard's validate_<name>(failed) entry (the modules have no __main__) and adds validate_ci_rca_adjudication and validate_actions_evidence; the evidence obligation moved to predicate (f) with the upload row's literal name; pre_globs add scripts/lambda_manifest.py. ci-rca.yml is a CI workflow edit with no sidecar words; the approval request names it with the other unbound edits (246 cl.4 disposition)."
+  - "Plan-critique r5 REVISE (1 blocking, 2 nits), all adopted: moving the designed-refusal check ahead of the log fetch would have emptied the persona-gate refusal's log read (#2053), so a separate log-free Rejected-deployment check runs first and the persona-capable check stays after the fetch, with a node pinning that order; the Decision 72 comment stays directly above the fetch step, whose env and run stay byte-identical; how GitHub records a rejected review (failure, no steps, no log) is labelled inferred, fails closed, and is fixed forward from the first rejected run's jobs JSON."
+  - "Decision-scout r9 FLAGS_FOUND. WARN Decision 162 cl.3: the new workflow's inline run: bodies had no r3_workflows entries -> config/composite_action_body_baseline.yaml joins scope with one measured entry per new body (ci-rca.yml's new step included), VP 5 runs validate_composite_action_shell_bodies, and 162 is cited. NOTE 246 cl.4 carried with the r8 disposition; the approval request names the ci-rca.yml reorder, filter entry and designed_refusal.py change. Advisories adopted: ci-rca-lifecycle.yaml's designed_refusal.rule and amendment_log join scope; the sibling reconcile-gate refusal is untouched because only the log-free rejected-deployment step gates the log fetch (critique r5). The ci-rca.yml change raised no new Decision flag. Decisions triaged: 219 of 219. Roadmap items intersected: 13; CONFLICT: 0; RELATED: 13. Serves: NS.9 4/5. CITE: 239, 270, 249, 254, 154, 125, 126, 79, 238, 232, 246, 267, 162."
+  - "Decision-scout r10 FLAGS_FOUND (r9 WARN Decision 162 resolved; NOTE 246 cl.4 carried with the r8 disposition). Decisions triaged: 219 of 219. Roadmap items intersected: 13; CONFLICT: 0; RELATED: 13. Serves: NS.9 4/5. CITE: 239, 270, 249, 254, 154, 125, 126, 79, 238, 232, 246, 267, 162."
+  - "Plan-critique r6 REVISE (3 blocking, 2 nits), all adopted: the Rejected-deployment step falls back to skip=false on any non-zero exit (a pre-merge failing commit's older designed_refusal.py rejects the new flag), pinned by a node; test_live_designed_refusal_command_uses_only_declared_arguments named as a planned, stricter change over every invoking line; ci-rca-lifecycle.yaml's NEAR_CAP relief stated; nits: r3_workflows keys are step ids; a protection-rule refusal or expired wait is an accepted residual of the stepless rule."
+  - "Plan-critique r7 PROCEED (0 blocking, 3 nits), all adopted: test_ci_rca_and_canary.py's new assertions go into one compact node within its 47-SLOC headroom; resolve keeps its sha reader and gains a separate record_reader defaulting to read_record; the declared-flag half of the designed-refusal argument test covers --rejected-deployment-only."
+  - "Plan-critique r8 (confirming) PROCEED (0 blocking, 1 nit), adopted: record_reader runs only for one function with a non-None sha, and _emit omits the two record outputs when empty, so the deploy-gate-decisions shard's exact-output and None-record nodes stay unedited. After r8, pr-validate asked for test obligations on the two files r5 and r9 added to scope; both are waivers onto the fast tier (VP 3), the pattern the taxonomy and deploy-paths rows use."
+  - "Decision 79: the manifest flip makes the artifact active; VP 9 (deploy and read-back) and VP 10 (the masked read) are its deploy and smoke steps."
+  - "Rollback: before the first approval nothing changed in AWS but the IAM line; revert the PR (the sandbox apply removes the prefix). After a deploy, a bad reader is rolled back by a revert PR that ships through the channel with a fresh approval (a revert of a shared, non-protective module does not wake the channel: the operator dispatches with force after its merge) (a dispatch always targets main's newest green commit and the role trusts main only, so an older commit cannot be redeployed directly), or by the operator's admin tier; the placeholder returns only through an operator admin action."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:d9d6ce8b3bc9ccdc230cbe0f7e6d584cd703d11b06713a1c8fb373cc36a8b46b'}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:a15caee1aad2ff925dc6dd2e60fbf4050840193d8e60116e3643ed878a73e501'}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:ec2261b10f09636dd516264c5eeba11bee9f56ab19231551cf00e29151a3a7d9'}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 4, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:099c7784634ccb9678b37afe86e9c1ecc755c997fb3c457135ca79d77d9d0f14'}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 5, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:130a23ac2c0f797115950a7b20ff1f42f1379b1b211848084da2fe7ffbf6550b'}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 6, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:90507a1b02225e7b3e6c80d8be6a124a92849995b7f0276e8493754423979cfb'}  # pragma: allowlist secret
+  - {gate: wording-check, round: 1, verdict: FAIL, digest: 042b3d268505bce0bb048131795934e2d1b7420b6aa23bd3c007796f5cd13392, base: 163d90b12426a7e978e3f88fbdd2ee941db973f5, selection: complete}  # pragma: allowlist secret
+  - {gate: wording-check, round: 2, verdict: PASS, digest: 1f8c2fd943933c49f6049fa0fe80a6c075e850a35e3686d0079f03fe0da906fa, base: 163d90b12426a7e978e3f88fbdd2ee941db973f5, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 8, nits: 5}
+  - {gate: decision-scout, round: 7, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:8fb0eb203d450e3b7f46911f4ebca11b748287d7a8dff8fd8ae464084ea4a70c'}  # pragma: allowlist secret
+  - {gate: wording-check, round: 3, verdict: PASS, digest: 1146708233d87f07766ffdab34680dc78e0a9a00a29b9d87dff2fe028e68d19f, base: 163d90b12426a7e978e3f88fbdd2ee941db973f5, selection: complete}  # pragma: allowlist secret
+  - {gate: wording-check, round: 4, verdict: FAIL, digest: 60c5506e88ced5601fa38dc8f508f6af53c26a6ef74bdf98c48244bb247b9117, base: 163d90b12426a7e978e3f88fbdd2ee941db973f5, selection: complete}  # pragma: allowlist secret
+  - {gate: wording-check, round: 5, verdict: PASS, digest: 60c5506e88ced5601fa38dc8f508f6af53c26a6ef74bdf98c48244bb247b9117, base: 51ab4e86b1f08d59e2a0f860e2f2fc386cf9b31b, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 6, nits: 4}
+  - {gate: decision-scout, round: 8, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:bf409b8b32d5ac2abd6b680e229b827abfa6aa8a339d4c4f157ba5a291ef7a2e'}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 3, nits: 3}
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 2}
+  - {gate: decision-scout, round: 9, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:74517f2b15e0e38dec4c935a36140059eaa09fa9efcfad1dde803c164c3e20fb'}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 2}
+  - {gate: decision-scout, round: 10, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:fac801294cec713ebfd1c34b4c74135a705512a9305f9d267d8462ba4aa47479'}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 3, nits: 2}
+  - {gate: plan-critique, round: 7, verdict: PROCEED, blocking: 0, nits: 3}
+  - {gate: plan-critique, round: 8, verdict: PROCEED, blocking: 0, nits: 1}
+  - {gate: decision-scout, round: 11, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:6ad55949a408c8642951d0e3f128a4bc6f0f12ab354bf8c0147a7863ee7c9118'}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 12, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:997004bb9de9943a24de2b1ca400fd5f1613d25a347ce00badc99ba7c6dccf62'}  # pragma: allowlist secret
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Only the plan-cited decision sections (239, 249, 254, 270)
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+  - "Start condition: this plan merged, its approval run approved, and no change to the content reader's roles or the Environment merged since ddb28a40."
+execution_steps:
+  - "VP 7 (red_overlap) and VP 6 (the operator's layer read) first. Post: no new overlapping red; two layer lines in hand."
+  - "Tests first (scope test rows), seen red on the unchanged tree. Post: they fail on the new assertions."
+  - "Apply each sidecar block verbatim with {{N}} the next free Decision number and {{DATE}} the build date; then the remaining scope edits. Post: VP 1, 2, 4 and 5 pass."
+  - "Commit, VP 3, push, PR (body: the Decision number, the approval run link, no Resolves trailer until the final squash), CI green, review PROCEED, scripts.rec_trailer_acceptance census and evaluate at the PR head show both recs holds; squash-merge with 'Resolves: rec-5246, rec-4696' (operator's standing rule: an approved plan's build merges on review PROCEED and green CI)."
+  - "VP 8 (sandbox apply green), then VP 9: post the first run's approval ask to the operator with the evidence block; after his approval VP 10, then ask VP 11, then VP 12."
+  - "Execute Verification Plan: run each step; loop until pass; on an unrecoverable V3 failure stop and RCA (Decision 55)."
+  - "Report: what was implemented, the validation_result --verify-head verdict, VP 8-12's lines, the merge SHA, and that Decision 267's lock-available condition fired (rec-5323)."
+weakening_dispositions:
+  - candidate: "[assertion-changed] tests/lambdas/ducklake_telemetry_writer/test_packaging.py::test_append_modules_bundled_request_shared_with_reader"
+    disposition: planned-change
+    cite: "acceptance_criteria[1]"
+  - candidate: "[assertion-changed] tests/lambdas/ducklake_telemetry_writer/test_packaging.py::test_blob_modules_bundled_adapter_shared_with_reader"
+    disposition: planned-change
+    cite: "acceptance_criteria[1]"
+  - candidate: "[assertion-changed] tests/test_ci_rca_designed_refusal.py::test_live_designed_refusal_command_uses_only_declared_arguments"
+    disposition: planned-change
+    cite: "acceptance_criteria[1]"
+  - candidate: "[assertion-changed] tests/verify_ci_workflow/test_deploy_gate_wiring.py::test_deploy_gate_is_workflow_call_only_with_outputs_and_manifest"
+    disposition: planned-change
+    cite: "acceptance_criteria[1]"
+  - candidate: "[assertion-changed] tests/verify_ci_workflow/test_ducklake_row_rules_wiring.py::test_data_pipeline_excludes_the_engine_and_is_never_marked_affected_by_it"
+    disposition: planned-change
+    cite: "acceptance_criteria[1]"
+  - candidate: "[test-removed] tests/lambdas/ducklake_telemetry_content_reader/test_packaging.py::test_manifest_is_a_stub_bundling_the_content_closure"
+    disposition: refactor
+    cite: "tests/lambdas/ducklake_telemetry_content_reader/test_packaging.py::test_manifest_is_active_bundling_the_content_closure"
+  - candidate: "[test-removed] tests/lambdas/ducklake_telemetry_content_reader/test_packaging.py::test_stub_affects_no_artifact"
+    disposition: planned-change
+    cite: "acceptance_criteria[1]"
+  - candidate: "[assertion-changed] tests/checks/ci_guards/test__manifest.py::TestGatedEntryInputClosures::test_actions_sha_pinned_entry_closes_over_its_inputs"
+    disposition: planned-change
+    cite: "acceptance_criteria[1]"
+  - candidate: "[assertion-changed] tests/checks/ci_guards/test__manifest.py::TestGatedEntryInputClosures::test_dependabot_config_entry_closes_over_its_inputs"
+    disposition: planned-change
+    cite: "acceptance_criteria[1]"
+  - candidate: "[assertion-changed] tests/checks/ci_guards/test_validate_environment_reviewer_preflight.py::test_check_is_registered_in_the_fast_tier_manifest"
+    disposition: planned-change
+    cite: "acceptance_criteria[1]"
+  - candidate: "[assertion-changed] tests/checks/misc/test_sensitive_value_detectors.py::test_ratchet_skips_leg_e_when_origin_unreachable_or_batch_fails"
+    disposition: planned-change
+    cite: "acceptance_criteria[1]"
+rollback: >-
+  Revert the PR before the first approval: the sandbox apply removes the record prefix and nothing else changed in AWS.
+  After a deploy, a revert PR ships through the channel with a fresh approval (a dispatch with force after the merge
+  when the revert touches only shared modules), or the operator's admin tier restores
+  the previous code; a dispatch cannot target an older commit.

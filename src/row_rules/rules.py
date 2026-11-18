@@ -39,15 +39,20 @@ _COLUMN_KEYS = frozenset(
         "not_null",
         "min_length",
         "array_element_format",
+        "array_element_reference",
+        "json_object",
+        "per_write",
         "exclude_before",
         "write_time_exemptions",
     }
 )
 _DATEABLE_KINDS = frozenset(
-    {"not_null", "accepted_values", "min_length", "pattern", "array_element_format", "not_before", "at_most"}
+    {"not_null", "accepted_values", "min_length", "pattern", "array_element_format", "json_object", "not_before", "at_most"}
 )
 _TWO_COLUMN_KINDS = frozenset({"not_before", "at_most"})
 PRODUCER_SIDE_KINDS = frozenset({"acceptance_lint", "array_element_reference", "glossary_lint"})
+WRITER_REFERENCE_KINDS = frozenset({"array_element_reference"})
+WRITER_SHAPE_KINDS = frozenset({"json_object"})
 _TABLE_KEYS = frozenset({"exactly_one_of", "payload"})
 _CONTENT_KEYS = frozenset({"inline", "uri", "sha", "size", "threshold", "cap", "integrity"})
 EXEMPTABLE_LEGS = frozenset({"inline_within_threshold", "uri_above_threshold", "within_cap", "integrity"})
@@ -59,6 +64,7 @@ WAIVABLE_KINDS = frozenset(
         "pattern",
         "pattern_when",
         "array_element_format",
+        "json_object",
         "required_when",
         "not_before",
         "at_most",
@@ -472,5 +478,7 @@ __all__ = [
     "RowRuleError",
     "RowRules",
     "RuleProjectionError",
+    "WRITER_REFERENCE_KINDS",
+    "WRITER_SHAPE_KINDS",
     "check_row",
 ]

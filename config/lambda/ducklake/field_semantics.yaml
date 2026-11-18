@@ -125,6 +125,11 @@ maintenance_policy:
       reason: 'Decision 204: a history table with legacy-scheme (day-of-month) files is re-laid onto the declared calendar-day
         scheme under a row-preserving, digest-proven transaction; the verb itself refuses a non-history table (current projections
         rebuild from history, Decision 81 cl.8).'
+    rewrite_current_deletes:
+      apply: true
+      reason: 'Decision 88 amended (PLAN-ops-current-table-compaction, rec-5179): the current side''s delete-bearing files
+        are rewritten at an explicit delete threshold, proved row- and digest-preserving, before the merge consolidates them;
+        the verb itself skips a history side.'
   append_only:
     merge_ops:
       apply: true
@@ -138,6 +143,9 @@ maintenance_policy:
       apply: true
       reason: 'Decision 204: the append-only table''s history-class rows are re-laid onto the declared calendar-day scheme
         by the same row-preserving, digest-proven transaction as scd2 history.'
+    rewrite_current_deletes:
+      apply: false
+      reason: An append-only table has no current projection and so no delete files to rewrite.
   control:
     merge_ops:
       apply: true
@@ -155,6 +163,10 @@ maintenance_policy:
       reason: 'Decision 204: ops_entity_counters is the writer-internal entity-id allocation counter (Decision 84 I-2); its
         identity partition spec never drifts, and a delete-all rewrite transaction would contend with the same-table allocation
         serialization the counter exists to provide.'
+    rewrite_current_deletes:
+      apply: false
+      reason: ops_entity_counters is the writer-internal entity-id allocation counter (Decision 84 I-2); a rewrite would contend
+        with the allocation serialization the counter exists to provide (rec-5201).
   smoke_harness:
     merge_ops:
       apply: true
@@ -171,6 +183,11 @@ maintenance_policy:
       apply: false
       reason: 'Same as reconcile_partitions: the pair''s layout is owned by its creator''s create_scd2_tables force_recreate,
         never re-laid by this verb.'
+    rewrite_current_deletes:
+      apply: true
+      reason: 'Decision 88 amended (PLAN-ops-current-table-compaction): the production-resident smoke-harness current table
+        is the in-pass canary, compacted first; a probe overlapping the pass may fail that one table under per-table isolation,
+        surfacing as MergeOpsPassFailed -- accepted.'
 ops_tables:
   ops_recommendations:
     status: live
@@ -266,6 +283,7 @@ ops_tables:
         - claude-code-subagent
         - telemetry_verify
         - actions_capacity
+        - workflow_dispatch_integrity
       effort:
         role: input
         sql_type: VARCHAR
@@ -381,11 +399,7 @@ ops_tables:
         sql_type: VARCHAR[]
         nullable: true
         array_element_format: ^rec-[0-9]+$
-        write_time_exemptions:
-          array_element_reference:
-            class: cross_row
-            reason: an existence lookup outside the batch partitions (Decision 210 cl.2(a))
-            owner: rec-4166
+        array_element_reference: true
       tags:
         role: input
         sql_type: VARCHAR[]
@@ -430,6 +444,45 @@ ops_tables:
         role: input
         sql_type: VARCHAR
         nullable: true
+      provenance_json:
+        role: input
+        sql_type: VARCHAR
+        nullable: true
+        per_write: true
+        json_object:
+          max_bytes: 4096
+          versions:
+            1:
+              required:
+                schema_version: integer
+                client: string
+                client_commit: string
+                client_dirty: boolean
+                ruleset_version: string
+                checks:
+                  map:
+                    key_pattern: ^[a-z][a-z0-9_]{0,63}$
+                    values:
+                    - pass
+                    - fail
+                    - advisory
+                    - skipped
+              optional:
+                risk_formula_version: string
+                file_exists_at_commit: boolean
+                complexity_fallback: boolean
+                effort_fallback: boolean
+                coverage_present: boolean
+                ceiling_fallback: boolean
+                boundary_match: boolean
+                empty_file_fallback: boolean
+                complexity_max: number
+                effort_scale: number
+                risk_raw: number
+                maturity_ceiling: number
+                coverage_line_rate: number?
+        exclude_before:
+          json_object: '2026-11-17'
       _contract_version:
         role: input
         sql_type: VARCHAR
@@ -440,12 +493,20 @@ ops_tables:
           role: input
           sql_type: VARCHAR
           nullable: true
+        provenance_json:
+          role: input
+          sql_type: VARCHAR
+          nullable: true
         _contract_version:
           role: input
           sql_type: VARCHAR
           nullable: true
       current:
         context_v2_json:
+          role: input
+          sql_type: VARCHAR
+          nullable: true
+        provenance_json:
           role: input
           sql_type: VARCHAR
           nullable: true
@@ -1405,6 +1466,7 @@ ops_tables:
         - claude-code-subagent
         - telemetry_verify
         - actions_capacity
+        - workflow_dispatch_integrity
       agent_name:
         role: input
         sql_type: VARCHAR
@@ -1475,6 +1537,13 @@ ops_tables:
         role: input
         sql_type: VARCHAR
         nullable: true
+        required_when:
+          agent_type:
+          - implement-agent
+          - planning
+          - code-review
+          - decision-scout
+          - plan-critique
         pattern: ^[0-9a-f]{64}$
       host_run_ref:
         role: input

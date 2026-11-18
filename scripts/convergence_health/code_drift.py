@@ -281,6 +281,12 @@ def detect_ducklake_code_drift(
 
 # Single path source for the deploy gate and this sensor (Decision 249): the deploy-prod-lambdas.yml push
 # paths filter is gone, so the sensor's notion of "source changed" is exactly the gate's.
+TELEMETRY_CONTENT_SOURCE_PATHSPECS: tuple[str, ...] = (
+    "src/lambdas/ducklake_telemetry_content_reader",
+    "src/common/ducklake_content_read_verbs.py",
+    "src/sensitive_values",
+)
+
 PROD_SOURCE_PATHSPECS: tuple[str, ...] = (
     "src/data/handlers",
     "scripts/aws_profile.py",
@@ -291,11 +297,13 @@ PROD_SOURCE_PATHSPECS: tuple[str, ...] = (
     "scripts/s3_log_store.py",
     "scripts/tool_runtime.py",
     "config/lambda/data-pipeline",
+    "config/lambda/scheduled_workflow_dispatcher",
 )
 
 _PROD_FUNCTION_NAMES: tuple[str, ...] = (
     "agent-platform-scheduled-agent-dispatcher",
     "agent-platform-findings-processor",
+    "agent-platform-workflow-dispatcher",
 )
 
 

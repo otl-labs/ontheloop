@@ -46,7 +46,8 @@ def _load(name: str) -> dict[Any, Any]:
 
 
 def _on(doc: dict[Any, Any]) -> dict[str, Any]:
-    return doc.get("on", doc.get(True))
+    on: Any = doc.get("on", doc.get(True))
+    return on
 
 
 def _watched(path: str, pathspecs: tuple[str, ...]) -> bool:
@@ -129,7 +130,7 @@ def test_deploy_gate_is_workflow_call_only_with_outputs_and_manifest() -> None:
     assert set(trigger) == {"workflow_call"}
     assert trigger["workflow_call"]["inputs"]["channel"]["required"] is True
     assert trigger["workflow_call"]["inputs"]["force"]["default"] is False
-    assert set(trigger["workflow_call"]["outputs"]) == {"sha", "deploy", "reason"}
+    assert set(trigger["workflow_call"]["outputs"]) == {"sha", "deploy", "reason", "record_sha", "record_code_sha256"}
     steps = doc["jobs"]["gate"]["steps"]
     resolve = next(s for s in steps if s.get("id") == "resolve")
     assert "inputs.force && '--force' || ''" in resolve["run"] and "FORCE" not in resolve["run"]
@@ -162,3 +163,17 @@ def test_every_deleted_push_glob_is_still_watched_and_plans_are_not() -> None:
         for glob in _DELETED_PUSH_GLOBS[name]:
             assert _watched(_sample(glob), pathspecs), (name, glob)
         assert not _watched("docs/plans/PLAN-x.yaml", pathspecs)
+
+
+def test_prod_smoke_job_freshness_and_smoke_cover_the_workflow_dispatcher() -> None:
+    steps = _load("deploy-prod-lambdas.yml")["jobs"]["smoke"]["steps"]
+    function = "agent-platform-workflow-dispatcher"
+    freshness = [s["run"] for s in steps if "deploy_gate freshness" in s.get("run", "")]
+    assert freshness and all(function in r for r in freshness)
+    smoke = [s for s in steps if s.get("name", "").startswith("Smoke invoke -- workflow-dispatcher")]
+    assert len(smoke) == 1
+    run = smoke[0]["run"]
+    assert f"--function-name {function}" in run
+    assert "--payload '{}'" in run
+    assert "d.get('status') == 'smoke'" in run
+    assert "d.get('schedules') == ['convergence-health', 'main-canary', 'terraform-drift']" in run

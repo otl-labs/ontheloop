@@ -13,6 +13,7 @@ import re
 from collections import Counter
 from typing import Any
 
+from src.turn_capture.persona_identity import persona_of, skill_name
 from src.turn_capture.provenance import Facts, harness_session_key, open_provenance, resume_provenance
 from src.turn_capture.refs import role_ref, session_marker_ref
 from src.turn_capture.scrub import scrub_text
@@ -104,6 +105,7 @@ AGENT_COLUMNS = (
     "lambda_request_id",
     "workflow_run_id",
     "host_run_ref",
+    "definition_sha256",
 )
 _ERROR_KIND = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _COMMAND_NAME = re.compile(r"<command-name>/?([A-Za-z][A-Za-z0-9_-]*)</command-name>")
@@ -124,7 +126,7 @@ def _skill_workflow(stream: Stream, bound: int) -> str | None:
         spec = use.block_body.get("input")
         skill = spec.get("skill") if isinstance(spec, dict) else None
         if use.block_body.get("name") == "Skill" and isinstance(skill, str):
-            name = WORKFLOW_SKILLS.get(skill.lower().removeprefix("/"))
+            name = WORKFLOW_SKILLS.get(skill_name(skill))
             if name is not None:
                 return name
     return None
@@ -311,7 +313,9 @@ def agent_row_base(ctx: Ctx, kind: str, when: Any, ordinal: int, ext: str, **col
     return {k: v for k, v in row.items() if v is not None}
 
 
-def _agent_row(ctx: Ctx, spawn: Spawn, child: Stream, ext: str, kind: str, rec: Rec, **cols: Any) -> dict[str, Any]:
+def _agent_row(
+    ctx: Ctx, spawn: Spawn, child: Stream, ident: tuple[str, str] | None, ext: str, kind: str, rec: Rec, **cols: Any
+) -> dict[str, Any]:
     use = spawn.tool_use
     spec = use.block_body.get("input")
     spec = spec if isinstance(spec, dict) else {}
@@ -326,7 +330,8 @@ def _agent_row(ctx: Ctx, spawn: Spawn, child: Stream, ext: str, kind: str, rec: 
         entity_ref=use.tool_id,
         session_ref=child.session_ref,
         observation_ref=use.tool_id,
-        agent_type=AGENT_TYPE,
+        agent_type=AGENT_TYPE if ident is None else ident[0],
+        definition_sha256=None if ident is None else ident[1],
         agent_name=name if isinstance(name, str) else None,
         model=first_model(child),
         version=version if isinstance(version, str) else None,
@@ -355,11 +360,12 @@ def build_agents(parsed: ParsedTree, ctx: Ctx, diag: Counter[str] | None = None)
         if child is None or not (spawn.complete or parsed.final):
             continue
         use = spawn.tool_use
-        rows.append(_agent_row(ctx, spawn, child, role_ref(use.rec.uuid, use.block, "agent_open"), "open", use.rec))
+        who = persona_of(child, open_bound(child), diag)
+        rows.append(_agent_row(ctx, spawn, child, who, role_ref(use.rec.uuid, use.block, "agent_open"), "open", use.rec))
         if spawn.close_result is None:
             for notice in spawn.notices:
                 ext = role_ref(notice.uuid, 0, "agent_close")
-                rows.append(_agent_row(ctx, spawn, child, ext, "close", notice, **_notice_close(notice, diag)))
+                rows.append(_agent_row(ctx, spawn, child, who, ext, "close", notice, **_notice_close(notice, diag)))
             continue
         res = spawn.close_result
         info = res.use_result
@@ -370,6 +376,6 @@ def build_agents(parsed: ParsedTree, ctx: Ctx, diag: Counter[str] | None = None)
         closing = res.rec
         ext = role_ref(closing.uuid, spawn.close_block, "agent_close")
         rows.append(
-            _agent_row(ctx, spawn, child, ext, "close", closing, outcome="failed" if failed else "success", error=error)
+            _agent_row(ctx, spawn, child, who, ext, "close", closing, outcome="failed" if failed else "success", error=error)
         )
     return rows

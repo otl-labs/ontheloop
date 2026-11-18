@@ -178,6 +178,32 @@ class TestDuckLakeTransportHelpers:
         assert bodies[0]["table"] == "ops_recommendations"
         assert "idempotency_ulid" not in bodies[0]
 
+    def test_ducklake_write_sends_the_body_sha256(self, monkeypatch) -> None:
+        import hashlib
+        import types
+
+        import boto3
+        import requests
+
+        import scripts.ops_data_portal as p
+
+        creds = types.SimpleNamespace(access_key="AK", secret_key="SK", token=None)  # pragma: allowlist secret
+        creds.get_frozen_credentials = lambda: creds
+        session = types.SimpleNamespace(get_credentials=lambda: creds)
+        monkeypatch.setattr(boto3, "Session", lambda profile_name=None: session)
+        monkeypatch.setenv("DUCKLAKE_WRITER_URL", "https://abc123.execute-api.eu-west-2.amazonaws.com/v1/ops/writer")
+        seen: list[tuple[bytes, dict]] = []
+
+        def _post(url, data=None, headers=None, timeout=None):
+            seen.append((data, dict(headers)))
+            return _FakeResp(200, {"ok": True})
+
+        monkeypatch.setattr(requests, "post", _post)
+        p._ducklake_write("ops_recommendations", {"id": "rec-1", "status": "open"}, action="write_ops")
+        body, headers = seen[0]
+        assert headers["X-Amz-Content-Sha256"] == hashlib.sha256(body.encode("utf-8")).hexdigest()
+        assert "x-amz-content-sha256" in headers["Authorization"].split("SignedHeaders=")[1].split(",")[0]
+
     def test_ducklake_write_carries_idempotency_ulid(self, monkeypatch) -> None:
         """When the caller passes idempotency_ulid it is included in the request payload."""
         import scripts.ops_data_portal as p

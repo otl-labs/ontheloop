@@ -180,3 +180,24 @@ def test_deadline_plus_cleanup_reserve_stays_below_the_shim_limit() -> None:
     match = re.search(r"timeout -k (\d+) (\d+) ", shim)
     assert match
     assert mg._BUDGET + mg._CLEANUP_RESERVE < int(match.group(2))
+
+
+def test_persona_leg_git_calls_stay_inside_the_deadline(clock: _Clock, monkeypatch: pytest.MonkeyPatch) -> None:
+    asked: list[float] = []
+    config = fx.config_text({"code_reviewer": "actions"})
+
+    def fake_exec(cmd: list[str], cwd: Path, timeout: float) -> subprocess.CompletedProcess[str]:
+        asked.append(timeout)
+        clock.now += 12.0
+        out = config if "show" in cmd else "src/a.py\n"
+        return subprocess.CompletedProcess(cmd, 0, out, "")
+
+    monkeypatch.setattr(mg, "_exec", fake_exec)
+    dl = mg._Deadline()
+    extra, refusal = mg._persona_leg(Path("."), "b" * 40, "c" * 40, dl)
+    assert (extra, refusal) == (["persona-verdict/code_reviewer"], None)
+    assert all(t <= mg._BUDGET for t in asked)
+    clock.now += 100
+    with pytest.raises(mg._Unavailable) as exc:
+        mg._persona_leg(Path("."), "b" * 40, "c" * 40, dl)
+    assert "deadline spent" in str(exc.value) and "persona config" in str(exc.value)

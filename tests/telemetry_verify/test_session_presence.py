@@ -14,7 +14,6 @@ import pytest
 import yaml
 
 from scripts.ci_rca import fingerprint
-from scripts.telemetry_verify import completeness
 from scripts.telemetry_verify import session_presence as sp
 
 NOW = datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
@@ -112,6 +111,36 @@ def test_the_shipped_config_excuses_the_reopened_rec_5055_session() -> None:
     assert result.pr_lookups == 0
     stripped = {**config, "excused_sessions": [r for r in config["excused_sessions"] if r["key"] != key]}
     control = run([commit(1, key, pr=1)], Roots([]), stripped, pr=after_window)
+    assert (control.missing, control.lost_window, control.excused) == (1, 0, 0)
+
+
+def test_the_shipped_config_excuses_the_rec_5194_session() -> None:
+    key = "01XZubGyV1F33wmhDdqDwNYT"
+    config = sp.load_config(ROOT)
+    sp.check_config(config)
+    pr_time = created({1: "2026-11-14T22:53:09+00:00"})
+    result = run([commit(1, key, pr=1)], Roots([]), config, pr=pr_time)
+    assert (result.excused, result.missing, result.lost_window) == (1, 0, 0)
+    assert result.status != "red"
+    assert [r for r in config["excused_sessions"] if r["key"] == key and r["owner"] == "rec-5194"]
+    assert result.pr_lookups == 0
+    stripped = {**config, "excused_sessions": [r for r in config["excused_sessions"] if r["key"] != key]}
+    control = run([commit(1, key, pr=1)], Roots([]), stripped, pr=pr_time)
+    assert (control.missing, control.lost_window, control.excused) == (1, 0, 0)
+
+
+def test_the_shipped_config_excuses_the_07cb0d3b_session() -> None:
+    key = "01G2j5RhJHzfcowduXUtmir5"  # pragma: allowlist secret
+    config = sp.load_config(ROOT)
+    sp.check_config(config)
+    pr_time = created({1: "2026-11-14T14:28:28+00:00"})
+    result = run([commit(1, key, pr=1)], Roots([]), config, pr=pr_time)
+    assert (result.excused, result.missing, result.lost_window) == (1, 0, 0)
+    assert result.status != "red"
+    assert [r for r in config["excused_sessions"] if r["key"] == key and r["owner"] == "rec-5276"]
+    assert result.pr_lookups == 0
+    stripped = {**config, "excused_sessions": [r for r in config["excused_sessions"] if r["key"] != key]}
+    control = run([commit(1, key, pr=1)], Roots([]), stripped, pr=pr_time)
     assert (control.missing, control.lost_window, control.excused) == (1, 0, 0)
 
 
@@ -325,7 +354,7 @@ def test_the_open_start_lost_window_ends_on_the_production_first_judged_day() ->
     config = yaml.safe_load((ROOT / sp.CONFIG).read_text(encoding="utf-8"))
     open_start = [w for w in config["lost_windows"] if "from" not in w]
     assert len(open_start) == 1
-    assert open_start[0]["to"].startswith(completeness.PRODUCTION_FIRST_JUDGED_DAY)
+    assert open_start[0]["to"].startswith("2026-10-28")
     sp.check_config(config)
     expectation = sp.load_expectation(ROOT)
     assert sp.check_expectation(expectation) == timedelta(minutes=60)
@@ -448,3 +477,8 @@ def test_recent_commits_bounds_by_judge_days(monkeypatch: pytest.MonkeyPatch) ->
     sp._recent_commits(ROOT, NOW, CONFIG)
     sp._recent_commits(ROOT, NOW, "bad")
     assert seen == [NOW - timedelta(days=4), None]
+
+
+def test_normalise_key_strips_either_prefix() -> None:
+    values = ("session_X", "cse_X", "X", "session_", "", None, 5)
+    assert [sp.normalise_key(v) for v in values] == ["X", "X", "X", None, None, None, None]

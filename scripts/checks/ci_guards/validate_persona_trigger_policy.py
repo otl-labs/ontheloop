@@ -6,7 +6,9 @@ Over every .github/workflows/*.yml (glob; claude.yml exempt by name, Decision 18
     same job running the gate script, no continue-on-error, whose if: is the LLM step's if: less the refused term,
     optionally plus github.event_name == 'workflow_dispatch'), the LLM step's if: carrying the refused conjunct, no
     top-level || and no status function but success();
-  * a workflow_run LLM workflow's named upstreams must qualify (see _upstream_problems);
+  * a workflow_run LLM workflow's named upstreams must qualify (see _one_upstream); a workflow_dispatch upstream, directly
+    or through any workflow_run middle, qualifies only when every LLM step of the file it reaches carries the
+    pull_request-event conjunct (PR_EVENT_TERM), so nothing a person or agent dispatches can reach an LLM step;
   * no pull_request-triggered workflow grants checks: write, and no workflow starts a compute-plane persona.
 Gate recognition is syntactic (a fixed conjunct and the earlier gate step); no expression is ever evaluated.
 """
@@ -28,8 +30,10 @@ GATE_ID_PREFIX = "persona_gate"
 GATE_SCRIPT = "persona_dispatch_gate.py"
 DISPATCH_TERM = "github.event_name == 'workflow_dispatch'"
 FAILURE_TERM = "github.event.workflow_run.conclusion == 'failure'"
+PR_EVENT_TERM = "github.event.workflow_run.event == 'pull_request'"
 REFUSED_TERM = re.compile(r"steps\.(" + GATE_ID_PREFIX + r"[A-Za-z0-9_-]*)\.outputs\.refused != 'true'")
 BAD_STATUS = re.compile(r"\b(always|failure|cancelled)\s*\(")
+BAD_STATUS_PR = re.compile(r"\b(always|failure)\s*\(|(?<!!)\bcancelled\s*\(")
 
 
 def split_top(expr: str, op: str) -> list[str]:
@@ -178,9 +182,30 @@ class Policy:
                 return True
         return False
 
-    def upstream_problems(self, file: str, doc: dict[str, Any], stack: tuple[str, ...]) -> list[str]:
+    def pr_event_gated(self, origin: dict[str, Any]) -> bool:
+        """Every LLM step of origin carries PR_EVENT_TERM as a top-level && conjunct of its job's or its own if:."""
+        for _, job, step in self.llm_steps(origin):
+            if not any(
+                PR_EVENT_TERM in and_terms(expr)
+                and len(split_top(_unwrap(str(expr)), "||")) == 1
+                and not BAD_STATUS_PR.search(str(expr))
+                for expr in (job.get("if"), step.get("if"))
+            ):
+                return False
+        return True
+
+    def upstream_problems(
+        self,
+        file: str,
+        doc: dict[str, Any],
+        stack: tuple[str, ...],
+        gated: bool | None = None,
+        origin: dict[str, Any] | None = None,
+    ) -> list[str]:
         out: list[str] = []
-        gated = all(self.failure_gated(doc, j, s) for _, j, s in self.llm_steps(doc))
+        origin = doc if origin is None else origin
+        if gated is None:
+            gated = all(self.failure_gated(doc, j, s) for _, j, s in self.llm_steps(doc))
         for name in _upstream_names(doc):
             up = self.by_name.get(name)
             if up is None:
@@ -188,20 +213,29 @@ class Policy:
             elif up in stack or up == file:
                 out.append(f"{file}: workflow_run cycle through {up}")
             else:
-                out.extend(self._one_upstream(file, up, gated, (*stack, file)))
-        return out
+                out.extend(self._one_upstream(file, up, gated, (*stack, file), origin))
+        return list(dict.fromkeys(out))
 
-    def _one_upstream(self, file: str, up: str, gated: bool, stack: tuple[str, ...]) -> list[str]:
+    def _one_upstream(
+        self, file: str, up: str, gated: bool, stack: tuple[str, ...], origin: dict[str, Any] | None = None
+    ) -> list[str]:
         udoc = self.workflows[up]
+        origin = self.workflows[file] if origin is None else origin
         if gated and not self.is_llm(up):
             return []
         problems = self.rule_problems(up, udoc, stack) if self.is_llm(up) else []
         if not gated:
             trig = triggers(udoc)
-            if not trig <= {"push", "pull_request", "workflow_run"}:
+            plain = {"push", "pull_request", "workflow_run"}
+            if not trig <= plain | {"workflow_dispatch"}:
                 problems.append(f"{up}: upstream of the non-failure-gated {file} but triggered by {sorted(trig)}")
-            elif "workflow_run" in trig and not self.is_llm(up):
-                problems.extend(self.upstream_problems(up, udoc, stack))
+            elif "workflow_dispatch" in trig and not self.pr_event_gated(origin):
+                problems.append(
+                    f"{up}: upstream of the non-failure-gated {file} but triggered by {sorted(trig)}, "
+                    f"and not every LLM step carries {PR_EVENT_TERM}"
+                )
+            if "workflow_run" in trig and trig <= plain | {"workflow_dispatch"}:
+                problems.extend(self.upstream_problems(up, udoc, stack, gated, origin))
         return [f"{file}: upstream {up} does not qualify: {p}" for p in problems] if problems else []
 
     def rule_problems(self, file: str, doc: dict[str, Any], stack: tuple[str, ...] = ()) -> list[str]:
@@ -213,7 +247,7 @@ class Policy:
             out.extend(self.gate_problems(file, doc))
         if "workflow_run" in trig:
             out.extend(self.upstream_problems(file, doc, stack))
-        return out
+        return list(dict.fromkeys(out))
 
     def checks_write_problems(self, file: str, doc: dict[str, Any]) -> list[str]:
         if "pull_request" not in triggers(doc):

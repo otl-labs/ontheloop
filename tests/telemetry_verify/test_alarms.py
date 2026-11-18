@@ -126,23 +126,22 @@ def _callers() -> list[tuple[str, Any, int | None]]:
 
     return [
         (cli.MONITOR_FILE, cli.acceptance_for, None),
-        (cli.COMPLETENESS_FILE, cli.acceptance_for, None),
         (capture.FILE, capture.acceptance_for, capture.PARSER_VERSION),
         ("scripts/ducklake_smoke/lambda_telemetry_golden_gates.py", lambda _cls: golden.ACCEPTANCE, None),
     ]
 
 
-@pytest.mark.parametrize("caller", range(4), ids=["monitor", "completeness", "capture", "golden"])
+@pytest.mark.parametrize("caller", range(3), ids=["monitor", "capture", "golden"])
 @pytest.mark.parametrize(
     ("cls", "scope"),
-    [("a", "s"), ("completeness_listed_not_captured", "2026-10-18"), ("golden_replay_error", "abc12345")],
+    [("a", "s"), ("harness_key_missing", "2026-10-18"), ("golden_replay_error", "abc12345")],
 )
 def test_every_alarm_record_passes_the_portal_row_gate(caller: int, cls: str, scope: str) -> None:
     """build_fields' record clears file_rec's client-side gates (rec-4515: an under-80-character context was refused)."""
     from scripts.executor.jsonl_store import Recommendation  # noqa: PLC0415
     from scripts.executor.rec_write_guidance import validate_source  # noqa: PLC0415
     from scripts.ops_portal.risk_scoring import _derive_computed_fields  # noqa: PLC0415
-    from scripts.ops_portal.write_validators import gate_write  # noqa: PLC0415
+    from tests.fixtures.portal_gate import assert_portal_gate_clean  # noqa: PLC0415
 
     file, acceptance_for, parser_version = _callers()[caller]
     portal = Portal()
@@ -150,7 +149,7 @@ def test_every_alarm_record_passes_the_portal_row_gate(caller: int, cls: str, sc
     fields = dict(portal.calls[0][1])
     _derive_computed_fields(fields)
     validate_source(fields["source"])
-    gate_write("ops_recommendations", fields, insert=True)
+    assert_portal_gate_clean("ops_recommendations", fields, insert=True)
     Recommendation.model_validate({**fields, "id": "rec-0", "date": "2026-10-26"})
 
 

@@ -8,6 +8,8 @@
 #   CLAUDE_CODE_OAUTH_TOKEN  caller-passed secret (composite actions cannot read secrets.* directly)
 #   CONTEXT_DESCRIPTION      plan-under-review context phrase, interpolated into the reviewer prompt
 #   WORKSPACE_ROOT           ${{ github.workspace }} -- repo root for scripts/ lookups
+#   REVISE_ROUTES            exactly "true" makes a REVISE exit 0 with outcome=revise so the caller can route it
+#                            to tf-gated-apply (Decision 265); any other value keeps the fail-closed exit 1
 #   GITHUB_OUTPUT            step-output file (GitHub-provided)
 # cwd is the terraform root module directory containing plan.json (step `working-directory`).
 #
@@ -157,7 +159,11 @@ case "$VERDICT" in
     exit 0
     ;;
   REVISE)
-    echo "Subagent returned REVISE; failing closed." >&2
+    if [ "${REVISE_ROUTES:-}" = "true" ]; then
+      echo "Subagent returned REVISE; routing to tf-gated-apply for operator approval." >&2
+    else
+      echo "Subagent returned REVISE; failing closed." >&2
+    fi
     REASON=$(python3 "${WORKSPACE_ROOT}/scripts/ci/review_verdict.py" --reason "$VERDICT_FILE" 2> /dev/null | tr '\r\n' '  ') || true
     [ -n "${REASON// /}" ] || REASON="(no reason given)"
     echo "[SUBAGENT-REVIEW] REVISE reason: ${REASON}" >&2
@@ -165,6 +171,13 @@ case "$VERDICT" in
       printf '\n## Subagent review REVISE\n\n`[SUBAGENT-REVIEW] REVISE reason: %s`\n' "$(printf '%s' "$REASON" | tr '`' "'")" >> "$GITHUB_STEP_SUMMARY"
     fi
     echo "outcome=revise" >> "$GITHUB_OUTPUT"
+    if [ "${REVISE_ROUTES:-}" = "true" ]; then
+      if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+        printf '\nRouted to the tf-gated-apply Environment: approve only after reading the reason above (rec-5205).\n' >> "$GITHUB_STEP_SUMMARY"
+      fi
+      echo "::warning::[SUBAGENT-REVIEW] REVISE routed to tf-gated-apply (rec-5205)" >&2
+      exit 0
+    fi
     exit 1
     ;;
   *)

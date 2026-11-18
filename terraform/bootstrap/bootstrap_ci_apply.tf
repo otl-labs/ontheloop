@@ -54,7 +54,7 @@ locals {
     "ssm:ListTagsForResource",
     "ssm:DescribeParameters",
     "apigateway:GET",
-    "lambda:GetPolicy",
+    "lambda:GetPolicy", "lambda:GetFunction*", "lambda:GetRuntimeManagementConfig", "lambda:ListVersionsByFunction",
     "servicequotas:Get*",
     "servicequotas:List*",
   ]
@@ -148,7 +148,7 @@ locals {
       {
         Sid      = "LambdaPolicyRead"
         Effect   = "Allow"
-        Action   = ["lambda:GetPolicy"]
+        Action   = ["lambda:GetPolicy", "lambda:GetFunction*", "lambda:GetRuntimeManagementConfig", "lambda:ListVersionsByFunction"]
         Resource = ["arn:aws:lambda:${var.aws_region}:${var.account_id}:function:agent-platform-ducklake-*"]
       },
       {
@@ -261,7 +261,7 @@ locals {
           "arn:aws:iam::${var.account_id}:role/github-settings-*",
           "arn:aws:iam::${var.account_id}:role/bootstrap-*",
           "arn:aws:iam::${var.account_id}:role/platform-security-*",
-          "arn:aws:iam::${var.account_id}:role/ducklake-api-*",
+          "arn:aws:iam::${var.account_id}:role/ducklake-api-*", "arn:aws:iam::${var.account_id}:role/telemetry-content-*",
         ]
       },
       {
@@ -303,7 +303,7 @@ locals {
           "iam:TagOpenIDConnectProvider", "iam:UntagOpenIDConnectProvider",
           "iam:CreateSAMLProvider", "iam:UpdateSAMLProvider", "iam:DeleteSAMLProvider", "iam:TagSAMLProvider", "iam:UntagSAMLProvider",
           "iam:CreateServiceLinkedRole", "iam:DeleteServiceLinkedRole", "iam:CreateAccountAlias", "iam:DeleteAccountAlias",
-          "iam:UpdateAccountPasswordPolicy", "iam:DeleteAccountPasswordPolicy", "sts:SetSecurityTokenServicePreferences",
+          "iam:UpdateAccountPasswordPolicy", "iam:DeleteAccountPasswordPolicy", "iam:SetSecurityTokenServicePreferences",
         ]
         Resource = ["*"]
       },
@@ -382,7 +382,7 @@ locals {
         # by this statement; a direct call is. The key policy's kms:ViaService still bounds the forwarded one.
         Sid       = "DenyAllButReads"
         Effect    = "Deny"
-        NotAction = concat(local.bootstrap_plan_read_actions, ["sts:GetCallerIdentity"])
+        NotAction = concat(local.bootstrap_plan_read_actions, local.bootstrap_preview_analyzer_actions, ["sts:GetCallerIdentity"])
         Resource  = ["*"]
         Condition = {
           BoolIfExists = {

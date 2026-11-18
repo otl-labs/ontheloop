@@ -65,6 +65,7 @@ from tests.fixtures.turn_capture_v7_cases import V7_BUILDERS
 from tests.fixtures.turn_capture_v8_cases import V8_BUILDERS
 from tests.fixtures.turn_capture_v9_cases import V9_BUILDERS
 from tests.fixtures.turn_capture_v10_cases import V10_BUILDERS
+from tests.fixtures.turn_capture_v11_cases import V11_BUILDERS, close_identity_trees
 
 SECRET_KINDS = ("aws_access", "aws_secret", "aws_session", "anthropic", "github", "github_pat", "bearer")
 
@@ -329,6 +330,7 @@ def test_new_cases_are_built_from_their_builders() -> None:
         **V8_BUILDERS,
         **V9_BUILDERS,
         **V10_BUILDERS,
+        **V11_BUILDERS,
     }
     for name, builder in builders.items():
         assert load_case(name)[0] == builder(), name
@@ -500,7 +502,7 @@ def test_finalization_cuts_are_recorded_once_and_survive_a_reset() -> None:
     stale = dataclasses.replace(first.next_cursor, parser_version=PARSER_VERSION - 1)
     re_emitted = capture(files, stale, final=True)
     assert [r["event_kind"] for r in re_emitted.sessions].count("close") == 1 and re_emitted.next_cursor.finalize_cuts == cuts
-    assert PRODUCER_VERSION == "turn-capture-10" and PARSER_VERSION == 10
+    assert PRODUCER_VERSION == "turn-capture-11" and PARSER_VERSION == 11
 
 
 def test_resend_tree_re_emits_every_row_keeping_pins_and_cuts() -> None:
@@ -542,3 +544,15 @@ def test_prior_content_divergence_is_counted_and_not_resent(monkeypatch) -> None
     second = capture(make_files(grown), first.next_cursor)
     assert second.diagnostics["prior_content_divergence"] > 0
     assert not set(keyed(first)) & set(keyed(second))
+
+
+def test_close_rows_repeat_the_open_row_identity() -> None:
+    cut, full = close_identity_trees()
+    first = capture(cut, final=True)
+    second = capture(full, first.next_cursor, final=True)
+    assert second.diagnostics["close_identity_copied"] >= 1
+    rows = [r for result in (first, second) for r in result.agents]
+    kid = [r for r in rows if r["entity_ref"] == "tuA"]
+    assert {r["event_kind"] for r in kid} == {"open", "close"}
+    for row in kid:
+        assert row["agent_type"] == "claude-code-subagent" and "definition_sha256" not in row

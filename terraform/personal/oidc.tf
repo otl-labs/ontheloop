@@ -228,7 +228,8 @@ data "aws_iam_policy_document" "ci_full_refresh_read" {
       # roles must be refresh-readable by github_ci_planner once they enter terraform/personal
       # state, or every subsequent plan against this module fails closed with AccessDenied.
       "arn:aws:iam::${var.account_id}:role/agent-platform-scheduled-agent-dispatcher",
-      "arn:aws:iam::${var.account_id}:role/agent-platform-findings-processor"
+      "arn:aws:iam::${var.account_id}:role/agent-platform-findings-processor",
+      "arn:aws:iam::${var.account_id}:role/agent-platform-workflow-dispatcher"
     ]
   }
 

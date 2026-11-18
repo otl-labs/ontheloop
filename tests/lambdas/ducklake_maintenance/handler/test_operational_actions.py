@@ -174,6 +174,9 @@ def test_handler_dispatches_catalog_reinit_without_a_connection_arg():
 # ---------------------------------------------------------------------------
 
 
+_NO_COMPACTION_CELL = {"rewrite_current_deletes": {"apply": False, "reason": "fixture: compaction is out of scope here"}}
+
+
 def _merge_ops_semantics() -> dict:
     """A field_semantics-shaped fixture covering both live scd2 tables + their policy cell."""
     return {
@@ -190,9 +193,9 @@ def _merge_ops_semantics() -> dict:
             },
         },
         "maintenance_policy": {
-            "scd2": {"merge_ops": {"apply": True, "reason": "standard"}},
-            "append_only": {"merge_ops": {"apply": True, "reason": "standard"}},
-            "control": {"merge_ops": {"apply": True, "reason": "standard"}},
+            "scd2": {"merge_ops": {"apply": True, "reason": "standard"}, **_NO_COMPACTION_CELL},
+            "append_only": {"merge_ops": {"apply": True, "reason": "standard"}, **_NO_COMPACTION_CELL},
+            "control": {"merge_ops": {"apply": True, "reason": "standard"}, **_NO_COMPACTION_CELL},
         },
     }
 
@@ -321,7 +324,7 @@ _TELEMETRY_DISCOVERED = ["telemetry_sessions", "telemetry_agents"]
 def _telemetry_semantics() -> dict:
     return {
         "ops_tables": {},
-        "maintenance_policy": {"append_only": {"merge_ops": {"apply": True, "reason": "standard"}}},
+        "maintenance_policy": {"append_only": {"merge_ops": {"apply": True, "reason": "standard"}, **_NO_COMPACTION_CELL}},
     }
 
 
@@ -333,6 +336,7 @@ def _run_merge_ops(meta_schema: str):
         patch.object(h.rt, "open_connection", return_value=con),
         patch.object(h.rt, "load_field_semantics", return_value=_merge_ops_semantics()),
         patch.object(h.scope, "resolve_scope") as resolve,
+        patch.object(h.current_compaction, "compact_current_tables", return_value={"failures": [], "refused": []}),
         patch.object(h.maint, "_count_files", return_value=3),
         patch.object(h.maint, "merge_adjacent_files"),
         patch.object(h, "_emit_maintenance_metric") as mock_emit,

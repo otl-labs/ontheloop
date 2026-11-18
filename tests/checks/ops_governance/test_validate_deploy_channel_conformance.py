@@ -198,6 +198,11 @@ _TAXONOMY_DUCKLAKE_MISSING_KEY = "conformance:\n  prod_class: DECOUPLED\n"
 _TAXONOMY_PROD_MISSING_KEY = "conformance:\n  ducklake_class: DECOUPLED\n"
 
 
+_DISPATCHER_TF_DECOUPLED = (
+    'resource "aws_lambda_function" "workflow_dispatcher" {\n  lifecycle {\n    ignore_changes = [source_code_hash]\n  }\n}\n'
+)
+
+
 class TestValidateDeployChannelConformance:
     def _write(
         self,
@@ -282,6 +287,27 @@ class TestValidateDeployChannelConformance:
         assert "partial rollout" in failed[0]
 
     # --- prod class (T2.43) ---
+
+    def test_dispatcher_tf_without_ignore_changes_fails_the_prod_class(self, tmp_path: Path) -> None:
+        """scheduled_workflow_dispatch.tf is scanned with prod_lambdas.tf: a function there that lacks
+        ignore_changes is a partial rollout of the prod class."""
+        self._write(tmp_path, _TF_DECOUPLED, _BUILD_LAMBDA_DECOUPLED, _TAXONOMY_DECOUPLED)
+        (tmp_path / "terraform" / "personal" / "scheduled_workflow_dispatch.tf").write_text(
+            'resource "aws_lambda_function" "workflow_dispatcher" {\n  function_name = "x"\n}\n',
+            encoding="utf-8",
+        )
+        failed = self._run(tmp_path)
+        assert len(failed) == 1
+        assert "partial rollout" in failed[0]
+        assert "prod" in failed[0]
+
+    def test_dispatcher_tf_with_ignore_changes_passes_the_prod_class(self, tmp_path: Path) -> None:
+        self._write(tmp_path, _TF_DECOUPLED, _BUILD_LAMBDA_DECOUPLED, _TAXONOMY_DECOUPLED)
+        (tmp_path / "terraform" / "personal" / "scheduled_workflow_dispatch.tf").write_text(
+            _DISPATCHER_TF_DECOUPLED,
+            encoding="utf-8",
+        )
+        assert self._run(tmp_path) == []
 
     def test_prod_matching_decoupled_state_passes(self, tmp_path: Path) -> None:
         self._write(tmp_path, _TF_DECOUPLED, _BUILD_LAMBDA_DECOUPLED, _TAXONOMY_DECOUPLED, prod_tf=_PROD_TF_DECOUPLED)

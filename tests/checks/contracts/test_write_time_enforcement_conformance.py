@@ -32,6 +32,7 @@ from src.telemetry.append import prepare_batch
 from src.telemetry.gate import GateError, RowRuleGateError
 from tests.fixtures.ducklake_fakes import FakeCon, ops_rec_record
 from tests.fixtures.turn_capture_ducklake import load_specs
+from tests.fixtures.write_time_registry_less import REGISTRY_LESS
 
 T0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
 NOW = T0 + timedelta(seconds=30, microseconds=999_999)
@@ -179,7 +180,7 @@ SCENARIOS: dict[str, list[dict[str, Any]]] = {
             entity_ref="a#2/run",
             host_run_ref="gha:1/1/rca/1",
         ),  # fmt: skip
-        _event("a#3", event_kind="open", agent_type="manual", trigger="subagent_sync"),
+        _event("a#3", event_kind="open", agent_type="code-review", trigger="subagent_sync", definition_sha256="0" * 64),
     ],
 }
 
@@ -434,7 +435,7 @@ _NON_ROW_WRITING: dict[str, dict[str, str]] = {
             (
                 "catalog_reinit restore_drill merge_ops gc_ops catalog_stats reconcile_columns "
                 "clone_catalog control_health reconcile_partitions rewrite_partition_layout "
-                "provision_telemetry_login ensure_catalog_indexes restore_rehearsal"
+                "provision_telemetry_login ensure_catalog_indexes restore_rehearsal merge_ops_gated"
             ).split(),
             "maintenance: moves or removes files, writes no caller row",
         ),
@@ -446,11 +447,7 @@ _NON_ROW_WRITING: dict[str, dict[str, str]] = {
         "disposable ducklake_smoke catalog maintenance or provisioning, no caller row",
     ),
 }
-_REGISTRY_LESS = {
-    "src/lambdas/ducklake_catalog_dr/handler.py": "catalog disaster-recovery job: dump and restore, no row write",
-    "src/data/handlers/scheduled_agent_handler.py": "dispatches scheduled agents, writes no warehouse row through the writer",
-    "src/data/handlers/findings_processor_handler.py": "findings processor, writes through the portal, not a writer verb",
-}
+_REGISTRY_LESS = REGISTRY_LESS
 _REGISTRATION_VERBS = {"register_tenant": "ops_tenants", "register_project": "ops_projects"}
 
 

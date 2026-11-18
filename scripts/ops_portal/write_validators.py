@@ -4,16 +4,21 @@ Owner-concern: gate_write runs the DuckLake writer's own pure gate (schema_gate 
 field_semantics.yaml projection of the Class A contract, so file_rec, update_rec, file_decision and update_decision
 refuse early with the rule the writer would apply. It is a derived pre-check, never authoritative: the writer
 re-evaluates every rule (Decision 81 cl.5 as widened by Decision 210 cl.5). The producer-side rules no row-local
-evaluator can run (acceptance lint, dependency existence, and the glossary rule, whose ground is house style the
-repository's profile decides) are driven from the contract's own exemptions. This path is named by the
+evaluator can run (acceptance lint and the glossary rule, whose ground is house style the repository's profile decides)
+are driven from the contract's own exemptions; dependency existence is enforced by the writer (reference_columns) and
+this module's lookup is its derived pre-check. A leg the contract declares advisory is run and reported (a LintResult,
+one stderr line), never refused; every other producer leg refuses as before. This path is named by the
 ops_recommendations contract as the acceptance_lint and glossary_lint exemption owner; it must not move.
 """
 
 from __future__ import annotations
 
 import copy
+import dataclasses
 import functools
 import re
+import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, cast
@@ -24,12 +29,31 @@ from scripts.executor.acceptance_lint import lint_acceptance_command
 from scripts.ops_portal._common import _REPO_ROOT
 from scripts.ops_portal.writer_transport import _project_ops_record
 from src.common.ducklake_scd2_schema import SchemaGateError, resolve_table_spec, schema_gate
-from src.common.ducklake_write_rules import RowRuleViolationError, check_write
+from src.common.ducklake_write_rules import (
+    WRITER_REFERENCE_KINDS,
+    RowRuleViolationError,
+    check_write,
+    reference_columns,
+)
 from src.row_rules.rules import RowRules
 
 _PLACEHOLDER_ULID = "0" * 26
 _GLOSSARY_PATH = _REPO_ROOT / "docs" / "contracts" / "glossary.yaml"
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+
+
+class LintUnavailable(ValueError):
+    """An advisory lint could not run (its glossary is unreadable); reported as an error result, never a refusal."""
+
+
+@dataclass(frozen=True)
+class LintResult:
+    """One producer-side leg's outcome: pass, finding (the lint found something), error (it could not run) or skipped."""
+
+    column: str
+    kind: str
+    outcome: str
+    message: str = ""
 
 
 class RowRuleRejected(ValueError):
@@ -55,6 +79,10 @@ def _limit_in_words(rule: str, spec: dict[str, Any]) -> str:
         return f"elements must match {spec.get('array_element_format')!r}"
     if rule == "not_null":
         return "is required"
+    if rule == "json_object":
+        return (
+            f"must be a JSON object of a declared schema_version within {spec.get('json_object', {}).get('max_bytes')} bytes"
+        )
     return "violates its declared rule"
 
 
@@ -134,13 +162,16 @@ class _ElementReference:
 @functools.lru_cache(maxsize=None)
 def _load_glossary(path: Path) -> dict[str, Any]:
     try:
-        return cast(dict[str, Any], yaml.safe_load(path.read_text(encoding="utf-8")))
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
-        raise ValueError(f"glossary_lint: {path.name} is not loadable ({type(exc).__name__}); failing closed") from exc
+        raise LintUnavailable(f"glossary_lint: {path.name} is not loadable ({type(exc).__name__})") from exc
+    if not isinstance(loaded, dict):
+        raise LintUnavailable(f"glossary_lint: {path.name} is not a mapping")
+    return cast(dict[str, Any], loaded)
 
 
 class _GlossaryLint:
-    """glossary_lint for one write: refuse a sentence the stored value does not already hold that uses either relative word."""
+    """glossary_lint for one write: report a sentence the stored value does not already hold that uses either relative word."""
 
     def __init__(self, existing: dict[str, Any] | None) -> None:
         self._existing = existing
@@ -158,8 +189,12 @@ class _GlossaryLint:
                 continue
             for _, word in _glossary_words.unqualified_uses(sentence, yaml_keys=False, identifiers=known):
                 derived = " (a short context is built from context_v2_json or dispute evidence)" if column == "context" else ""
+                try:
+                    say = _glossary_words.say_instead(word, contract)
+                except (KeyError, TypeError) as exc:
+                    raise LintUnavailable(f"glossary_lint: glossary.yaml has no say_instead for {word!r}") from exc
                 raise ValueError(
-                    f'{column}: unqualified "{word}" -- say instead: {_glossary_words.say_instead(word, contract)}, '
+                    f'{column}: unqualified "{word}" -- say instead: {say}, '
                     f"or quote it if it is not the relative word; see docs/contracts/glossary.yaml{derived}"
                 )
 
@@ -193,29 +228,74 @@ def _run_row_rules(table: str, record: dict[str, Any], *, insert: bool) -> None:
     rules = RowRules.from_projection(columns)
     now = datetime.now(timezone.utc)
     try:
-        check_write(spec, rules, record, now, now, _PLACEHOLDER_ULID, None)
+        check_write(dataclasses.replace(spec, fields=columns), rules, record, now, now, _PLACEHOLDER_ULID, None)
     except RowRuleViolationError as exc:
         raise RowRuleRejected(
             table, exc.column, exc.rule, _limit_in_words(exc.rule, spec.fields.get(exc.column, {})), exc.exclude_before
         ) from exc
 
 
-def _run_producer_rules(table: str, projected: dict[str, Any], *, insert: bool, existing: dict[str, Any] | None) -> None:
-    exemptions = RowRules.from_projection(resolve_table_spec(table).fields).producer_exemptions
-    if not exemptions:
-        return
+def carry_forward(table: str, existing: dict[str, Any]) -> dict[str, Any]:
+    """The prior row minus its per_write columns: the one merge source for every portal update path, so an update that
+    omits such a column sends no value (the writer stores NULL) instead of re-sending the stored one."""
+    per_write = {name for name, spec in resolve_table_spec(table).fields.items() if spec.get("per_write")}
+    return {k: v for k, v in existing.items() if k not in per_write}
+
+
+def _report(table: str, results: list[LintResult]) -> None:
+    for r in results:
+        if r.outcome in ("finding", "error"):
+            print(
+                f"[REC_LINT_ADVISORY] {table}.{r.column} {r.kind} {r.outcome}: {r.message} -- "
+                "the portal does not refuse; an unenforced residual owned by rec-5239",
+                file=sys.stderr,
+            )
+
+
+def _run_producer_rules(
+    table: str, projected: dict[str, Any], *, insert: bool, existing: dict[str, Any] | None
+) -> tuple[LintResult, ...]:
+    fields = resolve_table_spec(table).fields
+    references = ((c, k) for c in sorted(reference_columns(fields)) for k in sorted(WRITER_REFERENCE_KINDS))
+    targets = [*RowRules.from_projection(fields).producer_exemptions, *references]
+    if not targets:
+        return ()
     params, handlers = _producer_params(table), _producer_handlers(existing)
-    for column, kind in exemptions:
+    results: list[LintResult] = []
+    for column, kind in targets:
         handler = handlers.get(kind)
         if handler is None:
             raise ValueError(f"{table}.{column}: producer-side rule {kind!r} has no portal handler (fails closed)")
         value = projected.get(column)
-        if insert or existing is None or value != existing.get(column):
-            handler(column, value, params.get((column, kind), {}))
+        if not (insert or existing is None or value != existing.get(column)):
+            results.append(LintResult(column, kind, "skipped"))
+            continue
+        leg = params.get((column, kind), {})
+        if leg.get("advisory") is not True:
+            try:
+                handler(column, value, leg)
+            except ValueError:
+                _report(table, results)
+                raise
+            results.append(LintResult(column, kind, "pass"))
+            continue
+        try:
+            handler(column, value, leg)
+            results.append(LintResult(column, kind, "pass"))
+        except LintUnavailable as exc:
+            results.append(LintResult(column, kind, "error", str(exc)))
+        except ValueError as exc:
+            results.append(LintResult(column, kind, "finding", str(exc)))
+    _report(table, results)
+    return tuple(results)
 
 
-def gate_write(table: str, record: dict[str, Any], *, insert: bool, existing: dict[str, Any] | None = None) -> None:
-    """Refuse *record* with the writer's own gate; never stricter than the writer.
+def gate_write(
+    table: str, record: dict[str, Any], *, insert: bool, existing: dict[str, Any] | None = None
+) -> tuple[LintResult, ...]:
+    """Refuse *record* with the writer's own gate; never stricter than the writer. Returns each producer leg's result.
+
+    A leg the contract declares advisory is reported (its result, one stderr line) and never refuses.
 
     insert=True (file_ops only: the writer allocates the key) evaluates every rule with no prior. insert=False
     (update_ops and caller-keyed write_ops upserts) evaluates undated rules only: dated legs stay the writer's alone,
@@ -229,4 +309,4 @@ def gate_write(table: str, record: dict[str, Any], *, insert: bool, existing: di
     except SchemaGateError as exc:
         raise ValueError(str(exc)) from exc
     _run_row_rules(table, keyed, insert=insert)
-    _run_producer_rules(table, projected, insert=insert, existing=existing)
+    return _run_producer_rules(table, projected, insert=insert, existing=existing)

@@ -1,0 +1,278 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "platform-security-alarm-ok-actions"
+intent: >-
+  Every platform-security-* detector alarm emails the alerts topic when it returns to OK as well as when it fires, so an
+  ALARM email is always paired with a recovery email and the operator can tell a cleared alarm from a stuck one
+  without opening the console (operator ask, 2026-11-17, after two event alarms looked stuck from 22:28Z 2026-11-16).
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-platform-security-alarm-ok-actions.yaml
+phase: >-
+  user_explicit_out_of_scope (soft-warn exception category; no tier_item claimed, so the Tier Item Freshness Gate is
+  skipped): the operator's direct ask on 2026-11-17. Closes no roadmap criterion.
+cites: [dec:202, dec:257, dec:256, dec:126, dec:101]
+scope:
+  - file: terraform/bootstrap/platform_security_alarms.tf
+    action: Modify
+    purpose: >-
+      Add ok_actions = [local.platform_security_alerts_topic_arn] to the seven event alarms (platform-role-iam-change,
+      denied-iam-write, detector-tamper, alerts-topic-change, ducklake-api-change, agent-session-iam-change, telemetry-content-change), matching
+      the heartbeat alarm, which already has it. No other attribute, filter pattern or name changes.
+  - file: tests/checks/iam_tf/test_platform_role_iam_change_alarms.py
+    action: Modify
+    purpose: >-
+      alarm_problems requires ok_actions equal to [local.platform_security_alerts_topic_arn] on every alarm (moved out of
+      the heartbeat-only expected dict into the shared check beside alarm_actions); one new _TEXT_REDS row deletes the
+      first event alarm's ok_actions line and must be detected. About +8 SLOC (ruff wraps the new red row) against 465 of 500 (plan_obligations,
+      2026-11-17); no relief needed.
+bundled_recommendations: []
+followon_recs: []
+infrastructure_dependencies:
+  - >-
+    terraform/bootstrap is admin-only, and the platform-security-* detector is in Decision 257 cl.3's protected set
+    (cl.2: never split or applied by CI); mechanically, aws_cloudwatch_metric_alarm is outside CI_TYPES in
+    scripts/ci/terraform_bootstrap_apply_classify.py. So the merge push's terraform-bootstrap-apply preview
+    ends CLOUDSHELL_REQUIRED (expected) and the operator applies the whole plan from CloudShell (VP 6), never split and
+    never -target (deploy-paths.yaml admin_out_of_band.bootstrap_ci_apply).
+  - >-
+    One merged-unapplied bootstrap change at a time: the build merges only when no other terraform/bootstrap change is
+    merged and unapplied (2026-11-17 10:40Z: none since #2086, applied by its VP 6) and the operator can run VP 6 in the
+    same sitting.
+  - >-
+    Detector email expected: the apply's PutMetricAlarm calls on platform-security-* alarms match
+    platform-security-detector-tamper by design, so the operator gets one detector-tamper ALARM email about 5-15 minutes
+    after the apply and, with this change, its OK email about 15 minutes later. That pair is this plan's behavioural
+    proof (VP 7). No IAM write occurs, so no IAM-change alarm fires.
+  - "No spend: OK notifications publish to the existing topic; no new resource."
+acceptance_criteria:
+  - >-
+    All eight platform-security-* alarms in platform_security_alarms.tf carry ok_actions equal to the alerts topic, and
+    alarm_problems rejects an event alarm without it (VP 1).
+  - "The operator's pre-merge plan at the PR head shows exactly seven in-place alarm updates that change only ok_actions (VP 5)."
+  - >-
+    After the CloudShell apply, describe-alarms shows OKActions equal to AlarmActions on all eight alarms, a re-plan
+    shows no changes (VP 6), and the detector-tamper alarm the apply itself fired returns to OK and emails the operator
+    on that return (VP 7).
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: Run the detector text tests, including the new red case.
+    command: bin/venv-python -m pytest tests/checks/iam_tf/test_platform_role_iam_change_alarms.py -q
+    expected: >-
+      All pass, including the new ok_actions red case; against the unchanged Terraform test_alarms fails naming each of
+      the seven event alarms' ok_actions.
+    fix_if: Any failure; fix the Terraform or the test's parsing, never an assertion's meaning (Decision 235).
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      The file's TestPlatformRoleIamChangeDetector node is already the graduated row
+      platform-role-iam-change-detector-declared; this step only runs it early.
+  - step: 2
+    phase: pre-deploy
+    action: Provider-free formatting accepts the changed root.
+    command: terraform fmt -check -recursive terraform/bootstrap && echo FMT_OK
+    expected: FMT_OK prints.
+    fix_if: Run terraform fmt on the file and re-check.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: terraform-validate in PR CI already runs fmt on the root; this step only runs it early.
+  - step: 3
+    phase: pre-deploy
+    action: Fast and full tiers before handoff.
+    command: >-
+      bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.validate && bin/venv-python -m
+      scripts.checks.validation_result --verify-head
+    expected: >-
+      Both tiers pass and validation_result verifies the head sha. The full tier is started in the background with a
+      2 h limit from the top-level session; its verdict is --verify-head's, never a pipe's exit status.
+    fix_if: >-
+      A failure caused by this diff is fixed on the branch; a failure that reproduces on origin/main is cited by its
+      existing rec in the PR body, never fixed inline.
+    hermetic: false
+    graduation: not-applicable
+  - step: 4
+    phase: pre-deploy
+    action: >-
+      ENVIRONMENT CHECK (deploy-paths.yaml admin_out_of_band.pre_merge_live_plan), operator-run in AWS CloudShell in
+      the PROD account as the break-glass user, posted once the PR is CI green.
+    command: >-
+      ( printf 'caller-arn check: '; aws sts get-caller-identity --query Arn --output text 2> /dev/null | grep -q
+      ':user/platform-breakglass$' && echo ADMIN_CHAIN_OK || echo ADMIN_CHAIN_ABSENT )
+    expected: caller-arn check, ADMIN_CHAIN_OK. The ARN itself is never printed.
+    fix_if: ADMIN_CHAIN_ABSENT; the operator signs in as the break-glass user and re-runs, and VP 5 waits.
+    hermetic: false
+    graduation: not-applicable
+  - step: 5
+    phase: pre-deploy
+    action: >-
+      PRE-MERGE GATE (ADMIN), operator-run in CloudShell after VP 4, at the PR's full CI-green head (the build fills
+      PR_HEAD_SHA). PLAN-bootstrap-guard-analyzer-findings VP 5's fetch, screen, install, variable and init lines with
+      the screen's file list replaced by this plan's one .tf file; a read-only plan; then, per changed address, whether
+      anything but ok_actions differs between before and after.
+    command: >-
+      ( set -o pipefail; PR_HEAD_SHA=<full PR head sha>; W="${TMPDIR:-/tmp}/pok"; L="$HOME/pok-tf.err"; rm -rf "$W";
+      mkdir -p "$W/bin"; : > "$L"; trap 'rm -rf "$W"' EXIT; unset AWS_PROFILE; git init -q "$W/repo" 2>> "$L"; { git -C
+      "$W/repo" fetch -q --depth 1 https://github.com/otl-labs/ontheloop.git +refs/heads/main:refs/o/main && git -C
+      "$W/repo" fetch -q --depth 1 https://github.com/otl-labs/ontheloop.git "$PR_HEAD_SHA" && git -C "$W/repo" checkout
+      -q --detach FETCH_HEAD; } 2>> "$L" || { echo CLONE_FAILED; exit 1; }; F=$(git -C "$W/repo" diff --name-only
+      refs/o/main HEAD -- terraform config/aws-region config/terraform-version 2>> "$L" | LC_ALL=C sort | tr '\n' ' ');
+      X=$(git -C "$W/repo" diff refs/o/main HEAD -- 'terraform/*.tf' 2>> "$L" | grep -E '^\+' | grep -cE 'data
+      "(external|http)"|provider "|required_providers|module "|provisioner|local-exec|^\+\s*(data|import|removed|check|terraform)\b');
+      [ "$F" = "terraform/bootstrap/platform_security_alarms.tf " ] && [ "$X" = 0 ] || { echo SCREEN_REFUSED; exit 1; };
+      echo SCREEN_OK; R=$(tr -d '[:space:]' < "$W/repo/config/aws-region"); export AWS_REGION="$R" AWS_DEFAULT_REGION="$R";
+      V=$(tr -d '[:space:]' < "$W/repo/config/terraform-version"); case "$(uname -m)" in aarch64) P=linux_arm64 ;; *)
+      P=linux_amd64 ;; esac; Z="terraform_${V}_${P}.zip"; { curl -fsSL -o "$W/$Z"
+      "https://releases.hashicorp.com/terraform/$V/$Z" && curl -fsSL -o "$W/sums"
+      "https://releases.hashicorp.com/terraform/$V/terraform_${V}_SHA256SUMS" && ( cd "$W" && grep " $Z\$" sums |
+      sha256sum -c --quiet - ) && unzip -qo "$W/$Z" -d "$W/bin"; } >> "$L" 2>&1 || { echo TERRAFORM_INSTALL_FAILED; exit
+      1; }; export PATH="$W/bin:$PATH"; command -v jq > /dev/null || { echo JQ_ABSENT; exit 1; }; aws ssm get-parameter
+      --name /secret/agent-platform-terraform-personal-tfvars --with-decryption --query Parameter.Value --output text >
+      "$W/vars.tfvars" 2>> "$L" && test -s "$W/vars.tfvars" || { echo TFVARS_ABSENT; exit 1; }; A=$(aws sts
+      get-caller-identity --query Account --output text 2>> "$L"); test -n "$A" || { echo IDENTITY_FAILED; exit 1; };
+      B="$W/repo/terraform/bootstrap"; terraform -chdir="$B" init -input=false -lockfile=readonly
+      -backend-config="region=$R" > /dev/null 2>> "$L" || { echo INIT_FAILED; exit 1; }; terraform -chdir="$B" plan
+      -lock=false -input=false -no-color -detailed-exitcode -var-file="$W/vars.tfvars" -var "account_id=$A" -var
+      "aws_profile=" -out="$W/head.bin" > "$W/plan.txt" 2>> "$L"; echo "HEAD_PLAN_EXIT $?"; grep -E '^Plan: '
+      "$W/plan.txt"; terraform -chdir="$B" show -json "$W/head.bin" > "$W/plan.json" 2>> "$L"; jq -r '.resource_changes[]
+      | select(.change.actions != ["no-op"]) | "\(.change.actions | join(",")) \(.address) ok_before=\(.change.before.ok_actions
+      | length) ok_after=\(.change.after.ok_actions | length) diff=\(. as $r | [(.change.before + .change.after |
+      keys[]) | select(. != "ok_actions" and $r.change.before[.] != $r.change.after[.])] | unique | join(","))"'
+      "$W/plan.json" | LC_ALL=C sort; echo "PR_HEAD_SHA $PR_HEAD_SHA" )
+    expected: >-
+      SCREEN_OK; HEAD_PLAN_EXIT 2; Plan: 0 to add, 7 to change, 0 to destroy.; exactly seven lines, each "update
+      aws_cloudwatch_metric_alarm.platform_security_X ok_before=0 ok_after=1 diff=" (empty diff) for X in agent_session_iam_change,
+      alerts_topic_change, denied_iam_write, detector_tamper, ducklake_api_change, platform_role_iam_change and telemetry_content_change; no
+      iam_event_heartbeat line; the sha.
+    fix_if: >-
+      SCREEN_REFUSED: nothing was initialised; if main moved under terraform/ the build rebases and re-posts, else the
+      head carries files beyond scope and the build stops. A setup line: the operator reads $HOME/pok-tf.err in
+      CloudShell and re-pastes. A non-empty diff= on a row names the other attributes that differ (key names only, never
+      values): provider normalisation or drift, or an edit beyond scope; stop, do not merge, report the address and keys. Any other address or action (another merged-unapplied
+      bootstrap change, or drift): stop, do not merge, report to the coordinator.
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: post-deploy
+    action: >-
+      OPERATOR STEP, CloudShell in the PROD account, in the same sitting as the merge, at merge sha M. VP 5's lines at M
+      (a depth-2 fetch, screened on HEAD^..HEAD), a saved plan applied only when it is exactly VP 5's seven updates, a
+      fresh plan, and a describe-alarms read of names and action counts only. The operator's paste is the direction for
+      the apply (Decision 126 cl.1).
+    command: >-
+      ( set -o pipefail; M=<full merge sha>; W="${TMPDIR:-/tmp}/pok"; L="$HOME/pok-tf.err"; rm -rf "$W"; mkdir -p
+      "$W/bin"; : > "$L"; trap 'rm -rf "$W"' EXIT; unset AWS_PROFILE; git init -q "$W/repo" 2>> "$L"; { git -C "$W/repo"
+      fetch -q --depth 2 https://github.com/otl-labs/ontheloop.git "$M" && git -C "$W/repo" checkout -q --detach
+      FETCH_HEAD; } 2>> "$L" || { echo CLONE_FAILED; exit 1; }; F=$(git -C "$W/repo" diff --name-only HEAD^ HEAD --
+      terraform config/aws-region config/terraform-version 2>> "$L" | LC_ALL=C sort | tr '\n' ' '); X=$(git -C "$W/repo"
+      diff HEAD^ HEAD -- 'terraform/*.tf' 2>> "$L" | grep -E '^\+' | grep -cE 'data "(external|http)"|provider
+      "|required_providers|module "|provisioner|local-exec|^\+\s*(data|import|removed|check|terraform)\b'); [ "$F" =
+      "terraform/bootstrap/platform_security_alarms.tf " ] && [ "$X" = 0 ] || { echo SCREEN_REFUSED; exit 1; }; echo
+      SCREEN_OK; R=$(tr -d '[:space:]' < "$W/repo/config/aws-region"); export AWS_REGION="$R" AWS_DEFAULT_REGION="$R";
+      V=$(tr -d '[:space:]' < "$W/repo/config/terraform-version"); case "$(uname -m)" in aarch64) P=linux_arm64 ;; *)
+      P=linux_amd64 ;; esac; Z="terraform_${V}_${P}.zip"; { curl -fsSL -o "$W/$Z"
+      "https://releases.hashicorp.com/terraform/$V/$Z" && curl -fsSL -o "$W/sums"
+      "https://releases.hashicorp.com/terraform/$V/terraform_${V}_SHA256SUMS" && ( cd "$W" && grep " $Z\$" sums |
+      sha256sum -c --quiet - ) && unzip -qo "$W/$Z" -d "$W/bin"; } >> "$L" 2>&1 || { echo TERRAFORM_INSTALL_FAILED; exit
+      1; }; export PATH="$W/bin:$PATH"; command -v jq > /dev/null || { echo JQ_ABSENT; exit 1; }; aws ssm get-parameter
+      --name /secret/agent-platform-terraform-personal-tfvars --with-decryption --query Parameter.Value --output text >
+      "$W/vars.tfvars" 2>> "$L" && test -s "$W/vars.tfvars" || { echo TFVARS_ABSENT; exit 1; }; A=$(aws sts
+      get-caller-identity --query Account --output text 2>> "$L"); test -n "$A" || { echo IDENTITY_FAILED; exit 1; };
+      B="$W/repo/terraform/bootstrap"; terraform -chdir="$B" init -input=false -lockfile=readonly
+      -backend-config="region=$R" > /dev/null 2>> "$L" || { echo INIT_FAILED; exit 1; }; terraform -chdir="$B" plan
+      -input=false -no-color -var-file="$W/vars.tfvars" -var "account_id=$A" -var "aws_profile=" -out="$W/apply.bin" >
+      "$W/plan.txt" 2>> "$L"; S=$(grep -E '^Plan: ' "$W/plan.txt"); echo "$S"; terraform -chdir="$B" show -json
+      "$W/apply.bin" > "$W/plan.json" 2>> "$L"; G=$(jq -r '.resource_changes[] | select(.change.actions != ["no-op"]) |
+      .address' "$W/plan.json" | LC_ALL=C sort | tr '\n' ' '); O=$(jq -r '[.resource_changes[] | select(.change.actions !=
+      ["no-op"]) | . as $r | (.change.before + .change.after | keys[]) | select(. != "ok_actions" and $r.change.before[.]
+      != $r.change.after[.])] | unique | join(",")' "$W/plan.json") || O=JQ_FAILED; [ "$S" = "Plan: 0 to add, 7 to change, 0 to destroy." ] && [ -z "$O" ] && [ "$G" =
+      "aws_cloudwatch_metric_alarm.platform_security_agent_session_iam_change aws_cloudwatch_metric_alarm.platform_security_alerts_topic_change aws_cloudwatch_metric_alarm.platform_security_denied_iam_write aws_cloudwatch_metric_alarm.platform_security_detector_tamper aws_cloudwatch_metric_alarm.platform_security_ducklake_api_change aws_cloudwatch_metric_alarm.platform_security_platform_role_iam_change aws_cloudwatch_metric_alarm.platform_security_telemetry_content_change " ]
+      || { echo "APPLY_SKIPPED${O:+ diff=$O}"; exit 1; }; date -u +APPLY_START_%Y-%m-%dT%H:%MZ; terraform -chdir="$B" apply -input=false -no-color
+      "$W/apply.bin" > /dev/null 2>> "$L" && echo APPLY_DONE || { echo APPLY_FAILED; exit 1; }; terraform -chdir="$B"
+      plan -lock=false -input=false -no-color -detailed-exitcode -var-file="$W/vars.tfvars" -var "account_id=$A" -var
+      "aws_profile=" > /dev/null 2>> "$L"; echo "REPLAN_EXIT $?"; aws cloudwatch describe-alarms --alarm-name-prefix
+      platform-security- --query 'MetricAlarms[].[AlarmName, length(OKActions), length(AlarmActions), OKActions ==
+      AlarmActions]' --output text 2>> "$L" | sed 's/^/ALARM /'; echo "M $M" )
+    expected: >-
+      SCREEN_OK; Plan: 0 to add, 7 to change, 0 to destroy.; an APPLY_START time; APPLY_DONE; REPLAN_EXIT 0; eight ALARM
+      lines, one per platform-security-* alarm, each "1 1 True"; M.
+    fix_if: >-
+      SCREEN_REFUSED or a setup line: nothing initialised; as VP 5. APPLY_SKIPPED: nothing applied; stop and report the
+      summary and any diff= keys. APPLY_FAILED or REPLAN_EXIT 2: report the error class in words; a partial apply is finished by a plan
+      amendment's CloudShell block, never by -target. An ALARM line other than "1 1 True": report it; a forward-fix PR
+      or plan amendment follows, never a console edit.
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: post-deploy
+    action: >-
+      Behavioural proof, triggered by the operator's report (in the thread) that the detector-tamper ALARM and then OK
+      emails arrived after VP 6's APPLY_START; on that report the build reads, with the routine profile, that the alarm
+      is OK with a state change after APPLY_START (the build never sleeps or polls for it) (CloudWatch alarm history is denied to the session user and ages out,
+      so the emails are the record).
+    command: >-
+      aws cloudwatch describe-alarms --profile agent_platform --region "$(tr -d '[:space:]' < "$(git rev-parse --show-toplevel)/config/aws-region")"
+      --alarm-names platform-security-detector-tamper --query 'MetricAlarms[].[AlarmName, StateValue,
+      StateUpdatedTimestamp, length(OKActions)]' --output text
+    expected: >-
+      One line: platform-security-detector-tamper OK, a StateUpdatedTimestamp after APPLY_START, 1. The operator reports
+      a detector-tamper ALARM email and then an OK email, both after APPLY_START.
+    fix_if: >-
+      State ALARM when the operator reports: a write is still matching the tamper filter; triage it as a detector alert before
+      anything else. State OK but timestamp before APPLY_START: the apply's writes never fired the tamper alarm; record
+      it and file a rec on the tamper filter. OK email missing while the state is OK after APPLY_START: the OK action did
+      not deliver; report and file a rec, never re-apply by hand.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: terraform/bootstrap/platform_security_alarms.tf
+    behavior: Every platform-security-* alarm notifies the alerts topic on OK as well as on ALARM.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_platform_role_iam_change_alarms.py::TestPlatformRoleIamChangeDetector::test_alarms
+    red_green_expectation: red before (seven event alarms lack ok_actions), green after
+  - source: tests/checks/iam_tf/test_platform_role_iam_change_alarms.py
+    behavior: An event alarm whose ok_actions line is deleted is rejected by alarm_problems.
+    verification_step: 1
+    test_selector: tests/checks/iam_tf/test_platform_role_iam_change_alarms.py::TestPlatformRoleIamChangeDetector::test_hcl_red_case
+    red_green_expectation: the new red case is detected; the real tree passes
+constraints:
+  - "No rescue agents or workaround loops (Decision 55). Live admin calls run only in the operator's CloudShell (VP 4-6)."
+  - "Never write an account id, ARN with an account, ExternalId, key or host into the repo, a PR, a comment or the shared folder (Decision 101). VP outputs are names and counts only."
+  - "No change to any filter pattern, threshold, period, missing-data treatment, alarm name or alarm_actions. No change to security_detector_probe.py."
+  - "No assertion is loosened (Decision 235): the heartbeat's ok_actions pin moves into the shared check, which now covers all eight alarms."
+context:
+  - "Decision-scout r1 NO_FLAGS (fingerprint in gate_rounds). Decisions triaged: 216 of 216. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2 (T4.15, T4.23; prefix-only, neither touched). Serves: NS.9 2/5. CITE: 202, 257, 256, 126, 101. 202 reversal (c): email volume crowding out signal; the OK email adds one message per already-rare event alarm, the same pairing every terraform/personal alarm and the heartbeat already have. 202 cl.5: the liveness probe's failed-alarm-action check now also covers OK actions."
+  - "Decision 256 cl.3: VP 4's break-glass caller check is the CloudShell form; deploy-paths.yaml's ENVIRONMENT CHECK still names the PlatformAdmin chain, owned by rec-5195. SIT (Decision 252 cl.7): SIT's bootstrap root is not yet applied (rec-5027), so SIT gets ok_actions on its first apply."
+  - "Fork (decided with notice, consistency-only): all seven event alarms, not only the two that fired; precedent is the heartbeat alarm and every terraform/personal alarm, which all carry ok_actions."
+  - "Trigger: 2026-11-16 22:28Z, platform-role-iam-change and agent-session-iam-change fired on #2086's own CloudShell apply (PlatformDev DailyOps PutRolePolicy; agent-platform-session-guard CreatePolicyVersion) and returned to OK at 22:43:32Z and 22:44:41Z (describe-alarms read 2026-11-17, routine profile); no OK email because only the heartbeat alarm has ok_actions."
+  - "CLOUDSHELL_REQUIRED is by design: aws_cloudwatch_metric_alarm is outside CI_TYPES in scripts/ci/terraform_bootstrap_apply_classify.py (read 2026-11-17)."
+  - "Live read (2026-11-17, agent_platform): describe-alarms works for the session user; cloudwatch:DescribeAlarmHistory, logs:FilterLogEvents and logs:StartQuery on platform-security-cloudtrail are denied, hence VP 7's email confirmation."
+  - "The merge push's preview runs the Access Analyzer step from #2076; that step failed on #2076's own merge run (2026-11-16 23:44Z), owned by the AWS policy checks thread. This plan changes no IAM document, so the step has nothing to check; if it still fails at merge the build cites the owning thread and does not fix it inline."
+  - "PLAN-agent-proxy-signed-access (plan B; plan_obligations 2026-11-17 flags it unbuilt, build state unconfirmed since the agent-session pair it names is already on main) also scopes both files; if it builds, whichever lands second rebases."
+  - "Red-overlap 2026-11-17 11:50Z: verdict blocked by rec-5247 (telemetry-reader smoke 504; rule slo_breached, shared none). Deferral rationale: this plan shares no file or path with that red (two detector files in terraform/bootstrap and their text test) and does not repair it, so rec-5247 is deferred to its owning repair, not bundled here."
+  - "Approvals at build start: none for the build session. It runs no secret read, admin credential or terraform command; VP 4-6 are the operator's own CloudShell blocks, and VP 7 uses the routine agent_platform profile."
+  - "V3 resolution: VP 5's operator-run pre-merge plan at the PR head substitutes for pre-merge post-deploy evidence; behavioural acceptance is VP 6-7, operator-reported in a counts-only PR comment naming the applied sha."
+  - "Amendment 1 (build, 2026-11-17): main gained a seventh event alarm, platform-security-telemetry-content-change (#2135, applied), after this plan merged; the shared check would fail it, so it gets ok_actions too and every six/seven count in VP 5-6 moves to seven/eight. Same file, no new scope."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:58b81a62487dc1721fe5b0b4cd8de4e222759a5af028b0d1a61b3cd921ff4259'}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: PROCEED, blocking: 0, nits: 4}
+  - {gate: plan-critique, round: 2, verdict: PROCEED, blocking: 0, nits: 4}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Only the plan-cited decision sections (202, 257, 256, 126, 101)
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+  - "Start condition: this plan merged; no other bootstrap change merged and unapplied."
+execution_steps:
+  - "Test first (scope row 2), seen red on the unchanged tree; then the Terraform edit. Post: VP 1-2 pass."
+  - "Commit; VP 3; push; PR; CI green."
+  - "Post VP 4 and VP 5 to the operator with the full head sha in one message; record the lines on the PR; once VP 5 matches, merge (squash) at that head, then post VP 6 at the merge sha in the same sitting and record its lines."
+  - "VP 7 when the operator reports the detector-tamper OK email (no sleep or poll); if no report arrives, ask once after an hour; record the result on the PR."
+  - "Execute Verification Plan: run each step; loop until pass; on an unrecoverable V3 failure stop and RCA (Decision 55)."
+  - "Report: what was implemented, the validation_result --verify-head verdict, VP 5-7's lines and the merge SHA."
+rollback: >-
+  A revert PR removes the seven ok_actions lines and the operator applies it from CloudShell; it fires detector-tamper
+  once, as the forward change does.

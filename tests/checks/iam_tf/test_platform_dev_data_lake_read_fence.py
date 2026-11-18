@@ -11,6 +11,7 @@ admin-only) proves that live, but this guard rejects the inert HCL shape at PR t
 
 from __future__ import annotations
 
+import fnmatch
 import re
 from pathlib import Path
 
@@ -43,12 +44,15 @@ _EXPECTED_FENCED_OBJECT_RESOURCES = frozenset(
         "${local.data_lake_bucket_arn}/tfstate/personal/*",
     }
 )
-_EXPECTED_LIST_DENY_CONDITION_PREFIXES = frozenset(
-    {
-        "convergence/personal/*",
-        "tfplan/personal/*",
-        "tfstate/personal/*",
-    }
+_PINNED_LOCALS = {"ducklake_prod_data_prefix": "ducklake", "ducklake_smoke_data_prefix": "ducklake-neon-smoke"}
+_STATE_PREFIXES = (
+    "convergence/personal/",
+    "convergence/personal/x",
+    "tfplan/personal/",
+    "tfplan/personal/x",
+    "tfstate/personal/",
+    "tfstate/personal/x",
+    "tf",
 )
 _VERSION_READ_VERB_FAMILY = frozenset(
     {
@@ -94,8 +98,8 @@ def _effect(block: str) -> str | None:
     return m.group(1) if m else None
 
 
-def _condition_prefix_values(block: str) -> list[str] | None:
-    m = re.search(r'Condition\s*=\s*\{.*?StringLike\s*=\s*\{.*?"s3:prefix"\s*=\s*\[(?P<body>.*?)\]', block, re.S)
+def _condition_prefix_values(block: str, operator: str = "StringLike") -> list[str] | None:
+    m = re.search(rf'Condition\s*=\s*\{{.*?\b{operator}\s*=\s*\{{.*?"s3:prefix"\s*=\s*\[(?P<body>.*?)\]', block, re.S)
     if not m:
         return None
     return re.findall(r'"([^"]+)"', m.group("body"))
@@ -186,7 +190,26 @@ def _check_object_deny(blocks: dict[str, str]) -> list[str]:
     return failed
 
 
-def _check_list_deny(blocks: dict[str, str]) -> list[str]:
+def _state_prefix_failures(sid: str, prefixes: list[str], text: str) -> list[str]:
+    failed: list[str] = []
+    resolved: list[str] = []
+    for value in prefixes:
+        for name in re.findall(r"\$\{local\.(\w+)\}", value):
+            m = re.search(rf'^\s*{name}\s*=\s*"([^"]*)"', text, re.M)
+            if not m:
+                failed.append(f"{sid} local {name} is not defined in the file")
+                break
+            if name in _PINNED_LOCALS and m.group(1) != _PINNED_LOCALS[name]:
+                failed.append(f"{sid} local {name} is {m.group(1)!r}, pinned to {_PINNED_LOCALS[name]!r}")
+            value = value.replace("${local." + name + "}", m.group(1))
+        resolved.append(value)
+    for state in _STATE_PREFIXES:
+        if any(fnmatch.fnmatchcase(state, pattern) for pattern in resolved):
+            failed.append(f"{sid} StringNotLike value matches state prefix {state!r}, so it would not be denied")
+    return failed
+
+
+def _check_list_deny(blocks: dict[str, str], locals_text: str) -> list[str]:
     sid = _LIST_DENY_SID
     block = blocks.get(sid)
     if block is None:
@@ -202,14 +225,18 @@ def _check_list_deny(blocks: dict[str, str]) -> list[str]:
             f"{sid} Resource is not the bare bucket ARN -- an object-prefix Resource shape is "
             "INERT against the BUCKET-level s3:ListBucketVersions action"
         )
-    prefixes = _condition_prefix_values(block)
+    if _condition_prefix_values(block, "StringLike") is not None:
+        failed.append(f"{sid} carries a positive StringLike s3:prefix condition, expected StringNotLike")
+    prefixes = _condition_prefix_values(block, "StringNotLike")
     if prefixes is None:
-        failed.append(f"{sid} has no s3:prefix StringLike condition")
-    elif set(prefixes) != _EXPECTED_LIST_DENY_CONDITION_PREFIXES:
+        failed.append(f"{sid} has no s3:prefix StringNotLike condition")
+    elif set(prefixes) != _EXPECTED_LIST_CONDITION_PREFIXES:
         failed.append(
-            f"{sid} s3:prefix condition is {sorted(prefixes)}, expected exactly "
-            f"{sorted(_EXPECTED_LIST_DENY_CONDITION_PREFIXES)}"
+            f"{sid} s3:prefix condition is {sorted(prefixes)}, expected exactly the Allow's "
+            f"{sorted(_EXPECTED_LIST_CONDITION_PREFIXES)}"
         )
+    else:
+        failed.extend(_state_prefix_failures(sid, prefixes, locals_text))
     return failed
 
 
@@ -222,11 +249,14 @@ def validate_fence_shapes(text: str) -> list[str]:
         *_check_list_grant(blocks),
         *_check_object_grant(blocks),
         *_check_object_deny(blocks),
-        *_check_list_deny(blocks),
+        *_check_list_deny(blocks, text),
     ]
 
 
 _GOOD_FENCE_TEXT = """
+  ducklake_prod_data_prefix  = "ducklake"
+  ducklake_smoke_data_prefix = "ducklake-neon-smoke"
+
       {
         Sid      = "DataLakeBucketConfigRead"
         Effect   = "Allow"
@@ -277,11 +307,10 @@ _GOOD_FENCE_TEXT = """
         Action   = ["s3:ListBucketVersions"]
         Resource = [local.data_lake_bucket_arn]
         Condition = {
-          StringLike = {
+          StringNotLike = {
             "s3:prefix" = [
-              "convergence/personal/*",
-              "tfplan/personal/*",
-              "tfstate/personal/*",
+              "${local.ducklake_prod_data_prefix}/*",
+              "${local.ducklake_smoke_data_prefix}/*",
             ]
           }
         }
@@ -343,3 +372,38 @@ def test_inert_object_prefix_list_deny_is_rejected() -> None:
     assert bad != _GOOD_FENCE_TEXT
     failed = validate_fence_shapes(bad)
     assert any(_LIST_DENY_SID in f for f in failed), failed
+
+
+def test_old_stringlike_state_prefix_list_deny_is_rejected() -> None:
+    old = (
+        "StringLike = {\n"
+        '            "s3:prefix" = [\n'
+        '              "convergence/personal/*",\n'
+        '              "tfplan/personal/*",\n'
+        '              "tfstate/personal/*",\n'
+        "            ]\n"
+        "          }"
+    )
+    start = _GOOD_FENCE_TEXT.index("StringNotLike", _GOOD_FENCE_TEXT.index(_LIST_DENY_SID))
+    end = _GOOD_FENCE_TEXT.index("}", _GOOD_FENCE_TEXT.index("]", start)) + 1
+    bad = _GOOD_FENCE_TEXT[:start] + old + _GOOD_FENCE_TEXT[end:]
+    failed = validate_fence_shapes(bad)
+    assert any(_LIST_DENY_SID in f for f in failed), failed
+
+
+def test_list_deny_set_differing_from_the_allow_is_rejected() -> None:
+    start = _GOOD_FENCE_TEXT.index("StringNotLike")
+    bad = _GOOD_FENCE_TEXT[:start] + _GOOD_FENCE_TEXT[start:].replace('"${local.ducklake_smoke_data_prefix}/*",', "", 1)
+    assert bad != _GOOD_FENCE_TEXT
+    failed = validate_fence_shapes(bad)
+    assert any(_LIST_DENY_SID in f for f in failed), failed
+
+
+def test_local_mutated_to_a_state_prefix_is_rejected() -> None:
+    bad = _GOOD_FENCE_TEXT.replace(
+        'ducklake_prod_data_prefix  = "ducklake"', 'ducklake_prod_data_prefix  = "tfstate/personal"'
+    )
+    assert bad != _GOOD_FENCE_TEXT
+    failed = validate_fence_shapes(bad)
+    assert any("pinned" in f for f in failed), failed
+    assert any("matches state prefix" in f for f in failed), failed

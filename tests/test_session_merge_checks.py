@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import pytest
+import yaml
+
 from scripts.session import merge_checks as mc
 
 REQ = ["pr-validate", "terraform-validate"]
@@ -101,3 +104,199 @@ def test_null_started_at_outranks_a_completed_success() -> None:
 def test_run_without_an_app_object_is_never_a_github_actions_run() -> None:
     bare = {"name": "pr-validate", "status": "completed", "conclusion": "success", "started_at": None, "id": 1}
     assert judge([bare, run("terraform-validate", run_id=2)]).kind == mc.REFUSE
+
+
+def _config(code: str = "in_session", scout: str = "in_session", critic: str = "in_session", **over: object) -> str:
+    rows = [
+        {"id": "gates.code_reviewer.verdict_source", "defaults": {"local": code, "cloud": code}},
+        {"id": "gates.decision_scout.verdict_source", "defaults": {"local": scout, "cloud": scout}},
+        {"id": "gates.plan_critic.verdict_source", "defaults": {"local": critic, "cloud": critic}},
+    ]
+    for row in rows:
+        row.update(over.get(str(row["id"]), {}))  # type: ignore[call-overload]
+    return yaml.safe_dump({"settings": rows})
+
+
+def test_persona_check_name_rule() -> None:
+    assert mc.persona_check_name("plan_critic") == "persona-verdict/plan_critic"
+
+
+def test_verdict_sources_reads_all_in_session() -> None:
+    assert mc.verdict_sources(_config()) == dict.fromkeys(mc.PERSONA_CLASSES, "in_session")
+
+
+def test_verdict_sources_unparseable() -> None:
+    assert isinstance(mc.verdict_sources("settings: [unclosed"), str)
+    assert isinstance(mc.verdict_sources("- a list"), str)
+
+
+def test_verdict_sources_no_rows_reads_in_session() -> None:
+    assert mc.verdict_sources(yaml.safe_dump({"settings": [{"id": "x"}]})) == dict.fromkeys(mc.PERSONA_CLASSES, "in_session")
+
+
+def test_verdict_sources_missing_row() -> None:
+    cfg = yaml.safe_load(_config())
+    cfg["settings"].pop()
+    assert "gates.plan_critic.verdict_source has no row" in str(mc.verdict_sources(yaml.safe_dump(cfg)))
+
+
+def test_verdict_sources_unknown_persona() -> None:
+    cfg = yaml.safe_load(_config())
+    cfg["settings"].append({"id": "gates.plan_agent.verdict_source", "defaults": {"local": "actions", "cloud": "actions"}})
+    assert "plan_agent" in str(mc.verdict_sources(yaml.safe_dump(cfg)))
+
+
+def test_verdict_sources_duplicated_row() -> None:
+    cfg = yaml.safe_load(_config())
+    cfg["settings"].append(dict(cfg["settings"][0]))
+    assert "more than once" in str(mc.verdict_sources(yaml.safe_dump(cfg)))
+
+
+def test_verdict_sources_bad_value() -> None:
+    assert "not in_session or actions" in str(mc.verdict_sources(_config(code="both")))
+
+
+def test_verdict_sources_local_differs_from_cloud() -> None:
+    cfg = yaml.safe_load(_config())
+    cfg["settings"][0]["defaults"] = {"local": "actions", "cloud": "in_session"}
+    assert "differs" in str(mc.verdict_sources(yaml.safe_dump(cfg)))
+
+
+def test_pr_class() -> None:
+    assert mc.pr_class(["docs/plans/PLAN-x.yaml"]) == "plan"
+    assert mc.pr_class(["docs/plans/PLAN-x.yaml", "scripts/a.py"]) == "code"
+    assert mc.pr_class(["scripts/a.py"]) == "code"
+    assert mc.pr_class([]) == "code"
+    assert mc.pr_class(None) == "code"
+
+
+def test_persona_checks_per_class() -> None:
+    both = mc.verdict_sources(_config(scout="actions", critic="actions"))
+    assert mc.persona_checks(both, "plan") == ["persona-verdict/decision_scout", "persona-verdict/plan_critic"]
+    assert mc.persona_checks(both, "code") == []
+    one = mc.verdict_sources(_config(code="actions"))
+    assert mc.persona_checks(one, "code") == ["persona-verdict/code_reviewer"]
+    assert mc.persona_checks(one, "plan") == []
+    assert mc.persona_checks(mc.verdict_sources(_config()), "code") == []
+
+
+def test_switch_backs() -> None:
+    actions = mc.verdict_sources(_config(code="actions"))
+    plain = mc.verdict_sources(_config())
+    assert mc.switch_backs(actions, plain) == ["code_reviewer"]
+    assert mc.switch_backs(plain, actions) == []
+    assert mc.switch_backs(actions, actions) == []
+
+
+def test_ready_head_personas_are_plan_class_personas() -> None:
+    assert mc.READY_HEAD_PERSONAS
+    assert mc.READY_HEAD_PERSONAS <= set(mc.PERSONA_CLASSES)
+    assert all(mc.PERSONA_CLASSES[p] == "plan" for p in mc.READY_HEAD_PERSONAS)
+
+
+_CODE = "persona-verdict/code_reviewer"
+_APP = 900001
+
+
+def app_run(
+    name: str, app_id: object = _APP, conclusion: str = "success", run_id: int = 1, started: str = "2026-11-17T10:00:00Z"
+):
+    return {
+        "name": name,
+        "status": "completed",
+        "conclusion": conclusion,
+        "started_at": started,
+        "id": run_id,
+        "app": {"slug": "verdict-app", "id": app_id},
+    }
+
+
+def _cfg(*rows: str) -> str:
+    return "settings:\n" + "".join(rows)
+
+
+def _row(defaults: str) -> str:
+    return f"  - id: gates.verdict_app.app_id\n    defaults: {defaults}\n"
+
+
+def test_verdict_app_id_reads_the_row() -> None:
+    assert mc.verdict_app_id(_cfg("  - id: other\n")) is None
+    assert mc.verdict_app_id(_cfg(_row("{local: null, cloud: null}"))) is None
+    assert mc.verdict_app_id(_cfg(_row("{local: 42, cloud: 42}"))) == 42
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "a: [",
+        "other: 1\n",
+        _cfg(_row("{local: 1, cloud: 1}"), _row("{local: 1, cloud: 1}")),
+        _cfg(_row("{local: 1, cloud: 2}")),
+        _cfg(_row("{local: '1', cloud: '1'}")),
+        _cfg(_row("{local: true, cloud: true}")),
+        _cfg(_row("{local: 0, cloud: 0}")),
+        _cfg(_row("{local: -1, cloud: -1}")),
+        _cfg(_row("{local: null, cloud: 4}")),
+    ],
+    ids=["unparseable", "no-settings", "duplicate", "split", "string", "bool", "zero", "negative", "null-vs-int"],
+)
+def test_verdict_app_id_reasons(text: str) -> None:
+    assert isinstance(mc.verdict_app_id(text), str)
+
+
+@pytest.mark.parametrize(
+    ("runs", "pin", "kind", "needle"),
+    [
+        ([app_run(_CODE)], _APP, mc.CLEAR, ""),
+        ([run(_CODE, app="github-actions")], _APP, mc.REFUSE, "no run by the verdict App (app id 900001)"),
+        ([app_run(_CODE), run(_CODE, "failure", run_id=5, started="2026-11-17T12:00:00Z")], _APP, mc.CLEAR, ""),
+        (
+            [app_run(_CODE), app_run(_CODE, conclusion="failure", run_id=2, started="2026-11-17T11:00:00Z")],
+            _APP,
+            mc.REFUSE,
+            "concluded failure",
+        ),
+        (
+            [app_run(_CODE, conclusion="failure", run_id=1), app_run(_CODE, run_id=2, started="2026-11-17T11:00:00Z")],
+            _APP,
+            mc.CLEAR,
+            "",
+        ),
+        ([app_run(_CODE)], None, mc.REFUSE, "has no verdict App"),
+        ([app_run(_CODE, app_id=True)], 1, mc.REFUSE, "no run by the verdict App"),
+        ([{**app_run(_CODE), "app": {"slug": "x"}}], _APP, mc.REFUSE, "no run by the verdict App"),
+    ],
+    ids=[
+        "app-ok",
+        "forged-ignored",
+        "foreign-fail-ignored",
+        "newest-app-failed",
+        "newest-app-ok",
+        "empty-pin",
+        "bool-id",
+        "no-id",
+    ],
+)
+def test_pinned_name_counts_only_the_app(runs: list[dict[str, object]], pin: int | None, kind: str, needle: str) -> None:
+    result = mc.verdict([_CODE], runs, len(runs), pins={_CODE: pin})
+    assert result.kind == kind
+    assert needle in " ".join(result.reasons)
+
+
+def test_an_unpinned_name_keeps_the_slug_rule() -> None:
+    runs = green()
+    assert mc.verdict(REQ, runs, 2, pins={_CODE: _APP}) == mc.Verdict(mc.CLEAR)
+
+
+@pytest.mark.parametrize(
+    ("base", "head", "changed"), [(None, 5, True), (5, None, True), (5, 6, True), (5, 5, False), (None, None, False)]
+)
+def test_app_id_changed(base: int | None, head: int | None, changed: bool) -> None:
+    assert mc.app_id_changed(base, head) is changed
+
+
+@pytest.mark.parametrize("app", [7, None])
+def test_persona_pins_cover_every_persona_name(app: int | None) -> None:
+    names = [mc.persona_check_name(p) for p in mc.PERSONA_CLASSES]
+    pins = mc.persona_pins([*names, "pr-validate", "persona-verdict/code_reviewr", f"{names[0]}-x"], app)
+    assert pins == dict.fromkeys(names, app)

@@ -40,15 +40,16 @@ def _projection(table: str) -> dict[str, Any]:
 
 
 def _row(**over: Any) -> dict[str, Any]:
-    row: dict[str, Any] = {"trigger": "subagent_sync", "definition_sha256": GOOD_HASH}
+    row: dict[str, Any] = {"trigger": "subagent_sync", "agent_type": "claude-code-subagent", "definition_sha256": GOOD_HASH}
     row.update(over)
     return row
 
 
 def _check(row: dict[str, Any]) -> None:
     columns = _projection("telemetry_agents")["columns"]
-    rules = RowRules.from_projection({"definition_sha256": columns["definition_sha256"]})
-    check_row("telemetry_agents", {"definition_sha256": row["definition_sha256"]}, rules, CREATED)
+    names = ("agent_type", "definition_sha256")
+    rules = RowRules.from_projection({name: columns[name] for name in names})
+    check_row("telemetry_agents", {name: row[name] for name in names}, rules, CREATED)
 
 
 def test_definition_sha256_is_declared_and_write_enforced() -> None:

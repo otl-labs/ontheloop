@@ -4,17 +4,32 @@ verdict(required, runs, total_count) judges check names and conclusions only: it
 I/O and never fetches. `required` is the set of required check names, or None when the ruleset named none (unknown is
 never a pass). `runs` are the head's check runs as dicts (name, status, conclusion, started_at, id, app slug);
 `total_count` is the forge's count of runs, so a partial read is UNAVAILABLE.
+
+The persona leg (T4.32 c5, Decision 264 cl.4-5) is the same kind of pure function: verdict_sources reads the
+gates.<persona>.verdict_source rows from a config text, pr_class sorts a changed-path set into plan or code,
+persona_checks names the persona checks an actions row adds for that class, and switch_backs names the personas a
+change returns from actions to in_session. No I/O, no pull request number.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+
+import yaml
+
+from scripts.ci import push_scope
 
 CLEAR = "CLEAR"
 REFUSE = "REFUSE"
 UNAVAILABLE = "UNAVAILABLE"
 APP = "github-actions"
+PERSONA_CLASSES = {"code_reviewer": "code", "decision_scout": "plan", "plan_critic": "plan"}
+READY_HEAD_PERSONAS = frozenset({"plan_critic"})
+SOURCES = ("in_session", "actions")
+VERDICT_APP_ROW = "gates.verdict_app.app_id"
+_ROW_ID = re.compile(r"^gates\.([A-Za-z0-9_]+)\.verdict_source$")
 
 
 @dataclass(frozen=True)
@@ -45,7 +60,19 @@ def _state(run: Mapping[str, object]) -> str | None:
     return f"concluded {run.get('conclusion') or 'with no conclusion'}"
 
 
-def verdict(required: Iterable[str] | None, runs: Iterable[Mapping[str, object]], total_count: int | None) -> Verdict:
+def _app_id(run: Mapping[str, object]) -> int | None:
+    app = run.get("app")
+    ident = app.get("id") if isinstance(app, Mapping) else None
+    return ident if isinstance(ident, int) and not isinstance(ident, bool) else None
+
+
+def verdict(
+    required: Iterable[str] | None,
+    runs: Iterable[Mapping[str, object]],
+    total_count: int | None,
+    *,
+    pins: Mapping[str, int | None] | None = None,
+) -> Verdict:
     names = sorted(set(required)) if required is not None else []
     if not names:
         return Verdict(UNAVAILABLE, ("no required status checks were found for main",))
@@ -54,11 +81,111 @@ def verdict(required: Iterable[str] | None, runs: Iterable[Mapping[str, object]]
         return Verdict(UNAVAILABLE, (f"partial check-run read ({len(listed)} of {total_count})",))
     reasons: list[str] = []
     for name in names:
-        mine = [r for r in listed if r.get("name") == name and _slug(r) == APP]
-        if not mine:
-            reasons.append(f"{name} has no {APP} run")
-            continue
+        if pins is not None and name in pins:
+            pin = pins[name]
+            if pin is None:
+                reasons.append(f"{name} has no verdict App: {VERDICT_APP_ROW} is empty on origin/main")
+                continue
+            mine = [r for r in listed if r.get("name") == name and _app_id(r) == pin]
+            if not mine:
+                reasons.append(f"{name} has no run by the verdict App (app id {pin})")
+                continue
+        else:
+            mine = [r for r in listed if r.get("name") == name and _slug(r) == APP]
+            if not mine:
+                reasons.append(f"{name} has no {APP} run")
+                continue
         problem = _state(max(mine, key=_newest_key))
         if problem is not None:
             reasons.append(f"{name} {problem}")
     return Verdict(REFUSE, tuple(reasons)) if reasons else Verdict(CLEAR)
+
+
+def persona_check_name(persona: str) -> str:
+    return f"persona-verdict/{persona}"
+
+
+def verdict_sources(config_text: str) -> dict[str, str] | str:
+    """Persona -> in_session or actions from a project-configuration.yaml text, or a reason string when unreadable."""
+    try:
+        data = yaml.safe_load(config_text)
+    except yaml.YAMLError as exc:
+        return "the configuration does not parse: " + (str(exc).splitlines() or ["unreadable"])[0]
+    settings = data.get("settings") if isinstance(data, dict) else None
+    if not isinstance(settings, list):
+        return "the configuration has no settings list"
+    rows: dict[str, list[object]] = {}
+    for row in settings:
+        match = _ROW_ID.match(str(row.get("id"))) if isinstance(row, dict) else None
+        if match and isinstance(row, dict):
+            rows.setdefault(match.group(1), []).append(row.get("defaults"))
+    if not rows:
+        return dict.fromkeys(PERSONA_CLASSES, "in_session")
+    for persona in sorted(rows):
+        if persona not in PERSONA_CLASSES:
+            return f"gates.{persona}.verdict_source names no verdict persona"
+        if len(rows[persona]) > 1:
+            return f"gates.{persona}.verdict_source appears more than once"
+    for persona in sorted(PERSONA_CLASSES):
+        if persona not in rows:
+            return f"gates.{persona}.verdict_source has no row"
+    found: dict[str, str] = {}
+    for persona, (defaults,) in sorted(rows.items()):
+        local = defaults.get("local") if isinstance(defaults, dict) else None
+        cloud = defaults.get("cloud") if isinstance(defaults, dict) else None
+        if local not in SOURCES or cloud not in SOURCES:
+            return f"gates.{persona}.verdict_source defaults are not in_session or actions"
+        if local != cloud:
+            return f"gates.{persona}.verdict_source defaults.local differs from defaults.cloud"
+        found[persona] = str(local)
+    return found
+
+
+def pr_class(changed: Iterable[str] | None) -> str:
+    return "plan" if push_scope.confined_to_plans(set(changed) if changed else None) else "code"
+
+
+def persona_checks(sources: Mapping[str, str], klass: str) -> list[str]:
+    return sorted(persona_check_name(p) for p, v in sources.items() if v == "actions" and PERSONA_CLASSES.get(p) == klass)
+
+
+def switch_backs(base_sources: Mapping[str, str], head_sources: Mapping[str, str]) -> list[str]:
+    return sorted(p for p, v in base_sources.items() if v == "actions" and head_sources.get(p) == "in_session")
+
+
+def _positive_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def verdict_app_id(config_text: str) -> int | None | str:
+    """The gates.verdict_app.app_id row's id (a positive int), None (no row or null), or a reason string."""
+    try:
+        data = yaml.safe_load(config_text)
+    except yaml.YAMLError as exc:
+        return "the configuration does not parse: " + (str(exc).splitlines() or ["unreadable"])[0]
+    settings = data.get("settings") if isinstance(data, dict) else None
+    if not isinstance(settings, list):
+        return "the configuration has no settings list"
+    rows = [r.get("defaults") for r in settings if isinstance(r, dict) and r.get("id") == VERDICT_APP_ROW]
+    if not rows:
+        return None
+    if len(rows) > 1:
+        return f"{VERDICT_APP_ROW} appears more than once"
+    defaults = rows[0] if isinstance(rows[0], dict) else {}
+    local, cloud = defaults.get("local"), defaults.get("cloud")
+    if local != cloud or type(local) is not type(cloud):
+        return f"{VERDICT_APP_ROW} defaults.local differs from defaults.cloud"
+    if local is None:
+        return None
+    if not _positive_int(local):
+        return f"{VERDICT_APP_ROW} is not a positive integer or null"
+    return int(local)
+
+
+def app_id_changed(base: int | None, head: int | None) -> bool:
+    return base != head
+
+
+def persona_pins(names: Iterable[str], app: int | None) -> dict[str, int | None]:
+    persona_names = {persona_check_name(p) for p in PERSONA_CLASSES}
+    return {n: app for n in names if n in persona_names}

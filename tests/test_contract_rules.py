@@ -25,6 +25,28 @@ from scripts.contract_rules import (
 )
 
 _D = "2026-05-01"
+_PROV_V1 = {
+    "required": {
+        "schema_version": "integer",
+        "client": "string",
+        "client_commit": "string",
+        "client_dirty": "boolean",
+        "ruleset_version": "string",
+        "checks": {"map": {"key_pattern": "^[a-z][a-z0-9_]{0,63}$", "values": ["pass", "fail", "advisory", "skipped"]}},
+    },
+    "optional": {
+        **dict.fromkeys(
+            ("file_exists_at_commit", "complexity_fallback", "effort_fallback", "coverage_present", "ceiling_fallback"),
+            "boolean",
+        ),
+        "boundary_match": "boolean",
+        "empty_file_fallback": "boolean",
+        "risk_formula_version": "string",
+        **dict.fromkeys(("complexity_max", "effort_scale", "risk_raw", "maturity_ceiling"), "number"),
+        "coverage_line_rate": "number?",
+    },
+}
+_PROV_LEG = {"max_bytes": 4096, "versions": {1: _PROV_V1}}
 _ALLOWED = frozenset({"not_null", "accepted_values", "min_length", "write_time_exemptions"})
 
 
@@ -51,7 +73,11 @@ def test_ops_recommendations_declares_its_rule_list() -> None:
             "not_null": ({}, None),
             "pattern": ({"value": "^(rec-[0-9]+|agent-[0-9]+|test-[a-z0-9-]+)$"}, None),
         },
-        "title": {"not_null": ({}, None), "min_length": ({"value": 10}, "2026-09-01"), "glossary_lint": ({}, None)},
+        "title": {
+            "not_null": ({}, None),
+            "min_length": ({"value": 10}, "2026-09-01"),
+            "glossary_lint": ({"advisory": True}, None),
+        },
         "source": {"not_null": ({}, _D), "accepted_values": ({"values": registry}, None)},
         "effort": {"not_null": ({}, _D), "accepted_values": ({"values": ["XS", "S", "M", "L", "XL"]}, _D)},
         "priority": {"not_null": ({}, _D), "accepted_values": ({"values": ["Critical", "High", "Medium", "Low"]}, _D)},
@@ -69,13 +95,13 @@ def test_ops_recommendations_declares_its_rule_list() -> None:
                 _D,
             ),
         },
-        "context": {"not_null": ({}, _D), "min_length": ({"value": 80}, _D), "glossary_lint": ({}, None)},
+        "context": {"not_null": ({}, _D), "min_length": ({"value": 80}, _D), "glossary_lint": ({"advisory": True}, None)},
         "acceptance": {
             "not_null": ({}, _D),
             "min_length": ({"value": 1}, _D),
             "acceptance_lint": ({"require_discrimination": True}, None),
         },
-        "verification": {"glossary_lint": ({}, None)},
+        "verification": {"glossary_lint": ({"advisory": True}, None)},
         "dependencies": {
             "array_element_format": ({"pattern": "^rec-[0-9]+$"}, None),
             "array_element_reference": ({}, None),
@@ -83,6 +109,7 @@ def test_ops_recommendations_declares_its_rule_list() -> None:
         "tags": {"array_element_format": ({"pattern": "^[a-z][a-z0-9-]*$"}, "2026-09-08")},
         "created_timestamp": {"not_null": ({}, None)},
         "last_updated_timestamp": {"not_null": ({}, None), "not_before": ({"value": "created_timestamp"}, None)},
+        "provenance_json": {"json_object": (_PROV_LEG, "2026-11-17")},
     }
     actual = {col: {kind: _shape(rule) for kind, rule in kinds.items()} for col, kinds in cols.items()}
     assert actual == expected
@@ -90,13 +117,8 @@ def test_ops_recommendations_declares_its_rule_list() -> None:
     for column in ("title", "context", "verification"):
         assert cols[column]["glossary_lint"].exemption["class"] == "repository_state"
         assert cols[column]["glossary_lint"].exemption["owner"] == "scripts/ops_portal/write_validators.py"
-    assert cols["dependencies"]["array_element_reference"].exemption["class"] == "cross_row"
-    assert cols["dependencies"]["array_element_reference"].exemption["owner"] == "rec-4166"
     assert all(
-        r.exemption is None
-        for c in cols.values()
-        for k, r in c.items()
-        if k not in ("acceptance_lint", "array_element_reference", "glossary_lint")
+        r.exemption is None for c in cols.values() for k, r in c.items() if k not in ("acceptance_lint", "glossary_lint")
     )
 
 
@@ -289,3 +311,9 @@ def test_not_null_presence_and_legacy_spelling_read_alike(tmp_path: Path) -> Non
     )
     (rule,) = declared_rules("fx", contracts_dir=tmp_path, repo_root=tmp_path)
     assert dict(rule.params) == {"values": ["a"]}
+
+
+def test_dependencies_reference_leg_is_not_exempt() -> None:
+    leg = declared_rules("ops_recommendations")
+    reference = [r for r in leg if (r.column, r.kind) == ("dependencies", "array_element_reference")]
+    assert len(reference) == 1 and reference[0].exemption is None

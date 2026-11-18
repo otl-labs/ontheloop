@@ -316,8 +316,7 @@ def _locked_pass(
     if detach_below is not None and budget.remaining() < detach_below:
         return _finish(state, record, "short_budget", diag)
     if not _rows(result, record):
-        kept = (loaded.catalog, loaded.reset_at)
-        _persist_and_hook(state, record, result.next_cursor, root, loaded, diag, (event, final, "no_rows"), kept)
+        _persist_no_rows(state, record, result.next_cursor, root, loaded, diag, (event, final, "no_rows"))
         return _finish(state, record, "no_rows", diag)
     conflict = "grain_conflict_after_cursor_loss" if loaded.status in (LOST, TAIL_MISMATCH) else "grain_conflict"
     sender: _Sender | None = None
@@ -338,6 +337,7 @@ def _locked_pass(
         return _producer_halt(state, record, exc, diag)
     except CaptureUnavailable as exc:
         diag[exc.reason] += 1
+        record["stop_token"] = exc.reason
         return _finish(state, record, "stopped", diag)
     except _Stop as stop:
         return _stopped(state, record, stop, sender, diag)
@@ -349,6 +349,8 @@ def _locked_pass(
 
 def _stopped(state: CaptureState, record: dict[str, Any], stop: _Stop, sender: _Sender | None, diag: Counter) -> PassResult:
     diag[stop.reason] += 1
+    if stop.outcome == "stopped":
+        record["stop_token"] = stop.reason
     if sender is not None:
         record["requests"] = sender.requests
     if stop.halt is not None:
@@ -383,6 +385,20 @@ def _producer_halt(state: CaptureState, record: dict[str, Any], exc: CursorError
     state.write_halt(halt)
     record["halt"] = halt
     return _finish(state, record, "halted", diag)
+
+
+def _persist_no_rows(
+    state: CaptureState,
+    record: dict[str, Any],
+    cursor: Any,
+    root: bytes,
+    loaded: Loaded,
+    diag: Counter,
+    pass_kind: tuple[Any, ...],
+) -> None:
+    """A lost cursor persists nothing on a no-rows pass, so DEFAULT_CATALOG is never recorded for rows never sent."""
+    if loaded.status != LOST:
+        _persist_and_hook(state, record, cursor, root, loaded, diag, pass_kind, (loaded.catalog, loaded.reset_at))
 
 
 def _persist_and_hook(

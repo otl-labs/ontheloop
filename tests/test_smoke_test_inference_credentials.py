@@ -127,10 +127,16 @@ class TestRun:
         assert "boom" in capsys.readouterr().err
         monkeypatch.delenv(_row("primary")["variable"], raising=False)
 
-    def test_missing_row(self) -> None:
+    def test_missing_row(self, capsys: pytest.CaptureFixture[str]) -> None:
         with patch.object(smoke.tier_selection, "load", return_value=({}, {"settings": []})):
-            with pytest.raises(tier_selection.TierSelectionError):
-                smoke.run("primary")
+            assert smoke.run("primary") == 1
+        assert "contract load raised TierSelectionError" in capsys.readouterr().err
+
+    def test_contract_load_error_returns_one(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with patch.object(smoke.tier_selection, "load", side_effect=FileNotFoundError("no contracts")):
+            assert smoke.run("primary") == 1
+        err = capsys.readouterr().err
+        assert "FAIL [primary] contract load raised FileNotFoundError: no contracts" in err
 
 
 class TestMain:

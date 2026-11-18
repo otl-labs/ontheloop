@@ -16,7 +16,7 @@ from typing import Any
 
 from scripts import contract_rules
 from scripts.checks.contracts._rule_grammar import CONTENT_THRESHOLD, table_class_of
-from src.row_rules.rules import EXEMPTABLE_LEGS
+from src.row_rules.rules import EXEMPTABLE_LEGS, WRITER_SHAPE_KINDS
 
 FIELD_SEMANTICS_REL = "config/lambda/ducklake/field_semantics.yaml"
 REGISTRY_REL = "config/agent/data_quality/source_registry.yaml"
@@ -104,9 +104,23 @@ def _marked_temporary(base: TableView, column: str, kind: str) -> bool:
     return any((base.exemptions.get((column, k)) or {}).get("class") == "temporary" for k in keys)
 
 
+def _without_advisory(params: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in params.items() if k != "advisory"}
+
+
+def _advisory_errors(
+    where: str, b: contract_rules.DeclaredRule, h: contract_rules.DeclaredRule, entries: list[dict[str, Any]]
+) -> list[str]:
+    was, now = bool(dict(b.params).get("advisory")), bool(dict(h.params).get("advisory"))
+    if was == now or _break_entry(entries):
+        return []
+    verb = "added" if now else "removed"
+    return [f"ratchet: {where} advisory {verb} without a semantic-break entry"]
+
+
 def _params_narrowed(kind: str, base_params: dict[str, Any], head_params: dict[str, Any]) -> tuple[bool, set[Any]]:
     if kind != "accepted_values":
-        return base_params != head_params, set()
+        return _without_advisory(base_params) != _without_advisory(head_params), set()
     removed = set(base_params.get("values") or []) - set(head_params.get("values") or [])
     rest_b = {k: v for k, v in base_params.items() if k != "values"}
     rest_h = {k: v for k, v in head_params.items() if k != "values"}
@@ -126,6 +140,28 @@ def _date_errors(where: str, b: str | None, h: str | None, entries: list[dict[st
     return []
 
 
+def _shape_errors(where: str, b: contract_rules.DeclaredRule, h: contract_rules.DeclaredRule) -> list[str]:
+    """A json_object leg is checked by the writer alone (the census compiles nothing for it), so no census token backs a
+    change: only an added version or a larger cap is free."""
+    if b.exclude_before is not None and h.exclude_before is not None and h.exclude_before < b.exclude_before:
+        return [f"ratchet: {where} exclude_before moved earlier; the census cannot check a JSON leg, so no entry backs it"]
+    errors = _date_errors(where, b.exclude_before, h.exclude_before, [])
+    old, new = _without_advisory(dict(b.params)), _without_advisory(dict(h.params))
+    versions_new = new.get("versions") or {}
+    kept = all(v in versions_new and versions_new[v] == shape for v, shape in (old.get("versions") or {}).items())
+    cap_ok = (
+        isinstance(old.get("max_bytes"), int)
+        and isinstance(new.get("max_bytes"), int)
+        and new["max_bytes"] >= old["max_bytes"]
+    )
+    if not (kept and cap_ok):
+        errors.append(
+            f"ratchet: {where} params changed beyond an added version or a larger cap; the census cannot check a JSON leg, "
+            "so use a new schema_version, or a temporary exemption, the drop, then a new dated leg"
+        )
+    return errors
+
+
 def _leg_errors(table: str, key: tuple[str, str], base: TableView, head: TableView) -> list[str]:
     column, kind = key
     where = f"{table}.{column}.{kind}"
@@ -136,8 +172,11 @@ def _leg_errors(table: str, key: tuple[str, str], base: TableView, head: TableVi
             f"ratchet: {where} was removed; a removal needs a prior temporary exemption (mark-then-drop, Decision 210 cl.4)"
         ]
     b, h = base.rules[key], head.rules[key]
+    if kind in WRITER_SHAPE_KINDS:
+        return _shape_errors(where, b, h)
     entries = _gained(base, head, column)
     errors = _date_errors(where, b.exclude_before, h.exclude_before, entries)
+    errors.extend(_advisory_errors(where, b, h, entries))
     sourced = column in head.registry_sourced and kind == "accepted_values"
     narrowed, removed = (False, set()) if sourced else _params_narrowed(kind, dict(b.params), dict(h.params))
     if removed and not _narrow_value_entry(entries, removed):
@@ -205,7 +244,8 @@ def _rearmed(table: str, base: TableView, head: TableView) -> list[str]:
     for (column, kind), prior in base.exemptions.items():
         if (column, kind) in head.exemptions or prior.get("class") != "temporary" or head.table_class != "scd2":
             continue
-        if _leg_stays_undated(head, column, kind) and not _census_entry(_gained(base, head, column)):
+        shape = kind in WRITER_SHAPE_KINDS
+        if _leg_stays_undated(head, column, kind) and (shape or not _census_entry(_gained(base, head, column))):
             errors.append(
                 f"ratchet: {table}.{column}.{kind} temporary exemption removed from an undated rule that stays; it re-arms "
                 "against every older row, so it needs a semantic-break entry carrying `census: 0 violators (<date>)`"

@@ -29,6 +29,7 @@ from .conftest import GitRunnerStub, _FakeDeployRecordsS3, _RecordingS3
 _ALL_PROD_FUNCTIONS = {
     "agent-platform-scheduled-agent-dispatcher",
     "agent-platform-findings-processor",
+    "agent-platform-workflow-dispatcher",
 }
 
 
@@ -175,6 +176,7 @@ class TestDetectProdCodeDrift:
 
         assert "src/data/handlers" in PROD_SOURCE_PATHSPECS
         assert "config/lambda/data-pipeline" in PROD_SOURCE_PATHSPECS
+        assert "config/lambda/scheduled_workflow_dispatcher" in PROD_SOURCE_PATHSPECS
 
     def test_rec_fields_shape_on_file(self) -> None:
         captured: dict[str, Any] = {}

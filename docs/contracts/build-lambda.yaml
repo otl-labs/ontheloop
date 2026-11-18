@@ -19,6 +19,34 @@ contract:
     check: validate_deploy_channel_conformance
 
 amendment_log:
+  - date: "2026-11-17"
+    semantic_break: false
+    change_class: field_add
+    summary: >-
+      PLAN-telemetry-content-deploy-channel (Decision 272): deploy_channels gains telemetry_content_function (operator_gated, governed channel deploy-telemetry-content.yml) and cli_flags gains --content-reader-only.
+    migration_story: >-
+      scripts/build_lambda.py can build only the content reader zip with no AWS profile; the function deploys only through the gated channel.
+  - date: "2026-11-17"
+    semantic_break: false
+    change_class: field_add
+    summary: >-
+      PLAN-deploy-event-record (rec-5269): deploy_record.shape gains schema_version, run_id, run_attempt, trigger and
+      workflow; the new deploy_record.history declares each record's version list (current and noncurrent) as the
+      append-only deploy history and names the test that keeps lifecycle rules off deploy-records/.
+    migration_story: >-
+      scripts/build_lambda_deploy.py writes the five keys beside the four it wrote; existing readers ignore them, and
+      records written before the change stay readable as version 1.
+  - date: "2026-11-17"
+    semantic_break: false
+    change_class: field_add
+    summary: >-
+      PLAN-scheduled-workflow-dispatch (rec-4233) PR 4: deploy_targets.prod_functions gains
+      agent-platform-workflow-dispatcher, the third prod-class function (data-pipeline.zip); deploy_channels.prod_functions.root
+      names scheduled_workflow_dispatch.tf beside prod_lambdas.tf.
+    migration_story: >-
+      deploy-prod-lambdas.yml deploys the zip to the third function, asserts its deploy-record freshness and smoke-invokes it
+      (status=smoke and the three schedules). scripts/build_lambda_config.py's fallback list, the code-drift sensor's
+      _PROD_FUNCTION_NAMES and the data-pipeline manifest carry the same entry.
   - date: "2026-11-07"
     semantic_break: false
     change_class: governance_note_add
@@ -138,6 +166,7 @@ deploy_targets:
   prod_functions:  # each deploys data-pipeline.zip
     - agent-platform-scheduled-agent-dispatcher
     - agent-platform-findings-processor
+    - agent-platform-workflow-dispatcher
   ducklake_function_zip_keys:
     agent-platform-ducklake-writer: lambda-packages/ducklake-writer.zip
     agent-platform-ducklake-reader: lambda-packages/ducklake-reader.zip
@@ -162,6 +191,11 @@ deploy_record:
     code_sha256: "str -- CodeSha256 from the update-function-code response"
     source_git_sha: "str | null -- LAMBDA_ARTIFACT_SHA (the commit the deploy gate chose), else GITHUB_SHA, at deploy time; null for a break-glass local deploy (neither set)"
     deployed_at: "str -- ISO8601 UTC timestamp of the deploy"
+    schema_version: "int -- 2 for a record carrying the four keys below; a record without it is version 1 (the four keys above only)"
+    run_id: "str | null -- GITHUB_RUN_ID of the deploying workflow run; null for a break-glass local deploy"
+    run_attempt: "str | null -- GITHUB_RUN_ATTEMPT of that run; null for a break-glass local deploy"
+    trigger: "str -- GITHUB_EVENT_NAME of that run (e.g. workflow_run, workflow_dispatch); break_glass when unset"
+    workflow: "str | null -- GITHUB_WORKFLOW of that run; null for a break-glass local deploy"
   freshness_semantics: >-
     Freshness is REACHABILITY against the newest green commit (Decision 249): the sensor's target is the newest main
     commit whose full tier passed and whose CI run settled 45 minutes ago (scripts.ci.deploy_gate.newest_green_sha). A
@@ -175,6 +209,26 @@ deploy_record:
     --deploy run outside CI with neither LAMBDA_ARTIFACT_SHA nor GITHUB_SHA set) is deliberately treated as STALE, never
     fresh -- fail closed on uncertainty. write_deploy_record never fabricates a sha: it records LAMBDA_ARTIFACT_SHA, then
     GITHUB_SHA (Decision 249; under workflow_run GITHUB_SHA is main HEAD and cannot be overridden), else null.
+  history: >-
+    The data_lake bucket's versioning (terraform/personal/main.tf aws_s3_bucket_versioning.data_lake, Enabled) keeps
+    every overwritten record as a noncurrent version, so a record's version list is the append-only deploy history,
+    keyed by channel and function in the record's key (deploy-records/<channel>/<function>.json): one version per write,
+    and the governed channels write one per successful function deploy (grain: function x deploy; a failed update writes
+    no record and stays in its run's log). Other principals that can write the bucket could add a version, so the run
+    facts are self-asserted: a schema_version 2 version a governed run writes names that run (run_id, run_attempt,
+    workflow), which a reader confirms against the Actions run before trusting the version, and a break-glass version
+    carries trigger break_glass and null run facts. Versions written before schema_version 2 carry only the four
+    original keys; on 2026-11-17 the earliest surviving version was dated 2026-07-13. Append-only holds while no
+    lifecycle rule expires noncurrent versions under deploy-records/ and no principal deletes object versions there (no
+    IAM deny enforces the second yet); no lifecycle rule may expire them
+    (tests/checks/iam_tf/test_ducklake_maintenance_tf_invariants.py::TestDataLakeLifecycleGoverned::test_no_rule_reclaims_deploy_record_history).
+    Consumer: the fix-proof effective day of the fix-attempt stamp (rec-5078), the earliest version per function whose
+    source_git_sha has the fix commit as an ancestor; source_git_sha is evidence of what shipped, never the last-green
+    authority (Decision 254 cl.2). Readers list versions with a role that can list them: the deploy role is
+    PutObject-only on deploy-records/ and agent sessions have no S3 read (Decision 256), so no named verb serves the
+    history until a journal load copies it (rec-5077 designs that journal's writer). The history is per account: when
+    SIT stands, the effective day re-keys to the SIT deploy (Decision 252 cl.6, Decision 254 sit-stood-up; rec-5028,
+    rec-5033), and replicating deploy-records/ into SIT is out of scope here.
 
 # Flag DEFAULTS (--profile: $AWS_PROFILE else agent_platform via scripts.aws_profile.resolve_aws_profile; --region=eu-west-2) are OUT of registry scope.
 # The equivalence test compares flag-name sets only.
@@ -189,6 +243,7 @@ cli_flags:
   - --ducklake-functions
   - --ducklake-deploy-only
   - --ducklake-publish-canary-layers
+  - --content-reader-only
 
 verified_against:
   - "scripts/build_lambda.py (LAMBDA_SIZE_LIMIT_BYTES, _LAMBDA_FUNCTION_NAMES, _DUCKLAKE_FUNCTION_ZIP_KEYS, DUCKLAKE_LAYER_NAMES, build_parser() flags)"
@@ -205,8 +260,13 @@ deploy_channels:
     governed_channel: .github/workflows/deploy-ducklake-lambdas.yml  # Decision 236 nine-job topology (supersedes the T2.38 five-job split): the DEFAULT channel -- wakes on each completed CI push run on main and deploys the newest main commit whose full tier passed (Decision 249; .github/workflows/deploy-gate.yml, scripts/ci/deploy_gate.py; watched paths = scripts.convergence_health *_SOURCE_PATHSPECS), or workflow_dispatch (same target, force redeploys it); the workflow files and `deploy_gate resolve` run at main HEAD, `deploy_gate freshness` and the build at the gate sha; assumes the merged agent-platform-github-ci-deploy role (T2.49 / DEP-12, UpdateFunctionCode-only on function:agent-platform-*). deploy-maintenance builds+uploads ALL artifacts once and deploys maintenance + maintenance-smoke (ungated) -> maintenance-smoke + reconcile-gate (the latter invoking validate_reconcile_pending_gate --deploy-gate, refusing the serving and telemetry legs while any reconcile_scope=ducklake table has a non-empty pending_reconcile) -> deploy-serving (--ducklake-deploy-only for writer, reader and catalog-dr) -> smoke (--lambda-attach/--lambda-reader); deploy-telemetry-twin (the smoke-pinned telemetry writer twin, ungated) -> telemetry-twin-smoke (--lambda-telemetry-smoke, after maintenance-smoke and deploy-serving) -> deploy-telemetry (telemetry-writer and telemetry-reader, success-only behind reconcile-gate and telemetry-twin-smoke, and skipped while a reconcile_scope=telemetry_catalog table has a pending column (validate_reconcile_pending_gate --telemetry-hold)) -> telemetry-smoke (--lambda-telemetry-production, the production writer's light gate, then --lambda-telemetry-reader)
     break_glass_only: "bin/venv-python -m scripts.build_lambda --ducklake-only --deploy"  # genuinely NON-DEFAULT now that governed_channel exists (T2.38) -- retained as a fallback for when the governed channel cannot run (mirrors the agent_platform_admin human-gated IAM-apply precedent), not the routine agent path
   prod_functions:  # data-pipeline.zip targets above
-    root: terraform/personal  # T2.43: provisioned in terraform/personal/prod_lambdas.tf
+    root: terraform/personal  # T2.43: provisioned in terraform/personal/prod_lambdas.tf and scheduled_workflow_dispatch.tf
     channel_class: decoupled_build_pipeline
     see: src/data/handlers/CLAUDE.md
     governed_channel: .github/workflows/deploy-prod-lambdas.yml  # T2.43: the DEFAULT channel -- wakes on each completed CI push run on main and deploys the newest main commit whose full tier passed (Decision 249; .github/workflows/deploy-gate.yml, scripts/ci/deploy_gate.py; watched paths = scripts.convergence_health *_SOURCE_PATHSPECS), or workflow_dispatch (same target, force redeploys it); the workflow files and `deploy_gate resolve` run at main HEAD, `deploy_gate freshness` and the build at the gate sha; assumes the merged agent-platform-github-ci-deploy role (T2.49 / DEP-12, UpdateFunctionCode-only on function:agent-platform-*, shared with deploy-ducklake-lambdas.yml), runs build_lambda --deploy, gates on a per-function smoke invocation
     break_glass_only: "bin/venv-python -m scripts.build_lambda --deploy"  # genuinely NON-DEFAULT now that governed_channel exists (T2.43) -- retained as a fallback for when the governed channel cannot run (mirrors the agent_platform_admin human-gated IAM-apply precedent), not the routine agent path
+  telemetry_content_function:  # lambda-packages/ducklake-telemetry-content-reader.zip, built by --content-reader-only
+    root: terraform/bootstrap  # the function, its roles and the route; code, layers, handler and environment are the gated job's (Decision 239 cl.5)
+    channel_class: operator_gated
+    see: docs/contracts/ducklake_telemetry_content_reader.yaml
+    governed_channel: .github/workflows/deploy-telemetry-content.yml  # Decision 272: wakes like the sibling channels (Decision 249) but deploys only when the reader's protective set changed (scripts.convergence_health.code_drift.TELEMETRY_CONTENT_SOURCE_PATHSPECS) or on dispatch; a credential-free build job, a deploy job held in the telemetry-content-deploy Environment that deploys exactly the built digest with the pins in deploy_config.json and reads back the live CodeSha256 and configuration, then a record job under agent-platform-github-ci-deploy. No break_glass_only: the operator's admin tier is the fallback (Decision 125 cl.3's command is refused by Decision 270 cl.3).

@@ -4,7 +4,7 @@ Every distinct Claude-Session trailer on a first-parent squash commit merged to 
 resolve to a captured root session (set inclusion on harness_session_key). A merged session that never reached the
 warehouse is red; a source that cannot be read is unreadable (red, never a pass); an empty denominator is skipped, never
 green. The SLA is read from the data-modeling standard's arrival_expectations declaration, never restated here. Output
-is counts and commit shas only (Decision 101). Imports only the standard library, yaml, read_route and completeness.
+is counts and commit shas only (Decision 101). Imports only the standard library and yaml.
 
 Author-date rule (rec-5084, Decision 235): when a pull request's creation misses every lost window, an uncaptured key
 still counts lost_window if the earliest commit that PR lists with that key's own trailer was authored inside a window
@@ -29,8 +29,6 @@ from typing import Any
 
 import yaml
 
-from scripts.telemetry_verify import completeness
-
 MODULE = "scripts/telemetry_verify/session_presence.py"
 STANDARD = "docs/contracts/data-modeling-standard.yaml"
 CONFIG = "config/telemetry/arrival.yaml"
@@ -48,6 +46,18 @@ _LOST_OWNER = re.compile(r"^(rec-[0-9]{4,}|Decision [0-9]+)$")
 _EXCUSED_OWNER = re.compile(r"^rec-[0-9]{4,}$")
 _SEP = "\x1f"
 _END = "\x1e"
+_PREFIXES = ("session_", "cse_")
+
+
+def normalise_key(value: Any) -> str | None:
+    """The harness session key without its session_ or cse_ prefix; None when nothing remains."""
+    if not isinstance(value, str):
+        return None
+    for prefix in _PREFIXES:
+        if value.startswith(prefix):
+            value = value[len(prefix) :]
+            break
+    return value or None
 
 
 class Unreadable(Exception):
@@ -138,7 +148,7 @@ def check_config(config: Any) -> list[tuple[datetime | None, datetime, str]]:
 
 
 def _keys_in(text: str) -> list[str]:
-    keys = (completeness.normalise_key(url.rstrip("/").rsplit("/", 1)[-1]) for url in _TRAILER.findall(text))
+    keys = (normalise_key(url.rstrip("/").rsplit("/", 1)[-1]) for url in _TRAILER.findall(text))
     return [k for k in keys if k]
 
 
@@ -196,7 +206,7 @@ def _walk(
                 if attempt:
                     raise Unreadable(type(exc).__name__) from exc
         r.windows_read += 1
-        found = {completeness.normalise_key(row.get("harness_session_key")) for row in rows}
+        found = {normalise_key(row.get("harness_session_key")) for row in rows}
         remaining -= found
         day_to = day_from - timedelta(days=1)
 
@@ -240,7 +250,7 @@ def _judge(
     remaining = set(first)
     _walk(roots_for, remaining, max(c.committed_at for c in first.values()).date(), config, r)
     r.captured = r.judged - len(remaining)
-    excused = {completeness.normalise_key(str(row["key"])) for row in config.get("excused_sessions") or []}
+    excused = {normalise_key(str(row["key"])) for row in config.get("excused_sessions") or []}
     for key in sorted(remaining, key=lambda k: first[k].committed_at):
         commit = first[key]
         if key in excused:
@@ -357,7 +367,7 @@ def _own_author_date(item: Any, key: str) -> datetime | None:
 
 
 def github_pr_key_authored_at(repo: str, number: int, key: str) -> datetime | None:
-    wanted, seen, dates = completeness.normalise_key(key), 0, []
+    wanted, seen, dates = normalise_key(key), 0, []
     if not wanted:
         return None
     for page in range(1, _COMMIT_PAGES + 1):

@@ -334,10 +334,20 @@ def test_default_list_storage_handles_a_page_with_no_contents():
 
 def test_rewrite_calls_per_table():
     con = FakeCon()
-    rewrite(con, ["t1"])
+    rewrite(con, ["t1"], delete_threshold=0.0)
     stmts = " ".join(con.executed)
     assert "ducklake_rewrite_data_files" in stmts
     assert "t1" in stmts
+
+
+def test_rewrite_requires_explicit_delete_threshold():
+    con = FakeCon(fetchall_map={"'t1'": [("main", "t1", 3, 1)]})
+    with pytest.raises(TypeError):
+        rewrite(con, ["t1"])  # type: ignore[call-arg]
+    assert con.executed == []
+    processed = rewrite(con, ["t1", "t2"], delete_threshold=0.0)
+    assert any("delete_threshold=0.0" in s for s in con.executed)
+    assert processed == 3
 
 
 # ---------------------------------------------------------------------------

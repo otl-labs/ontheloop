@@ -6,6 +6,7 @@ ARN or account id appears here, and no output may carry an ARN or a twelve-digit
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import re
 from pathlib import Path
@@ -16,6 +17,7 @@ import pytest
 from scripts.ci import terraform_bootstrap_apply_classify as cls
 from scripts.ci import terraform_bootstrap_apply_gate as gate
 from scripts.ci import terraform_bootstrap_apply_screen as screen
+from tests.fixtures.bootstrap_analyzer import pass_analyzer
 
 ROOT = Path(__file__).resolve().parents[1]
 ACCT = "123456789012"
@@ -96,6 +98,16 @@ def test_new_boundary_role_is_ci_writable() -> None:
 )
 def test_roles_outside_the_agent_prefix_or_session_are_protected(name: str) -> None:
     assert "name" in reasons(plan(role_row(name)))
+
+
+@pytest.mark.parametrize("name", ["telemetry-content-reader", "telemetry-content-deploy"])
+def test_telemetry_content_roles_are_cloudshell_required_by_their_protected_pattern(name: str) -> None:
+    matched = {pat for pat in cls.PROTECTED_NAME_PATTERNS if fnmatch.fnmatchcase(f"role/{name}", pat)}
+    assert matched == {"role/telemetry-content-*"}
+    created = plan(role_row(name))
+    assert all(r["protected"] for r in rows_of(created)) and gate.verdict_of(rows_of(created)) == "CLOUDSHELL_REQUIRED"
+    updated = plan(policy_row("aws_iam_role_policy", name, doc(), doc(allow("lambda:UpdateFunctionCode", "*"))))
+    assert gate.verdict_of(rows_of(updated)) == "CLOUDSHELL_REQUIRED"
 
 
 def test_boundary_policy_user_and_alarm_are_protected() -> None:
@@ -297,16 +309,20 @@ def test_two_instances_of_one_for_each_resource_are_one_protected_group() -> Non
     assert "x2" in gate.table(rows, "t")
 
 
+def preview_of(p: dict, event: str = "") -> tuple[int, str, str]:
+    return gate.preview(p, pass_analyzer(rows_of(p)), event)
+
+
 def test_verdicts_and_preview_outputs(tmp_path: Path) -> None:
     out = tmp_path / "gh"
-    assert gate.preview(plan())[0] == 0 and "verdict=NO_CHANGES" in gate.preview(plan())[2]
-    rc, text, gh = gate.preview(plan(role_row()), "push")
+    assert preview_of(plan())[0] == 0 and "verdict=NO_CHANGES" in preview_of(plan())[2]
+    rc, text, gh = preview_of(plan(role_row()), "push")
     assert rc == 0 and "verdict=REVIEWABLE" in gh and "has_changes=true" in gh and "NEW_ROLE" in text
     assert "1 changes; 0 privilege-affecting" in text or "privilege-affecting" in text
     protected = plan(role_row("PlatformAdmin"))
-    rc, text, gh = gate.preview(protected, "push")
+    rc, text, gh = preview_of(protected, "push")
     assert rc == 0 and "::warning::CLOUDSHELL_REQUIRED 1" in text and "has_changes=false" in gh
-    assert gate.preview(protected, "workflow_dispatch")[0] == 1
+    assert preview_of(protected, "workflow_dispatch")[0] == 1
     assert not re.search(r"arn:aws|[0-9]{12}", text) and not out.exists()
 
 

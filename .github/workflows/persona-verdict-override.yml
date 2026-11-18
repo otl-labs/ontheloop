@@ -1,0 +1,104 @@
+name: persona-verdict-override
+
+# The operator's override of a failing plan-PR verdict check (T4.32 c6; PLAN-persona-verdict-override).
+# Dispatched from main for one PR head, one persona check run and the digest of that verdict's blocking finding ids. The
+# render job runs main's code only, refuses anything that does not match the stored verdict record, and lists the ids; the
+# approve job waits on the persona-verdict-override Environment, whose reviewers only the operator holds. Its completion
+# re-runs persona-verdict.yml (workflow_run), which proves the approval from GitHub's records and posts a new check run.
+# Never add id-token or secrets, an LLM step or a persona run: no job here may assume a role or hold a credential.
+# Fail closed: render checks the Environment has reviewers and no admin bypass; approve checks first that this run holds an
+# approved entry for it. Never a required check; waiting, rejected and refused runs are expected states.
+
+run-name: persona-verdict-override ${{ inputs.pr }} ${{ inputs.head_sha }} ${{ inputs.route }} ${{ inputs.check_run_id }} ${{ inputs.ids_digest }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number
+        type: string
+        required: true
+      head_sha:
+        description: The pull request head commit the override covers
+        type: string
+        required: true
+      route:
+        description: The persona route whose check run is overridden
+        type: string
+        required: true
+      check_run_id:
+        description: The failing persona-verdict check run id
+        type: string
+        required: true
+      ids_digest:
+        description: Digest of the blocking finding ids (scripts.personas.override.ids_digest)
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  render:
+    if: (github.event_name != 'workflow_dispatch' || github.actor != 'otl-workflow-dispatcher[bot]') && (github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the persona-verdict-override Environment has reviewers
+        id: reviewers-preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEWER_LOGINS: ${{ vars.TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS }}
+        run: python3 -I scripts/ci/environment_reviewer_preflight.py environment --environment persona-verdict-override --require-no-admin-bypass
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install override dependencies
+        id: install-override-dependencies
+        run: pip install pyyaml -c requirements.txt
+
+      - name: Render the override request
+        id: override-render
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_PR: ${{ inputs.pr }}
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+          INPUT_ROUTE: ${{ inputs.route }}
+          INPUT_CHECK_RUN_ID: ${{ inputs.check_run_id }}
+          INPUT_IDS_DIGEST: ${{ inputs.ids_digest }}
+        run: python3 -I scripts/personas/run.py override-render
+
+  approve:
+    needs: render
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: persona-verdict-override
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the reviewer approval for persona-verdict-override
+        id: approvals-preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEWER_LOGINS: ${{ vars.TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS }}
+        run: python3 -I scripts/ci/environment_reviewer_preflight.py approvals --environment persona-verdict-override
+
+      - name: Approval recorded
+        id: gate-opened
+        run: echo "persona-verdict-override gate opened"

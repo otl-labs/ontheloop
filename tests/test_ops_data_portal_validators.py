@@ -211,14 +211,18 @@ def test_producer_side_rules_follow_the_contract_exemptions(tmp_path: Path, clea
     _write_validators._rec_exists_memo.clear()
 
 
-def _refusal(record: dict[str, Any], **kwargs: Any) -> str:
-    with pytest.raises(ValueError, match="unqualified") as exc:
-        gate_write("ops_recommendations", record, **kwargs)
-    return str(exc.value)
+def _finding(record: dict[str, Any], **kwargs: Any) -> str:
+    unclean = [r for r in gate_write("ops_recommendations", record, **kwargs) if r.outcome == "finding"]
+    assert len(unclean) == 1, unclean
+    return unclean[0].message
 
 
-def test_glossary_lint_refuses_unqualified_title() -> None:
-    message = _refusal({**ops_rec_fields(), "title": "Fix the platform runner for retries"}, insert=True)
+def _clean_findings(record: dict[str, Any], **kwargs: Any) -> list[Any]:
+    return [r for r in gate_write("ops_recommendations", record, **kwargs) if r.outcome in ("finding", "error")]
+
+
+def test_glossary_lint_reports_unqualified_title() -> None:
+    message = _finding({**ops_rec_fields(), "title": "Fix the platform runner for retries"}, insert=True)
     assert message.startswith('title: unqualified "platform" -- say instead: On The Loop, core')
     assert "runner for retries" not in message
     assert "context_v2_json" not in message
@@ -227,29 +231,29 @@ def test_glossary_lint_refuses_unqualified_title() -> None:
 def test_glossary_lint_update_judges_only_new_sentences() -> None:
     stored = reader_rec_row(context="The platform runner stalls. " + "x" * 90)
     kept = {**stored, "context": stored["context"] + " Retry with a bounded delay."}
-    gate_write("ops_recommendations", kept, insert=False, existing=stored)
+    assert _clean_findings(kept, insert=False, existing=stored) == []
     added = {**stored, "context": stored["context"] + " The product hangs too."}
-    assert 'unqualified "product"' in _refusal(added, insert=False, existing=stored)
+    assert 'unqualified "product"' in _finding(added, insert=False, existing=stored)
 
 
-def test_glossary_lint_fails_closed_without_contract(tmp_path: Path) -> None:
+def test_glossary_lint_reports_error_without_contract(tmp_path: Path) -> None:
     _write_validators._load_glossary.cache_clear()
     with patch.object(_write_validators, "_GLOSSARY_PATH", tmp_path / "absent.yaml"):
-        with pytest.raises(ValueError, match="failing closed"):
-            gate_write("ops_recommendations", ops_rec_fields(), insert=True)
+        results = gate_write("ops_recommendations", ops_rec_fields(), insert=True)
+    assert {r.column: r.outcome for r in results if r.kind == "glossary_lint"}["title"] == "error"
     _write_validators._load_glossary.cache_clear()
 
 
 def test_glossary_lint_covers_verification_not_resolution() -> None:
-    assert 'verification: unqualified "platform"' in _refusal(
+    assert 'verification: unqualified "platform"' in _finding(
         {**ops_rec_fields(), "verification": "Check the platform runner."}, insert=True
     )
-    gate_write("ops_recommendations", {**ops_rec_fields(), "resolution": "Fixed the platform runner."}, insert=True)
+    assert _clean_findings({**ops_rec_fields(), "resolution": "Fixed the platform runner."}, insert=True) == []
 
 
 def test_glossary_lint_context_message_names_derivation() -> None:
     long_context = "The platform runner stalls on retry. " * 4
-    assert "context_v2_json" in _refusal({**ops_rec_fields(), "context": long_context}, insert=True)
+    assert "context_v2_json" in _finding({**ops_rec_fields(), "context": long_context}, insert=True)
 
 
 @pytest.mark.parametrize(
@@ -261,7 +265,7 @@ def test_glossary_lint_context_message_names_derivation() -> None:
     ],
 )
 def test_glossary_lint_passes_quotes_identifiers_and_none(column: str, value: str | None) -> None:
-    gate_write("ops_recommendations", {**ops_rec_fields(), column: value}, insert=True)
+    assert _clean_findings({**ops_rec_fields(), column: value}, insert=True) == []
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +439,22 @@ def test_array_element_reference_skips_reader_when_all_elements_memoised():
     _write_validators._rec_exists_memo.clear()
 
 
+def test_reference_precheck_runs_from_writer_leg():
+    """The pre-check is driven by reference_columns (Decision 268), not a producer exemption: no exemption remains."""
+    from src.common.ducklake_write_rules import reference_columns  # noqa: PLC0415
+
+    fields = rt.resolve_table_spec("ops_recommendations").fields
+    assert "dependencies" in reference_columns(fields)
+    assert ("dependencies", "array_element_reference") not in RowRules.from_projection(fields).producer_exemptions
+    _write_validators._rec_exists_memo.clear()
+    reader = MagicMock()
+    reader.named.return_value = []
+    with patch(_REF, return_value=reader):
+        with pytest.raises(ValueError, match="absent"):
+            gate_write("ops_recommendations", _deps(["rec-424242"]), insert=True)
+    _write_validators._rec_exists_memo.clear()
+
+
 # ---------------------------------------------------------------------------
 # The removal ledger: every retired portal check maps to the contract leg that replaces it
 # ---------------------------------------------------------------------------
@@ -449,7 +469,7 @@ def _without_leg(semantics: dict[str, Any], column: str, leg: str) -> dict[str, 
         else:
             field["sql_type"] = "VARCHAR"
         return mutated
-    if leg in ("acceptance_lint", "array_element_reference"):
+    if leg == "acceptance_lint":
         field["write_time_exemptions"].pop(leg)
         return mutated
     field.pop(leg)
@@ -524,3 +544,46 @@ def test_repair_dependency_tokens_dry_run_writes_nothing():
         {"id": "rec-100", "before": ["[rec-1]"], "after": ["rec-1"]},
         {"id": "rec-103", "before": ["[rec-4", "rec-5]"], "after": ["rec-4", "rec-5"]},
     ]
+
+
+_JSON_LEG = {"max_bytes": 64, "versions": {1: {"required": {"schema_version": "integer"}}}}
+
+
+def _with_json_leg(leg_extra: dict | None = None):
+    import dataclasses  # noqa: PLC0415
+    from unittest.mock import patch  # noqa: PLC0415
+
+    import scripts.ops_portal.write_validators as wv  # noqa: PLC0415
+
+    real = rt.resolve_table_spec
+
+    def fake(name: str, *args, **kwargs):
+        spec = real(name, *args, **kwargs)
+        if name != "ops_recommendations":
+            return spec
+        column = {**spec.fields["context_v2_json"], "json_object": _JSON_LEG, **(leg_extra or {})}
+        return dataclasses.replace(spec, fields={**spec.fields, "context_v2_json": column})
+
+    return patch.object(wv, "resolve_table_spec", side_effect=fake)
+
+
+def test_gate_write_insert_refuses_malformed_json_object() -> None:
+    from scripts.ops_portal.write_validators import RowRuleRejected, gate_write  # noqa: PLC0415
+    from tests.fixtures.ducklake_fakes import ops_rec_fields  # noqa: PLC0415
+
+    with _with_json_leg():
+        gate_write("ops_recommendations", {**ops_rec_fields(), "context_v2_json": '{"schema_version": 1}'}, insert=True)
+        with pytest.raises(RowRuleRejected) as raised:
+            gate_write("ops_recommendations", {**ops_rec_fields(), "context_v2_json": "SENTINEL-nope"}, insert=True)
+    assert (raised.value.rule, raised.value.column) == ("json_object", "context_v2_json")
+    assert "JSON object of a declared schema_version within 64 bytes" in str(raised.value)
+    assert "SENTINEL" not in str(raised.value)
+
+
+def test_gate_write_update_leaves_dated_json_object_to_writer() -> None:
+    from scripts.ops_portal.write_validators import gate_write  # noqa: PLC0415
+    from tests.fixtures.ducklake_fakes import ops_rec_fields  # noqa: PLC0415
+
+    dated = {"exclude_before": {"json_object": "2026-12-01"}}
+    with _with_json_leg(dated):
+        gate_write("ops_recommendations", {**ops_rec_fields(), "id": "rec-4001", "context_v2_json": "nope"}, insert=False)

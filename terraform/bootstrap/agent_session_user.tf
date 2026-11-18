@@ -170,11 +170,10 @@ locals {
         Action   = ["s3:ListBucketVersions"]
         Resource = [local.data_lake_bucket_arn]
         Condition = {
-          StringLike = {
+          StringNotLike = {
             "s3:prefix" = [
-              "convergence/personal/*",
-              "tfplan/personal/*",
-              "tfstate/personal/*",
+              "${local.ducklake_prod_data_prefix}/*",
+              "${local.ducklake_smoke_data_prefix}/*",
             ]
           }
         }

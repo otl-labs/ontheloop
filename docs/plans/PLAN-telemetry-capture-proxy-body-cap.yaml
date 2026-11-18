@@ -1,0 +1,341 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: telemetry-capture-proxy-body-cap
+intent: >-
+  Make long cloud sessions keep reaching the telemetry warehouse. Since sessions sign through the egress proxy
+  (Decision 256), the proxy refuses any signed request body over 1 MiB that lacks an X-Amz-Content-Sha256 header and
+  answers 502; the capture client packs up to 5 MB per append and sends no such header, so a session stops capturing
+  for good once one pass has more than 1 MiB to send. The plan signs every capture and ops-writer request with the
+  body's SHA-256, stops a first no-rows pass from recording a catalog it never confirmed (which forced a false catalog
+  reset and whole-tree resend), makes a persistent capture stop visible in the session, and recovers the operator's three
+  kept sessions (including PR #2059's) by ordinary re-capture.
+plan_type: IMPLEMENTATION
+implementation_declared: true
+verification_tier: V3
+plan_path: docs/plans/PLAN-telemetry-capture-proxy-body-cap.yaml
+phase: >-
+  ci_rca (soft-warn exception category): the cause behind arrival reds rec-5212 and rec-5194, carried by rec-5204, under
+  docs/contracts/red-main-recovery.yaml (Decision 226). No tier_item is targeted and no exit criterion is closed.
+closes_criteria: []
+cites: [dec:186, dec:201, dec:212, dec:226, dec:256]
+scope:
+  - file: scripts/telemetry_capture/transport.py
+    action: Modify
+    purpose: >-
+      make_client's sign() adds X-Amz-Content-Sha256 (lowercase hex SHA-256 of the exact body bytes) to the AWSRequest
+      headers before SigV4Auth.add_auth, so the header is signed and returned with Content-Type and Authorization. Chunk
+      caps (MAX_INVOKE_BODY_BYTES 5 MiB and the rest) are unchanged. The module docstring gains one sentence naming the
+      proxy rule the header answers.
+    new_imports: []
+  - file: scripts/ops_portal/writer_transport.py
+    action: Modify
+    purpose: >-
+      The ops writer's signed POST adds the same header, the SHA-256 of body.encode("utf-8") (body is a str), to
+      its headers before signing, so a rec or decision write over
+      1 MiB is not refused by the proxy. No other behaviour changes.
+    new_imports: []
+  - file: scripts/telemetry_capture/runner.py
+    action: Modify
+    purpose: >-
+      (1) A no_rows pass whose load status is cursor_lost persists no envelope, so a first pass cannot record
+      DEFAULT_CATALOG for rows it never sent; the next pass reloads cursor_lost, records from the start and adopts the
+      describe's catalog without a catalog_reset. cursor_tail_mismatch and valid loads keep today's behaviour. (2) A
+      stopped pass records its fixed stop token in the diagnostics line as stop_token (the _Stop reason or the
+      CaptureUnavailable reason), for the in-session warning; a halted line carries no stop_token, so the stopped and
+      halted streaks stay disjoint.
+    new_imports: []
+  - file: scripts/telemetry_capture/capture_warning.py
+    action: Modify
+    purpose: >-
+      Rule DW-1 gains a third reason, stopped: the last STOPPED_TRIGGER_PASSES (3) Stop or StopFailure passes all ended
+      stopped. prompt_warning prints, once per episode with the existing REARM_EVERY rearm, a fixed-token warning naming
+      the streak and the latest stop_token (for example status_502), printed only when it matches [a-z0-9_]{1,40} and
+      otherwise as unknown (as cli_version is shape-checked by is_version), and the status command. Deferred and halted
+      reasons, their texts and their trigger of 2 are unchanged. The module docstring names the stopped reason. Alarm, never a gate, as rules DW-1..DW-3 already are.
+    new_imports: []
+  - file: docs/contracts/ports.yaml
+    action: Modify
+    purpose: >-
+      PC-01's description gains one sentence (Decision 212 cl.3): in agent environments the egress proxy refuses a signed
+      body over 1 MiB without X-Amz-Content-Sha256 (502), so the capture client and the ops writer send that header (the reader's
+      named-verb bodies stay far below 1 MiB); plus one amendment_log row (Class D, field_add, semantic_break false). The file is NEAR_CAP
+      (495 of 500 effective lines at the last plan_obligations run): the edit adds at most 3 lines, measured against main at build time; if
+      that would cross the cap, fold the sentence into an existing PC-01 line; if even the amendment_log row would cross
+      it (other plans used the headroom first), stop and report to the coordinator for a decomposition, never a raise
+      (Decision 128). Either way, every existing PC-01 phrase that standing tests read stays byte-identical.
+    new_imports: []
+  - file: tests/telemetry_capture/test_transport.py
+    action: Modify
+    purpose: >-
+      New node test_signed_request_carries_the_body_sha256: with the real botocore SigV4Auth over fixed frozen
+      credentials (pre-import the real botocore.auth and botocore.awsrequest, then monkeypatch boto3.Session and
+      botocore.session.get_session with setattr rather than replacing the botocore module as _fake_botocore does), make_client's sign(body) returns X-Amz-Content-Sha256 equal to hashlib.sha256(body).hexdigest() and
+      the Authorization header's SignedHeaders lists x-amz-content-sha256. Existing nodes that assert the exact header
+      dict gain the header key (planned change, acceptance_criteria[0]).
+    new_imports: []
+  - file: tests/ops_data_portal/test_writer_transport.py
+    action: Modify
+    purpose: >-
+      New node test_ducklake_write_sends_the_body_sha256: with the real SigV4Auth over fake frozen credentials
+      (patching only boto3.Session and requests.post, not the file's add_auth no-op fixture), the POST that
+      ducklake_write makes carries X-Amz-Content-Sha256 equal to the SHA-256 of the posted body and its Authorization
+      header's SignedHeaders lists x-amz-content-sha256.
+    new_imports: []
+  - file: tests/telemetry_capture/test_runner_catalog.py
+    action: Modify
+    purpose: >-
+      New node test_a_first_no_rows_pass_records_no_catalog: from no state.json, a pass with no rows leaves no
+      state.json; the next pass with rows against a production describe ends sent with no catalog_reset in its
+      diagnostics and persists catalog ducklake_telemetry. Existing nodes unchanged.
+    new_imports: []
+  - file: tests/telemetry_capture/test_session_capture_stop_visible.py
+    action: Create
+    purpose: >-
+      rec-5204's acceptance file, one node per behaviour.
+      test_three_stopped_passes_warn_once_with_the_stop_token (rec-5204's acceptance node): three trailing stopped Stop
+      passes produce one UserPromptSubmit warning naming status_502 and the streak, and a second call prints nothing.
+      test_the_stopped_warning_rearms_after_rearm_every_more_passes: REARM_EVERY more stopped passes print it again.
+      test_two_stopped_passes_or_a_later_sent_pass_stay_silent: two stopped passes, or a sent pass after three, print
+      nothing and clear the marker.
+      test_a_stopped_pass_records_its_stop_token: the diagnostics line's stop_token for a _Stop reason (status_502 when
+      the append answers 502) and a CaptureUnavailable reason (credential_transport); a halted line has none.
+      test_an_absent_or_malformed_token_warns_as_unknown: a stopped line without stop_token, or with one outside
+      [a-z0-9_]{1,40}, warns with unknown, and the text carries no URL, host, session id or account-like digits.
+    new_imports: []
+bundled_recommendations: [rec-5204, rec-5212]
+followon_recs: [rec-5230]
+infrastructure_dependencies: []
+acceptance_criteria:
+  - "Every request the capture client and the ops writer sign carries X-Amz-Content-Sha256 equal to the SHA-256 of its body, as a signed header."
+  - "A signed describe with a 2,000,000-byte body sent through make_client on the build branch answers 200 over the execute_api route (it answers 502 on main today)."
+  - "A first pass with no rows records no catalog, so the next pass sends without a catalog_reset."
+  - "Three consecutive stopped Stop passes give one in-session warning naming the stop token."
+  - "The operator's three kept sessions (the PR #2059 planning session, its implementation session and an ongoing /audit session) reach the warehouse by re-capture before the merge and keep capturing after it (a session reclaimed before VP 8 drops out of this criterion, VP 9 decides for #2059, and the report names it), arrival no longer lists sha 380916fc6726, and rec-5212 and rec-5204 are closed."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The capture client signs the body hash.
+    command: bin/venv-python -m pytest "tests/telemetry_capture/test_transport.py::test_signed_request_carries_the_body_sha256" -q
+    expected: exit 0; red before (no such header).
+    fix_if: the header is missing, wrong, or not in SignedHeaders (added after add_auth)
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: telemetry-capture-signs-body-sha256
+  - step: 2
+    phase: pre-deploy
+    action: The ops writer sends the body hash.
+    command: bin/venv-python -m pytest "tests/ops_data_portal/test_writer_transport.py::TestDuckLakeTransportHelpers::test_ducklake_write_sends_the_body_sha256" -q
+    expected: exit 0; red before.
+    fix_if: header absent or computed over a different byte string than the posted body
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      The file is collected only where duckdb is installed, which PR CI's fast tier lacks; the node runs in the full
+      tier on every post-merge run, and step 1's graduated shard guards the capture client's identical signing rule.
+  - step: 3
+    phase: pre-deploy
+    action: A first no-rows pass records no catalog.
+    command: bin/venv-python -m pytest "tests/telemetry_capture/test_runner_catalog.py::test_a_first_no_rows_pass_records_no_catalog" -q
+    expected: exit 0; red before (state.json written with ducklake_smoke, then catalog_reset).
+    fix_if: state.json exists after the first pass, or catalog_reset is counted on the second
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: telemetry-capture-no-unconfirmed-catalog
+  - step: 4
+    phase: pre-deploy
+    action: A persistent capture stop is visible in the session (rec-5204's acceptance).
+    command: bin/venv-python -m pytest tests/telemetry_capture/test_session_capture_stop_visible.py -q
+    expected: exit 0; red before (file absent). rec-5204's acceptance node is in this file.
+    fix_if: no warning after three stopped passes, a warning after two, or a repeat without rearm
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: telemetry-capture-stop-visible
+  - step: 5
+    phase: pre-deploy
+    action: The capture and ops-writer suites still pass (the ops-writer file needs duckdb, so this step is not hermetic).
+    command: bin/venv-python -m pytest tests/telemetry_capture tests/ops_data_portal/test_writer_transport.py -q
+    expected: exit 0
+    fix_if: an existing node fails for a reason other than the header key added to an exact-dict assertion
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: The capture suite already runs in the fast and full tiers and the ops-writer file in the full tier (it needs duckdb); steps 1, 3 and 4 graduate the new nodes.
+  - step: 6
+    phase: pre-deploy
+    action: Live, on the build branch from a cloud session, large signed describes pass the proxy (writes nothing), one near the 5 MiB chunk cap.
+    command: >-
+      OTL_OPS_VERBS_TRANSPORT=execute_api bin/venv-python -c "from scripts.telemetry_capture.transport import
+      make_client, Budget; c = make_client({}, None, Budget.start(300)); print([('status', n, c.invoke_once({'action':
+      'describe', 'pad': 'x' * n})[0]) for n in (2000000, 5200000)])"
+    expected: prints status 200 for both sizes (main prints status 502); record the line in the PR body.
+    fix_if: 502 means the header is not reaching the proxy; 200 at 2,000,000 but not 5,200,000 is a second cap, so stop and report before lowering any chunk cap; any other status is a new cause, stop and report
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: pre-deploy
+    action: Full tier, then HEAD attestation, after the build commit and rebase and before the push; start it backgrounded from the top-level session with a 2 h limit and read only the attestation.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: the full tier exits 0 and the attestation matches HEAD
+    fix_if: any failure; fix and rerun from the start
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion).
+  - step: 8
+    phase: pre-deploy
+    action: >-
+      Pre-merge recovery of the operator's three kept sessions outside projects, relayed by the coordinator once the
+      build branch is pushed: the PR #2059 planning session, the implementation session for the same plan, and an
+      ongoing /audit session. Each runs one manual capture pass on its own transcript from a detached worktree of the
+      build branch (its own branch and working tree are untouched), then the probe. The build worker writes the
+      relay text with the branch name filled in.
+    command: >-
+      git worktree remove --force /tmp/capture-fix 2>/dev/null; git fetch origin <build branch> && git worktree add
+      --detach /tmp/capture-fix FETCH_HEAD && cd /tmp/capture-fix
+      && <repo>/bin/venv-python -m scripts.telemetry_capture pass --tree "<this session's transcript path>" &&
+      <repo>/bin/venv-python -m scripts.telemetry_capture probe --tree "<this session's transcript path>" --require
+      telemetry_sessions,telemetry_observations,telemetry_transcripts
+    expected: >-
+      in each of the three sessions the pass's diagnostics line is outcome sent, and the probe exits 0 with rows above
+      0 for the three required tables for that session; the coordinator relays each session's two output lines.
+    fix_if: >-
+      502 means the pass ran the main checkout's code, not the worktree's (check that scripts resolves under
+      /tmp/capture-fix, else set PYTHONPATH=/tmp/capture-fix); a halt (for example grain_conflict_after_catalog_reset)
+      is read from halt.json and reported, never cleared blind; busy means a hook pass holds the lock, so wait and
+      re-run
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: pre-deploy
+    action: Arrival no longer misses the PR #2059 squash, before the merge (the operator's merge gate for rec-5212).
+    command: AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_verify arrival
+    expected: no ARRIVAL_MISSING line names 380916fc6726; record the ARRIVAL line in the PR body.
+    fix_if: still missing after step 8 shows sent, so read the session's root row in telemetry_root_sessions before suspecting the oracle; the merge waits until this passes
+    hermetic: false
+    graduation: not-applicable
+  - step: 10
+    phase: post-deploy
+    action: >-
+      The three sessions move onto the fixed code so their own hooks keep capturing (a catalog_reset confirm resends
+      the whole tree 30 minutes after step 8, which the old code would refuse). The two #2059 sessions, whose branch
+      is merged, detach onto main; the /audit session rebases its branch onto main. Each ends one turn, then runs the
+      probe. The command shown is the #2059 form; the /audit form replaces the switch with git rebase origin/main.
+    command: >-
+      git fetch origin main && git switch --detach origin/main && bin/venv-python -m scripts.telemetry_capture probe --tree
+      "<this session's transcript path>" --require telemetry_sessions,telemetry_observations,telemetry_transcripts
+    expected: >-
+      the switch or rebase succeeds and the latest hook pass in diagnostics is outcome sent; record it per session.
+    fix_if: >-
+      a dirty tree is stashed first (git stash, then git stash pop after); on a rebase conflict, git rebase --abort,
+      run step 8's pass once from a detached worktree of origin/main, and report to the coordinator so the operator
+      decides how that session lands its work (at most one such manual pass per session); a 502 from a hook pass
+      means the switch or rebase did not land
+    hermetic: false
+  - step: 11
+    phase: post-deploy
+    action: rec-5204 and rec-5212 are closed by the squash's Resolves trailer.
+    command: >-
+      AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids,
+      make_reader; rows, _ = fetch_recs_by_ids(make_reader(), ['rec-5204', 'rec-5212']); print([(r['id'], r['status'])
+      for r in rows])"
+    expected: >-
+      both closed; record the closure job run id. rec-5212's close names closure_artifact
+      shard:telemetry-capture-signs-body-sha256 added in the squash (Decision 186 cl.4). The closure job's run and the first post-merge ci-pass
+      capture on main are also the first live proof that a header-signed Function URL call succeeds (CI signs the lambda
+      service); record both run ids, and name them in the PR body as the watch point. The header is sent on every path, not only
+      execute-api, so the signing rule stays one rule; a Function URL accepts a correctly signed payload hash.
+    fix_if: >-
+      a ClosureArtifactRequired refusal means the shard is not in the squash, so land it and re-run the closure route
+      (merge_step recover --slug telemetry-capture-proxy-body-cap --sha <squash sha>); if CI's header-signed Function URL calls are refused, revert
+      per rollback and report it to the coordinator for ci-rca; never close with a direct status write after a refusal
+      (Decision 186)
+    hermetic: false
+test_obligations:
+  - source: scripts/telemetry_capture/transport.py
+    behavior: every signed capture request carries the signed body hash
+    verification_step: 1
+    test_selector: tests/telemetry_capture/test_transport.py::test_signed_request_carries_the_body_sha256
+    red_green_expectation: red before, green after
+  - source: scripts/ops_portal/writer_transport.py
+    behavior: every signed ops write carries the signed body hash
+    verification_step: 2
+    test_selector: tests/ops_data_portal/test_writer_transport.py::TestDuckLakeTransportHelpers::test_ducklake_write_sends_the_body_sha256
+    red_green_expectation: red before, green after
+  - source: scripts/telemetry_capture/runner.py
+    behavior: a first no-rows pass records no unconfirmed catalog
+    verification_step: 3
+    test_selector: tests/telemetry_capture/test_runner_catalog.py::test_a_first_no_rows_pass_records_no_catalog
+    red_green_expectation: red before, green after
+  - source: scripts/telemetry_capture/runner.py
+    behavior: a stopped pass records its fixed stop token, for both a _Stop reason and a CaptureUnavailable reason
+    verification_step: 4
+    test_selector: tests/telemetry_capture/test_session_capture_stop_visible.py::test_a_stopped_pass_records_its_stop_token
+    red_green_expectation: red before (no stop_token key), green after
+  - source: scripts/telemetry_capture/capture_warning.py
+    behavior: three stopped Stop passes warn once in the session with the stop token
+    verification_step: 4
+    command: bin/venv-python -m pytest tests/telemetry_capture/test_session_capture_stop_visible.py -q
+    red_green_expectation: red before (file absent), green after
+  - source: docs/contracts/ports.yaml
+    behavior: PC-01 records the proxy body-hash rule for the two signing clients
+    verification_step: 7
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: Prose in one coupling row plus one amendment_log row. Standing tests read PC-01's existing literals (for example tests/telemetry_capture/test_deferred_no_pin_surface.py and tests/checks/contracts/test_telemetry_dimension_contracts.py), and VP 5 and VP 7 run them, so the edit must leave those literals intact; the full tier's contract checks cover the file's shape and line cap.
+constraints:
+  - "No account id, host, URL or session id in code, tests, diagnostics, warnings or PR text (Decision 101)."
+  - "Chunk caps, the response table and the writer are unchanged; nothing is deployed (the capture runs from each session's checkout)."
+  - "The in-session warning is an alarm, never a gate, like the existing deferral and halt warnings; a stop fails loudly in the session (Decision 84 I-4)."
+  - "No backfill: step 8 is ordinary capture of a transcript that still exists; reclaimed sessions are not recovered."
+  - "No existing assertion is loosened (Decision 235); exact-header-dict assertions gain the new key as a planned change citing acceptance_criteria[0]."
+  - "The rec-5204 and rec-5212 acceptance re-keys are operator-confirmed (14:27Z and the 15:54Z card; Decisions 181, 235); the build PR body states them as planned changes, and any further change to either goes to the operator first."
+  - "No rescue agents or workaround loops (Decision 55)."
+context:
+  - "Decision-scout verdict FLAGS_FOUND (rounds 1-3; round 2 added: the PC-01 sentence names only the two clients, and rec-5212's close names fixed_by_sha; round 3 added a Decision 226 cl.3 NOTE on the rec-5205 overlap deferral, kept as the sanctioned exit-1 path with re-measure at build start and a green full tier before handoff). CITE: 256 (cl.2 the execute_api path that fails), 226 (cl.1 Track B, cl.3 a red never blocks the plan bundling its repair, cl.5 preventive_action), 201 (closure acceptance verdict), 186 (rec-5212 closure_artifact), 212 (cl.3 the PC-01 coupling row). CONTRADICT: NOTE 256 reversal condition proxy-stops-signing, evaluated and not fired: the refusal is a request-shape rule a standard SigV4 header satisfies (200 at 2 MB and 5 MB with it), so clause 1's signing model stands; the condition is kind manual, so the operator confirms this reading at plan approval. SPIRIT: none. RELATED: 255, 250, 210, 101, 55, 235, 228, 199, 207, 230, 236, 213, 84, 100, 128, 126. Decisions triaged: 211 of 211. Roadmap items intersected: 4; CONFLICT: 0; RELATED: 4. Serves: NS.6 3/5 -- telemetry that keeps arriving is the input improvement is proven against; a restoration, not an advance."
+  - "rec-5212 (ci_rca, escape_mode no_premerge_gate_by_design): its preventive_action is this plan's in-session stop warning (VP 4), with rec-5176 the fleet-wide alarm; closure_artifact shard:telemetry-capture-signs-body-sha256 stamped in its context_v2_json at plan write (update_rec read back 2026-11-16 ~15:15Z; status open); the shard lands in the build's squash, which the trailer close stamps as fix sha (Decision 186 cl.4). Its acceptance was re-keyed at plan write (operator card 2026-11-16 15:54Z; update_rec read back 15:55Z) from the live arrival probe, which the closure sandbox runs with no network and so measures nothing, to VP 1's node bin/venv-python -m pytest \"tests/telemetry_capture/test_transport.py::test_signed_request_carries_the_body_sha256\" -q. The live arrival check stays as VP 9, a pre-merge gate: the build merges only after it shows sha 380916fc6726 arrived. The squash's Resolves trailer closes rec-5212 with rec-5204; validate_merge_step requires the trailer union to equal bundled_recommendations."
+  - "Root cause proven 2026-11-16 ~14:20Z from a cloud session with describe-only probes over the execute_api writer route: 200 up to 1,046,875 body bytes, 502 from 1,062,500; the 502 body is the proxy's own refusal (body exceeds 1048576 bytes with no X-Amz-Content-Sha256 header). With the header, 200 at 2,000,000 and 5,000,000 bytes."
+  - "Writer log /aws/lambda/agent-platform-ducklake-telemetry-writer 2026-11-16 12:00Z onward: 240 describe vs 154 append_telemetry from agent-platform-session, no append from a session over 900 KB, no non-200; the 13:58Z window shows describes with no following append. The writer never sees the refused request."
+  - "Operator's #2059 session diagnostics (pasted in thread, 2026-11-16 14:02Z): 2 no_rows passes then 86 stopped status_502 with catalog_reset since 10:35Z, requests [], cursor at root line 173, state.json catalog ducklake_smoke; 8,628 rows offered on the latest pass."
+  - "Not in scope: src/common/ducklake_reader_client.py signs the same way, but its named-verb request bodies are small and it ships in a Lambda bundle; blob PUTs go to presigned S3 grants and are not injected by the proxy (begin_blobs and appends from sessions are 200 in the log)."
+  - "Operator rulings 2026-11-16: 14:07Z the #2059 session (a data manipulation and cleanup plan) is not to be excused, recover it; 14:27Z plan approved ('agreed. write the plan', confirming the rec-5204 acceptance re-key and the Decision 256 not-fired reading); he stopped working in cloud sessions outside projects and keeps exactly three open for capture: the #2059 planning session, its implementation session and an ongoing /audit session."
+  - "rec-5204 acceptance re-keyed at plan write (update_rec read back 2026-11-16 14:30Z): bin/venv-python -m pytest \"tests/telemetry_capture/test_session_capture_stop_visible.py::test_three_stopped_passes_warn_once_with_the_stop_token\" -q."
+  - "rec-5194 (excuse build in its own thread) is not bundled. Its plan made rec-5204 the owner of retiring its excused row and shard once dcc6a9f5 leaves judge_days (about 2026-11-18T09:56Z); this plan closes rec-5204, so that obligation moved to follow-on rec-5230 (Low, depends on rec-5194; filed and read back 2026-11-16 ~16:35Z)."
+  - "rec-5176 (fleet-wide capture-silence alarm) stays open: this plan adds only the in-session warning."
+  - "Graduated shards kept unchanged (test_runner_catalog.py gains one node, existing nodes untouched): capture-catalog-reset-resends-tree, capture-describe-pairs-catalog-and-data-path."
+  - "Overlaps (whichever builds second rebases): PLAN-agent-proxy-signed-access (transport.py, writer_transport.py and their tests; its transport changes are already on main, so the rebase risk is low), PLAN-ratify-telemetry-writer-contract (transport.py), PLAN-telemetry-claude-p-capture-adapter (runner.py). No open PR touches the scope files (checked 2026-11-16)."
+  - "fork: rec-5204 acceptance | chosen: re-keyed at plan write (operator-confirmed 14:27Z) to the ::node test_three_stopped_passes_warn_once_with_the_stop_token in the same file, because the closure lint refuses a file-only pytest (Decision 201) | class: asked | precedent: Decision 201; Decision 235 | precedent_kind: decision | reversible: yes | persisted: rec-5204 acceptance (warehouse)"
+  - "fork: stopped-warning trigger | chosen: 3 trailing stopped Stop passes (deferred and halted keep 2), so one transient deadline or transport stop does not warn | class: consistency-only | precedent: Decision 84 | precedent_kind: decision | reversible: yes | persisted: scripts/telemetry_capture/capture_warning.py"
+  - 'red_overlap (2026-11-16 14:33Z, main 137d6533): {"verdict": "blocked", reds: rec-5205 rule overlap (shared: tests/checks/ci_guards/test_validate_composite_action_shell_bodies.py, tests/checks/contracts/test_validate_composite_action_shape_rosters.py, tests/test_ci_rca_lifecycle_correct_rec_context.py, tests/verify_ci_workflow/test_apply_and_terraform.py), rec-5212 repairs_this_red}. Deferral rationale for rec-5205: the shared paths are import-graph test residue reached through writer_transport.py, none is edited here; CI Reform owns rec-5205 (coordinator log 2026-11-16 13:19Z) and its repair touches the sandbox-apply reviewer, not these files; the build reaches handoff only on a green full tier (Decision 163). Re-measure at build start.'
+  - "fork: when the kept sessions are recovered | chosen: before the merge, by a manual pass from a worktree of the build branch (VP 8), so rec-5212's acceptance holds at the PR head and one Resolves trailer closes both bundled recs | class: consistency-only | precedent: Decision 201 | precedent_kind: decision | reversible: yes | persisted: docs/plans/PLAN-telemetry-capture-proxy-body-cap.yaml"
+  - "fork: rec-5212 acceptance | chosen: re-keyed to VP 1's pytest node with the live arrival check kept as the VP 9 pre-merge gate (operator card 2026-11-16 15:54Z) | class: asked | precedent: Decision 201; Decision 235 | precedent_kind: decision | reversible: yes | persisted: rec-5212 acceptance (warehouse)"
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:d4d46f9cd2c3f8d5c15fc8290e602250f4c88a98e9db19ad485c90bc6a83099d"}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:b36078e6d34c0af0ec1acae16159e3e183fdd52835723e26f31bd34da985d222"}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:410b9f49a213f03e2024d408d81d57efad48ef6a5e56aef23cd6220a8964df78"}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 1, nits: 5}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 3, nits: 5}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 2, nits: 7}
+  - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 5}
+  - {gate: plan-critique, round: 5, verdict: PROCEED, blocking: 0, nits: 4}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Decisions cited in cites read
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "transport.py and writer_transport.py: sign the body hash; VP 1, 2."
+  - "runner.py: the cursor_lost no_rows rule and stop_token; VP 3."
+  - "capture_warning.py: the stopped reason; the new test file; VP 4, 5."
+  - "Graduated shards for VP 1, 3 and 4."
+  - "ports.yaml: the PC-01 sentence and amendment_log row, within the line budget."
+  - "CLOSURE: set implementation_declared: true; commit with Resolves: rec-5204, rec-5212; rebase onto origin/main; VP 6; VP 7; push; PR; subscribe; hand the coordinator the VP 8 relay text with the branch name; fresh-context code review; once VP 8 and VP 9 pass, merge_step premerge previews both recs; merge on review PROCEED and green CI with Resolves: rec-5204, rec-5212 in the squash body."
+  - "After merge: post a lift entry on the coordinator log (lean rule); hand VP 10 to the coordinator to relay to the three sessions; then VP 11."
+  - "Report: what was implemented, verification results"
+rollback: Revert the build PR; long sessions stop capturing again.
+weakening_dispositions:
+  - candidate: "[assertion-changed] tests/telemetry_capture/test_transport.py::test_make_client_installs_one_clamped_single_attempt_config"
+    disposition: planned-change
+    cite: "acceptance_criteria[0]"

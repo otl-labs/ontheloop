@@ -33,7 +33,8 @@ _READ_ACTIONS = {
     "secretsmanager:GetResourcePolicy", "secretsmanager:ListSecrets", "s3:GetBucket*", "s3:GetAccelerateConfiguration",
     "s3:GetLifecycleConfiguration", "s3:GetReplicationConfiguration", "s3:GetEncryptionConfiguration", "s3:ListBucket",
     "s3:GetObject", "ssm:GetParameter", "ssm:GetParameters", "ssm:ListTagsForResource", "ssm:DescribeParameters",
-    "apigateway:GET", "lambda:GetPolicy", "servicequotas:Get*", "servicequotas:List*",
+    "apigateway:GET", "lambda:GetPolicy", "lambda:GetFunction*", "lambda:GetRuntimeManagementConfig",
+    "lambda:ListVersionsByFunction", "servicequotas:Get*", "servicequotas:List*",
 }  # fmt: skip
 _WRITE_ACTIONS = {
     "s3:PutObject", "s3:GetObject", "s3:DeleteObject", "iam:CreateRole", "iam:PutRolePolicy",
@@ -48,7 +49,7 @@ _PROTECTED_DENIES = {
 }  # fmt: skip
 _BOUNDARY_DENY_RESOURCES = {
     "arn:aws:iam::*:role/Platform*", "arn:aws:iam::*:role/bootstrap-*", "arn:aws:iam::*:role/github-settings-*",
-    "arn:aws:iam::*:role/platform-security-*", "arn:aws:iam::*:role/ducklake-api-*",
+    "arn:aws:iam::*:role/platform-security-*", "arn:aws:iam::*:role/ducklake-api-*", "arn:aws:iam::*:role/telemetry-content-*",
 }  # fmt: skip
 _DETECTOR_PATTERNS = {
     "aws_iam_role": ("role/platform-security-*",),
@@ -215,8 +216,9 @@ def preview_problems(text: str) -> list[str]:
     if not all(re.match(r"^(\w+:(Get|List|Describe)|apigateway:GET|states:Validate)", a) for a in reads):
         problems.append("a plan-read action is not a read family")
     guard = _local(text, "bootstrap_preview_guard_json")
-    if 'concat(local.bootstrap_plan_read_actions, ["sts:GetCallerIdentity"])' not in guard:
-        problems.append("DenyAllButReads NotAction must be the reads list plus sts:GetCallerIdentity")
+    want = 'concat(local.bootstrap_plan_read_actions, local.bootstrap_preview_analyzer_actions, ["sts:GetCallerIdentity"])'
+    if want not in guard:
+        problems.append("DenyAllButReads NotAction must be the reads, the four analyzer actions and sts:GetCallerIdentity")
     if re.search(r'BoolIfExists\s*=\s*\{\s*"aws:ViaAWSService"\s*=\s*"false"\s*\}', guard) is None:
         problems.append("DenyAllButReads must carry BoolIfExists aws:ViaAWSService false")
     if set(_local_list(text, "bootstrap_plan_read_actions")) != reads:
@@ -291,7 +293,7 @@ def boundary_deny_problems(texts: dict[str, str]) -> list[str]:
     if stmt.effect != "Deny" or set(stmt.actions) != {f"iam:{c}*" for c in "ACDPTU"}:
         problems.append("DenyBoundedWriteOnProtectedRoles must Deny iam:A*, C*, D*, P*, T*, U*")
     if set(stmt.resources) != _BOUNDARY_DENY_RESOURCES:
-        problems.append("DenyBoundedWriteOnProtectedRoles resources differ from the five protected role patterns")
+        problems.append("DenyBoundedWriteOnProtectedRoles resources differ from the six protected role patterns")
     for t in texts.values():
         for body in re.findall(r'resource\s+"aws_iam_role"\s+"\w+"\s*\{(.*?)\n\}', _nocomment(t), re.S):
             m = re.search(r'^\s*name\s*=\s*"([^"]+)"', body, re.M)

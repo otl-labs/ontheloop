@@ -1,0 +1,630 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "persona-verdict-override"
+implementation_declared: true
+intent: >-
+  Give the operator a recorded, GitHub-approved way to overrule a failing decision-scout or plan-critique verdict check
+  (T4.32 c6, plan 3 of the six PLAN-persona-verdict-* plans): a persona-verdict-override workflow, dispatched from main
+  for one PR head, one persona check run and the digest of that verdict's blocking finding ids, waits in a new
+  reviewer-gated persona-verdict-override Environment; once a required reviewer approves it, its completion re-runs
+  persona-verdict.yml by workflow_run, which proves the approval from GitHub's own records and re-derives the check from
+  the verdict record stored in the failing check run, posting a new success check run of the same name that names the
+  approver, the covered ids and the override run, without running any persona again. This serves the North Star's
+  verdict plane and its human-authority leg (NS.3, NS.9): a human disposition is an approval GitHub records, never a
+  plan edit, a comment or a skipped gate.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-persona-verdict-override.yaml
+phase: >-
+  T4.32 (persona foundation) c6 HUMAN OVERRIDE, after PLAN-persona-verdict-chain's build and before the decision_scout
+  add plan (the approved hint, docs/plans/approved/persona-verdict-chain.yaml block t4-32-verdict-jobs-hint).
+cites: [dec:205, dec:233, dec:235, dec:246, dec:248, dec:264, dec:267]
+closes_criteria:
+  - T4.32:c6
+fallback_reevaluation:
+  reevaluated_on: "2026-11-17"
+  substrate_status: CD.27 pending; executor substrate unratified; T4.2 not built; the T4.15 spike has not run.
+  verdict: continue_on_current_substrate
+  basis: >-
+    T4.32 c6 here is a GitHub Actions workflow, a reviewer-gated Environment and changes to the verdict chain's shell on
+    the forge; they read the same under every candidate layer-2 substrate and touch no CD.27, fallback_spec or T4.15
+    ruling (the PLAN-persona-verdict-chain disposition).
+scope:
+  - file: terraform/github/environments.tf
+    action: Modify
+    purpose: >-
+      Append github_repository_environment.persona_verdict_override (environment "persona-verdict-override",
+      prevent_self_review false, can_admins_bypass false, reviewers { users = var.gated_apply_reviewer_user_ids },
+      deployment_branch_policy { protected_branches false, custom_branch_policies true }, lifecycle { prevent_destroy
+      true }) and github_repository_environment_deployment_policy.persona_verdict_override_main (branch_pattern "main"),
+      with a header comment in the approved_text block's style: the operator-only gate of a T4.32 c6 override run; never
+      in any OIDC trust, never a job holding id-token or secrets; created by an operator-approved
+      terraform-github-apply.yml dispatch naming both addresses in gate_change (Decision 248); destroying it fails open
+      for the same reason as tf_gated_apply, which the approvals preflight catches. No other resource changes.
+  - file: .github/workflows/persona-verdict-override.yml
+    action: Create
+    purpose: >-
+      name persona-verdict-override. on: workflow_dispatch only, inputs (all type string, required) pr, head_sha, route,
+      check_run_id, ids_digest. run-name exactly `persona-verdict-override ${{ inputs.pr }} ${{ inputs.head_sha }} ${{
+      inputs.route }} ${{ inputs.check_run_id }} ${{ inputs.ids_digest }}` (the record the verdict job parses: dispatch
+      inputs are not readable from the run API afterwards, the approved-text-approval.yml precedent). Top-level
+      permissions {}; no env, no concurrency, no id-token, no secrets reference, no LLM step; every uses: pinned to the
+      40-hex SHA approved-text-approval.yml pins (actions/checkout v7) with its version comment. Job render (if: exactly
+      approved-text-approval.yml's render condition, `(github.event_name != 'workflow_dispatch' || github.actor !=
+      'otl-workflow-dispatcher[bot]') && (github.ref == 'refs/heads/main')`, Decision 267 cl.3; timeout-minutes 5;
+      permissions contents: read, actions: read, checks: read, pull-requests: read): actions/checkout with
+      persist-credentials false; step id reviewers-preflight (GH_TOKEN ${{ github.token }}, REVIEWER_LOGINS ${{
+      vars.TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS }}) running `python3 -I scripts/ci/environment_reviewer_preflight.py
+      environment --environment persona-verdict-override --require-no-admin-bypass`; actions/setup-python pinned to the
+      SHA and python-version '3.12' approved-text-approval.yml uses; step id install-override-dependencies running
+      `pip install pyyaml -c requirements.txt` (the verb's closure reaches yaml through merge_checks; the
+      approved-text-approval.yml render pattern, no new dependency); then step id override-render (GH_TOKEN and the
+      five inputs as env values, never interpolated into the script) running `python3 -I scripts/personas/run.py
+      override-render`, which writes the covered ids and finding titles to $GITHUB_STEP_SUMMARY. Job approve (needs
+      render; environment persona-verdict-override; timeout-minutes 5; permissions contents: read, actions: read):
+      actions/checkout with persist-credentials false, then step id approvals-preflight first (`python3 -I
+      scripts/ci/environment_reviewer_preflight.py approvals --environment persona-verdict-override`, same two env
+      values), then step id gate-opened that echoes "persona-verdict-override gate opened". Every run: body is one line
+      and every step carrying one has an id, so no baseline key is positional. Nothing else.
+  - file: .github/workflows/persona-verdict.yml
+    action: Modify
+    purpose: >-
+      on.workflow_run.workflows becomes exactly [persona-verdict-trigger, persona-verdict-override] (types stay
+      [completed]); run-name `persona-verdict ${{ github.event.workflow_run.event }} ${{
+      github.event.workflow_run.head_sha }}` (the producing run's record the override reader matches); the concurrency
+      group becomes `persona-verdict-${{ github.event.workflow_run.head_repository.full_name }}-${{
+      github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.head_branch ||
+      github.event.workflow_run.id }}`, so override runs (whose head_branch is always main) never cancel each other or a
+      PR's run; the prepare job's permissions gain actions: read (the approval read); the run job's if: becomes `${{
+      !cancelled() && needs.prepare.result == 'success' && github.event.workflow_run.event == 'pull_request' }}`, so no
+      persona runs on an override event. Every other line of plan 1's shape is unchanged.
+  - file: scripts/personas/override.py
+    action: Create
+    new_imports: [scripts.session.merge_checks]
+    purpose: >-
+      Imports stdlib, scripts.* and (through merge_checks) yaml only, never jsonschema: the render job installs pyyaml
+      alone and the post job installs pyyaml and jsonschema. (1) RECORD: the verdict
+      record line `<!-- persona-verdict-record v1 {json} -->` with keys route, head_sha, verdict, blocking_ids (sorted
+      unique list), run_id; render_record and parse_record (only output.text's first line is read: it must be exactly such a line, valid
+      JSON, every key typed, else None; a record-shaped line anywhere else is ignored). (2) DIGEST: ids_digest(ids) = sha256 hex of the sorted ids joined by "\n". (3) BLOCKING-ID EXTRACTORS: a
+      registry route-prefix -> callable(parsed persona output) -> (verdict, ids), holding only the probe's
+      (verdict_probe.: findings with blocking true for BLOCK and REVISE, every finding for FLAGS_FOUND); each persona add
+      plan registers its own when it binds its contract, so this module names no persona id (executor-personas.yaml
+      landing_dirs rule). OVERRIDABLE(route): a probe route, or a route whose persona's merge_checks.PERSONA_CLASSES
+      class is plan (decision_scout and plan_critic, T4.32 c6), never a code-class persona. (4) ORIGIN: a check run
+      qualifies only if its app slug is github-actions, its name is persona-verdict/<route>, its head_sha is the head,
+      its record parses with that route and head, and GET /actions/runs/<record.run_id> has path
+      .github/workflows/persona-verdict.yml, event workflow_run, head_branch main and display_title `persona-verdict
+      pull_request <head_sha>` (residual, stated: this proves a genuine verdict run existed for that head, not that the
+      record's content is that run's; rec-5241's shared origin check supersedes this when it lands). (5) APPROVAL: for a
+      run id, GET /actions/runs/<id> must have path .github/workflows/persona-verdict-override.yml, event
+      workflow_dispatch, head_branch main, status completed, conclusion success and a display_title parsing into the five
+      fields (pr a positive integer, head_sha 40 lowercase hex, route matching the probe or persona route grammar,
+      check_run_id a positive integer, ids_digest 64 lowercase hex); its jobs must include approve concluded success;
+      GET /actions/runs/<id>/approvals must hold an entry with state approved naming the persona-verdict-override
+      Environment, whose user.login is the approver and the approve job's completed_at the approval time (the
+      approved_text_github.lookup shape; authority rests on can_admins_bypass false). LOOKUP(pr, head, route, digest):
+      newest-first over at most two pages of persona-verdict-override.yml runs (event workflow_dispatch, branch main,
+      status success), the first whose title matches and whose approval proves. (6) The override-render verb: reads the
+      five inputs from env and refuses (exit 1, one `PERSONA-OVERRIDE refused: <reason>` line, no summary) unless the
+      fields are well formed, the PR is open with live head.sha equal to head_sha and head.repo.full_name equal to the
+      repository (the same test resolve applies, so a fork head is refused before the gate), the check run exists and passes
+      ORIGIN, OVERRIDABLE(route), the record's verdict is BLOCK, REVISE or FLAGS_FOUND with a non-empty id set, and
+      ids_digest equals the record's digest; on success it writes the PR, head, route, verdict, each id and its finding
+      title (from the check run's output text, persona output over PR content, so each title is HTML-escaped, stripped
+      of backticks and newlines, cut to 200 characters and written inside one fenced code block) to
+      $GITHUB_STEP_SUMMARY and prints `PERSONA-OVERRIDE render ok`. Every
+      API error refuses (fail closed). Uses only GH_TOKEN, GITHUB_API_URL and GITHUB_REPOSITORY.
+  - file: scripts/personas/run.py
+    action: Modify
+    purpose: >-
+      The verb table gains override-render -> override.main. The sys.path and snapshot guard are unchanged (with
+      PERSONA_SNAPSHOT unset the guard has nothing to compare and passes; if plan 1's merged run.py refuses an unset
+      PERSONA_SNAPSHOT for every verb, override-render is exempted by name, since its job has no snapshot).
+  - file: tests/personas/test_run.py
+    action: Modify
+    purpose: >-
+      Additive: the verb table dispatches override-render to override.main (red before: verb absent); the ast
+      import-closure table gains override-render with install set {yaml}, so the verb can never outgrow the render
+      job's one pip line.
+  - file: scripts/personas/resolve_pr.py
+    action: Modify
+    purpose: >-
+      A second resolution path, taken only when workflow_run.event is workflow_dispatch and workflow_run.path is
+      .github/workflows/persona-verdict-override.yml: take the GitHub-set workflow_run.id, prove it with
+      override.APPROVAL (a failed, rejected, cancelled or unproven run -> unresolved, exit 0, nothing posted), then
+      GET /pulls/<the title's pr> and require state open, head.sha equal to the title's head_sha and head.repo.full_name
+      equal to the repository (else unresolved: the override is stale or foreign). The author allowlist is not read on
+      this path: no persona runs, and the approval is the operator's. Output adds
+      override: {run_id, pr, head_sha, route, check_run_id, ids_digest, approver, approved_at}; routes stay empty. The
+      PERSONA-VERDICT line gains `override=<run_id or none>`. Any other non-pull_request event keeps plan 1's
+      no-routes rule. Never reads workflow_run.pull_requests[] or any artifact of the override run.
+  - file: scripts/personas/route.py
+    action: Modify
+    purpose: >-
+      The probe's closed marker set gains block and flags (six stems: proceed, revise, fail, malformed, block, flags).
+      Six routes at plan 1's 180 s budget could reach 18 minutes against the run job's 15; the probe is deterministic and
+      returns in seconds, and fixture PRs touch at most four markers (VP 9 touches two).
+      A resolution carrying override yields no routes.
+  - file: scripts/personas/post_verdict.py
+    action: Modify
+    purpose: >-
+      (a) Every check run it posts for a parsed, schema-valid result whose verdict is BLOCK, REVISE or FLAGS_FOUND on an
+      OVERRIDABLE route carries override.render_record(...) as the first line of output.text (every persona-derived line after it has
+      `<!--` escaped to `&lt;!--`, so persona output can never forge a record or an override marker), with blocking ids from
+      the route's registered extractor and run_id = GITHUB_RUN_ID (a route with no extractor gets no record, so it can
+      never be overridden). (b) Before posting a failure for such a route, it calls override.LOOKUP(pr, head, route,
+      digest of the fresh ids); an approved match posts the override form below instead (c6: the verdict job reads the
+      approved run on its next run); a LOOKUP API error posts the failure as plan 1 maps it (fail closed: the check is
+      still posted, never skipped). (c) On a resolution carrying override (the re-run event), it GETs the named check
+      run, re-checks ORIGIN, OVERRIDABLE and the digest, and posts one new completed check run on the same head SHA and
+      name: conclusion success; title `<verdict> overridden by <approver>` (FLAGS_FOUND: `FLAGS_FOUND dispositioned by
+      <approver>`); summary naming the original verdict, the covered ids, the approver, the approval time and the
+      override run URL; output.text the original record line plus `<!-- persona-verdict-override v1 {json} -->`
+      (override run id, approver, approved_at). Any failed re-check posts nothing and exits non-zero (a shell fault the
+      run's own log shows; the failing check stays). Never PATCHes an existing check run, never posts neutral or
+      skipped; failure_outputs, missing, unparseable or schema-invalid results, timeouts and author refusals carry no
+      record and are never overridden. Plan 1's conclusion mapping is otherwise unchanged.
+  - file: tests/fixtures/persona_verdict/probe.py
+    action: Modify
+    purpose: >-
+      Output gains findings [{id, title, blocking}] with fixed ids: revise -> REVISE with probe:revise-1 (blocking);
+      block -> outcome success, verdict BLOCK with probe:block-1 and probe:block-2 (both blocking); flags -> outcome
+      success, verdict FLAGS_FOUND with probe:flag-1 (not blocking). proceed, fail and malformed unchanged. Still
+      removed by PLAN-persona-verdict-fixture-run.
+  - file: tests/fixtures/persona_verdict/probe_schema.json
+    action: Modify
+    purpose: Output schema admits verdicts PROCEED, REVISE, BLOCK and FLAGS_FOUND and the optional findings array (id, title, blocking).
+  - file: tests/fixtures/persona_verdict/fixture_pr/block.txt
+    action: Create
+    purpose: "Fixture marker file whose text is block."
+  - file: tests/fixtures/persona_verdict/fixture_pr/flags.txt
+    action: Create
+    purpose: "Fixture marker file whose text is flags."
+  - file: tests/personas/test_override.py
+    action: Create
+    purpose: >-
+      Mirror test of override.py on recorded API shapes (the HTTP client patched; no network): record round trip and
+      every malformed-record case; digest order-independence; OVERRIDABLE refuses a code-class persona and admits the
+      probe and plan-class personas (monkeypatching merge_checks.PERSONA_CLASSES changes the result); ORIGIN refuses a
+      wrong app, name, head, record, producing-run path, event, branch or title; APPROVAL refuses waiting, rejected,
+      failed and cancelled runs, a run on another branch or path, a title that does not parse, an approve job not
+      success and an approvals list without an approved persona-verdict-override entry, and admits the approved shape;
+      LOOKUP takes the newest matching approved run; the render verb's refusals (closed PR, moved head, digest mismatch,
+      an id set the record does not hold, verdict PROCEED or NO_FLAGS, a failure_outputs record, an API error) and its
+      ok path writing each id to the summary file.
+  - file: tests/personas/test_resolve_pr.py
+    action: Modify
+    purpose: >-
+      Additive cases: the override path resolves an approved run to its PR with no routes; an unapproved, failed or
+      cancelled override run, a closed PR or a moved head is unresolved; a workflow_dispatch run of any other path keeps
+      the no-routes rule.
+  - file: tests/personas/test_route.py
+    action: Modify
+    purpose: Additive cases for the block and flags stems and the no-routes override resolution.
+  - file: tests/personas/test_post_verdict.py
+    action: Modify
+    purpose: >-
+      Additive cases: the record line on BLOCK, REVISE and FLAGS_FOUND for an overridable route and none otherwise; an
+      approved LOOKUP match on a fresh run posts the override form; the override resolution posts one new success run
+      with the approver, ids and run URL; a failed re-check posts nothing and exits non-zero; no PATCH call is ever made.
+  - file: tests/personas/test_probe.py
+    action: Modify
+    purpose: Additive cases for the block and flags markers and the revise finding id.
+  - file: scripts/checks/ci_guards/validate_persona_verdict_chain.py
+    action: Modify
+    new_imports: []
+    purpose: >-
+      Amends plan 1's rules: the verdict workflow's workflow_run workflows must be exactly [persona-verdict-trigger,
+      persona-verdict-override]; prepare's pinned permissions become contents: read, pull-requests: read, actions: read;
+      the run job's pinned condition becomes `!cancelled() && needs.prepare.result == 'success' &&
+      github.event.workflow_run.event == 'pull_request'`; run-name and the concurrency group are pinned to the strings
+      in the persona-verdict.yml row. Adds the override workflow (a third file it reads; missing -> fail): on exactly
+      workflow_dispatch with exactly the five string inputs; run-name exactly the pinned string; top-level permissions
+      {}; exactly the jobs render and approve with their pinned permissions and the render condition; approve names
+      environment persona-verdict-override and needs render; no other job names an Environment; no id-token, no
+      secrets context reference (any form, case-insensitive), no env or with: value holding github.token other than the
+      two preflight steps' and the render verb's GH_TOKEN; every python step is either one of the two pinned
+      environment_reviewer_preflight.py lines or `python3 -I scripts/personas/run.py override-render`; render's only
+      pip line is exactly `pip install pyyaml -c requirements.txt` and approve has none; every uses: 40-hex pinned.
+      Reads YAML text only, as before.
+  - file: tests/checks/ci_guards/test_validate_persona_verdict_chain.py
+    action: Modify
+    purpose: >-
+      Additive: one red fixture per new refused shape (a third upstream, a missing override upstream, the old run
+      condition, prepare without actions: read, an override workflow with id-token, a secret, an extra job, an
+      Environment on render, an unpinned uses:, a sixth input, another run.py verb, a second or different pip line, a pip line in approve); green on the live three
+      files. Plan 1's red fixtures that pinned the one-upstream rule and the old run condition are re-pointed at the new
+      pinned values, each still red on its shape (planned-change, the AC for the chain check).
+  - file: scripts/checks/ci_guards/validate_persona_trigger_policy.py
+    action: Modify
+    new_imports: []
+    purpose: >-
+      In _one_upstream, for a non-failure-gated LLM workflow_run file whose upstream is triggered by workflow_dispatch
+      (alone or with push, pull_request or workflow_run), the upstream qualifies only when every LLM step of the
+      downstream file carries the exact term `github.event.workflow_run.event == 'pull_request'` (a new
+      PR_EVENT_TERM constant beside FAILURE_TERM, compared after _unwrap and whitespace normalisation) as one of the
+      top-level && conjuncts of its job's or its own if:, with no top-level || in that if: and no status function but
+      success() and !cancelled(); the upstream must itself pass rule_problems. Tightening in the same function (a
+      pre-existing multi-hop hole, critiques r2 and r3): upstream_problems gains optional gated and origin arguments (the originating LLM file's
+      gated value and doc, whose LLM steps the conjunct rule reads), and for a
+      non-failure-gated originating file _one_upstream recurses through EVERY workflow_run middle, LLM or not (the
+      `and not self.is_llm(up)` recursion guard is dropped; an LLM middle is still also judged by rule_problems),
+      passing the originating file's gated value and judging the conjunct rule against the originating file's LLM
+      steps, instead of recomputing gated from the middle (vacuously true for a file with no LLM step); so a chain
+      LLM <- any workflow_run middles <- workflow_dispatch is judged exactly as a direct dispatch upstream, and an LLM
+      middle admitted under the conjunct cannot pass a dispatch on to an ungated LLM downstream (prototyped at planning:
+      the live tree stays green, the two-hop non-LLM chain and the LLM-middle chain are refused). Every other upstream
+      rule is unchanged. The problem list is de-duplicated in first-seen order (an LLM middle's upstreams are walked
+      twice: once as its own origin, once with the originating file's values). So nothing a person or an agent
+      dispatches, directly or through any workflow_run middle, can
+      reach an LLM step (Decision 205 cl.1 is kept without reading who issued the dispatch). Module
+      docstring gains one bullet naming the rule.
+  - file: tests/checks/ci_guards/test_validate_persona_trigger_policy.py
+    action: Modify
+    purpose: >-
+      Additive (the graduated shard persona-trigger-policy is kept), every new case built inline under tmp_path as
+      test_non_llm_workflow_run_upstream_is_followed does, so no fixture directory is added and RED_EXPECT is
+      unchanged: a dispatch upstream admitted when every LLM step
+      carries the term on the job if:, and on the step if:; refused when one LLM step lacks it, when the term sits under
+      a top-level ||, when it compares 'push' or another value, and when only a non-LLM step carries it; the existing
+      dispatch-upstream refusal still fires for a downstream with no term; red: LLM down <- non-LLM mid (workflow_run)
+      <- top (workflow_dispatch) with no term is refused (green on main before this change: the red-before case), and
+      admitted when every LLM step of down carries the term; red: LLM down (no term) <- LLM mid (every LLM step carries
+      the term, workflow_run top) <- top (workflow_dispatch) is refused; red: a three-hop non-LLM chain to a dispatch
+      is refused; one admitted case uses the exact pinned run-job condition `${{ !cancelled() &&
+      needs.prepare.result == 'success' && github.event.workflow_run.event == 'pull_request' }}` on the job if:, so the
+      module's status-function rule is proven to accept !cancelled() there.
+  - file: scripts/checks/ci_guards/validate_environment_reviewer_preflight.py
+    action: Modify
+    new_imports: []
+    purpose: "UPSTREAM gains the persona-verdict-override.yml row (render, approve). No other change."
+  - file: tests/checks/ci_guards/test_validate_environment_reviewer_preflight.py
+    action: Modify
+    purpose: >-
+      Additive: the live tree passes with the new Environment and workflow, and persona-verdict-override is among the
+      reviewer-gated Environments the declared HCL yields; a synthetic override workflow whose approve
+      job runs a step before the approvals preflight, or whose render job lacks the reviewers check, is refused.
+  - file: tests/checks/iam_tf/test_terraform_github_import_blocks.py
+    action: Modify
+    purpose: >-
+      EXEMPT gains github_repository_environment.persona_verdict_override and
+      github_repository_environment_deployment_policy.persona_verdict_override_main with a reason in the
+      _PERSONA_VERDICT_REASON style naming PLAN-persona-verdict-override (created by the approved dispatch; no remote
+      object before it). Additive; the graduated shard terraform-github-import-blocks is kept.
+  - file: config/ci_rca_taxonomy.yaml
+    action: Modify
+    purpose: >-
+      One workflows row, beside approved-text-approval's: `persona-verdict-override: {tier: not_a_gate, ci_rca:
+      excluded, owner: platform, rationale: "Operator-gated override of a failing plan-PR verdict check (T4.32 c6);
+      dispatched from main only, so waiting, rejected and refused runs are expected states, not failures."}`. The file
+      is near its 500-line cap (497 at planning; plan 1's build compacts it first). Relief, measured on the build's base
+      with plan_obligations before the edit: when headroom is under 3, first compact block-style entries to flow style
+      with identical keys and text (plan 1's pattern) until the row fits with 2 lines to spare; only if no such entry
+      is left, STOP to the plan owner. Never a budget raise.
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: >-
+      Five r3_workflows entries for the new workflow's one-line run: bodies (Decision 162 R3,
+      validate_composite_action_shell_bodies), each at count 1, keyed by step id beside approved-text-approval.yml's:
+      `.github/workflows/persona-verdict-override.yml::render::reviewers-preflight`,
+      `...::render::install-override-dependencies`, `...::render::override-render`,
+      `...::approve::approvals-preflight` and `...::approve::gate-opened` (each written in full). No other entry
+      changes; persona-verdict.yml gains no run: body here.
+  - file: docs/ROADMAP-PLATFORM.yaml
+    action: Modify
+    purpose: >-
+      Exactly the two ROADMAP blocks of docs/plans/approved/persona-verdict-override.yaml: T4.32 c6 status open -> met
+      with met_by persona-verdict-override (closes_criteria), and one dated progress_note bullet after the 2026-11-16
+      c5 bullet. No other edit.
+bundled_recommendations: []
+followon_recs: [rec-5241, rec-5268]
+infrastructure_dependencies:
+  - >-
+    terraform/github (Decision 248): CI-applied by terraform-github-apply.yml. The build merge's push run ends neutral
+    naming the dispatch owed; a workflow_dispatch from main whose gate_change names exactly
+    github_repository_environment.persona_verdict_override and
+    github_repository_environment_deployment_policy.persona_verdict_override_main applies them after the operator
+    approves the apply job in Actions (VP 8, an admin step needing his words naming it). Until it is applied no override
+    run may be dispatched: GitHub would create an unprotected persona-verdict-override Environment on first reference,
+    and the render job's reviewers check and the approve job's approvals preflight both refuse such a run (fail closed).
+  - "No terraform/personal, terraform/bootstrap or IAM change; the new Environment is in no OIDC trust and no job naming it holds id-token or secrets."
+  - "Lambda: none. compute_affected_artifacts over this scope names only data-pipeline, through docs/ROADMAP-PLATFORM.yaml (a criterion flip and a progress bullet; the PLAN-persona-verdict-chain disposition): no build, deploy or smoke step. The workflows take effect on main at merge."
+acceptance_criteria:
+  - "After the Environment apply, a fixture PR head whose diff touches only tests/fixtures/persona_verdict/fixture_pr/block.txt and flags.txt has a failing persona-verdict/verdict_probe.block check carrying the record line with ids probe:block-1 and probe:block-2, and a success persona-verdict/verdict_probe.flags check carrying a record with probe:flag-1."
+  - "A persona-verdict-override run dispatched from main for that head, the block check run and the digest of its two ids waits for review; once the operator approves it, a persona-verdict run whose event is workflow_run (upstream event workflow_dispatch) posts a NEW persona-verdict/verdict_probe.block check run on the same head with conclusion success, naming the operator, both ids and the override run, and runs no persona (its run job is skipped)."
+  - "An override dispatched with a digest that does not match the record, or for a head that is no longer the PR's head, fails in its render job and never reaches the Environment gate."
+  - "The persona-verdict-override Environment exists with required reviewers, admin bypass off and one main-only deployment policy, created by an approved terraform-github-apply.yml dispatch whose apply re-planned clean."
+  - "validate_persona_verdict_chain refuses each unsafe override-workflow shape and a third upstream; validate_persona_trigger_policy admits a workflow_dispatch upstream, directly or through any workflow_run middle, only when every LLM step of the downstream LLM file carries the pull_request-event conjunct; validate_environment_reviewer_preflight covers the new workflow; all are green on main."
+  - "docs/ROADMAP-PLATFORM.yaml differs from its base by exactly the two approved sidecar blocks (approved_text verify OK)."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The override module's tests (record, digest, extractor, origin, approval, lookup, render verb).
+    command: bin/venv-python -m pytest tests/personas/test_override.py -q
+    expected: All tests pass.
+    expected_literals: [passed]
+    fix_if: Any failure; fix override.py, never the assertion.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      Split build: the code merged in #2136 (e8e754f5) before this closure, so the differential against origin/main is
+      tautological and no late-closure route covers a sidecar plan; tests/personas/test_override.py still runs in the
+      fast tier on its globs. Re-graduation and the route gap: rec-5325.
+  - step: 2
+    phase: pre-deploy
+    action: The chain modules' additive override cases and the probe markers.
+    command: bin/venv-python -m pytest tests/personas -q
+    expected: All tests pass, plan 1's cases included.
+    expected_literals: [passed]
+    fix_if: Any failure; a plan 1 case failing means the override path changed the pull_request path, which it must not.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      Plan 1's persona-verdict-chain-modules record already re-runs tests/personas; step 1's record carries this plan's
+      new module, and the mirror files' additive cases ride plan 1's record.
+  - step: 3
+    phase: pre-deploy
+    action: The workflow-shape checks, red fixtures and the live tree.
+    command: >-
+      bin/venv-python -m pytest tests/checks/ci_guards/test_validate_persona_verdict_chain.py
+      tests/checks/ci_guards/test_validate_environment_reviewer_preflight.py
+      tests/checks/iam_tf/test_terraform_github_import_blocks.py tests/checks/ci_guards/test__manifest.py -q
+    expected: All pass.
+    expected_literals: [passed]
+    fix_if: A refused shape passes or the live tree fails; fix the workflow or HCL, never the check.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      Existing test modules of registered fast-tier checks that already carry graduated records (persona-verdict-chain-shape
+      from plan 1, terraform-github-import-blocks); test_validate_environment_reviewer_preflight.py and test__manifest.py
+      carry no record of their own and are fast-tier module tests; the --pre affected set re-runs all four whenever
+      their globs change.
+  - step: 4
+    phase: pre-deploy
+    action: The trigger-policy amendment, red and green, and the live tree.
+    command: >-
+      bin/venv-python -m pytest tests/checks/ci_guards/test_validate_persona_trigger_policy.py -q && bin/venv-python -c
+      "from scripts.checks.ci_guards.validate_persona_trigger_policy import validate_persona_trigger_policy as v; f=[];
+      v(f); print('FAILED', f) if f else print('TRIGGER_POLICY_OK')"
+    expected: Tests pass and the live tree prints the ok marker.
+    expected_literals: [TRIGGER_POLICY_OK]
+    fix_if: The live tree names a persona workflow; fix the workflow, never the policy check.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      The test module already carries the graduated persona-trigger-policy record and the check runs in the --pre tier
+      on its globs; this plan adds cases to that record's module, not a new standing guard.
+  - step: 5
+    phase: pre-deploy
+    action: The approved roadmap text is placed byte-exactly, and the roadmap validates.
+    command: >-
+      bin/venv-python -m scripts.roadmap.approved_text verify --slug persona-verdict-override --base origin/main &&
+      bin/venv-python -m pytest tests/roadmap/test_verdict_persona_criteria.py -q
+    expected: Prints APPROVED-TEXT OK, then the roadmap criteria tests pass.
+    expected_literals: [APPROVED-TEXT OK, passed]
+    fix_if: Any drift; re-place the blocks from the sidecar, never edit the sidecar.
+    hermetic: true
+    graduation: not-applicable
+  - step: 6
+    phase: pre-deploy
+    action: Provider-free formatting of the terraform/github root (Decision 119; CI's terraform-validate and the terraform-github plan are the authoritative verifiers).
+    command: terraform fmt -check -recursive terraform/github && echo TF_FMT_OK
+    expected: Prints the ok marker.
+    fix_if: Run terraform fmt on the file and re-check.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      ci.yml's terraform validation job already runs fmt -check across every root on each PR touching terraform/**,
+      so a graduated record would duplicate a standing required check. Not hermetic: pr-validate's runner has no
+      terraform binary, so a replay is unmeasurable (exit_127_command_not_found; closure PR #2163, run 44169417880; the
+      PLAN-approved-text-operator-approval precedent).
+  - step: 7
+    phase: pre-deploy
+    action: Fast tier on the branch, then the full tier on the ready head (background, 2 h limit) and its verdict.
+    command: bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: --pre exits 0 and verify-head reports ok for HEAD.
+    fix_if: Any failure; tests/test_aws_profile.py needs HOME set to an empty directory in containers (rec-5196).
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: post-deploy
+    action: >-
+      ADMIN STEP (the operator's words naming it). The build merge's push run of terraform-github-apply.yml ends neutral
+      naming the dispatch owed. Dispatch it from main with gate_change naming exactly the two addresses; tell the operator
+      the apply job is waiting for his approval, with the run link; read the preview, the apply and its clean re-plan.
+    command: >-
+      mcp__github__actions_run_trigger(owner=otl-labs, repo=ontheloop, method=run_workflow,
+      workflow_id=terraform-github-apply.yml, ref=main, inputs={gate_change:
+      "github_repository_environment.persona_verdict_override,github_repository_environment_deployment_policy.persona_verdict_override_main"});
+      then mcp__github__actions_list(method=list_workflow_runs, resource_id=terraform-github-apply.yml) for the dispatch
+      run, mcp__github__actions_list(method=list_workflow_jobs, resource_id=<run id>) and mcp__github__get_job_logs on
+      the preview and apply jobs
+    expected: >-
+      The preview lists exactly two creates, the two addresses, and nothing else, with the allowlisted values
+      environment persona-verdict-override, can_admins_bypass false and branch_pattern main (Decision 248 cl.2); after
+      the operator approves, the apply job concludes success and its re-plan is clean. Record the push run id, the dispatch run id and the apply job
+      conclusion on the merged build PR.
+    fix_if: >-
+      The preview lists any other change (someone else's terraform/github change is merged but unapplied, for example
+      another Environment): stop and report, never widen gate_change; the gate refuses an address: fix the input to the
+      HCL addresses; an apply failure: read the names-only report and stop.
+    hermetic: false
+  - step: 9
+    phase: post-deploy
+    action: >-
+      LIVE PROOF, after VP 8. On the build session's own branch (restarted from main per git-ops.yaml), commit one head
+      that appends a newline to tests/fixtures/persona_verdict/fixture_pr/block.txt and flags.txt and nothing else (one
+      full-tier run and validation_result --verify-head before the push: the path is not handoff-gate exempt). Push it
+      and open one draft fixture PR. Read its two probe checks. Then dispatch persona-verdict-override.yml from main once
+      with a wrong ids_digest (expect the render job to fail) and once with the block check run's id and the digest of
+      probe:block-1 and probe:block-2 (computed with override.ids_digest); tell the operator the second run waits for
+      his approval in the persona-verdict-override Environment, with the run link (his click is the proof; no session
+      tool can approve). After he approves, read the persona-verdict run whose upstream is that override run and the
+      head's check runs. Close the fixture PR unmerged.
+    command: >-
+      mcp__github__pull_request_read(method="get_check_runs", owner="otl-labs", repo="ontheloop", pullNumber=<n>);
+      mcp__github__actions_run_trigger(method="run_workflow", owner="otl-labs", repo="ontheloop",
+      workflow_id="persona-verdict-override.yml", ref="main", inputs={pr, head_sha, route: "verdict_probe.block",
+      check_run_id, ids_digest}) twice; mcp__github__actions_list(method="list_workflow_runs", owner="otl-labs",
+      repo="ontheloop", resource_id="persona-verdict-override.yml"); mcp__github__actions_list(method="list_workflow_jobs",
+      ...) and mcp__github__get_job_logs for the render jobs and for the persona-verdict run whose prepare log's
+      PERSONA-VERDICT line carries override=<the approved run id>; mcp__github__pull_request_read(method="get_check_runs",
+      ...) again; then mcp__github__update_pull_request(state="closed").
+    expected: >-
+      Before: verdict_probe.block failure and verdict_probe.flags success, each with its record line. The wrong-digest
+      run's render job fails with a PERSONA-OVERRIDE refused line and its approve job never starts. After the approval:
+      the persona-verdict run's run job is skipped, its post job posts a new persona-verdict/verdict_probe.block check
+      run on the same head, newer than the failing one, conclusion success, title naming the operator's login, summary
+      naming probe:block-1, probe:block-2 and the override run; no job log shows an OIDC token request, an AWS call or a
+      secret.
+    fix_if: >-
+      A render refusal on the correct inputs, an unproven approval, or a missing or failing new check run: close the
+      fixture PR and file the defect to the plan owner; never re-dispatch with edited inputs to force it green.
+    hermetic: false
+  - step: 10
+    phase: pre-deploy
+    action: The follow-on rec for Decision 262's override-run-built condition exists and is open (filed at planning time).
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader; rows, _m =
+      fetch_recs_by_ids(make_reader(profile='agent_platform'), ['rec-5268']); assert rows and rows[0]['status'] == 'open'; print('REC_262_OPEN')"
+    expected: Prints REC_262_OPEN.
+    fix_if: The rec is missing or closed; report to the plan owner, never re-file a duplicate.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: scripts/personas/override.py
+    behavior: record, digest, extractor registry, origin, approval and lookup, and the render verb's refusals
+    verification_step: 1
+    test_selector: tests/personas/test_override.py
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/personas/run.py
+    behavior: the override-render verb dispatches to override.main
+    verification_step: 2
+    test_selector: tests/personas/test_run.py
+    red_green_expectation: red before (verb absent), green after
+  - source: scripts/personas/resolve_pr.py
+    behavior: an approved override run resolves to its PR with no routes; anything else unresolved
+    verification_step: 2
+    test_selector: tests/personas/test_resolve_pr.py
+    red_green_expectation: red before (override path absent), green after
+  - source: scripts/personas/route.py
+    behavior: block and flags stems; no routes on an override resolution
+    verification_step: 2
+    test_selector: tests/personas/test_route.py
+    red_green_expectation: red before (stems absent), green after
+  - source: scripts/personas/post_verdict.py
+    behavior: the stored record, the lookup on a fresh run, and the new success run on an override resolution
+    verification_step: 2
+    test_selector: tests/personas/test_post_verdict.py
+    red_green_expectation: red before (record and override form absent), green after
+  - source: tests/fixtures/persona_verdict/probe.py
+    behavior: block and flags markers and fixed finding ids
+    verification_step: 2
+    test_selector: tests/personas/test_probe.py
+    red_green_expectation: red before (markers absent), green after
+  - source: .github/workflows/persona-verdict-override.yml
+    behavior: the override workflow's pinned shape
+    verification_step: 3
+    test_selector: tests/checks/ci_guards/test_validate_persona_verdict_chain.py
+    red_green_expectation: red before (workflow absent), green after
+  - source: .github/workflows/persona-verdict.yml
+    behavior: two upstreams, no persona run on an override event, per-run concurrency for overrides
+    verification_step: 3
+    test_selector: tests/checks/ci_guards/test_validate_persona_verdict_chain.py
+    red_green_expectation: red before (one upstream), green after
+  - source: scripts/checks/ci_guards/validate_persona_verdict_chain.py
+    behavior: refuses each unsafe override shape and a third upstream
+    verification_step: 3
+    test_selector: tests/checks/ci_guards/test_validate_persona_verdict_chain.py
+    red_green_expectation: red before (new fixtures pass the old check), green after
+  - source: scripts/checks/ci_guards/validate_persona_trigger_policy.py
+    behavior: a dispatch upstream qualifies only when every LLM step carries the pull_request-event conjunct
+    verification_step: 4
+    test_selector: tests/checks/ci_guards/test_validate_persona_trigger_policy.py
+    red_green_expectation: red before (the admitted fixtures are refused), green after
+  - source: scripts/checks/ci_guards/validate_environment_reviewer_preflight.py
+    behavior: the override workflow's render and approve jobs are covered
+    verification_step: 3
+    test_selector: tests/checks/ci_guards/test_validate_environment_reviewer_preflight.py
+    red_green_expectation: red before (the synthetic override without a reviewers check passes), green after
+  - source: terraform/github/environments.tf
+    behavior: the reviewer-gated Environment and its main policy, exempt from import blocks
+    verification_step: 3
+    test_selector: tests/checks/iam_tf/test_terraform_github_import_blocks.py
+    red_green_expectation: red before (the new addresses have no import and no EXEMPT row), green after
+  - source: config/ci_rca_taxonomy.yaml
+    behavior: the new workflow is classified
+    verification_step: 7
+    command: bin/venv-python -m scripts.validate --pre
+    red_green_expectation: red before (validate_ci_rca_adjudication group (a) refuses the unmapped workflow), green after
+  - source: config/composite_action_body_baseline.yaml
+    behavior: the override workflow's five run bodies are baselined by step id
+    verification_step: 7
+    command: bin/venv-python -m scripts.validate --pre
+    red_green_expectation: red before (validate_composite_action_shell_bodies refuses the unbaselined workflow bodies), green after
+  - source: docs/ROADMAP-PLATFORM.yaml
+    behavior: exactly the two approved sidecar blocks are placed
+    verification_step: 5
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug persona-verdict-override --base origin/main
+    red_green_expectation: red before (blocks not placed), green after
+constraints:
+  - "No LLM call, no inference key, no OIDC token, no AWS call and no secret in any job of either workflow; the override event runs no persona (T4.32 c7 and the operator's 2026-11-16 card keep the role for PLAN-persona-verdict-egress)."
+  - "An override never PATCHes or deletes a check run; it adds a newer one (the merge gate reads the newest, Decision 264)."
+  - "Nothing under scripts/personas/ names a registered persona id or its contract path (executor-personas.yaml implementation_binding); persona classes come from merge_checks."
+  - "Decision 262 is not amended: pr-validate's BLOCK barrier and the operator's admin-bypass release valve are unchanged (operator card 2026-11-17)."
+  - "docs/contracts/git-ops.yaml and docs/contracts/ports.yaml are not edited (both at their caps)."
+  - "No override run is dispatched before VP 8's apply has created the Environment."
+  - "No rescue agents or workaround loops (Decision 55); never skip or loosen a test to get green (Decision 235)."
+  - "The validate_persona_trigger_policy change is a named LOOSENING (Decision 235 cl.1, on the cl.5 floor: it guards .github/workflows/): it admits a workflow_dispatch upstream, directly or through any workflow_run middle, only under the pull_request-event conjunct on every LLM step of the file it reaches, and stays human-gated for good."
+  - "Any rec the build files names, as the first pytest path of its acceptance, a test file that does not exist yet (the portal acceptance lint reads only that path)."
+context:
+  - "Decision-scout r1-r3 FLAGS_FOUND (r3: Decision 262 NOTE only; Decision 235 moved to CITE once the loosening became a named constraint) (Decisions triaged: 216 of 216; Roadmap items intersected: 4; CONFLICT: 0; RELATED: 3; Serves: NS.9 5/5, NS.3 served too). CITE: dec:205, dec:233, dec:235, dec:246, dec:248, dec:264, dec:267. Dispositions: Decision 262 NOTE -> operator card 2026-11-17 'Not now, decide in the scout add plan': 262 is not amended here; its override-run-built reversal condition is carried by follow-on rec rec-5268 for PLAN-decision-scout-add-dual-run. Decision 235 NOTE -> the trigger-policy loosening (a floor-check change, human-gated for good) was named to the operator at sign-off; the build records its weakening_disposition as planned-change citing AC5 (Decision 181 cl.2). Decision 263 RELATED -> PLAN-persona-verdict-egress's credential job must also carry the pull_request-event conjunct (the trigger-policy rule and this plan's run-job pin make that the pattern)."
+  - "Design settled on a blind Fable consult: /mnt/project-files/persona-verdict-override/advisor-brief/ADVICE.md and ADVICE-followup.md (one plan; second workflow_run upstream; re-derive from a record stored in the check run, never re-run the persona; exact binding; new Environment; the conjunct rule over a named-upstream exception)."
+  - "Depends on PLAN-persona-verdict-chain's BUILD: every scripts/personas/ and persona-verdict.yml Modify row edits files that build creates; start only after it merges, and re-read its merged text (pinned strings may differ in detail; keep its rules, change only what this plan names)."
+  - "Binding: an override covers one (PR, head SHA, route, id set); a later head needs a new override until PLAN-persona-verdict-rescout lets an unchanged scout fingerprint reuse a verdict (and its override). The lookup on a fresh run (post (b)) only re-applies an override on the same head with the same ids; LLM finding ids may differ between runs, so override on the final ready head."
+  - "UNPROVEN until VP 9: that GitHub fires workflow_run for a completed workflow_dispatch run started by the operator's account, that its workflow_run.id and path are the override run's, and that a check run created by the post job outranks the older one in the merge gate's newest-run read. Inferred from GitHub docs and merge_checks.py's _newest_key."
+  - "The approval's authority is GitHub's (Decision 233 cl.4): the Environment's required reviewers come from var.gated_apply_reviewer_user_ids, admin bypass is off, and an agent may dispatch but not approve (Decision 246 cl.1). Residual inherited from approved-text (rec-4695 HOLDS_BY_GRANT): approval is operator-only by grant."
+  - "Extractor duty: a route with no registered blocking-id extractor gets no record and can never be overridden, so PLAN-decision-scout-add-dual-run and the plan-critic add plan each register their persona's extractor in override.py when they bind its contract (in their briefs). Live proof covers a BLOCK override only; FLAGS_FOUND disposition is unit-proven."
+  - "Decision 212: override.py's GitHub couplings (the approvals endpoint, the display_title grammar, the check-run record line) join the verdict chain's structural assumptions that rec-5249 (owned by PLAN-persona-verdict-egress; ports.yaml is at its cap) records."
+  - "rec-5241 (High): the merge gate trusts a same-named persona check from any workflow. This plan's ORIGIN check reads the producing run for the failing check; rec-5241's shared origin function, when built, should replace it (one implementation)."
+  - "Other unbuilt plans share scope files (plan_obligations lists them): PLAN-environment-gates-fail-closed and PLAN-bootstrap-ci-gated-apply on environments.tf and the preflight check; PLAN-telemetry-content-reader-lock and PLAN-trusted-plan-identity on environments.tf and the import-blocks test; open plan PR #2100 adds another Environment; many on config/ci_rca_taxonomy.yaml and docs/ROADMAP-PLATFORM.yaml. Whichever builds second rebases; an unapplied terraform/github change from another plan shows in VP 8's preview: stop, never widen gate_change."
+  - "CI Reform's #2071 (wording routing): the roadmap edits ride this plan's own sidecar, so its leg P is satisfied either way; the new workflow carries Decision 267 cl.3's bot guard on render (approve needs render)."
+  - "red_overlap at writing (2026-11-17): blocked by rec-5247 (Critical, slo_breached: the telemetry-reader smoke's 504 read_deadline_exceeded on sessions_window, file scripts/ducklake_smoke/lambda_telemetry_reader_gates.py; no shared paths). Deferral rationale: this plan neither touches nor repairs that red, and planning proceeds under Decision 226; the build re-runs red_overlap before starting and waits for the repair if it still blocks (red-main-recovery.yaml slo_clock)."
+  - "The coordinator log (issue #1963) gets an entry naming the terraform/github/environments.tf and validate_environment_reviewer_preflight.py touch (CI Reform owns the Environment tidy) when the plan PR opens."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:e53c62dc3e155208dc41bdf95bb8a9cbbbbb618684718a641b39b822a6013efc"}
+  - {gate: wording-check, round: 1, verdict: FAIL, digest: 083b78c32088e47aa280771b6848e2ce8356fb45df2efd17fe7f3a4e844012d7, base: 7cd38349dcb17e5b477fa5693159003143ad37cd, selection: complete}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:d8a6ea20fbe6b2f008f02f491f00d079a06a9041743b682566b2f9ecc959ba47"}
+  - {gate: wording-check, round: 2, verdict: PASS, digest: 083b78c32088e47aa280771b6848e2ce8356fb45df2efd17fe7f3a4e844012d7, base: 7cd38349dcb17e5b477fa5693159003143ad37cd, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 6, nits: 12}
+  - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:a731d14afcddc6c5bc8780c632edbfb29aa293f54426a24d7c3afd727498c072"}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 6}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 1}
+  - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 2}
+  - {gate: plan-critique, round: 5, verdict: PROCEED, blocking: 0, nits: 1}
+  - {gate: plan-critique, round: 6, verdict: PROCEED, blocking: 0, nits: 2}
+  - {gate: plan-critique, round: 7, verdict: PROCEED, blocking: 0, nits: 2}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "Pre: PLAN-persona-verdict-chain's build is merged (scripts/personas/ and both persona-verdict*.yml exist on main); no open PR edits persona-verdict*.yml or scripts/personas/ (mcp__github__list_pull_requests); re-run plan_obligations and red_overlap on this plan."
+  - "Create scripts/personas/override.py and tests/personas/test_override.py; post: VP 1 green."
+  - "Modify run.py, resolve_pr.py, route.py, post_verdict.py, the probe, its schema and the two new marker files, with the additive mirror-test cases; post: VP 2 green."
+  - "Create persona-verdict-override.yml and modify persona-verdict.yml; modify validate_persona_verdict_chain and its test, validate_environment_reviewer_preflight and its test; post: VP 3 green."
+  - "Modify validate_persona_trigger_policy and its test; post: VP 4 green. Record the loosening as weakening_disposition planned-change citing AC5."
+  - "Append the two terraform/github resources and the two EXEMPT rows; post: VP 6 and VP 3 green."
+  - "Add the five composite_action_body_baseline entries and the ci_rca_taxonomy row (measure the cap first, relieve by compaction) and place the two sidecar blocks with {{DATE}} set to the build date; post: VP 5 green."
+  - "Execute VP 7 before the PR is ready; loop until pass; on unrecoverable V3 failure stop and RCA (Decision 55)."
+  - "After merge: VP 8 (admin step: the operator's words naming the terraform-github-apply approval), then VP 9 (the operator approves one fixture override run); report run ids and conclusions to the coordinator."
+  - "Report: what was implemented, verification results"
+rollback: >-
+  Revert the build PR: persona-verdict.yml returns to one upstream and the override workflow disappears, so no override
+  can run; a check run already posted stays as GitHub history. The Environment stays (prevent_destroy); removing it is a
+  separate gated terraform-github-apply dispatch the operator approves. The roadmap blocks revert with the PR.

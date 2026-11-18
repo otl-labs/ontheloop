@@ -116,6 +116,8 @@ def _tool_output_flag(entry_verb: str, params: Any) -> tuple[Any, bool]:
 
 
 def _named_read(payload: dict[str, Any], meta: dict[str, Any], remaining_ms: Callable[[], float] | None) -> dict[str, Any]:
+    if not meta.get("caller_present"):
+        return _response(403, {"ok": False, "error_type": "missing_caller_identity", "action": "named_read"})
     verb = payload.get("verb")
     if not isinstance(verb, str) or verb not in SERVED_VERBS:
         return _response(400, {"ok": False, "error_type": "unknown_verb", "served": sorted(SERVED_VERBS)})
@@ -213,6 +215,7 @@ def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
         "verb": "unknown",
         "session_id": None,
         "served": masked.Served(0, 0, {}),
+        "caller_present": access_log.caller_fields(event) is not None,
     }
     status = 500
     try:

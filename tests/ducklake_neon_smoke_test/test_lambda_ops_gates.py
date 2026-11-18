@@ -168,6 +168,7 @@ def test_lambda_row_rules_ok(monkeypatch, capsys):
     assert f"LAMBDA_ROW_RULES OK {len(lambda_ops_gates.ROW_RULES_CASES)} cases" in out
     assert f"{len(lambda_ops_gates.DORMANT_REFUSAL_CASES)} dormant (table, verb) cases refused 400" in out
     assert [a for a, _ in calls].count("write_ops") == len(lambda_ops_gates.ROW_RULES_CASES)
+    assert "array_element_reference" in [c[0] for c in lambda_ops_gates.ROW_RULES_CASES]  # Decision 268's dangling case
     assert calls[-1][0] == "read_ops_current" and "update_ops" not in [a for a, _ in calls]
     assert sorted(calls.dormant) == sorted(lambda_ops_gates.DORMANT_REFUSAL_CASES)  # each pair sent exactly once
 
