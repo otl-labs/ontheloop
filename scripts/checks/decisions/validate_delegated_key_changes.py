@@ -1,4 +1,4 @@
-"""Delegated-key change rules (Decision 272 clauses 1 and 3).
+"""Delegated-key change rules (Decision 273 clauses 1 and 3).
 
 A decision entry may delegate values to a contract or config key through its envelope `delegates` field. Delegations
 are read from origin/main, never from head, so an in-place envelope edit cannot move them. For every base delegation:
@@ -130,14 +130,14 @@ def _delegation_problems(
 def _changed_key_problems(number: int, item: dict, split: tuple[str, str], head_value: Any, new: dict[int, str]) -> list[str]:
     problems = [
         f"Decision {n} re-sets {item['key']}, which Decision {number} delegates: change the key by its "
-        f"{item.get('change_rule')} rule, not a new mechanism entry (Decision 272 clause 3)"
+        f"{item.get('change_rule')} rule, not a new mechanism entry (Decision 273 clause 3)"
         for n, block in sorted(new.items())
         if _is_mechanism_without_delegates(block) and _names_key(_outside_envelope(block), *split)
     ]
     if _outside_bounds(item.get("bounds"), head_value):
         problems.append(
             f"{item['key']} is {head_value!r} at head, outside Decision {number}'s bounds {item.get('bounds')}: "
-            "a value outside them needs a new direction entry amending it (Decision 272 clause 1)"
+            "a value outside them needs a new direction entry amending it (Decision 273 clause 1)"
         )
     return problems
 
@@ -150,7 +150,7 @@ def validate_delegated_key_changes(
     base_text_reader: BaseTextReaderFn | None = None,
 ) -> None:
     """Fail a changed delegated key that a new mechanism entry re-sets, leaves its bounds, or whose delegation moved."""
-    print("\n=== Delegated-key change rules (Decision 272) ===")
+    print("\n=== Delegated-key change rules (Decision 273) ===")
     using_default_root = root is None
     root = root if root is not None else _common.ROOT
     baseline_reader = baseline_reader or baseline_decision_numbers

@@ -1,4 +1,4 @@
-"""The conformance check's delegates and plan rules end to end on tmp roots (Decision 272 clause 1).
+"""The conformance check's delegates and plan rules end to end on tmp roots (Decision 273 clause 1).
 test_entry_rules.py is at 500 SLOC, so these live here."""
 
 from __future__ import annotations

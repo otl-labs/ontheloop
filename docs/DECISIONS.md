@@ -2,10 +2,10 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
-## Decision 272: A Decision may delegate its values to a named contract key, and the per-entry cap stops charging the envelope, the reversal stanza and the options considered (amends Decision 167) (Decided)
+## Decision 273: A Decision may delegate its values to a named contract key, and the per-entry cap stops charging the envelope, the reversal stanza and the options considered (amends Decision 167) (Decided)
 
 ```yaml
-number: 272
+number: 273
 status: Decided
 decided_date: "2026-11-17"
 kind:
@@ -31,7 +31,7 @@ delegates:
 
 **Status:** Decided
 **Date:** 2026-11-17
-**Warehouse ID:** dec-272 (per Decision 84 backfill)
+**Warehouse ID:** dec-273 (per Decision 84 backfill)
 
 **Problem:** The routing rule has no row for mechanism specification, so new entries still carry it (74 percent of
 the 12 newest by bytes) and each later change to it mints another entry (81 of the 97 since Decision 167 amend an
@@ -78,7 +78,7 @@ seen only by step 12p (rec-5261); an in-bounds change to an operator_approval ke
 sidecar is unchecked (rec-5277).
 
 ```yaml reversal-conditions
-decision: 272
+decision: 273
 review_by: 2027-01-29
 on_trigger: "re-decide via /plan"
 conditions:
@@ -8004,7 +8004,7 @@ conditions:
 > stanza's mis-routed-past-both-gates did not fire and is re-armed with wording a review can check; review_by moves
 > from 2026-11-17 to 2027-02-17. No clause changes.
 
-> **Amended by Decision 272 (2026-11-17):** Clause 3's cap measures the entry less its envelope, its reversal-conditions stanza and its options-considered block, at docs/contracts/decision-entry.yaml size_governance.measured_size_norm; entries new before Decision 272 landed under the 6,144-byte whole-span norm, which their pin tests keep, and clause 6 of Decision 272 fails later growth of their measured body past the new cap. Clause 4's routing rule gains the mechanism_specification row (Decision 272 cl.2 and cl.4).
+> **Amended by Decision 273 (2026-11-17):** Clause 3's cap measures the entry less its envelope, its reversal-conditions stanza and its options-considered block, at docs/contracts/decision-entry.yaml size_governance.measured_size_norm; entries new before Decision 273 landed under the 6,144-byte whole-span norm, which their pin tests keep, and clause 6 of Decision 273 fails later growth of their measured body past the new cap. Clause 4's routing rule gains the mechanism_specification row (Decision 273 cl.2 and cl.4).
 
 ---
 

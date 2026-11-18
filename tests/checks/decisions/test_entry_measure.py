@@ -1,4 +1,4 @@
-"""Mirror test for scripts/checks/decisions/entry_measure.py (Decision 272 clause 4)."""
+"""Mirror test for scripts/checks/decisions/entry_measure.py (Decision 273 clause 4)."""
 
 from __future__ import annotations
 

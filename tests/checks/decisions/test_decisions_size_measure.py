@@ -1,4 +1,4 @@
-"""Mirror test for scripts/checks/decisions/decisions_size_measure.py (Decision 272 clauses 4-6)."""
+"""Mirror test for scripts/checks/decisions/decisions_size_measure.py (Decision 273 clauses 4-6)."""
 
 from __future__ import annotations
 

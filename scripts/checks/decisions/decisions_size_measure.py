@@ -1,8 +1,8 @@
-"""Size legs of Decision 272 as pure functions over injected texts (no file or git reads, never raise on text).
+"""Size legs of Decision 273 as pure functions over injected texts (no file or git reads, never raise on text).
 
 validate_decisions_size wires these to the repository; their mirror test is tests/checks/decisions/
 test_decisions_size_measure.py. The contract keys read are docs/contracts/decision-entry.yaml size_governance
-.measured_size_norm and .options_considered (Decision 272 clauses 4-6).
+.measured_size_norm and .options_considered (Decision 273 clauses 4-6).
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from scripts.checks.decisions import entry_measure
 from scripts.checks.decisions.envelope_rules import amended_numbers
 from scripts.decisions_md import extract_entry_envelope
 
-DECISION = 272
+DECISION = 273
 CONTRACT = "docs/contracts/decision-entry.yaml"
 MEASURED_CAP_KEY = f"{CONTRACT}#size_governance.measured_size_norm.cap_bytes"
 _STATUS_SUFFIX = re.compile(r"\s*\((?:Decided|Accepted|Proposed|Superseded[^)]*)\)\s*$")
