@@ -46,7 +46,7 @@ contract:
       line 192, but no scheduled or operational verb depends on it). SCHEDULED actions are
       EventBridge-triggered (merge daily 04:00 UTC -> smoke; gc weekly 05:00 UTC Sun -> smoke;
       hot_merge cron(0 */6 * * ? *) -> smoke; merge_ops cron(30 */6 * * ? *) -> PRODUCTION
-      ducklake_ops, cron(50 */6 * * ? *) and gc_ops cron(5 4 ? * SUN *) -> PRODUCTION ducklake_telemetry). OPERATIONAL actions (catalog_reinit, restore_drill, catalog_stats,
+      ducklake_ops, cron(50 */6 * * ? *) and gc_ops cron(5 4 ? * SUN *) -> PRODUCTION ducklake_telemetry; merge_ops_gated cron(0,6,8,10,16,18,20,22,24,26,32,34,36,38,40,46,52,54,56,58 * * * ? *) -> PRODUCTION ducklake_telemetry). OPERATIONAL actions (catalog_reinit, restore_drill, catalog_stats,
       reconcile_columns, reconcile_partitions, rewrite_partition_layout, provision_telemetry_login,
       provision_catalog_owner, provision_telemetry_catalog)
       are human-invoked over 443 via `aws lambda invoke` (AWS_IAM); the two partition verbs
@@ -204,6 +204,15 @@ verbs:
         missing s3:// data_path / meta_schema, no tables discovered at all, or a post-loop aggregate raise naming per-table merge failures (table + underlying error text),
         compaction failures and refusals, and/or unclassified tables (500)
       version_mismatch: "DuckDB/extension version mismatch (500)"
+  merge_ops_gated:
+    payload_schema_ref: >-
+      event envelope {action: "merge_ops_gated", data_path (s3://), meta_schema, backlog_gate {min_commits, max_unmerged_minutes}}. SCHEDULED against PRODUCTION
+      ducklake_telemetry beside its every-6h merge_ops. Reads CloudWatch only: the latest MergeOpsTablesCount or MergeOpsGateTriggered datapoint in 6 h is the last pass,
+      and the writer's CommitLatencyMs samples since then are the committed appends. At min_commits, or once the oldest has waited max_unmerged_minutes, it emits
+      MergeOpsGateTriggered and runs merge_ops with the same event; otherwise, or when a read fails, it returns skipped without a catalog connection. Emits MergeOpsBacklogCommits when read, else MergeOpsGateUnreadable.
+    response_codes:
+      200: "merge_ops's 200 body, or {ok, action, skipped: true, reason (below_threshold | gate_unreadable), commits, last_pass}"
+      500: "DuckLakeRuntimeError: a missing or non-positive backlog_gate field; otherwise merge_ops's 500"
   gc_ops:
     payload_schema_ref: >-
       event envelope {action: "gc_ops", data_path (s3://), meta_schema, dry_run? (default false)}. SCHEDULED (EventBridge cron(45 3 ? * SUN *) against PRODUCTION ducklake_ops;
@@ -434,6 +443,7 @@ audit_invariants:
   - "Telemetry catalog maintenance (Decision 236 cl.5): ten alarms read only the MetaSchema=ducklake_telemetry series (eight maintenance, two writer); the ops series stays undimensioned and receives no telemetry datapoint. G4 headroom: weekly dead files are about 7 x D against G4_MAX_DELETE_FILES 20,000, and above about 2,850 files a day every pass drains partially (GcDeferredFiles, Decision 193). Neon storage growth is detected by the stats-rows alarm on the dominant catalog table and egress driver (Decision 88 cl.1(iii)); no compute cap is claimed for storage (Decision 214 cl.3 caps compute; its Terraform limit is pending under rec-4220)."
   - "An unknown `action` returns 400 with the sorted action allow-list (dispatcher-level; not a per-verb outcome)."
 amendment_log:
+  - {date: "2026-11-17", semantic_break: false, change_class: field_add, summary: "PLAN-telemetry-read-timeouts (Decision 236 cl.5 amendment, rec-5247, rec-5248): the new merge_ops_gated verb runs merge_ops on the production telemetry catalog when its backlog_gate (60 commits or 30 minutes) is met, from a rule that ticks every two to six minutes; the every-6h telemetry merge stays as the floor; the MergeOpsBacklogCommits, MergeOpsGateUnreadable, MergeOpsGateTriggered and MergeOpsFilesBeforeTotal catalog metrics; the ops catalog's cadence and every existing alarm are unchanged."}
   - {date: "2026-11-09", semantic_break: false, change_class: prose_improvement, summary: "PLAN-sit-restore-spike (Decision 251): the description names the ephemeral-only restore_rehearsal verb and its contract; no verb of this function changes."}
   - date: "2026-10-25"
     semantic_break: false

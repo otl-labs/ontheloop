@@ -86,7 +86,8 @@ resource "aws_lambda_function" "ducklake_telemetry_reader" {
 
   # A literal: one telemetry slot and no ops slot per container, against the reader login's CONNECTION LIMIT 10
   # (catalog_logins.LOGINS), keeping the 2 x reserved-concurrency headroom recorded at ducklake_telemetry_writer_role.sql.
-  reserved_concurrent_executions = 5
+  # The content reader (terraform/bootstrap/telemetry_content_reader.tf, 1) shares that login: 2 x (4 + 1) <= 10 (Decisions 230 cl.3, 239 cl.1).
+  reserved_concurrent_executions = 4
 
   s3_bucket = aws_s3_bucket.data_lake.id
   s3_key    = "lambda-packages/ducklake-telemetry-reader.zip"
@@ -192,6 +193,32 @@ resource "aws_cloudwatch_metric_alarm" "ducklake_telemetry_reader_errors" {
   tags = {
     Name    = "DuckLake Telemetry Reader Errors Alarm"
     Purpose = "Decision 236 runtime error alert"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "ducklake_telemetry_reader_slow" {
+  alarm_name          = "ducklake-telemetry-reader-slow"
+  alarm_description   = "DuckLake telemetry reader: a call ran close to the reader's read deadline (unmerged small-file backlog; PLAN-telemetry-read-timeouts, rec-5247/rec-5248)."
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 4
+  datapoints_to_alarm = 2
+  metric_name         = "Duration"
+  namespace           = "AWS/Lambda"
+  period              = 900
+  statistic           = "Maximum"
+  threshold           = 100000
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    FunctionName = aws_lambda_function.ducklake_telemetry_reader.function_name
+  }
+
+  alarm_actions = [aws_sns_topic.alerts.arn]
+  ok_actions    = [aws_sns_topic.alerts.arn]
+
+  tags = {
+    Name    = "DuckLake Telemetry Reader Slow Alarm"
+    Purpose = "PLAN-telemetry-read-timeouts reader duration alert"
   }
 }
 

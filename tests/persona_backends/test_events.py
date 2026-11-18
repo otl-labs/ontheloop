@@ -32,3 +32,21 @@ def test_write_atomic_leaves_no_tmp_and_whole_document(tmp_path):
 def test_end_record_carries_error_only_when_given():
     assert "error" not in ev.end_record("success", None, 1, 0, 2)
     assert ev.end_record("aborted", None, 1, 0, 2, "outage")["error"] == "outage"
+
+
+def test_attempt_and_probe_fields():
+    fixed = ev.attempt_dict(fakes.attempt())
+    assert (fixed["provider"], fixed["billing_shape"], fixed["started_at_ms"]) == ("p", "b", 1000)
+    assert ev.header("c", "p", 1, "h", "i", 1)["tools_sha256"] is None
+    tools = [{"type": "function", "function": {"name": "f"}}]
+    assert (
+        ev.header("c", "p", 1, "h", "i", 1, ev.tools_sha256(tools))["tools_sha256"]
+        == hashlib.sha256(ev.canonical_json(tools).encode("utf-8")).hexdigest()
+    )
+    probe = fakes.record("warm_fetched_escape_hatch")
+    transport = fakes.ScriptedTransport([fakes.final(failed_over=True, probe_record=probe)])
+    _, events = fakes.drive(transport)
+    assert events[1]["probe_record"]["role"] == "warm_fetched_escape_hatch"
+    assert events[1]["record"]["response_id"] == "resp-1" and events[1]["attempts"][0]["provider"] == "p"
+    _, plain = fakes.drive(fakes.ScriptedTransport([fakes.final()]))
+    assert plain[1]["probe_record"] is None

@@ -78,5 +78,9 @@ def test_catalog_metrics_is_the_closed_alarm_input_set():
             "MergeOpsFilesAfterTotal",
             "MergeOpsDurationMs",
             "CatalogFileColumnStatsRows",
+            "MergeOpsBacklogCommits",
+            "MergeOpsGateUnreadable",
+            "MergeOpsGateTriggered",
+            "MergeOpsFilesBeforeTotal",
         }
     )

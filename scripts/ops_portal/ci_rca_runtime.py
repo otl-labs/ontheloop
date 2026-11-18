@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
@@ -53,6 +54,21 @@ def _is_reader_unreachable_error(exc: Exception) -> bool:
     return any(marker in msg for marker in _READER_UNREACHABLE_MARKERS)
 
 
+def _sibling_fingerprints(fingerprint: str) -> list[str]:
+    """The fingerprint expanded to its full-tier sibling line in dedup's handoff file (Decision 142 cl.3), else itself."""
+    directory = os.environ.get("CI_RCA_BUNDLE_EMIT_DIR")
+    if directory:
+        try:
+            with open(os.path.join(directory, "sibling-fingerprints.txt"), encoding="utf-8") as handle:
+                for line in handle.read().splitlines():
+                    parts = line.split()
+                    if parts and parts[0] == fingerprint:
+                        return parts
+        except OSError:
+            pass
+    return [fingerprint]
+
+
 def find_open_ci_rca_rec_by_fingerprint(fingerprint: str, profile: Optional[str] = None) -> Optional[str]:
     """Return the id of an OPEN source=ci_rca rec whose context_v2_json.fingerprint matches, or None.
 
@@ -81,6 +97,7 @@ def find_open_ci_rca_rec_by_fingerprint(fingerprint: str, profile: Optional[str]
             return None
         raise
 
+    wanted = _sibling_fingerprints(fingerprint)
     for row in rows:
         if row.get("status") != "open":
             continue
@@ -91,7 +108,7 @@ def find_open_ci_rca_rec_by_fingerprint(fingerprint: str, profile: Optional[str]
             ctx = json.loads(ctx_raw) if isinstance(ctx_raw, str) else ctx_raw
         except (json.JSONDecodeError, TypeError):
             continue
-        if isinstance(ctx, dict) and ctx.get("fingerprint") == fingerprint:
+        if isinstance(ctx, dict) and ctx.get("fingerprint") in wanted:
             return row.get("id")
     return None
 

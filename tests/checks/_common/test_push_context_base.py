@@ -9,7 +9,9 @@ None otherwise -- and the PR-context invariance of get_changed_files()/get_statu
 
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -179,6 +181,61 @@ class TestPushContextBase:
         diff_call = next(c for c in mock_run.call_args_list if c.args[0][:2] == ["git", "diff"])
         assert diff_call.args[0] == ["git", "diff", "--name-status", "--no-renames", "deadbeef"]
 
+    def _push_repo(self, tmp_path: Path) -> tuple[Path, list[str]]:
+        repo = tmp_path / "repo"
+        self._init_repo(repo, "feature/not-main")
+        shas = [self._commit(repo, f"f{i}.txt", f"c{i}") for i in range(4)]
+        return repo, shas
+
+    def test_full_tier_prev_ancestor_is_returned(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        repo, shas = self._push_repo(tmp_path)
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
+        monkeypatch.setenv("FULL_TIER_PREV", shas[0])
+        with patch("scripts.checks._common.ROOT", repo):
+            assert _common.push_context_base() == shas[0]
+
+    def test_full_tier_prev_falls_to_last_green(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        repo, shas = self._push_repo(tmp_path)
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
+        monkeypatch.setenv("FULL_TIER_PREV", "f" * 40)
+        monkeypatch.setenv("FULL_TIER_LAST_GREEN", shas[1])
+        with patch("scripts.checks._common.ROOT", repo):
+            assert _common.push_context_base() == shas[1]
+
+    def test_neither_qualifying_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        repo, shas = self._push_repo(tmp_path)
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
+        monkeypatch.setenv("FULL_TIER_PREV", "f" * 40)
+        monkeypatch.setenv("FULL_TIER_LAST_GREEN", "")
+        with patch("scripts.checks._common.ROOT", repo), pytest.raises(RuntimeError, match="FULL_TIER_PREV"):
+            _common.push_context_base()
+
+    def test_full_tier_prev_equal_to_head_is_not_strict_ancestor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo, shas = self._push_repo(tmp_path)
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
+        monkeypatch.setenv("FULL_TIER_PREV", shas[-1])
+        with patch("scripts.checks._common.ROOT", repo), pytest.raises(RuntimeError):
+            _common.push_context_base()
+
+    def test_full_tier_prev_outside_push_context_returns_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        repo, shas = self._push_repo(tmp_path)
+        monkeypatch.setenv("FULL_TIER_PREV", shas[0])
+        with patch("scripts.checks._common.ROOT", repo):
+            assert _common.push_context_base() is None
+
+    def test_unset_or_empty_prev_keeps_today_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        repo, shas = self._push_repo(tmp_path)
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
+        monkeypatch.setenv("FULL_TIER_PREV", "")
+        with patch("scripts.checks._common.ROOT", repo):
+            assert _common.push_context_base() == shas[-2]
+        monkeypatch.setenv("GITHUB_EVENT_BEFORE", shas[0])
+        monkeypatch.delenv("FULL_TIER_PREV")
+        with patch("scripts.checks._common.ROOT", repo):
+            assert _common.push_context_base() == shas[0]
+
 
 class TestRootScopedProbes:
     """rec-3166: push_context_base(root=...) must resolve the INJECTED root's git state, never
@@ -247,3 +304,23 @@ class TestRootScopedProbes:
         with patch("scripts.checks._common.ROOT", repo):
             base = _common.push_context_base()
         assert base == first
+
+
+def test_full_tier_vars_absent_inside_a_test() -> None:
+    for name in ("FULL_TIER_PREV", "FULL_TIER_LAST_GREEN", "CI_RCA_RANGE_PREV"):
+        assert name not in os.environ
+
+
+def test_conftest_strips_full_tier_vars_from_job_env() -> None:
+    root = Path(__file__).resolve().parents[3]
+    env = {**os.environ, "FULL_TIER_PREV": "x", "FULL_TIER_LAST_GREEN": "y", "CI_RCA_RANGE_PREV": "z"}
+    node = "tests/checks/_common/test_push_context_base.py::test_full_tier_vars_absent_inside_a_test"
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", node, "-q"],
+        cwd=str(root),
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    assert result.returncode == 0, result.stdout[-800:]

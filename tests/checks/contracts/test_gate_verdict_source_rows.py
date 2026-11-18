@@ -108,3 +108,42 @@ def test_roadmap_carries_the_code_pr_amendment() -> None:
     assert "a PR changing code is every pull request whose diff from its merge base is not confined to docs/plans/" in _flat(
         "docs/ROADMAP-PLATFORM.yaml"
     )
+
+
+def _app_row_text(local: object, cloud: object) -> str:
+    data = yaml.safe_load(_text(_CONFIG))
+    for row in data["settings"]:
+        if row["id"] == mc.VERDICT_APP_ROW:
+            row["defaults"] = {"local": local, "cloud": cloud}
+    return yaml.safe_dump(data)
+
+
+def test_verdict_app_row_reads_null_and_pins_persona_checks() -> None:
+    assert mc.verdict_app_id(_text(_CONFIG)) is None
+    name = mc.persona_check_name("code_reviewer")
+    forged = [
+        {
+            "name": name,
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-11-17T10:00:00Z",
+            "id": 1,
+            "app": {"slug": "github-actions", "id": 15368},
+        }
+    ]
+    pins = mc.persona_pins([name], mc.verdict_app_id(_text(_CONFIG)))
+    result = mc.verdict([name], forged, 1, pins=pins)
+    assert result.kind == mc.REFUSE and "has no verdict App" in result.reasons[0]
+    assert mc.verdict_app_id(_app_row_text(42, 42)) == 42
+
+
+def test_verdict_app_text_is_placed() -> None:
+    ports = yaml.safe_load(_text("docs/contracts/ports.yaml"))
+    row = next(c for c in ports["coupling_findings"] if c["id"] == "PC-10")
+    assert "gates.verdict_app.app_id" in row["description"]
+    assert row["status"] == "open" and row["owning_item"] == "T4.2:c9"
+    assert "verdict GitHub App" in _flat("docs/contracts/coordinator.yaml")
+    assert "PLAN-persona-check-origin" in _flat("docs/ROADMAP-PLATFORM.yaml")
+    decisions = _flat("docs/DECISIONS.md")
+    assert "A persona verdict check counts only when the dedicated verdict GitHub App posted it" in decisions
+    assert decisions.count("> **Amended by Decision") >= 2

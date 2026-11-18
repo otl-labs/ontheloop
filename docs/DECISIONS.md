@@ -2,6 +2,232 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 271: A persona verdict check counts only when the dedicated verdict GitHub App posted it -- the merge gate pins persona checks to the App id read from origin/main and ignores same-named runs from any other source (amends Decisions 264 and 205) (Decided)
+
+```yaml
+number: 271
+status: Decided
+decided_date: "2026-11-17"
+kind:
+  value: direction
+  justification: >-
+    Clause 1 changes what the merge gate accepts as a persona verdict and clause 3 adds a refusal only the operator
+    can release, which moves a gate; undone, any branch workflow passes the persona leg.
+amends: [264, 205]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable, reversal-relevant: the trust rule for every persona verdict and the verdict identity every later
+    persona plan builds on. Not a project-configuration.yaml or ports.yaml note: a contract records a row and a
+    coupling, not the authority to refuse a merge (Decision 264's rejected home). Not amendment_forms on Decision
+    264: it also changes Decision 205 clause 2's verdict identity, and a dated note amends one body only.
+```
+
+**Status:** Decided
+**Date:** 2026-11-17
+**Warehouse ID:** dec-271 (per Decision 84 backfill)
+
+**Problem:** Decision 264 clauses 1 and 4 accept a persona check as the newest check run by the GitHub Actions app. Any workflow on an in-repo branch whose token holds checks: write runs as that app and can post a run with a persona's name and conclusion success on any head (rec-5241), so once a persona's row reads actions an agent could pass the persona leg without the persona running. The verdict chain posts its check through the Checks API from a workflow_run run whose own check suite is on main's commit, so nothing about a check run's suite ties it to the chain.
+
+**Intent:** A persona verdict counts only when the verdict chain on main posted it.
+
+**Decision:**
+1. **Verdict App pin.** For a check named persona-verdict/<persona>, the merge gate counts only check runs whose app id equals the gates.verdict_app.app_id row of docs/contracts/project-configuration.yaml on origin/main, read with the persona rows; Decision 264 clause 1's rules then apply to the newest such run. Required checks that are not persona checks keep clause 1's GitHub Actions rule. The app id is on the check runs the gate already reads, so no read is added.
+2. **Same-named runs from another source.** A persona-named run from any other app, the GitHub Actions app included, is ignored for the verdict and is never a refusal on its own, so a branch pusher can neither pass nor wedge an agent merge with one. Tracing and removing each such run is rec-5271.
+3. **Fail closed.** While the row is empty, absent or unreadable on origin/main, a persona check an actions row adds refuses (Decision 264 clause 3), and a PR head whose row does not read refuses. An agent merge of a pull request whose own change alters the row's value, adding or removing it included, is refused, so the operator merges it in the GitHub UI (the Decision 264 clause 5 pattern).
+4. **Verdict identity (amends Decision 205 clause 2).** On Actions too, the verdict check run is created under the dedicated verdict App, not the job's GITHUB_TOKEN; the executor App still holds no checks: write. The App, its key home, the role that reads the key and the post job's token mint belong to PLAN-persona-verdict-egress, under its own Decision, which widens Decision 263 clause 2's grant list and records the key-custody residual in the Decision 267 clause 5 form. Until then the row stays empty, so a persona row switched to actions refuses every agent merge of its class.
+5. **Coverage (Decision 181 cl.2).** Clauses 1-3: the merge gate and its hook tests (rec-5241). Clause 4: PLAN-persona-verdict-egress, a residual until built. Residuals: any principal that can read the App key can post as the App, so the key's custody is the trust root; GitHub UI merges and the ruleset, which require no persona check until rec-4624, which should require them from the App; persona-named runs from other sources are ignored but not yet reported (rec-5271). docs/contracts/ports.yaml PC-10 records the gate's coupling.
+
+**Rationale:** A dedicated App rather than a pointer the gate verifies: only the App's key can create its check runs, the pin costs no read at merge time, and the ruleset can later require the same App, which also covers operator UI merges. Rejected: rec-5241's check-suite predicate (the chain's suite is on main's commit, so it would refuse every genuine verdict); a check run naming its workflow run, verified through public run data (about two more reads per persona, a redesign of the post job, nothing for the ruleset); signed attestations (a signature verifier inside a fail-closed hook); refusing any foreign same-named run (a free wedge on agent merges for anyone who can push a branch).
+
+```yaml reversal-conditions
+decision: 271
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan; never add an agent override"
+conditions:
+  - id: app-key-exposed
+    kind: manual
+    description: "A principal outside the egress plan's declared readers reads the App key, or a check run the verdict chain did not post carries the App: rotate the key and re-decide clause 1."
+  - id: native-pin-available
+    kind: manual
+    description: "rec-4624 lets the ruleset require the persona checks from the App: retire the clauses GitHub then enforces."
+  - id: foreign-runs-recur
+    kind: manual
+    description: "rec-5271 records repeated persona-named runs from other sources: re-decide clause 2 (refuse rather than ignore)."
+```
+
+**Related:** Decisions 83, 143, 181, 203, 205, 212, 224, 229, 237, 245, 263, 264, 267; T4.2, T4.32; rec-4624, rec-5241, rec-5271.
+
+> **Update (2026-11-17):** PLAN-persona-verdict-egress re-cut T4.32's egress hint into five plans, and the operator ruled on 2026-11-17 that the verdict App's key gets its own Environment and role. So "PLAN-persona-verdict-egress" in clause 4 and the Coverage line reads as two plans: PLAN-persona-verdict-app-grant holds the App, its key home and the role that reads the key (a separate role, used only by the post job, under its own Decision in the Decision 267 clause 5 form, so Decision 263 clause 2's grant list does not widen), and PLAN-persona-verdict-app-post holds the post job's token mint; the app-key-exposed reversal's "the egress plan's declared readers" reads as PLAN-persona-verdict-app-grant's declared readers, and the gates.verdict_app.app_id row's note in docs/contracts/project-configuration.yaml reads the same way (rec-5351).
+
+---
+
+## Decision 272: The telemetry content reader's deploy channel asks the operator only when the reader's protective code changes (amends Decision 249 clause 2) (Decided)
+
+```yaml
+number: 272
+status: Decided
+decided_date: "2026-11-17"
+kind:
+  value: direction
+  justification: >-
+    Yes: clause 1 sets which changes reach the content reader only through an operator approval and which wait for the
+    next one, a standing rule on what production runs; undone, every bundled change asks the operator again.
+amends: [249]
+serves: [NS.9]
+significance:
+  value: numbered_decision
+  justification: >-
+    It narrows Decision 249 cl.2 for one channel, and 249's own envelope says an annotation cannot change a ratified
+    clause's meaning; build-lambda.yaml's deploy_channels row (considered) records the channel's mechanism, not which
+    changes may wait for the operator.
+```
+
+**Status:** Decided
+**Date:** 2026-11-17
+**Warehouse ID:** dec-272 (per Decision 84 backfill)
+
+**Problem:** Decision 239 cl.5 lets only an operator-approved job change the content reader, and Decision 249 cl.2
+ships every queued change with the next green commit. The reader bundles about 45 files, most of them shared DuckLake
+modules that 29 commits touched in the month to 2026-11-17, so the operator would approve a deploy about once a day;
+an approval given near-always stops telling anything apart (NS.9).
+
+**Intent:** The operator approves a content reader deploy only when the code that protects transcript text changes,
+and every approval names everything that ships.
+
+**Decision:**
+1. **Watched set (amends 249 cl.2 for this channel).** deploy-telemetry-content.yml deploys the last-green commit
+   (Decision 254 cl.5) only when the reader's protective set changed since its deployed commit: the reader's package,
+   its deploy_config.json included, src/common/ducklake_content_read_verbs.py and src/sensitive_values. Its other
+   bundled files ship with the next deploy the operator approves, and a workflow_dispatch redeploys on demand (249
+   cl.4). The approval screen leads with what ships and its evidence (the green run, the built digest, the hold state,
+   the layer pins), then lists every bundled or build-tooling commit going out, counted from the deployed commit only
+   once that commit is shown to build the live code. A drift sensor built for this channel watches the same set; none
+   is wired yet.
+2. **Record and pins.** agent-platform-github-ci-deploy writes the channel's deploy record after the gated job, from
+   that job's read-back, so the locked role keeps Decision 270 cl.2's grant. deploy_config.json pins each layer's
+   version and CodeSha256, and the gated job re-verifies them before it deploys.
+
+**Rationale:** The approval is the one step an agent holding the operator's GitHub identity cannot take for itself
+(Decision 239), so it should fall where a refusal is plausible: masking, the access line, the served verbs and the
+reader's settings. Shared modules still reach production only inside an approved deploy that lists them. Rejected
+(operator, 2026-11-17): asking on every bundled change (daily approvals), dropping the approval (reverses 239 cl.5),
+and a record write by the locked role (amends 270 cl.2 and needs a CloudShell apply).
+
+**Coverage (Decision 181 cl.2):** cl.1 -- validate_content_reader_lock, tests/ci/test_deploy_gate.py and the
+summary tests in tests/ci/test_telemetry_content_deploy_script.py; cl.2 -- that script's deploy tests and
+tests/checks/iam_tf/test_ci_deploy_record_prefixes.py. Residuals: a shared module waits for the next approval and the
+reader runs older shared code meanwhile (accepted); a plan touching only the shared modules still owes Decision 79's
+deploy step until rec-5333 decides the operator-gated case; the layers are CI-published, so a pin proves which bytes
+run, not who built them (rec-4742), and a layer republish can delete a pinned version (rec-4738); the protected-path
+edit hook and the golden replay's masked read-back are owed by rec-5322 (239 cl.5); Decision 267's lock-available
+condition fires, and rec-5323 re-decides its clause 5.
+
+```yaml reversal-conditions
+decision: 272
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: stale-shared-code
+    kind: manual
+    description: "A content read fails because the reader runs older shared code than main: re-decide clause 1's watched set."
+  - id: codeowners-binds
+    kind: manual
+    description: "rec-2827 closes: re-decide whether the approval still needs a narrowed set."
+```
+
+**Related:** Decisions 79, 125, 126, 154, 238, 239, 249, 254, 267, 270.
+
+---
+
+## Decision 270: The telemetry content reader is reached through a fifth DuckLake API route, and its change lock lives in the CI apply boundary, paid for by prefix-named URL-only Denies (amends Decisions 144, 202, 213, 230, 239, 255, 256, 257 and 258) (Decided)
+
+```yaml
+number: 270
+status: Decided
+decided_date: "2026-11-17"
+kind:
+  value: direction
+  justification: >-
+    Yes: it sets where the content reader's lock and its fence live (clauses 2-4), who may reach the reader and by
+    which path (clause 1), and the boundary size at which the operator re-decides (clause 5), each a standing rule.
+amends: [144, 202, 213, 230, 239, 255, 256, 257, 258]
+serves: [NS.9]
+significance:
+  value: numbered_decision
+  justification: >-
+    Yes: it amends nine Decisions about one boundary and one function, and clause 5 is the re-decision Decision
+    258 cl.3 requires; dated notes alone (amendment_forms, considered) would split one ruling into nine, and no
+    contract holds boundary placement (deploy-paths.yaml, considered, holds channels, not fences).
+```
+
+**Status:** Decided
+**Date:** 2026-11-17
+**Warehouse ID:** dec-270 (per Decision 84 backfill)
+
+**Problem:** Decision 239 planned the content reader on a Function URL invoked by PlatformDev. Since Decisions 255
+and 256 agents reach DuckLake verbs only through the signed REST API as agent-platform-session, and the CI apply
+boundary is at 5,696 bytes, Decision 258's trigger, so the lock's Deny needs the operator's re-decision (258 cl.3).
+
+**Intent:** Agents read masked production transcript text through the same signed path as every other verb, and
+only the operator-approved deploy can change the reader, with every fence still in the one boundary.
+
+**Decision:**
+1. **Path and consumer (amends 239 cl.1 and cl.4, 255 cl.1, 256 cl.2).** Agents read production transcript text
+   only through agent-platform-ducklake-telemetry-content on the DuckLake API's fifth route, telemetry/content; it
+   has no Function URL. Its consumer is the feedback loop's masked reads, as agent-platform-session, whose grant
+   gains the route. Decision 239 cl.4's access line names the caller from the delivering path's event shape.
+2. **Roles (amends 144 cl.3, 239 cl.7, 257 cl.3).** The execution role telemetry-content-reader carries the CI
+   apply boundary and is excepted by its exact ARN from Decision 230 cl.5's fence. The deploy role
+   telemetry-content-deploy is boundary-free by explicit exclusion, since clause 3's Deny must not refuse it; it may
+   only change the function's code and configuration and read layers, and only deploy-telemetry-content.yml at main
+   in the reviewer-gated telemetry-content-deploy Environment may assume it (Decision 238 cl.2). Both are named
+   telemetry-content-*, outside agent-platform-*, so no CI IAM grant reaches them; the boundary's protected-role
+   Deny names that prefix, and both join Decision 257 cl.3's protected set.
+3. **Lock (Decision 239 cl.5; amends 202 cl.3).** The boundary's DenyTelemetryContentChange refuses every carrier
+   every Lambda create, delete, publish, put, tag and update on the function and its qualifiers; the URL-only Denies
+   keep refusing direct invoke and permission edits. A Decision 202 filter pages on any IAM write naming a
+   telemetry-content-* role and any Lambda write on the function, the deploy role's included (202 cl.6: never
+   filtered by actor), denied attempts included. The reader's access log, that filter and its alarms join the platform-security-* family, so
+   the detector's Denies and tamper alarm cover them.
+4. **Prefix names (amends 213 cl.1, 230 cl.5).** The three URL-only Denies name the writer and reader by prefix,
+   writer* and reader*, beside telemetry-*, account wildcarded and region kept. Each prefix covers its function and
+   every qualifier, and widens a Deny only to a future function of that prefix.
+5. **Re-decision (amends 258 cl.2).** On 2026-11-16 the operator re-decided where the fences live: every fence
+   stays in the boundary, and clause 4's names pay for clause 3's Deny. Decisions 230 and 239's headroom
+   conditions fire when the minified PROD rendering passes 5427 bytes, its size with this entry's changes as the
+   landing build measures it; SIT's fires on the same growth. 258 cl.1 and cl.3 stand for every later change.
+
+**Rationale:** The fifth route reuses Decision 255's signed path, access log and detector instead of a transport
+agents cannot reach. Prefix names cost a Deny nothing and free more bytes than the lock uses. Rejected: a 5,946-byte
+trigger without them (198 bytes left under the 6,144-byte limit); a Deny on each CI role (a role CI creates would
+lack it); a service control policy (an organisation redesign); deferring (no forensic read for the feedback loop).
+
+**Coverage (Decision 181 cl.2):** tests/checks/iam_tf/test_telemetry_content_reader_iam.py pins clauses 5, 3, 2
+and 1; test_url_only_invoke_guard.py pins clause 4's cover of every identity-trusting function and qualifier; the
+filter is clause 3's alarm. Identities without the CI boundary: agent-platform-session and bootstrap-preview hold no
+Lambda write, bootstrap-apply none on the function plus its protected-role Deny (test_bootstrap_ci_roles.py), and
+PlatformAdmin is the operator's admin tier, watched by clause 3's alarm. Residuals: clause 1's consumer naming is
+unenforced (the scout reads it); a carrier may still pass the bounded telemetry reader role to a new function
+(Decision 239 cl.6).
+
+```yaml reversal-conditions
+decision: 270
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: boundary-size
+    kind: manual
+    description: "The boundary's minified PROD rendering passes clause 5's size: re-decide where the fences live."
+  - id: prefix-collision
+    kind: manual
+    description: "A function named agent-platform-ducklake-writer* or -reader* besides the two verb functions is planned: re-decide clause 4."
+```
+
+**Related:** Decisions 101, 126, 143, 154, 172, 177, 181, 202, 223, 236, 237, 238, 246, 248.
+
+---
+
 ## Decision 269: The rec portal reports glossary findings on rec text instead of refusing the write, and a repository-state rule may be declared advisory (amends Decisions 240 clause 5 and 210) (Decided)
 
 ```yaml
@@ -396,6 +622,8 @@ conditions:
 
 **Related:** Decisions 73, 76, 83, 89, 100, 163, 181, 203, 205, 212, 217, 224, 229, 234, 245, 246; T4.32; rec-2827, rec-4080, rec-4085, rec-4087, rec-4624, rec-4874, rec-4891.
 
+> **Amended by Decision 271 (2026-11-17):** Clauses 1 and 4 count a persona check only from the verdict App that gates.verdict_app.app_id names on origin/main, ignoring same-named runs from any other source, and an agent merge changing that row is refused. Clause 6's residual for a workflow posting a run named like a persona check narrows to custody of the App's key.
+
 ---
 
 ## Decision 263: The verdict personas' GitHub jobs read their inference keys from SSM under one role that only main's persona-verdict.yml in the persona-verdict Environment can assume -- an accepted exception to the Actions-secret CI home (Decided)
@@ -456,6 +684,8 @@ conditions:
 ```
 
 **Related:** Decisions 144, 172, 205, 212, 213, 223, 224, 237, 238, 248, 252; T4.32.
+
+> **Update (2026-11-17):** "The verdict-jobs plan" in clause 4 and the Coverage line reads as the PLAN-persona-verdict-* plans of T4.32's decomposition_hints. PLAN-persona-verdict-egress records clause 4's coupling as ports.yaml PC-12, and the telemetry writer principal registry (docs/contracts/telemetry-writer-principals.yaml, rec-4420) holds this role's principal row. PLAN-persona-verdict-first-key-read is to prove the live assume and decryption under the role, and that a job holding id-token: write without the Environment is refused; a pull_request job's refusal stays with the fixture run (T4.32 c3). The verdict App's key is to be read by a separate role in its own Environment under PLAN-persona-verdict-app-grant's own Decision (the operator's 2026-11-17 ruling), so this role's grant list does not change.
 
 ---
 
@@ -576,6 +806,8 @@ conditions:
 
 **Related:** Decisions 230, 239, 181, 126.
 
+> **Amended by Decision 270 (2026-11-17):** The operator re-decided under clause 3: every fence stays in the boundary, the URL-only Denies use prefix names, and clause 2's trigger size becomes 5427 bytes. Clauses 1 and 3 stand.
+
 ---
 
 ## Decision 257: terraform/bootstrap is CI-applied behind one operator approval; its protected set and root of trust stay the operator's (amends Decisions 92, 126, 144, 223, 225 and 238) (Decided)
@@ -691,6 +923,15 @@ conditions:
 > policies (the API route, App key and trail policies) and policy blocks inside a role are not checked; a trust is
 > checked for public access only.
 
+> **Update (2026-11-17):** CheckNoPublicAccess rejects a trust statement whose principal is a federated OIDC
+> provider (the GitHub Actions roles), so the analyzer checks each federated statement other than SAML by its own
+> rule: one that allows access refuses the run unless it names only OIDC providers of the account and pins its sub
+> condition to exact repository subjects, with no wildcard or policy variable. The document's other statements
+> still go to Access Analyzer. Which repository a subject names is not checked; 'a trust is checked for public
+> access only' stands for every other trust statement.
+
+> **Amended by Decision 270 (2026-11-17):** Clause 3's protected set gains the telemetry-content-* roles and their policies: bootstrap-apply's DenyProtectedRoleWrite and the apply classifier name role/telemetry-content-*, and bootstrap-apply holds no Lambda write on the content function.
+
 ---
 
 ## Decision 256: Agent sessions reach AWS only as a proxy-held IAM user that signs each call itself -- no session assumes a role or holds an AWS key, and admin authority stays out of agent environments (amends Decisions 113, 202, 223, 248 and 252) (Decided)
@@ -780,6 +1021,8 @@ conditions:
 
 **Related:** Decisions 84, 93, 126, 143, 144, 180, 181, 200, 212, 213, 225, 229, 237, 238, 239; rec-4043,
 rec-4206, rec-4420.
+
+> **Amended by Decision 270 (2026-11-17):** Clause 2's routes add the telemetry content reader's telemetry/content route; its session consumer is the feedback loop's masked reads.
 
 ---
 
@@ -873,6 +1116,8 @@ conditions:
 ```
 
 **Related:** Decision 213 (amended), 84 (amended), 101, 126, 143, 144, 181 cl.2, 184 cl.2, 200 cl.1, 202, 212, 214, 215 cl.6, 223, 230, 237.
+
+> **Amended by Decision 270 (2026-11-17):** Clause 1's API fronts a fifth function, the telemetry content reader, on POST telemetry/content.
 
 ---
 
@@ -1356,6 +1601,8 @@ conditions:
 **Related:** Decisions 24, 55, 73, 77, 125, 126, 166, 181, 205, 226, 236, 239, 245; rec-4874, rec-4912.
 
 > **Amended by Decision 254 (2026-11-12):** Decision 254 fires canary-model-decided and re-scopes clause 2: the green signal becomes the last-green ref, the newest first-parent main commit whose own run passed the full tier, which under batching is a batch head, and clause 4's "newest green commit" reads the same. Clauses 3 and 5 hold (Decision 254 cl.2, cl.5).
+
+> **Amended by Decision 272 (2026-11-17):** For the telemetry content reader's channel only, clause 2's watched paths are the reader's protective set; its other bundled files ship with the next deploy the operator approves (Decision 272 cl.1).
 
 > **Update (2026-11-10):** Decision 252 fires the tier-stood-up condition ahead of the tier and replaces the green-streak train that clause 1 calls future state (see the note on Decision 73): the PROD promotion item re-decides clause 1. Until then clause 2 holds, and SIT deploys keep it (Decision 252 cl.6).
 
@@ -2116,6 +2363,8 @@ conditions:
 ```
 
 **Related:** Decisions 236, 230, 126, 81, 91 (amended), 143, 154, 181, 199, 213, 235, 238, 101.
+
+> **Amended by Decision 270 (2026-11-17):** Clause 1's reader is reached on the DuckLake API's telemetry/content route by agent-platform-session, with no Function URL; clause 4's line names the caller from the delivering path; clause 5's lock is DenyTelemetryContentChange with a boundary-free deploy role; clause 7's fence exception is the execution role telemetry-content-reader.
 ---
 
 ## Decision 238: No agent-controlled identity reads Terraform state or saved plans -- the speculative plan runs from main's workflow on pull_request_target under a dedicated environment- and workflow-bound role and shows names only (amends Decisions 92 and 144) (Decided)
@@ -2383,6 +2632,8 @@ conditions:
 **Related:** Decisions 230, 81, 91, 199, 200 (amended), 143, 188, 192, 209, 213, 216, 88, 181, 177.
 
 [Amendment 2026-10-29, Decision 239: cl.3's content consumer exists; agents read production transcript text masked, only through the telemetry content reader; cl.2 and cl.6 count two production telemetry readers, so the closed read boundary is three readers.]
+
+[Amendment 2026-11-17, PLAN-telemetry-read-timeouts: cl.5's every-6h merge_ops on the production telemetry catalog stays as the floor, and a backlog-gated pass is added, as Decision 88 cl.1(iii) sizes cadence to write rate: a rule ticks every two to six minutes, never in the three minutes up to another maintenance job's start, reads CloudWatch only, and merges when at least 60 telemetry commits have landed since the last pass or a commit has waited 30 minutes; a gate that cannot read its metrics skips and alarms. Each telemetry write lands as its own small files, and on every busy day the 6-hour backlog pushed cold reads of the newest days past the reader's deadline (rec-5247, rec-5248). The weekly guarded gc_ops, the guards and every existing alarm are unchanged.]
 
 ---
 
@@ -2759,6 +3010,8 @@ conditions:
 [Amendment 2026-10-27, Decision 237: cl.4 logins live in /secret/.]
 
 [Amendment 2026-10-29, Decision 239: cl.3's telemetry reader login is shared with the content reader, its connection limit summed across both; cl.5's fence exceptions add the content reader's role.]
+
+[Amendment 2026-11-17, Decision 270: cl.5's fence names the shared writer and reader by prefix, and its exception for the content reader is role telemetry-content-reader.]
 
 ---
 
@@ -3928,6 +4181,8 @@ conditions:
 
 [Amendment 2026-11-13, Decision 255: cl.1's invariant reads "every path other than the Function URL and the function's named API route is closed"; the API path's control points are Decision 255 cl.2, and for that path cl.4's caller record is the API access log.]
 
+[Amendment 2026-11-17, Decision 270: cl.1's Denies name each function by ARN or by a prefix that covers it and every qualifier (writer*, reader*, telemetry-*).]
+
 ---
 
 ## Decision 212: Port independence and conformance -- one conformance suite per port against a credential-free oracle, cross-port coupling is a defect, the ops store is three ports, one file declares the bundle (amends Decision 184 clause 2 and Decision 197 clause 2) (Decided)
@@ -4431,6 +4686,8 @@ conditions:
 
 > **Amended by Decision 254 (2026-11-12):** Clause 5's plans-only test reads the batch range prev..head, never the head commit alone, so a batch holding any non-plans commit runs the full tier (Decision 254 cl.1).
 
+> **Amended by Decision 271 (2026-11-17):** Clause 2's verdict identity on Actions is the dedicated verdict App, not the job's GITHUB_TOKEN; the merge gate counts a persona check only from that App (Decision 271 cl.1, cl.4).
+
 ---
 
 ## Decision 204: Sanctioned admin-tier partition-layout rewrite for the ops history tables' day-of-month legacy files, human-directed ADMIN-agent execution (amends Decision 81, 126, 192) (Decided)
@@ -4683,6 +4940,8 @@ Roadmap refs: rec-4044, rec-4049, rec-4067.
 > **Amended by Decision 252 (2026-11-10):** Reversal condition (a)'s organisation trail arrives with the Organization, not at live_full; its rule stands: re-point the detector at its log delivery, retire this trail, never run both (Decision 252 cl.8).
 
 > **Amended by Decision 256 (2026-11-13):** Clause 1's "applied only by PlatformAdmin under the human-gated admin tier" reads "applied by PlatformAdmin or by the operator from an agent-prepared CloudShell block under the operator's own sign-in, still human-gated": PlatformAdmin's trust names only the retiring agent user. The detector stays outside the reach of the principals it watches, and a further alarm pair watches the agent-platform-session user and its policies.
+
+> **Amended by Decision 270 (2026-11-17):** Clause 3's family also holds the telemetry content reader's access log group, its change filter and its alarms, so the detector's Denies and tamper alarm cover them.
 
 ---
 
@@ -6592,25 +6851,38 @@ scripts/preflight/decision_conditions.py, surfaced from its review date; not pro
 
 ```yaml reversal-conditions
 decision: 179
-review_by: 2026-12-01
-on_trigger: "re-decide via /plan: bound the index read, or re-mint a stock guard"
+review_by: 2027-03-01
+on_trigger: "re-decide via /plan: bound the decision-scout's whole read further, or tighten the significance bar; re-minting a stock guard needs its own Decision"
 conditions:
   - id: index-read-context-cost
-    kind: manual
-    description: "The every-/plan index read becomes a measured context-budget problem before T2.56 c1 or T1.5 c1 lands."
-  - id: inflow-unguarded
-    kind: manual
-    description: "Inflow rises materially with no stock guard -- rec-3243 metering and a stricter significance bar first."
+    kind: repo_state
+    predicate: null   # manual until rec-5264 registers it
+    params: {max_bytes: 110608}
+    description: "At review, the bytes of the decision index one decision-scout round loads whole (docs/decisions-index.json today, the slim rows that replace it once rec-3250 lands; docs/contracts/north-star.yaml, which the scout's step 0 reads in full, is outside this measure) exceed max_bytes, the 2026-08-07 figure (187,040 on 2026-11-17, which rec-3250 owns bringing under it) -> bound the read further; never raise this figure to fit."
+  - id: inflow-per-plan
+    kind: repo_state
+    predicate: null   # manual until rec-5264 registers it
+    params: {window_days: 90, max_entries_per_plan: 0.30}
+    description: "Over the window before review, new entries per new plan file exceed max_entries_per_plan, above every period measured to 2026-11-17 (0.262, 0.191, 0.221) -> tighten the significance bar first (decision-entry.yaml routing rows; rec-3023, rec-5260); a stock guard is not the remedy."
   - id: t15-portal-read
     kind: manual
     description: "T1.5 c1 portal/verb read supersedes the index mechanism entirely."
-    note: "Decision 196 clause 1 forecloses this trigger -- decisions stay git-stored in every tier, so no portal read replaces the index mechanism; retained for the record."
+    note: "Not foreclosed (corrected 2026-11-17): Decision 196 clause 1 keeps the git corpus authoritative, but T1.5 c1 still plans a decisions read portal beside it that decision-scout would read instead of the index; the earlier note read clause 1 as foreclosing that."
 ```
 
 **Related:** Decision 134 cl.2 and Decision 160 pt.4 amended, pt.9 resolved; Decision 166 pt.9
 amended, (g) elected; Decision 176 precedent/mechanism; Decisions 167/150 retained levers; Decision
 145 warning discharged; Decision 114 parity ended here; Decisions 146/149 levers exhausted; Decision
 163 recorded downgrade. Refs: T2.56 c2/c1, T1.5 c1, rec-3243.
+
+> **Update (2026-11-17, PLAN-condition-reviews-167-177-179, rec-5255):** Reversal review due 2026-12-01
+> (audits/contract-first-retrospective-177c8f37.yaml, condition_reviews). inflow-unguarded fired (new entries a day
+> rose from 0.583 to 1.169; per new plan file from 0.191 to 0.221) and is re-decided: bound the read, no stock guard
+> returns, clauses 1 to 4 stand. Clause 5(i)'s residual is bounded first by rec-3250 (T2.56 c1 is met; T1.5 c1's
+> read portal stays its eventual owner); rec-3243's metering landed, and the stricter significance bar is rec-3023's
+> and rec-5260's. inflow-per-plan replaces inflow-unguarded; index-read-context-cost, whose window closed
+> 2026-09-12, is re-armed on a byte figure; t15-portal-read is kept, its note corrected. review_by moves from
+> 2026-12-01 to 2027-03-01.
 
 ---
 
@@ -6803,16 +7075,12 @@ That strictness is affordable precisely because the dialect absorbs every legiti
 
 ```yaml reversal-conditions
 decision: 177
-review_by: 2026-11-25
+review_by: 2027-05-25
 on_trigger: "re-decide via /plan whether the exact-line rule still fits the corpus's authoring reality; update or re-arm this stanza"
 conditions:
   - id: legitimate-shape-blocked-twice
     kind: manual
-    description: "Two or more legitimate corrections cannot be expressed in the post-lock dialect without contorting the entry -> widen the dialect at decision-entry.yaml's amendment_forms, never add a waiver route to the guard."
-  - id: t15-portal-cutover-retires-the-surface
-    kind: manual
-    description: "T1.5's portal cutover moves the corpus off docs/DECISIONS.md to warehouse-verb storage -> this file-diff guard loses its subject and retires with it; the invariant re-homes onto the warehouse's own append-only SCD2 versioning (Decision 167 condition (c) precedent)."
-    note: "Decision 196 clause 1 forecloses this trigger -- storage stays git in every tier, so this portal cutover will not occur; retained for the record, not armed toward a portal migration."
+    description: "Two or more legitimate corrections cannot be expressed in the post-lock dialect without contorting the entry -> widen the dialect at decision-entry.yaml's amendment_forms; never give the append-only policy, or any guard that re-lands it, a waiver route."
 ```
 
 **Related:** Decision 151 (amended -- clause 3(v)'s convention-only stance narrowed to a
@@ -6825,6 +7093,12 @@ Decision 163 (the exception-path anti-pattern the no-waiver posture avoids), Dec
 rec-3249 (resolved by this wave), rec-3264 / rec-3265 (drift flow-control, out of scope).
 
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
+> **Update (2026-11-17, PLAN-condition-reviews-167-177-179, rec-5255):** Reversal review due 2026-11-25
+> (audits/contract-first-retrospective-177c8f37.yaml, condition_reviews). legitimate-shape-blocked-twice did not fire
+> and is re-armed; its remedy no longer names the guard Decision 178 retired, and review_by moves from 2026-11-25 to
+> 2027-05-25. t15-portal-cutover-retires-the-surface is retired from the stanza: Decision 196 clause 1 keeps
+> decisions in git, so the cutover it waited for will not occur. No clause changes.
 
 ---
 
@@ -7397,15 +7671,26 @@ significance:
 
 ```yaml reversal-conditions
 decision: 167
-review_by: 2026-11-17
-on_trigger: "re-decide via /plan whether the deterministic subset still suffices or the f2 routing-consistency lint should be reconsidered; update or re-arm this stanza"
+review_by: 2027-02-17
+on_trigger: "re-decide via /plan whether the deterministic subset still suffices, weighing a routing row in decision-entry.yaml's significance.routing against the rejected f2 routing-consistency lint; update or re-arm this stanza"
 conditions:
   - id: mis-routed-past-both-gates
     kind: manual
-    description: "A post-167 entry is demonstrated mis-routed past BOTH the decision-entry conformance check and the plan-critique category-consistency verdict (.claude/skills/plan-critique/SKILL.md section 12p) -> the deterministic-subset-only control proved insufficient; re-open the routing-consistency-lint question with the new failure instance as evidence."
+    description: "At review, 2 or more of the newest 12 entries, read by the content_partition method of docs/audit-prompts/AUDIT-contract-first-retrospective.md (applied in audits/contract-first-retrospective-177c8f37.yaml), have bar_test routable-elsewhere or a non-empty routable_row (a bar met only through an amends edge passes); or, once rec-5261 records plan-critique's step 12p verdict for each drafted entry, an entry that verdict passed is later shown mis-routed -> the deterministic subset proved insufficient; route the gap to a routing row (rec-3023, rec-5260)."
+  - id: same-pr-split-to-evade-cap
+    kind: manual
+    description: "Prose condition (b): two or more new entries land in one PR as one decision split to stay under the per-entry cap. Screen: two new entries in one PR that cite each other; a reviewer confirms the split, since a cited pair can be two rulings (Decisions 199 and 200) -> close the loophole at the check, never by raising the cap."
 ```
 
 **Related:** Decision 150 (the Significance bar enforced machine-readably), Decision 160 (point 11's accrual-rate lever, installed here at WARN tier only), Decision 134 (the two stock size ceilings this norm sits alongside), Decision 145 (the never-raise-to-fit precedent), Decision 149 (the compacted-stub exemption), Decision 84 (warehouse-safety boundary keeping `significance` index-only), Decision 153 (the shared, memoized baseline read). Roadmap refs: audits/contract-first-governance-33c8667.yaml findings CFG-01/CFG-03/CFG-07 (closed), rec-2934 (resolved by `per_entry_size_norm`), tier_item T2.56 (eventual owner of this corpus's shape; closes none of its criteria here).
+
+> **Update (2026-11-17, PLAN-condition-reviews-167-177-179, rec-5255):** Reversal review due 2026-11-17
+> (audits/contract-first-retrospective-177c8f37.yaml, condition_reviews). Condition (a) is retired: its set, the first
+> ten entries under the cap (Decisions 170 to 179), is closed, and none of the ten is on record as unable to fit; whether the cap squeezes rationale is
+> rec-3682's and rec-5260's. Condition (b) did not fire and is kept; the stanza now watches it as
+> same-pr-split-to-evade-cap. Condition (d) is discharged: the cap has failed builds since #895 (2026-08-13). The
+> stanza's mis-routed-past-both-gates did not fire and is re-armed with wording a review can check; review_by moves
+> from 2026-11-17 to 2027-02-17. No clause changes.
 
 ---
 
@@ -8841,6 +9126,8 @@ post-merge, never written directly).
 > **Amended by Decision 252 (2026-11-10):** Clause 6's live_full gate on Organizations, the organisation trail and SCPs is lifted: the Organization is stood up now. SCPs add to the permissions boundary and never replace it, so the Reversal's supersession of this boundary does not fire (Decision 252 cl.1 and cl.8).
 
 > **Amended by Decision 257 (2026-11-14):** Clause 3's one explicit exclusion becomes three: bootstrap-apply and bootstrap-preview are boundary-free by name, outside agent-platform-*, and held by explicit Denies instead (Decision 257 cl.3). Clause 4's admin-create path for bootstrap-tier roles stays for the protected set; a boundary-carrying agent-platform-* role declared in terraform/bootstrap is created by that workflow's approved apply.
+
+> **Amended by Decision 270 (2026-11-17):** Clause 3 gains a fourth exclusion: telemetry-content-deploy is boundary-free by name, outside agent-platform-*, so the boundary's lock on the content reader never refuses the one role it admits.
 
 ---
 

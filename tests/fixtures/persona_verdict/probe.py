@@ -15,7 +15,22 @@ def result_for(marker: str) -> str:
     if marker == "proceed":
         return json.dumps({"outcome": "success", "verdict": "PROCEED"})
     if marker == "revise":
-        return json.dumps({"outcome": "success", "verdict": "REVISE"})
+        return json.dumps(
+            {
+                "outcome": "success",
+                "verdict": "REVISE",
+                "findings": [{"id": "probe:revise-1", "title": "probe revise finding", "blocking": True}],
+            }
+        )
+    if marker == "block":
+        findings = [
+            {"id": "probe:block-1", "title": "probe block finding one", "blocking": True},
+            {"id": "probe:block-2", "title": "probe block finding two", "blocking": True},
+        ]
+        return json.dumps({"outcome": "success", "verdict": "BLOCK", "findings": findings})
+    if marker == "flags":
+        findings = [{"id": "probe:flag-1", "title": "probe flag finding", "blocking": False}]
+        return json.dumps({"outcome": "success", "verdict": "FLAGS_FOUND", "findings": findings})
     if marker == "fail":
         return json.dumps({"outcome": "failure", "failure": "input_unusable", "detail": "probe fail marker"})
     return "this is not json {"

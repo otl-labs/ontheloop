@@ -152,3 +152,104 @@ def test_non_llm_workflow_run_upstream_is_followed(tmp_path: Path) -> None:
 def test_load_workflows_tolerates_malformed_yaml(tmp_path: Path) -> None:
     (tmp_path / "bad.yml").write_text("a: [unclosed\n", encoding="utf-8")
     assert v.load_workflows(tmp_path) == {"bad.yml": {}}
+
+
+TERM = "github.event.workflow_run.event == 'pull_request'"
+
+
+def _wf(name: str, on: str, steps: str = "      - run: echo\n", job_if: str = "") -> str:
+    cond = f"    if: {job_if}\n" if job_if else ""
+    return f"name: {name}\non:\n{on}\njobs:\n  j:\n{cond}    runs-on: x\n    steps:\n{steps}"
+
+
+def _llm(step_if: str = "") -> str:
+    cond = f"        if: {step_if}\n" if step_if else ""
+    key = "        env:\n          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}\n        run: echo\n"
+    return f"      - id: review\n{cond}{key}"
+
+
+def _runs(upstream: str) -> str:
+    return f"  workflow_run:\n    workflows: [{upstream}]"
+
+
+DISPATCH = "  workflow_dispatch:"
+
+
+def _problems(tmp_path: Path, files: dict[str, str]) -> list[str]:
+    wf = tmp_path / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    for name, text in files.items():
+        (wf / f"{name}.yml").write_text(text, encoding="utf-8")
+    return v.check_tree(tmp_path, LIVE)[0]
+
+
+def _chain(down: str, mid_on: str = DISPATCH, extra: dict[str, str] | None = None) -> dict[str, str]:
+    files = {"down": down, "mid": _wf("Mid", mid_on)}
+    files.update(extra or {})
+    return files
+
+
+def test_dispatch_upstream_admitted_when_every_llm_step_carries_the_term(tmp_path: Path) -> None:
+    job = _wf("Down", _runs("Mid"), _llm(), job_if=f"${{{{ {TERM} }}}}")
+    step = _wf("Down", _runs("Mid"), _llm(f"${{{{ {TERM} }}}}"))
+    assert _problems(tmp_path / "a", _chain(job)) == []
+    assert _problems(tmp_path / "b", _chain(step)) == []
+
+
+def test_the_pinned_run_job_condition_with_cancelled_is_accepted(tmp_path: Path) -> None:
+    cond = f"${{{{ !cancelled() && needs.prepare.result == 'success' && {TERM} }}}}"
+    assert _problems(tmp_path, _chain(_wf("Down", _runs("Mid"), _llm(), job_if=cond))) == []
+
+
+@pytest.mark.parametrize(
+    "cond",
+    [
+        "",
+        "github.event.workflow_run.event == 'push'",
+        f"{TERM} || github.event.workflow_run.event == 'push'",
+        f"always() && {TERM}",
+        f"cancelled() && {TERM}",
+    ],
+)
+def test_dispatch_upstream_refused_without_a_proper_term(tmp_path: Path, cond: str) -> None:
+    down = _wf("Down", _runs("Mid"), _llm(), job_if=f"${{{{ {cond} }}}}" if cond else "")
+    assert any("does not qualify" in p for p in _problems(tmp_path, _chain(down)))
+
+
+def test_dispatch_upstream_refused_when_one_llm_step_lacks_the_term(tmp_path: Path) -> None:
+    steps = _llm(f"${{{{ {TERM} }}}}") + _llm().replace("id: review", "id: other")
+    assert any("does not qualify" in p for p in _problems(tmp_path, _chain(_wf("Down", _runs("Mid"), steps))))
+
+
+def test_the_term_on_a_non_llm_step_does_not_count(tmp_path: Path) -> None:
+    steps = _llm() + f"      - if: ${{{{ {TERM} }}}}\n        run: echo\n"
+    assert any("does not qualify" in p for p in _problems(tmp_path, _chain(_wf("Down", _runs("Mid"), steps))))
+
+
+def test_llm_down_non_llm_middle_dispatch_top_is_refused_then_admitted(tmp_path: Path) -> None:
+    files = {"top": _wf("Top", DISPATCH), "mid": _wf("Mid", _runs("Top"))}
+    bare = _wf("Down", _runs("Mid"), _llm())
+    assert any("Top" in p or "top" in p for p in _problems(tmp_path / "a", {**files, "down": bare}))
+    gated = _wf("Down", _runs("Mid"), _llm(f"${{{{ {TERM} }}}}"))
+    assert _problems(tmp_path / "b", {**files, "down": gated}) == []
+
+
+def test_a_three_hop_non_llm_chain_to_a_dispatch_is_refused(tmp_path: Path) -> None:
+    files = {"top": _wf("Top", DISPATCH), "m1": _wf("M1", _runs("Top")), "mid": _wf("Mid", _runs("M1"))}
+    assert _problems(tmp_path, {**files, "down": _wf("Down", _runs("Mid"), _llm())})
+
+
+def test_an_llm_middle_cannot_pass_a_dispatch_to_an_ungated_llm_downstream(tmp_path: Path) -> None:
+    mid = _wf("Mid", _runs("Top"), _llm(f"${{{{ {TERM} }}}}"))
+    files = {"top": _wf("Top", DISPATCH), "mid": mid, "down": _wf("Down", _runs("Mid"), _llm())}
+    problems = _problems(tmp_path, files)
+    assert problems and any("down.yml" in p for p in problems)
+
+
+def test_the_problem_list_is_deduplicated(tmp_path: Path) -> None:
+    mid = _wf("Mid", _runs("Top"), _llm())
+    files = {"top": _wf("Top", DISPATCH), "mid": mid, "down": _wf("Down", _runs("Mid"), _llm())}
+    problems = _problems(tmp_path, files)
+    assert len(problems) == len(set(problems))
+    needle = "down.yml: upstream mid.yml does not qualify: mid.yml: upstream top.yml does not qualify"
+    assert sum(p.startswith(needle) for p in problems) == 1

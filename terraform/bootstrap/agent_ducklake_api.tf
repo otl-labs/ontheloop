@@ -15,6 +15,8 @@ locals {
       "ops/writer"       = local.ducklake_writer_function
       "telemetry/reader" = local.ducklake_telemetry_reader_function
       "telemetry/writer" = local.ducklake_telemetry_writer_function
+      # Decision 270 cl.1: the content reader's only agent path; one() is null in SIT, whose map is empty.
+      "telemetry/content" = one(aws_lambda_function.telemetry_content[*].function_name)
     }
     sit = {}
   }[var.environment]

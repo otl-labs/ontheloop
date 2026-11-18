@@ -178,7 +178,7 @@ def test_the_census_sql_and_the_engine_agree_row_for_row(con: Any) -> None:
         _seed(con, f"01ULID{ulid}", created, **fields)
     compared = 0
     for rule in declared_rules(TABLE):
-        if rule.exemption is not None or census.is_writer_lookup(rule):
+        if rule.exemption is not None or census.is_writer_lookup(rule) or census.is_writer_shape(rule):
             continue
         params = census.compile_rule(rule).params
         fragment, binds = dq.row_predicate(rule.kind, rule.table, rule.column, params)

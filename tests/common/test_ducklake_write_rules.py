@@ -79,6 +79,7 @@ def test_select_widens_only_with_dated_rules() -> None:  # and with a reference 
     sql, columns = existing_row_select(SPEC, RULES, True)
     assert columns[:2] == ("created_timestamp", "status")
     dated = {"title", "source", "effort", "priority", "automatable", "risk", "file", "context", "acceptance", "tags"}
+    dated |= {"provenance_json"}  # its dated json_object leg widens the select
     dated |= {"dependencies"}  # the reference column joins the widened select (Decision 268)
     assert set(columns[2:]) == dated and list(columns[2:]) == sorted(dated)
     assert sql == f"SELECT {', '.join(columns)} FROM ops_catalog.ops_recommendations_current WHERE id = ?"
@@ -177,6 +178,7 @@ def test_row_rule_gate_cases_trip_their_rule() -> None:
         "array_element_format",
         "pattern",
         "array_element_reference",
+        "json_object",
     ]
     for rule, overrides, column in ROW_RULES_CASES:
         if rule == "array_element_reference":
@@ -377,8 +379,9 @@ def test_engine_records_json_object_and_per_write_keys() -> None:
 def test_json_object_spec_built_from_projected_leg() -> None:
     built = json_object_spec("c", _LEG)
     assert built.max_bytes == 120 and set(built.versions) == {1}
-    assert json_object_columns(_json_spec().fields) == {"context_v2_json": json_object_spec("context_v2_json", _LEG)}
-    assert json_object_columns(SPEC.fields) == {}
+    assert set(json_object_columns(_json_spec().fields)) == {"context_v2_json", "provenance_json"}
+    assert json_object_columns(_json_spec().fields)["context_v2_json"] == json_object_spec("context_v2_json", _LEG)
+    assert set(json_object_columns(SPEC.fields)) == {"provenance_json"}
 
 
 @pytest.mark.parametrize(

@@ -13,9 +13,10 @@ from scripts.personas import run
 ROOT = Path(__file__).resolve().parents[2]
 STDLIB = set(sys.stdlib_module_names)
 ALLOWED = {
-    "resolve_pr": set(),
+    "resolve_pr": {"yaml"},
     "route": {"yaml"},
-    "snapshot": set(),
+    "snapshot": {"yaml"},
+    "override": {"yaml"},
     "materialise": {"yaml"},
     "execute": {"jsonschema"},
     "post_verdict": {"yaml", "jsonschema"},
@@ -33,6 +34,15 @@ def test_main_root_is_derived_from_the_file_and_goes_first(monkeypatch: pytest.M
     assert run.main(["post"]) == 0
     assert sys.path[0] == str(ROOT) and called == ["scripts.personas.post_verdict"]
     assert sys.path.count(str(ROOT)) == 1
+
+
+def test_override_render_verb_dispatches_to_override_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    called: list[str] = []
+    monkeypatch.setattr(
+        run.importlib, "import_module", lambda name: type("M", (), {"main": staticmethod(lambda a: called.append(name) or 0)})
+    )
+    assert run.main(["override-render"]) == 0 and called == ["scripts.personas.override"]
 
 
 def test_unknown_verb_exits_2() -> None:

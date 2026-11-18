@@ -1,0 +1,186 @@
+schema_version: 6
+implementation_declared: true
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: actions-capacity-tests-row-count
+intent: >-
+  Make the Actions capacity contract tests stop breaking when a plan adds a ledger row, so the image pin plan (and any
+  later plan that records new Actions load) can add its row without editing these tests. Test-only change; no contract,
+  evaluator or workflow text moves.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-actions-capacity-tests-row-count.yaml
+phase: >-
+  ad_hoc_rec (soft-warn exception category: rec-5294, filed by the persona image channel planner; no tier_item claimed,
+  so the Tier Item Freshness Gate is skipped). Downstream beneficiary: PLAN-persona-image-pin's capacity ledger row
+  (T4.32); this plan closes no T4.32 criterion. No Lambda-packaged file changes, so V2.
+cites: [dec:235, dec:244]
+scope:
+  - file: tests/ci/test_actions_capacity_contract.py
+    action: Modify
+    purpose: >-
+      test_real_contract_loads: replace `assert len(c.ledger.rows) == 4` with a wiring check that the loader keeps
+      every ledger row in order: the loaded ids equal the ids of the raw YAML's ledger.rows (yaml.safe_load of
+      docs/contracts/actions-capacity.yaml, already imported), and that list is non-empty. Every other assertion in the
+      file stays unchanged. Graduated shard actions-capacity-evaluator-and-steps is kept unchanged.
+  - file: tests/checks/contracts/test_validate_actions_capacity.py
+    action: Modify
+    purpose: >-
+      (1) _tree copies the whole .github/workflows/ directory (shutil.copytree, dirs_exist_ok=True) instead of the
+      four named workflow files, so a ledger row whose analog or live_signal names any other existing workflow still
+      resolves in the copied tree; the three non-workflow files keep their explicit copy; the unused `workflows`
+      parameter (no caller passes it) is dropped. (2) test_real_contract_passes_and_declares_examined: replace
+      `count == 4` with count equal to the number of rows in the raw YAML's ledger.rows. (3) Add
+      test_added_ledger_row_passes_and_is_counted: picks the first *.yml file under the real .github/workflows/
+      (sorted) whose basename the contract's raw YAML text does not contain (so no fixed workflow path is pinned),
+      failing with an explicit assertion message if none is left; records the raw
+      ledger row count before the edit as base; _tree with an edit appending one row {id: growth-probe, items:
+      [rec-5294], unit: per_merge, source: assumed, job_minutes_per_unit: 1.0, basis: growth probe, live_signal:
+      {workflow: <picked path>, job: "*"}}; asserts _run(root) == [] and the examined declaration's count == base + 1.
+      Red before (the picked workflow is not in the old four-file copy), green after. Every other test stays unchanged.
+      Graduated shard actions-capacity-evaluator-and-steps is kept unchanged (every node it names keeps its name).
+bundled_recommendations: [rec-5294]
+followon_recs: [rec-5326]
+infrastructure_dependencies: []
+acceptance_criteria:
+  - Neither test file asserts a literal ledger row count (no `rows) == 4` or `count == 4`).
+  - Appending a valid ledger row whose live_signal names a workflow outside the original four passes the evaluator in the copied tree and is counted.
+  - Every existing actions-capacity test still passes on main's contract.
+  - rec-5294 is closed by the build's merge.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: "Run the new growth node (red before: node absent, and the old _tree copies only four workflows)."
+    command: bin/venv-python -m pytest tests/checks/contracts/test_validate_actions_capacity.py::test_added_ledger_row_passes_and_is_counted -q
+    expected: exit 0, 1 passed
+    fix_if: exit 4 (node missing); a workflow-does-not-exist finding (the _tree copy still lists files)
+    hermetic: true
+    expected_literals: ["1 passed"]
+    graduation: graduate
+    graduation_check_id: actions-capacity-ledger-growth
+  - step: 2
+    phase: pre-deploy
+    action: rec-5294's acceptance, verbatim.
+    command: >-
+      ! grep -nE 'rows\) == 4|count == 4' tests/ci/test_actions_capacity_contract.py
+      tests/checks/contracts/test_validate_actions_capacity.py && bin/venv-python -m pytest
+      tests/ci/test_actions_capacity_contract.py::test_real_contract_loads -q
+    expected: grep finds nothing; then 1 passed
+    fix_if: grep prints a line (a literal count survived)
+    hermetic: true
+    expected_literals: ["1 passed"]
+    graduation: waive
+    graduation_waiver_reason: >-
+      The rec's own acceptance. Its grep half is a one-time absence claim (a moment claim, Decision 244 cl.4), not a
+      standing guard; validate_test_count_coupling does not catch these patterns (rec-5326). Its pytest half is an
+      existing node the graduated shard actions-capacity-evaluator-and-steps already re-runs, and step 1 graduates the
+      growth property itself.
+  - step: 3
+    phase: pre-deploy
+    action: Re-run every actions-capacity test against main's contract.
+    command: >-
+      bin/venv-python -m pytest tests/ci/test_actions_capacity_contract.py tests/ci/test_actions_capacity_gauge.py
+      tests/ci/test_actions_capacity_github.py tests/ci/test_actions_capacity_alarm.py
+      tests/ci/test_actions_capacity_steps.py tests/checks/contracts/test_validate_actions_capacity.py -q
+    expected: exit 0, no failures
+    fix_if: an existing node fails (fix the edit, never loosen an assertion, Decision 235)
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Whole-file re-run of existing standing tests already in every --pre selection that touches these files; it adds no new guard.
+  - step: 4
+    phase: pre-deploy
+    action: >-
+      Simulate the pin plan's change: in a scratch worktree of HEAD carrying this checkout's edited copies of both test
+      files, append a fifth ledger row with a live_signal at an existing workflow outside the original four to
+      docs/contracts/actions-capacity.yaml, then run both test files with this checkout's interpreter (the worktree has
+      no .venv). Runs from the repository root, before or after the closure commit.
+    command: >-
+      R=$PWD && D=$(mktemp -d) && W=$D/wt && git worktree add -q --detach "$W" HEAD
+      && cp tests/ci/test_actions_capacity_contract.py "$W/tests/ci/"
+      && cp tests/checks/contracts/test_validate_actions_capacity.py "$W/tests/checks/contracts/"
+      && printf '%s\n' '    - id: sim-row' '      items: [rec-5294]' '      unit: per_merge' '      source: assumed'
+      '      job_minutes_per_unit: 1.0' '      basis: "simulation"'
+      '      live_signal: {workflow: .github/workflows/convergence-health.yml, job: "*", event: schedule}' > "$W/row.txt"
+      && sed -i "/^trigger_response:/e cat $W/row.txt; echo" "$W/docs/contracts/actions-capacity.yaml"
+      && (cd "$W" && OTL_VENV_PYTHON="$R/.venv/bin/python" bin/venv-python -m pytest tests/ci/test_actions_capacity_contract.py
+      tests/checks/contracts/test_validate_actions_capacity.py -q); rc=$?; git worktree remove --force "$W"; rmdir "$D"; exit $rc
+    expected: "exit 0, no failures (with main's unedited test files the same command gives 2 failed, probed 2026-11-17)"
+    fix_if: either test file fails with a fifth row present
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Scratch-worktree simulation of a future contract edit; step 1 is the standing guard for the same property.
+  - step: 5
+    phase: pre-deploy
+    action: >-
+      Fast tier, then the full tier before handoff (handoff_policy): bin/venv-python -m scripts.validate --pre in the
+      foreground (exit 0), then this command as its own backgrounded run with a 2 h limit from the top-level session.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: "--pre exited 0 first; this command exits 0 for HEAD"
+    fix_if: >-
+      a failure in this plan's files is fixed at root and the full tier rerun; a failure only in another project's open
+      red (rec-5247 at plan time) goes to the operator as the implement skill's go/no-go, and without his word the build
+      waits for that red's repair (red-main-recovery.yaml); it never hands off on a non-green full tier by default
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: post-deploy
+    action: Confirm rec-5294 closed after the squash merge (Resolves trailer).
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import make_reader;
+      r=make_reader(profile='agent_platform').named('recs_by_ids', ids='rec-5294')[0]; print(r['status']); assert r['status']=='closed'"
+    expected: rec-5294 status closed
+    fix_if: still open after ci.yml's closure job ran; close it with update_rec citing the merge SHA
+    hermetic: false
+test_obligations:
+  - source: tests/checks/contracts/test_validate_actions_capacity.py
+    behavior: A valid added ledger row naming any existing workflow passes the evaluator in the copied tree and is counted.
+    verification_step: 1
+    test_selector: tests/checks/contracts/test_validate_actions_capacity.py::test_added_ledger_row_passes_and_is_counted
+    red_green_expectation: red before (node absent; the old four-file copy lacks the picked workflow), green after.
+  - source: tests/ci/test_actions_capacity_contract.py
+    behavior: The loader keeps every ledger row of the YAML in order.
+    verification_step: 2
+    test_selector: tests/ci/test_actions_capacity_contract.py::test_real_contract_loads
+    waiver_reason: >-
+      A test file, not behaviour: the edit replaces a literal count with a growth-safe wiring check; step 4's
+      simulation proves it survives a fifth row, and no assertion is loosened beyond the count.
+constraints:
+  - Test files only. Never edit docs/contracts/actions-capacity.yaml, the evaluator or the loader.
+  - No assertion other than the two literal counts and the _tree workflow list changes (Decision 235).
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - "Decision-scout verdict NO_FLAGS (round 1). CITE: Decisions 235, 244. Decisions triaged: 219 of 219. Roadmap items intersected: 1; CONFLICT: 0; RELATED: 1. Serves: NS.6 2/5."
+  - "Decision 235: validate_weakening_candidates lists both literal-count edits as assertion-changed; the build records each in weakening_dispositions as growth-safe-pin (implement-scope-boundary.yaml), citing test_added_ledger_row_passes_and_is_counted (the independent base + 1 guard), never weakening. Decision 244: graduated shard actions-capacity-evaluator-and-steps pins both edited nodes by name, so the names stay."
+  - "Third coupling found at planning (probe 2026-11-17 on main 37a4684d): with only the two counts fixed, a fifth row whose live_signal names a workflow outside ci.yml and the three deploy workflows still fails test_real_contract_passes_and_declares_examined, because _tree copies only those four workflows. PLAN-persona-image-pin's row names .github/workflows/persona-image-publish.yml, so the _tree change is needed for that plan."
+  - "Why validate_test_count_coupling missed these: its curated-loader list does not name load_contract, and `.count == 4` is not a len() call. Extending the lint is out of scope (keeps this plan test-only); filed as rec-5326."
+  - "No approved-text sidecar: no contract or always-ask wording changes, so no approval run."
+  - "Neither file is in .github/CODEOWNERS; no open PR or unbuilt plan edits either file. The build merges on green (operator ruling 2026-11-16)."
+  - "red_overlap at plan write (2026-11-17): blocked. Deferral: rec-5247 (telemetry-reader smoke 504; slo_breached, shared files none) is owned and being repaired by the Feedback Loop project; this plan edits nothing it repairs. The build re-runs red_overlap and proceeds under the same deferral or waits for the operator."
+  - "Owning planning thread: 'Plan capacity test decoupling rec-5294' (Agents in GitHub). Plan defects go to the coordinator, which forwards them here."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: NO_FLAGS, scout_input_fingerprint: "v1:f48e0402d53d77812886050fdeba743e7da50fc95644e7f01f434c861c538894"}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 5}  # B1 VP 4 worktree interpreter + edited files fixed (probed); B2 step 2 waiver restated; N3 rec-5326 filed; N4 picked workflow + base+1; N5 dirs_exist_ok + drop unused param; N7 phase wording; N6 grep alternation false positive, no change
+  - {gate: plan-critique, round: 2, verdict: PROCEED, blocking: 0, nits: 6}  # N1 growth-safe-pin cites the base+1 node; N2 *.yml basename match + explicit assert; N3 mktemp parent removed; N4 step 3 waiver reworded; N5 grep alternation intended; N6 rebase covered by closure step
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 3}  # confirming round; B1 VP 4 cleanup rm -rf of a command substitution refused by the session's rm safety check -> D=$(mktemp -d) + rmdir (probed); N1 phase names T4.32 only as beneficiary, no change; N2 wiring checks settled r2; N3 grep alternation intended
+  - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 5}  # N4 step 3 hermetic false (whole-file re-run incl. scope files); N1 N2 N3 repeats, kept; N5 informational (VP 4 still red on main)
+  - {gate: plan-critique, round: 5, verdict: PROCEED, blocking: 0, nits: 4}  # confirming round, ends the loop; N2 VP 5 fix_if go/no-go wording applied; N1 N3 N4 repeats, no change
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "Add test_added_ledger_row_passes_and_is_counted first; run step 1 red (fails: the picked workflow does not exist in the copied tree)."
+  - "Change _tree to copy .github/workflows/ whole and replace the examined count literal per the scope row. Post: steps 1 and 3 pass."
+  - "Replace the ledger row count literal in tests/ci/test_actions_capacity_contract.py per its scope row. Post: step 2 passes."
+  - Execute Verification Plan -- run each pre-deploy step; loop until pass; on unrecoverable failure stop and RCA (Decision 55)
+  - "CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; commit; rebase on origin/main; re-run red_overlap; VP 1-5; push; open the PR; subscribe; code review in a fresh context; squash-merge on PROCEED and green CI with `Resolves: rec-5294` in the commit body; report PR number, CI run ids and the read-back merge SHA; VP 6."
+  - "Report: what was implemented, verification results"
+weakening_dispositions:
+  - candidate: "[assertion-changed] tests/checks/contracts/test_validate_actions_capacity.py::test_real_contract_passes_and_declares_examined"
+    disposition: growth-safe-pin
+    cite: "tests/checks/contracts/test_validate_actions_capacity.py::test_added_ledger_row_passes_and_is_counted"
+  - candidate: "[assertion-changed] tests/ci/test_actions_capacity_contract.py::test_real_contract_loads"
+    disposition: growth-safe-pin
+    cite: "tests/checks/contracts/test_validate_actions_capacity.py::test_added_ledger_row_passes_and_is_counted"

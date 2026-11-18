@@ -1,14 +1,18 @@
 """Mirror test for scripts/backlog_health/probe.py (PLAN-backlog-health-detection).
 
-Hermetic: never depends on a real `unshare` being available in the environment running these
-tests (VP step 10 -- run against the real GitHub-hosted runner -- is the live proof of that
-primitive; this suite tests the verdict logic in isolation via injected runner/isolation_check/
-clock callables).
+Every node is hermetic (injected runner/isolation_check/clock) except test_timeout_kills_descendants,
+test_proc_agrees_with_sandbox_pids and test_probed_command_is_not_namespace_init, which need the real
+unshare primitive and skip without it, including in every CI job that does not run the AppArmor sysctl;
+so in CI the kill guarantee is exercised live only by the weekly backlog-health probe job and ci.yml's
+trailer-acceptance-evaluate, with the argv-token nodes as the unit guard.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
+import time
+import uuid
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -40,6 +44,11 @@ class TestIsolationAvailable:
         runner = MagicMock(side_effect=subprocess.TimeoutExpired(cmd="unshare", timeout=5))
         assert probe.isolation_available(tmp_path, runner=runner) is False
 
+    def test_probes_pid_namespace_prefix(self, tmp_path: Path) -> None:
+        runner = MagicMock(return_value=MagicMock(returncode=0))
+        probe.isolation_available(tmp_path, runner=runner)
+        _assert_ns_tokens(runner.call_args.args[0])
+
     def test_binds_repo_root_not_slash(self, tmp_path: Path) -> None:
         """Regression (VP step 11, live workflow_dispatch): binding `/` onto itself is not a
         safe proxy for binding a real subdirectory -- some filesystems reject the former while
@@ -47,12 +56,130 @@ class TestIsolationAvailable:
         runner = MagicMock(return_value=MagicMock(returncode=0))
         probe.isolation_available(tmp_path, runner=runner)
         argv = runner.call_args.args[0]
-        inner = argv[argv.index("--") + 3]
+        inner = argv[-1]
         assert str(tmp_path) in inner
         assert f"mount --bind -o ro {tmp_path} {tmp_path}" in inner
 
 
+_TOKENS = ["-rpmn", "--fork", "--kill-child", "--mount-proc"]
+
+
+def _assert_ns_tokens(argv: list[str]) -> None:
+    sep = argv.index("--")
+    head = argv[:sep]
+    assert head[0] == "unshare"
+    positions = [head.index(t) for t in _TOKENS]
+    assert positions == sorted(positions)
+
+
+def _real_primitive(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    if not probe.isolation_available(repo):
+        import pytest
+
+        pytest.skip("env: unprivileged user/pid namespaces unavailable")
+    return repo
+
+
 class TestRunOne:
+    def test_argv_uses_pid_namespace_prefix(self, tmp_path: Path) -> None:
+        runner = MagicMock(return_value=MagicMock(returncode=0))
+        probe.run_one("echo hi", repo_root=tmp_path, runner=runner)
+        _assert_ns_tokens(runner.call_args[0][0])
+
+    def test_inner_program_keeps_bash_as_init(self, tmp_path: Path) -> None:
+        runner = MagicMock(return_value=MagicMock(returncode=0))
+        probe.run_one("echo hi", repo_root=tmp_path, runner=runner)
+        assert runner.call_args[0][0][-1].startswith("trap : EXIT && ")
+
+    def test_scratch_removal_retries_then_succeeds(self, tmp_path: Path, monkeypatch) -> None:
+        import tempfile
+
+        calls = {"n": 0}
+        real = tempfile.TemporaryDirectory.cleanup
+
+        def flaky(self) -> None:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError(39, "Directory not empty")
+            real(self)
+
+        monkeypatch.setattr(tempfile.TemporaryDirectory, "cleanup", flaky)
+        monkeypatch.setattr(probe.time, "sleep", lambda s: None)
+        seen = {}
+
+        def fake_runner(*a, **kw):
+            seen["scratch"] = kw["env"]["PYTHONPYCACHEPREFIX"]
+            return MagicMock(returncode=0)
+
+        assert probe.run_one("true", repo_root=tmp_path, runner=fake_runner) == probe.PASS
+        assert calls["n"] == 2
+        assert not Path(seen["scratch"]).parent.exists()
+
+    def test_scratch_removal_raises_after_bounded_retries(self, tmp_path: Path, monkeypatch) -> None:
+        import shutil
+        import tempfile
+
+        calls = {"n": 0}
+        real = tempfile.TemporaryDirectory.cleanup
+        seen = {}
+
+        def always(self) -> None:
+            calls["n"] += 1
+            seen["name"] = self.name
+            raise OSError(39, "Directory not empty")
+
+        monkeypatch.setattr(tempfile.TemporaryDirectory, "cleanup", always)
+        monkeypatch.setattr(probe.time, "sleep", lambda s: None)
+        try:
+            import pytest
+
+            with pytest.raises(OSError):
+                probe.run_one("true", repo_root=tmp_path, runner=lambda *a, **k: MagicMock(returncode=0))
+            assert calls["n"] == 10
+        finally:
+            monkeypatch.undo()
+            if "name" in seen:
+                shutil.rmtree(seen["name"], ignore_errors=True)
+            del real
+
+    def test_timeout_kills_descendants(self, tmp_path: Path) -> None:
+        repo = _real_primitive(tmp_path)
+        marker = uuid.uuid4().hex
+        beat = tmp_path / "beat.txt"
+        script = tmp_path / f"d_{marker}.sh"
+        script.write_text(
+            f"while true; do echo x >> {beat}; "
+            'mkdir -p "$PYTHONPYCACHEPREFIX"; echo y > "$PYTHONPYCACHEPREFIX/w"; sleep 0.05; done\n'
+        )
+        cmd = f"{{ bash {script} {marker} & }}; sleep 100"
+        try:
+            assert probe.run_one(cmd, repo_root=repo, timeout=2) == probe.TIMEOUT
+            time.sleep(1)
+            assert beat.exists() and beat.stat().st_size > 0
+            for pid in filter(str.isdigit, os.listdir("/proc")):
+                try:
+                    data = Path(f"/proc/{pid}/cmdline").read_bytes()
+                except (FileNotFoundError, ProcessLookupError, PermissionError):
+                    continue
+                assert marker.encode() not in data, f"descendant {pid} survived"
+            size = beat.stat().st_size
+            time.sleep(0.5)
+            assert beat.stat().st_size == size
+        finally:
+            subprocess.run(["pkill", "-f", marker], check=False)
+
+    def test_proc_agrees_with_sandbox_pids(self, tmp_path: Path) -> None:
+        repo = _real_primitive(tmp_path)
+        cmd = 'read p _ < /proc/self/stat; test "$p" = "$BASHPID"'
+        assert probe.run_one(cmd, repo_root=repo) == probe.PASS
+
+    def test_probed_command_is_not_namespace_init(self, tmp_path: Path) -> None:
+        repo = _real_primitive(tmp_path)
+        cmd = "sh -c 'read p _ < /proc/self/stat; test \"$p\" != 1'"
+        assert probe.run_one(cmd, repo_root=repo) == probe.PASS
+
     def test_pass_on_zero_exit(self, tmp_path: Path) -> None:
         runner = MagicMock(return_value=MagicMock(returncode=0))
         assert probe.run_one("echo hi", repo_root=tmp_path, runner=runner) == probe.PASS
@@ -74,7 +201,7 @@ class TestRunOne:
         probe.run_one("echo hi", repo_root=tmp_path, runner=runner)
         argv = runner.call_args[0][0]
         assert argv[0] == "unshare"
-        assert "-rmn" in argv
+        assert "-rpmn" in argv
         assert "echo hi" in argv[-1]
 
     def test_pytest_command_gets_30s_timeout(self, tmp_path: Path) -> None:
@@ -128,7 +255,7 @@ class TestRunOne:
 
         probe.run_one(cmd, repo_root=tmp_path, runner=fake_runner)
         inner = captured["argv"][-1]
-        prefix = f"mount --bind -o ro {tmp_path} {tmp_path} && ulimit -u {probe._PID_CAP} && "
+        prefix = f"trap : EXIT && mount --bind -o ro {tmp_path} {tmp_path} && ulimit -u {probe._PID_CAP} && "
         assert inner.startswith(prefix), inner
         command_portion = inner[len(prefix) :]
         assert command_portion == cmd, "the mount/ulimit prefix must be followed by the raw command, never `exec {cmd}`"

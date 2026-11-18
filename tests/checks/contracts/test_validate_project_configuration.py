@@ -365,3 +365,40 @@ def test_platform_file_without_a_gates_key_passes(root: Path) -> None:
 def test_rejects_unreadable_persona_registry(root: Path, capsys: pytest.CaptureFixture[str]) -> None:
     (root / "docs/contracts/executor-personas.yaml").write_text("personas: [unclosed\n", encoding="utf-8")
     _expect_failure(root, capsys, "executor-personas.yaml cannot be read for rule (l)")
+
+
+_APP_ROW = "gates.verdict_app.app_id"
+
+
+def test_real_contract_passes_rule_m(root: Path) -> None:
+    _seed_every_reader(root)
+    failed: list[str] = []
+    validate_project_configuration(failed, root=root)
+    assert failed == []
+    data = yaml.safe_load((root / _CONTRACT).read_text(encoding="utf-8"))
+    assert _row(data, _APP_ROW)["defaults"] == {"local": None, "cloud": None}
+
+
+def _drop_app_row(d: dict[str, Any]) -> None:
+    d["settings"].remove(_row(d, _APP_ROW))
+
+
+@pytest.mark.parametrize(
+    ("mutate", "needle"),
+    [
+        (_drop_app_row, "gates.verdict_app.app_id row is missing"),
+        (lambda d: _row(d, _APP_ROW).update(kind="machine"), "must be kind project with a null variable"),
+        (lambda d: _row(d, _APP_ROW).update(variable="OTL_APP"), "must be kind project with a null variable"),
+        (lambda d: _row(d, _APP_ROW).update(defaults={"local": 5, "cloud": None}), "must be equal"),
+        (lambda d: _row(d, _APP_ROW).update(defaults={"local": "7", "cloud": "7"}), "null or a positive integer"),
+        (lambda d: _row(d, _APP_ROW).update(defaults={"local": True, "cloud": True}), "null or a positive integer"),
+        (lambda d: _row(d, _APP_ROW).update(defaults={"local": 0, "cloud": 0}), "null or a positive integer"),
+        (lambda d: _row(d, _APP_ROW).update(defaults={"local": -3, "cloud": -3}), "null or a positive integer"),
+    ],
+    ids=["missing", "kind", "variable", "split", "string", "bool", "zero", "negative"],
+)
+def test_rule_m_rejects_a_bad_verdict_app_row(
+    root: Path, capsys: pytest.CaptureFixture[str], mutate: Callable[[dict[str, Any]], None], needle: str
+) -> None:
+    _mutate(root, mutate)
+    _expect_failure(root, capsys, needle)

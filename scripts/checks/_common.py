@@ -25,6 +25,8 @@ PYTHON = sys.executable  # Use same interpreter that's running this script
 
 PLAN_PATH_RE = re.compile(r"^docs/plans/PLAN-([^/]+)\.yaml$")
 _ZERO_SHA = "0" * 40
+FULL_TIER_PREV_ENV = "FULL_TIER_PREV"
+FULL_TIER_LAST_GREEN_ENV = "FULL_TIER_LAST_GREEN"
 
 
 def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
@@ -38,6 +40,17 @@ def invoke_step(name: str, cmd: list[str], failed: list[str], cwd: Path | None =
         failed.append(name)
 
 
+def _strict_ancestor_of_head(candidate: str, cwd: Path) -> bool:
+    kw = {"capture_output": True, "text": True, "encoding": "utf-8", "cwd": cwd}
+    if run(["git", "cat-file", "-e", f"{candidate}^{{commit}}"], **kw).returncode != 0:
+        return False
+    resolved = run(["git", "rev-parse", "--verify", "-q", f"{candidate}^{{commit}}"], **kw).stdout.strip()
+    head = run(["git", "rev-parse", "HEAD"], **kw).stdout.strip()
+    if not resolved or resolved == head:
+        return False
+    return run(["git", "merge-base", "--is-ancestor", resolved, "HEAD"], **kw).returncode == 0
+
+
 def push_context_base(root: Path | None = None) -> str | None:
     """Return the diff base for a POST-MERGE (push-context) validation run, else None.
 
@@ -47,7 +60,10 @@ def push_context_base(root: Path | None = None) -> str | None:
     first commit, which would otherwise pull the previous merge's files into every
     session-start --pre run.
 
-    In push context, prefers GITHUB_EVENT_BEFORE when it names a non-zero commit present
+    In push context with FULL_TIER_PREV set and non-empty (a batched full-tier run's prev, passed in by the
+    job; Decision 254 cl.4), returns it when it is a strict ancestor of HEAD, else FULL_TIER_LAST_GREEN under
+    the same test, else raises RuntimeError (never HEAD~1, no API call). Otherwise, in push context, prefers
+    GITHUB_EVENT_BEFORE when it names a non-zero commit present
     locally, else HEAD~1. Returns None (with a loud warning) when HEAD~1 does not resolve
     (root/shallow checkout) so callers fall back to their own existing base instead of
     silently mis-scoping.
@@ -79,6 +95,17 @@ def push_context_base(root: Path | None = None) -> str | None:
 
     if not (is_push_event or on_main):
         return None
+
+    full_tier_prev = os.environ.get(FULL_TIER_PREV_ENV, "").strip()
+    if full_tier_prev:
+        last_green = os.environ.get(FULL_TIER_LAST_GREEN_ENV, "").strip()
+        for candidate in (full_tier_prev, last_green):
+            if candidate and _strict_ancestor_of_head(candidate, cwd):
+                return candidate
+        raise RuntimeError(
+            f"{FULL_TIER_PREV_ENV}={full_tier_prev!r} and {FULL_TIER_LAST_GREEN_ENV}={last_green!r} "
+            "are not strict ancestors of HEAD present locally"
+        )
 
     event_before = os.environ.get("GITHUB_EVENT_BEFORE", "").strip()
     if event_before and event_before != _ZERO_SHA:
