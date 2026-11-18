@@ -64,10 +64,11 @@ scope:
       and only a covered one blocks. Malformed hook input exits 0 (the
       never_on_main precedent). Every block message's first line is "BLOCKED by .claude/hooks/protected_path_guard.py: "
       followed by the target (the form test_hook_block_marker's _assert_marked reads); it names the reason and the fix
-      (write the merged plan's path to .claude/protected_edit_plan; its scope must list this exact file) and ends with
-      exactly these two lines:
-      "This hook covers Edit, Write, MultiEdit and NotebookEdit only; a Bash edit bypasses it. It is an early warning,
-      not a control (Decision 239 cl.5)." and "HOOK-BLOCK v1 hook=protected_path_guard". It prints nothing to stdout
+      (write the merged plan's path to .claude/protected_edit_plan; its scope must list this exact file) and its last
+      line is exactly "This hook covers Edit, Write, MultiEdit and NotebookEdit only; a Bash edit bypasses it. It is an
+      early warning, not a control (Decision 239 cl.5)." The adapter holds no 'HOOK-BLOCK v1' literal: rule HB-1's shim
+      pattern (src/turn_capture/markers.py; PLAN-telemetry-hook-block-markers, approved on main) puts the marker in the
+      shim, so one block prints one marker. It prints nothing to stdout
       and never returns a permission decision. Stdlib plus yaml only; git calls carry a 5 s timeout. Its
       docstring states the residuals the context's hook-residuals line names.
   - file: .claude/hooks/protected_path_guard.sh
@@ -77,8 +78,12 @@ scope:
       the adapter under `timeout -k 5 20 "$ROOT/bin/venv-python" -I`, passes exit 0 and 2 through with their stderr,
       and maps a missing adapter, a timeout or any other exit to a deny only when the payload's file_path or
       notebook_path value (extracted with sed, never a whole-payload match) contains one of its COARSE literals, and to
-      an allow otherwise. A checkout whose branch predates the shim exits 127, which Claude Code does not treat as a
-      block: the merge gate's accepted residual.
+      an allow otherwise. Rule HB-1, on PLAN-telemetry-hook-block-markers's shim pattern: one EXIT trap captures the exit
+      status first and prints 'HOOK-BLOCK v1 hook=protected_path_guard' to stderr exactly when it is 2 (the adapter's
+      deny and every fallback deny), then exits with that same status; allow paths print nothing new. So an adapter
+      block ends with the adapter's Bash-bypass line and then the marker, and a fallback deny ends with the shim's own
+      one-line reason (it names the target and the fallback cause) and then the marker. A checkout whose branch
+      predates the shim exits 127, which Claude Code does not treat as a block: the merge gate's accepted residual.
   - file: .claude/settings.json
     action: Modify
     purpose: >-
@@ -126,7 +131,8 @@ scope:
       both still block (the union); MultiEdit and NotebookEdit (notebook_path) are covered; Bash, Read and an
       unprotected path pass; a target outside the repository passes; a target spelled with a .. segment that resolves
       onto a PROTECTED entry blocks; malformed input allows; a git failure blocks a covered target naming git fetch
-      origin main and lets an uncovered target pass; every block ends with the two pinned lines; .claude/active_plan alone never
+      origin main and lets an uncovered target pass; every block (run through the shim) ends with the Bash-bypass line and then the marker, and every fallback deny ends with
+      exactly one marker; the adapter file holds no 'HOOK-BLOCK v1' literal; .claude/active_plan alone never
       allows; .claude/protected_edit_plan is ignored (git check-ignore -q run against the real repository root, not the
       temporary repository); the shim allows on exit 127-style adapter
       absence for an unprotected path and denies for a protected one; every PROTECTED entry on the real tree contains
@@ -134,7 +140,14 @@ scope:
       plugin_hooks.py's render.
   - file: tests/hooks/test_hook_block_marker.py
     action: Modify
-    purpose: STEMS gains protected_path_guard and one node runs a block and checks it ends with its marker.
+    purpose: >-
+      STEMS is unchanged (its nodes run a .py hook directly). One new node,
+      test_protected_path_guard_block_ends_with_its_marker, runs the shim as bash on a protected payload in a temporary
+      repository: exit 2, the first stderr line starts "BLOCKED by .claude/hooks/protected_path_guard.py: ", the last
+      line equals format_hook_block_marker('protected_path_guard') and hook_block_stems(stderr) is exactly that stem.
+      The design already meets PLAN-telemetry-hook-block-markers's guard
+      (test_every_registered_pretooluse_hook_prints_its_own_marker: the registered .sh holds the literal, its .py
+      adapter none), so either build order passes; this file's nodes are additive, and whichever lands second rebases.
   - file: scripts/ducklake_smoke/lambda_telemetry_golden_content.py
     action: Create
     purpose: >-
@@ -194,13 +207,16 @@ scope:
       status, body if isinstance(body, dict) else {} (the normalisation the Function URL writer has, golden_gates.py
       :407-413), so a malformed 200 stops as register_*_failed, never run_AttributeError. Its Budget is a module
       constant, GOLDEN_SESSION_BUDGET_SECONDS = 1800, sized for a whole replay plus the content leg; invoke_once
-      clamps each call to min(130 s, remaining) and a spent budget raises TimeoutError, a stop. make_client takes its
-      profile from AWS_PROFILE (else agent_platform) and its SSM region from AWS_REGION (else eu-west-2), not the gates'
-      --profile and --region; VP 7 sets AWS_PROFILE=agent_platform, and the docstring and --help say so. A failure
+      clamps each call to min(130 s, remaining) and a spent budget raises TimeoutError, a stop. make_client always
+      signs as agent_platform (resolve_aws_profile(DEFAULT_SSO_PROFILE); the ambient AWS_PROFILE is not honoured, and
+      environment keys take the default chain) and takes its SSM region from AWS_REGION, then AWS_DEFAULT_REGION, then
+      eu-west-2, not from the gates' --profile and --region; the docstring and --help say so. Under the switch the
+      writer's make_client gets a copy of os.environ without DUCKLAKE_TELEMETRY_WRITER_URL, so the API parameter always
+      wins over a stale Function URL. A failure
       resolving or signing for the writer (CaptureUnavailable, an SSM error) is
       raised as ReplayStop("writer_unresolved"), so main() prints GOLDEN_STOP, never a traceback. Under the switch _resolve_urls reads neither Function URL parameter
-      and exports neither DUCKLAKE_TELEMETRY_WRITER_URL nor DUCKLAKE_READER_URL (an operator-set value is left as it
-      is): DuckLakeReader._reader_url takes that env value before api_transport() (ducklake_reader_client.py:420-424)
+      and exports neither DUCKLAKE_TELEMETRY_WRITER_URL nor DUCKLAKE_READER_URL (an operator-set DUCKLAKE_READER_URL is left as it is and, if it is a Function URL, the run stops as an access
+      fault, failing closed; the writer's is set aside as above): DuckLakeReader._reader_url takes that env value before api_transport() (ducklake_reader_client.py:420-424)
       and RoutedReader.describe always calls the shared ops reader (read_route.py:180), so an exported lambda-url
       reader URL would stop every session run. The shared reader then resolves the ops/reader API route itself. Under
       the same switch live_env has no deploy-record reader: records_skewed is not called, neither in skewed() nor on
@@ -526,7 +542,7 @@ context:
   - "Build marker: the build first writes docs/plans/PLAN-telemetry-content-edit-hook.yaml to .claude/protected_edit_plan; every PROTECTED file it edits (sensitive_value_detectors.py, its test, protected-actions.yaml, deploy-telemetry-content.yml) is in scope."
   - "Friction: blocks land in r90 unmapped_block until a rule is added; the HOOK-BLOCK stem already names them (parser HD-2). The wave-2 friction-coverage planning thread may add rules; not this plan."
   - "rec-5333 (Decision 79 carve-out) stays separate: its planning and plan-critique SKILL.md edits sit under Decision Growth's open #2217 and plan_critic.yaml is Agents in GitHub's persona file."
-  - "Overlapping open work: #2186 (CODEOWNERS, deploy_gate.py, test_deploy_gate.py), #2198 and the unbuilt PLAN-computed-reversal-conditions (docs/DECISIONS.md; the latter moves Decision 267's and 239's review_by lines, not the lines this sidecar binds); PLAN-persona-image-channel (merged on main, 6fcf9540: the deploy_gate rows are written against it), PLAN-hook-canary-evidence (.claude/settings.json, .claude/hooks/hooks.json, re-rendered after either lands) and PLAN-sit-organization (its own sidecar on protected-actions.yaml's amendment_log head: whichever lands second takes a new wording run); whichever lands second rebases. plan_obligations lists more unbuilt plans sharing a file (CODEOWNERS: PLAN-environment-gates-fail-closed, PLAN-trusted-plan-cutover, PLAN-trusted-plan-identity, PLAN-bootstrap-ci-gated-apply, which also shares .gitignore; capabilities.yaml: PLAN-persona-verdict-chain, PLAN-wording-approval-routing; and many on docs/DECISIONS.md); the same rule applies to each. #2218 (merged c39dcdeb) already moved CODEOWNERS and the workflow; this plan is written on it. Merged on main and merged into this branch 2026-11-18: Decision 273 (amends 258 and 270; touches no line the sidecar binds and not the content route), bc29d718 (rec-5270 plan A: event-read SQL and derivation fixtures; a not-yet-deployed DuckLake change shows in VP 7 as a skew line, handled there) and 9b549344."
+  - "Overlapping open work: #2186 (CODEOWNERS, deploy_gate.py, test_deploy_gate.py), #2198 and the unbuilt PLAN-computed-reversal-conditions (docs/DECISIONS.md; the latter moves Decision 267's and 239's review_by lines, not the lines this sidecar binds); PLAN-persona-image-channel (merged on main, 6fcf9540: the deploy_gate rows are written against it), PLAN-hook-canary-evidence (.claude/settings.json, .claude/hooks/hooks.json, re-rendered after either lands) and PLAN-sit-organization (its own sidecar on protected-actions.yaml's amendment_log head: whichever lands second takes a new wording run); whichever lands second rebases. PLAN-telemetry-hook-block-markers (approved on main, unbuilt) shares tests/hooks/test_hook_block_marker.py and sets rule HB-1's shim pattern, which this plan follows, so either order passes; it edits PROTECTED .claude/hooks/protected_action_gate.sh, so if this plan lands first that build writes its own plan path to .claude/protected_edit_plan (the block message says how), and the coordinator is told at handoff. plan_obligations lists more unbuilt plans sharing a file (CODEOWNERS: PLAN-environment-gates-fail-closed, PLAN-trusted-plan-cutover, PLAN-trusted-plan-identity, PLAN-bootstrap-ci-gated-apply, which also shares .gitignore; capabilities.yaml: PLAN-persona-verdict-chain, PLAN-wording-approval-routing; and many on docs/DECISIONS.md); the same rule applies to each. #2218 (merged c39dcdeb) already moved CODEOWNERS and the workflow; this plan is written on it. Merged on main and merged into this branch 2026-11-18: Decision 273 (amends 258 and 270; touches no line the sidecar binds and not the content route), bc29d718 (rec-5270 plan A: event-read SQL and derivation fixtures; a not-yet-deployed DuckLake change shows in VP 7 as a skew line, handled there) and 9b549344."
   - "Reds: red_overlap (2026-11-18, base e68171b1) BLOCKED on slo_breached: rec-5355 (15.1 h) and rec-5364 (12.8 h), both product_regression, shared paths none; owned by CI Reform (coordinator log 2026-11-18 12:55Z). Deferral rationale (Decision 226): this plan repairs neither, shares no file with either, and its words do not depend on them; the operator ruled 2026-11-17 that builds may proceed past reds that share no files. VP 6 runs it again before the first commit."
   - "Rec acceptance (planning, 2026-11-18): rec-5322's and rec-4699's acceptance re-pointed through ops_data_portal update_rec to single nodes this plan creates (test_protected_edit_without_a_merged_plan_is_refused; test_content_tree_carries_a_blob_tier_row). The build confirms all four recs' acceptance holds at the PR head (scripts.rec_trailer_acceptance) before the squash merge."
   - "Graduated shards kept, node ids unchanged: telemetry-append-writer-edge-request-shared, telemetry-blob-writer-edge-adapter-shared, telemetry-writer-packaging and telemetry-writer-stub-handler (test_packaging.py), deploy-gate-decisions (test_deploy_gate.py). Those files gain or change helper code and nodes only; the build renames and deletes none of a shard's named nodes (deploy-gate-decisions names the whole file, so the one in-file rename its scope row names keeps it), and VP 1 runs each file."
@@ -541,6 +557,7 @@ context:
   - "Critique r4 REVISE, taken: R4-B1 (under the switch the gates still exported the shared reader's Function URL into DUCKLAKE_READER_URL, which the client prefers over the API route, and describe always calls that reader) fixed by _resolve_urls exporting nothing under the switch, with a test node; read back 2026-11-18 at ducklake_reader_client.py:420-424 and read_route.py:180. Nits N1-N4 folded (content-sha header, the :448 stop path, Decision 273 noted, the validator's directory)."
   - "Critique r5 REVISE, taken: R5-B1 (main's persona_image channel passes its revision reader through reader=, so dropping that parameter would break it) fixed by limiting the one-read change to single-function Lambda channels and keeping both parameters, with the persona and ducklake nodes unchanged; read back at deploy_gate.py:260-297 and :367 after merging main. R4-B1 confirmed resolved and VP 7's whole live path traced reachable as agent-platform-session. Nits folded: the January id needs no stored project_id, the capture client reused in place of a third signer (no new PC-01 client), the overlap line restated as merged work, writer-resolution failures become GOLDEN_STOP."
   - "Critique r6 REVISE, taken: R6-B1 (the one-read rule keyed only to function count would push run_resolve's single-function ducklake node onto a real aws s3 cp) fixed by keying it to the telemetry-content channel, so run_resolve and the ducklake nodes are truly unchanged. Nits folded: the writer body normalised to a dict, the Budget named (1800 s), the writer's profile and region source stated."
+  - "Critique r7 REVISE, taken: R7-B1 (the marker belonged in the shim under rule HB-1 and PLAN-telemetry-hook-block-markers's guard, not in the adapter) fixed: the shim's EXIT trap prints the marker on every exit 2, including fallback denies, the adapter prints none, STEMS is unchanged and one shim node is added; the branch merged main at 1425319a first. Nits folded: make_client's real profile and region source, the writer URL env set aside under the switch, the overlap line."
   - "Why a new hook, not a class in protected_action_gate: that gate's only Edit rule is transcript tamper, and its classes come from protected-actions.yaml's production-action grammar with approve lines; a PROTECTED edit is allowed by a merged plan's scope, not an approve line, and reads a different list (the detector ratchet's PROTECTED). Folding it in would change that contract's class grammar for a different authority; a separate hook keeps both small, and the tamper note's one-line pointer is the only contract change."
   - "Hook residuals (early warning, stated in the hook's docstring and tested where they can be): any plan ever merged that scopes a PROTECTED path authorizes that path whenever it is named in the marker; a target inside a worktree nested in the repository resolves to a non-PROTECTED relative path and passes; when git cannot read origin/main, coverage comes from the working tree alone, so a branch that shortened PROTECTED passes those paths until origin/main is fetched; a Bash edit bypasses it; until the operator updates the plugin (VP 9) project threads do not run it. CODEOWNERS review stays the binding control (rec-2827)."
 gate_rounds:
@@ -559,6 +576,7 @@ gate_rounds:
   - {gate: decision-scout, round: 5, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:5b8af3e5733aaab1291215ff6fcf3ad6879ae215b8cc7204dc1c755d3d5ffeda'}  # pragma: allowlist secret
   - {gate: wording-check, round: 4, verdict: PASS, digest: ae3f233b036bdf69a692fe12b79f0e00d20bd46833504abdd37c5019330f7b01, base: e5d703b2506acff9f753b2dd005a41d514e86c3b, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 1, nits: 3}
+  - {gate: plan-critique, round: 7, verdict: REVISE, blocking: 1, nits: 3}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
