@@ -2,6 +2,71 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 273: The verdict GitHub App's key lives in one SSM /secret/ parameter that only the post job's own role reads, and the CI apply boundary refuses that read to every other carrier -- an accepted residual against Decision 143 clause 1 (amends Decisions 258 and 270) (Decided)
+
+```yaml
+number: 273
+status: Decided
+decided_date: "2026-11-18"
+kind:
+  value: direction
+  justification: >-
+    Clause 5 accepts a merge-gating credential held inside the agent merge loop, an exception to Decision 143 cl.1,
+    and clause 6 re-decides where a boundary fence lives; clauses 1-4 are the means.
+amends: [258, 270]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable and reversal-relevant: the custody of what Decision 271 calls the persona verdicts' trust root, a new
+    credential path, a boundary Deny and a moved trigger. Not a project-configuration or inventory row, which record
+    a home and an owner, never a Deny or a residual. Not amendment_forms on 263 or 271: neither holds this role or lock.
+```
+
+**Status:** Decided
+**Date:** 2026-11-18
+**Warehouse ID:** dec-273 (per Decision 84 backfill)
+
+**Problem:** Whoever reads the verdict App's private key can pass the persona leg of the agent merge gate (Decision 271 cl.5), and Decision 271's dated Update leaves the App, its key home and its reader to PLAN-persona-verdict-app-grant. An in-budget inline-policy update in terraform/personal auto-applies after an agent merge (Decision 92 pt 5), so a grant naming the key's ARN would add a reader unattended.
+
+**Decision:**
+1. App. An organisation-owned GitHub App with Checks write and Metadata read only, no webhook, installed on this repository only, created by the operator. Its ids and the token mint are PLAN-persona-verdict-app-post's.
+2. Key home. The private key lives only in the SSM SecureString /secret/agent-platform-persona-verdict-app-key, put by the operator (Decision 237 cl.3), never in an Actions or Environment secret: an accepted exception to Decision 224 cl.2, as Decision 263 cl.3 is.
+3. Reader. The role agent-platform-github-ci-persona-verdict-app carries the CI apply boundary and one StringEquals trust statement: the audience, the persona-verdict-app Environment's subject in each repository form and job_workflow_ref persona-verdict.yml at refs/heads/main (the Decision 263 cl.2 shape). Its one grant is ssm:GetParameter on the key by literal ARN. The Environment admits main only, has no reviewers, allows no admin bypass and is never destroyed; only that workflow's post job may name it, so no model-running job can assume the role (the operator's 2026-11-17 ruling). PlatformAdmin keeps its /secret/ admin read (Decision 237 cl.2).
+4. Lock. The CI apply boundary's DenyVerdictAppKeyRead refuses every carrier but that role, by aws:PrincipalArn, the value reads of the key and by-path reads of its ancestors. The boundary is in the protected set (Decision 257 cl.3), outside the agent merge loop.
+5. Accepted residual against Decision 143 cl.1. persona-verdict.yml and the post job's code are agent-mergeable: a merged change to that job can post any persona verdict, and a role replace waits only for the gated apply's approval (an in-place trust edit is an admin split-apply, Decision 223 cl.4). Accepted, forged verdicts included, in Decision 267 cl.5's preventive half only (the operator chose prevention on 2026-11-18; rec-5363 tracks a sensor): the token holds checks: write only, so it approves no deployment and changes no setting, and clause 4 shuts the IAM door a Decision 248 cl.5 resource policy would. PLAN-persona-verdict-app-post's first run proves the token cannot approve a pending deployment (Decision 248 cl.8).
+6. Trigger (amends Decision 270 cl.5). The operator re-decided on 2026-11-18 that this fence lives in the boundary. Decisions 230 and 239's headroom conditions fire when the minified PROD rendering passes its size with this Deny, as the build landing this entry measures it; SIT's on the same growth. Decision 258 cl.1 and cl.3 stand. SIT holds no key (Decision 252).
+7. Coverage (Decision 181 cl.2). Clauses 2-4: tests/checks/iam_tf/test_persona_verdict_app_role.py and validate_secret_parameter_grants; clause 6: the boundary's byte pin; clause 1: the operator's settings read-back. The live assume, a refusal outside the Environment and the probe are app-post's, unproven until then. Residuals: clause 5, unsensed; PlatformAdmin's read.
+
+**Rationale:** One home, one declared reader, as Decisions 263 and 267. The Deny stops a second reader before any read; a CloudTrail alarm fires after the key has left and needs the actor filter Decision 202 cl.6 forbids.
+
+**Options considered:** Secrets Manager under a resource policy (Decision 248 cl.5), the IAM door clause 4 shuts at the cost of a second store and a protected-set role, the post job still open; a repository test alone, which agents can edit.
+
+```yaml reversal-conditions
+decision: 273
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: probe-approves
+    kind: manual
+    description: "The App's token approves a pending deployment: move the key to the Decision 248 cl.5 form and re-decide clause 5."
+  - id: key-exposed
+    kind: manual
+    description: "A principal other than the role or PlatformAdmin reads the key, or a check run the chain did not post carries the App: the operator makes a new key in the App's settings, puts it, deletes the old one, and clauses 3-5 are re-decided."
+  - id: workflow-lock-available
+    kind: manual
+    description: "A change to persona-verdict.yml or the post job's code needs the operator's merge (rec-4624, rec-2827): re-decide clause 5."
+  - id: boundary-headroom
+    kind: manual
+    description: "The boundary's minified PROD rendering passes clause 6's size: re-decide where the fences live."
+  - id: secret-scp
+    kind: manual
+    description: "Decision 252 cl.8's /secret/* SCP lands: move clause 4 into it."
+```
+
+**Related:** Decisions 92, 143, 144, 202, 223, 224, 230, 237, 239, 248, 252, 257, 258, 263, 267, 270, 271; T4.2, T4.32; rec-2827, rec-4624, rec-5271, rec-5363.
+
+---
+
 ## Decision 271: A persona verdict check counts only when the dedicated verdict GitHub App posted it -- the merge gate pins persona checks to the App id read from origin/main and ignores same-named runs from any other source (amends Decisions 264 and 205) (Decided)
 
 ```yaml
@@ -225,6 +290,8 @@ conditions:
 ```
 
 **Related:** Decisions 101, 126, 143, 154, 172, 177, 181, 202, 223, 236, 237, 238, 246, 248.
+
+> **Amended by Decision 273 (2026-11-18):** Clause 5's size reads as the boundary's minified PROD rendering with Decision 273's DenyVerdictAppKeyRead, as the build that lands that entry measures it; the operator re-decided on 2026-11-18 that the new fence also lives in the boundary.
 
 ---
 
@@ -807,6 +874,8 @@ conditions:
 **Related:** Decisions 230, 239, 181, 126.
 
 > **Amended by Decision 270 (2026-11-17):** The operator re-decided under clause 3: every fence stays in the boundary, the URL-only Denies use prefix names, and clause 2's trigger size becomes 5427 bytes. Clauses 1 and 3 stand.
+
+> **Amended by Decision 273 (2026-11-18):** The operator re-decided under clause 3 on 2026-11-18: the verdict App key's Deny also lives in the boundary, and clause 2's trigger size becomes Decision 273 cl.6's. Clauses 1 and 3 stand.
 
 ---
 
