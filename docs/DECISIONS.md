@@ -62,6 +62,84 @@ conditions:
 
 ---
 
+## Decision 272: The telemetry content reader's deploy channel asks the operator only when the reader's protective code changes (amends Decision 249 clause 2) (Decided)
+
+```yaml
+number: 272
+status: Decided
+decided_date: "2026-11-17"
+kind:
+  value: direction
+  justification: >-
+    Yes: clause 1 sets which changes reach the content reader only through an operator approval and which wait for the
+    next one, a standing rule on what production runs; undone, every bundled change asks the operator again.
+amends: [249]
+serves: [NS.9]
+significance:
+  value: numbered_decision
+  justification: >-
+    It narrows Decision 249 cl.2 for one channel, and 249's own envelope says an annotation cannot change a ratified
+    clause's meaning; build-lambda.yaml's deploy_channels row (considered) records the channel's mechanism, not which
+    changes may wait for the operator.
+```
+
+**Status:** Decided
+**Date:** 2026-11-17
+**Warehouse ID:** dec-272 (per Decision 84 backfill)
+
+**Problem:** Decision 239 cl.5 lets only an operator-approved job change the content reader, and Decision 249 cl.2
+ships every queued change with the next green commit. The reader bundles about 45 files, most of them shared DuckLake
+modules that 29 commits touched in the month to 2026-11-17, so the operator would approve a deploy about once a day;
+an approval given near-always stops telling anything apart (NS.9).
+
+**Intent:** The operator approves a content reader deploy only when the code that protects transcript text changes,
+and every approval names everything that ships.
+
+**Decision:**
+1. **Watched set (amends 249 cl.2 for this channel).** deploy-telemetry-content.yml deploys the last-green commit
+   (Decision 254 cl.5) only when the reader's protective set changed since its deployed commit: the reader's package,
+   its deploy_config.json included, src/common/ducklake_content_read_verbs.py and src/sensitive_values. Its other
+   bundled files ship with the next deploy the operator approves, and a workflow_dispatch redeploys on demand (249
+   cl.4). The approval screen leads with what ships and its evidence (the green run, the built digest, the hold state,
+   the layer pins), then lists every bundled or build-tooling commit going out, counted from the deployed commit only
+   once that commit is shown to build the live code. A drift sensor built for this channel watches the same set; none
+   is wired yet.
+2. **Record and pins.** agent-platform-github-ci-deploy writes the channel's deploy record after the gated job, from
+   that job's read-back, so the locked role keeps Decision 270 cl.2's grant. deploy_config.json pins each layer's
+   version and CodeSha256, and the gated job re-verifies them before it deploys.
+
+**Rationale:** The approval is the one step an agent holding the operator's GitHub identity cannot take for itself
+(Decision 239), so it should fall where a refusal is plausible: masking, the access line, the served verbs and the
+reader's settings. Shared modules still reach production only inside an approved deploy that lists them. Rejected
+(operator, 2026-11-17): asking on every bundled change (daily approvals), dropping the approval (reverses 239 cl.5),
+and a record write by the locked role (amends 270 cl.2 and needs a CloudShell apply).
+
+**Coverage (Decision 181 cl.2):** cl.1 -- validate_content_reader_lock, tests/ci/test_deploy_gate.py and the
+summary tests in tests/ci/test_telemetry_content_deploy_script.py; cl.2 -- that script's deploy tests and
+tests/checks/iam_tf/test_ci_deploy_record_prefixes.py. Residuals: a shared module waits for the next approval and the
+reader runs older shared code meanwhile (accepted); a plan touching only the shared modules still owes Decision 79's
+deploy step until rec-5333 decides the operator-gated case; the layers are CI-published, so a pin proves which bytes
+run, not who built them (rec-4742), and a layer republish can delete a pinned version (rec-4738); the protected-path
+edit hook and the golden replay's masked read-back are owed by rec-5322 (239 cl.5); Decision 267's lock-available
+condition fires, and rec-5323 re-decides its clause 5.
+
+```yaml reversal-conditions
+decision: 272
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: stale-shared-code
+    kind: manual
+    description: "A content read fails because the reader runs older shared code than main: re-decide clause 1's watched set."
+  - id: codeowners-binds
+    kind: manual
+    description: "rec-2827 closes: re-decide whether the approval still needs a narrowed set."
+```
+
+**Related:** Decisions 79, 125, 126, 154, 238, 239, 249, 254, 267, 270.
+
+---
+
 ## Decision 270: The telemetry content reader is reached through a fifth DuckLake API route, and its change lock lives in the CI apply boundary, paid for by prefix-named URL-only Denies (amends Decisions 144, 202, 213, 230, 239, 255, 256, 257 and 258) (Decided)
 
 ```yaml
@@ -1523,6 +1601,8 @@ conditions:
 **Related:** Decisions 24, 55, 73, 77, 125, 126, 166, 181, 205, 226, 236, 239, 245; rec-4874, rec-4912.
 
 > **Amended by Decision 254 (2026-11-12):** Decision 254 fires canary-model-decided and re-scopes clause 2: the green signal becomes the last-green ref, the newest first-parent main commit whose own run passed the full tier, which under batching is a batch head, and clause 4's "newest green commit" reads the same. Clauses 3 and 5 hold (Decision 254 cl.2, cl.5).
+
+> **Amended by Decision 272 (2026-11-17):** For the telemetry content reader's channel only, clause 2's watched paths are the reader's protective set; its other bundled files ship with the next deploy the operator approves (Decision 272 cl.1).
 
 > **Update (2026-11-10):** Decision 252 fires the tier-stood-up condition ahead of the tier and replaces the green-streak train that clause 1 calls future state (see the note on Decision 73): the PROD promotion item re-decides clause 1. Until then clause 2 holds, and SIT deploys keep it (Decision 252 cl.6).
 
