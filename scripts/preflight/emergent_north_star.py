@@ -17,6 +17,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from scripts.decisions_index import build_triage_excerpt
 from scripts.decisions_md import parse_decisions_md
 from scripts.north_star_models import load_north_star
 from scripts.north_star_shortlist import carriers as north_star_carriers
@@ -209,7 +210,7 @@ def load_entries(index_path: Path | None = None, decisions_paths: list[Path] | N
             continue
         p = parsed[n]
         body = " ".join(x for x in (p.get("intent"), p.get("problem")) if x)
-        text = f"{p['title']} {body or row.get('triage_excerpt') or ''}"
+        text = f"{p['title']} {body or build_triage_excerpt(p)[0]}"
         serves = row.get("serves")
         out.append(
             Entry(
