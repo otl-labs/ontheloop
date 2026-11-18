@@ -49,7 +49,7 @@ def _load_index() -> list[dict[str, Any]]:
 
 
 def _score(entry: dict[str, Any], keywords: tuple[str, ...], *, title_only: bool = False) -> int:
-    haystack = entry["title"] if title_only else f"{entry['title']} {entry['triage_excerpt']}"
+    haystack = entry["title"] if title_only else f"{entry['title']} {entry.get('triage_excerpt', '')}"
     haystack = haystack.lower()
     return sum(1 for kw in keywords if kw.lower() in haystack)
 

@@ -17,8 +17,9 @@ the real constructor regardless of whether recording itself failed.
 
 from __future__ import annotations
 
-import inspect
+import functools
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -77,16 +78,24 @@ def _measure(stream: object) -> int | None:
     return None
 
 
+@functools.lru_cache(maxsize=None)
+def _relative_to_scripts(filename: str, scripts_dir: Path) -> str | None:
+    try:
+        return Path(filename).resolve().relative_to(scripts_dir).as_posix()
+    except (OSError, ValueError):
+        return None
+
+
 def _scripts_frames(scripts_dir: Path) -> tuple[str, ...]:
     """Every scripts/ frame on the current call stack, as "path:function" relative to scripts_dir."""
     try:
         frames: list[str] = []
-        for frame_info in inspect.stack():
-            try:
-                rel = Path(frame_info.filename).resolve().relative_to(scripts_dir)
-            except (OSError, ValueError):
-                continue
-            frames.append(f"{rel.as_posix()}:{frame_info.function}")
+        frame = sys._getframe(1)
+        while frame is not None:
+            rel = _relative_to_scripts(frame.f_code.co_filename, scripts_dir)
+            if rel is not None:
+                frames.append(f"{rel}:{frame.f_code.co_name}")
+            frame = frame.f_back
         return tuple(frames)
     except Exception:  # noqa: BLE001 -- recording must never raise
         return ()

@@ -25,14 +25,14 @@ See the same contract's `gate_subagent_retrieval.substrate_swap_contract`.
 
 0. **North stars first.** Read `docs/contracts/north-star.yaml` in full before the index (rationale: `gate_subagent_retrieval.north_star_lane`).
 
-1. **Triage source.** Read `docs/decisions-index.json` (rationale: `gate_subagent_retrieval.triage_source_provenance`). Derive **M** = count of `live: true` entries, never the max decision number (numbering gaps). Each live entry's `title`, `triage_excerpt` (<=320 chars; its marker in `triage_excerpt_source`), `currency` and `category_tags` is the Phase 2 signal -- never a whole-file load here.
+1. **Triage source.** Read `docs/decisions-index.json` (rationale: `gate_subagent_retrieval.triage_source_provenance`). Derive **M** = count of `live: true` entries, never the max decision number (numbering gaps). Each live entry's `title`, `triage_excerpt` (<=320 chars), `currency` and `category_tags` is the Phase 2 signal -- never a whole-file load here.
 
 2. Read the caller's input brief, which is mandated to include:
-   - **Intent** (1-2 sentences from `/plan` Step 3 clarification)
-   - **Proposed approach** (paragraph from `/plan` Step 3-5 synthesis)
-   - **Scope file list** (from `/plan` Step 4 Identify Affected Files)
-   - **Verification Tier** (V1 / V2 / V3, from `/plan` Step 5)
-   - **Explicitly cited decision IDs** (any decisions the human or planning agent has already referenced)
+   - **Intent** (1-2 sentences, `/plan` Step 3)
+   - **Proposed approach** (`/plan` Steps 3-5 synthesis)
+   - **Scope file list** (`/plan` Step 4)
+   - **Verification Tier** (V1/V2/V3, `/plan` Step 5)
+   - **Explicitly cited decision IDs** (any the human or planning agent already named)
 
 If any of these inputs are absent in the prompt, return immediately with `Verdict: BLOCK` and a one-line note: "Caller did not provide [missing input]. Re-dispatch after [step] completes."
 

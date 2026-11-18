@@ -84,6 +84,7 @@ STAMPS_SELECT = (
 )
 STAMPS_JOIN = "LEFT JOIN gens ON gens.session_id = {sid} LEFT JOIN conf ON conf.session_id = {sid}"
 
+_S_ACTIVITY = "event_kind <> 'annotate'"  # a telemetry_sessions annotate row (merge link) is a post-close fact, never activity
 _IDLE = "epoch(CAST($as_of AS TIMESTAMPTZ)) - epoch(l.last_event_timestamp) > {idle_seconds}"
 
 # Session and agent-run state, written once (telemetry_sessions.yaml state / duration_seconds; telemetry_agents.yaml duration).
@@ -101,7 +102,8 @@ STATE_CTES = (
     "QUALIFY row_number() OVER (PARTITION BY session_id ORDER BY event_timestamp DESC, coalesce(source_ordinal, -1) DESC, "
     "event_id DESC) = 1), "
     "last_ev AS (SELECT session_id, max(event_timestamp) AS last_event_timestamp FROM ("
-    "SELECT session_id, event_timestamp FROM s UNION ALL SELECT session_id, event_timestamp FROM a "
+    "SELECT session_id, event_timestamp FROM s WHERE " + _S_ACTIVITY + " "
+    "UNION ALL SELECT session_id, event_timestamp FROM a "
     "UNION ALL SELECT session_id, event_timestamp FROM o UNION ALL SELECT session_id, event_timestamp FROM t) "
     "GROUP BY session_id), "
     "runs AS (SELECT session_id, agent_run_id, any_value(agent_type) AS agent_type, "
@@ -377,12 +379,17 @@ _LIVE = {SESSIONS: "s", OBSERVATIONS: "o", AGENTS: "a", TRANSCRIPTS: "t"}
 _REAL = "project_id IN (SELECT project_id FROM {projects} WHERE purpose = 'real')"
 _DAY = "strftime(timezone('UTC', tq.session_started_at), '%Y-%m-%d')"
 
+_LIVE_ACTIVITY = " UNION ALL ".join(
+    f"SELECT {_TREE_KEY}, event_timestamp FROM {k}" + (f" WHERE {_S_ACTIVITY}" if k == _LIVE[SESSIONS] else "")
+    for k in _LIVE.values()
+)
+
 ORPHAN_COUNTS_SQL = compose(
     _ALL_TABLES,
     "{telemetry_joins}, tl AS (SELECT "
     + _TREE_KEY
     + ", max(event_timestamp) AS last_event_timestamp FROM ("
-    + " UNION ALL ".join(f"SELECT {_TREE_KEY}, event_timestamp FROM {k}" for k in _LIVE.values())
+    + _LIVE_ACTIVITY
     + ") GROUP BY "
     + _TREE_KEY
     + "), tq AS (SELECT tl.*, epoch(CAST($as_of AS TIMESTAMPTZ)) - epoch(tl.last_event_timestamp) "
@@ -427,7 +434,7 @@ ROOT_SESSIONS_SQL = compose(
     "tl AS (SELECT "
     + _TREE_KEY
     + ", max(event_timestamp) AS last_event_timestamp FROM ("
-    + " UNION ALL ".join(f"SELECT {_TREE_KEY}, event_timestamp FROM {k}" for k in _LIVE.values())
+    + _LIVE_ACTIVITY
     + ") GROUP BY "
     + _TREE_KEY
     + ") "
@@ -459,7 +466,13 @@ _USAGE_TREE = (
     "count(*) FILTER (WHERE is_root) AS roots_in_tree FROM st LEFT JOIN ses USING (" + _TREE_KEY + ", session_id) "
     "WHERE " + _REAL_PROJECT + " GROUP BY " + _TREE_KEY + "), "
     "tl AS (SELECT " + _TREE_KEY + ", max(event_timestamp) AS last_event_timestamp FROM ("
-    "SELECT " + _TREE_KEY + ", event_timestamp FROM s UNION ALL SELECT " + _TREE_KEY + ", event_timestamp FROM o) "
+    "SELECT "
+    + _TREE_KEY
+    + ", event_timestamp FROM s WHERE "
+    + _S_ACTIVITY
+    + " UNION ALL SELECT "
+    + _TREE_KEY
+    + ", event_timestamp FROM o) "
     "GROUP BY " + _TREE_KEY + "), "
     "tg AS (SELECT " + _TREE_KEY + ", list(struct_pack(producer := producer, parser_version := v_star) "
     "ORDER BY producer, v_star) AS generations FROM (SELECT DISTINCT st.tenant_id, st.project_id, st.session_started_at, "
@@ -556,4 +569,22 @@ STARTUP_BASELINE_SQL = compose(
     + " LEFT JOIN ag ON ag.session_id = ses.session_id LEFT JOIN fc ON fc.session_id = ses.session_id "
     + STAMPS_JOIN.format(sid="ses.session_id")
     + " ORDER BY tx.session_started_at, tx.root_session_id, tx.project_id, ses.is_root DESC, ses.session_id",
+)
+
+TREE_ROLLUP_SQL = compose(
+    (SESSIONS, OBSERVATIONS),
+    (
+        "{T}, sc AS (SELECT {K}, count(*) AS session_count FROM st GROUP BY ALL), wf AS (SELECT {K}, "
+        "list_sort(list_distinct(list(workflow))) AS workflows FROM ses GROUP BY ALL), cp AS (SELECT {K}, count(*) AS "
+        "compact_count, count(DISTINCT session_id) AS compacted_session_count FROM s WHERE event_kind = 'compact' GROUP BY "
+        "ALL), ml AS (SELECT {K}, list(struct_pack(merge_sha := merge_sha, merged_at := event_timestamp, pr_url := pr_url, "
+        "rec_ids := rec_ids, ci_outcome := ci_outcome) ORDER BY event_timestamp, merge_sha) AS merge_links FROM (SELECT *, "
+        "regexp_extract(external_ref, ':merge:([0-9a-f]+)#0/annotate$', 1) AS merge_sha FROM s WHERE event_kind = 'annotate' "
+        "AND producer = 'ci_annotate') GROUP BY ALL) SELECT tx.root_session_id, tx.harness_session_key, tx.branch, "
+        "tx.workflow, tx.session_started_at, tx.last_event_timestamp, tx.roots_in_tree, sc.session_count, "
+        "coalesce(wf.workflows, []) AS workflows, coalesce(cp.compact_count, 0) AS compact_count, "
+        "coalesce(cp.compacted_session_count, 0) AS compacted_session_count, coalesce(ml.merge_links, []) AS merge_links, {S}"
+        " FROM tx JOIN sc{U} LEFT JOIN wf{U} LEFT JOIN cp{U} LEFT JOIN ml{U} ORDER BY tx.session_started_at, "
+        "tx.root_session_id, tx.project_id"
+    ).format(T=_USAGE_TREE, K=_TREE_KEY, S=_TREE_STAMPS, U=_TREE_USING),
 )
