@@ -18,7 +18,7 @@ import yaml
 from scripts.checks import _common, registry
 from scripts.checks.decisions import entry_measure
 from scripts.checks.decisions._baseline import BaselineReaderFn, base_file_text, baseline_decision_numbers
-from scripts.checks.decisions.envelope_rules import dotted_value, split_delegated_key
+from scripts.checks.decisions.envelope_rules import amended_numbers, dotted_value, split_delegated_key
 from scripts.decisions_md import extract_entry_envelope, extract_superseded_by, iter_decision_sections
 
 BaseTextReaderFn = Callable[[Path, str], Optional[str]]
@@ -51,12 +51,12 @@ def _parsed(text: str | None) -> Any:
 
 
 def _outside_bounds(bounds: Any, value: Any) -> bool:
-    if not isinstance(bounds, dict):
-        return False
-    if set(bounds) == {"min", "max"}:
-        numeric = isinstance(value, (int, float)) and not isinstance(value, bool)
+    keys = set(bounds) if isinstance(bounds, dict) else set()
+    if keys == {"min", "max"}:
+        numbers = (value, bounds["min"], bounds["max"])
+        numeric = all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in numbers)
         return not numeric or not bounds["min"] <= value <= bounds["max"]
-    if set(bounds) == {"one_of"}:
+    if keys == {"one_of"}:
         return value not in bounds["one_of"]
     return False
 
@@ -82,7 +82,7 @@ def _waivers(new: dict[int, str]) -> set[int]:
     for block in new.values():
         envelope = extract_entry_envelope(block) or {}
         if (envelope.get("kind") or {}).get("value") == "direction":
-            waived |= {*envelope.get("amends", []), *envelope.get("supersedes", [])}
+            waived |= amended_numbers(envelope)
     return waived
 
 
@@ -90,8 +90,7 @@ def _superseder_lists(base: dict[int, str], head_block: str, number: int) -> boo
     target = extract_superseded_by(head_block).removeprefix("dec-")
     if not target.isdigit() or int(target) not in base:
         return False
-    envelope = extract_entry_envelope(base[int(target)]) or {}
-    return number in {*envelope.get("amends", []), *envelope.get("supersedes", [])}
+    return number in amended_numbers(extract_entry_envelope(base[int(target)]) or {})
 
 
 def _read(path: Path) -> str | None:

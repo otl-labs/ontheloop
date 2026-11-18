@@ -207,3 +207,18 @@ class TestCostGatesAndSentinels:
 
     def test_a_compared_run_declares_the_number_compared(self, tmp_path: Path) -> None:
         assert _setup(tmp_path, 2, 2).go({5}) == ([], "examined", 1)
+
+
+class TestMalformedBaseInputsNeverRaise:
+    def test_non_numeric_base_bounds_fail_instead_of_raising(self, tmp_path: Path) -> None:
+        assert _setup(tmp_path, 2, 4, bounds="{min: lo, max: hi}").go({5})[0] == ["Delegated-key changes"]
+
+    def test_a_delegation_key_with_no_dotted_part_is_skipped(self, tmp_path: Path) -> None:
+        bad = _delegator().replace(KEY, "config/knob.yaml")
+        run = _Run(tmp_path, {DECISIONS: bad, ARCHIVE: ""}, {DECISIONS: bad, ARCHIVE: ""})
+        assert run.go({5}) == ([], "examined", 1)
+
+    def test_an_unparseable_base_value_file_reads_as_absent(self, tmp_path: Path) -> None:
+        run = _setup(tmp_path, 2, 4)
+        run.base["config/knob.yaml"] = "sec: ["
+        assert run.go({5})[0] == []

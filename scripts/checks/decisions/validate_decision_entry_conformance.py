@@ -312,28 +312,24 @@ def _envelope_body_conflicts(envelope: dict, block: str) -> list[str]:
 
 
 def _resolves(root: Path, key: str) -> bool:
-    split = envelope_rules.split_delegated_key(key)
-    if split is None:
-        return False
+    path, dotted = envelope_rules.split_delegated_key(key) or ("", "")
     try:
-        parsed = yaml.safe_load((root / split[0]).read_text(encoding="utf-8"))
+        parsed = yaml.safe_load((root / path).read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError):
         return False
-    return envelope_rules.dotted_value(parsed, split[1])[0]
+    return envelope_rules.dotted_value(parsed, dotted)[0]
 
 
-def _delegation_plan_issues(envelope: dict, grammar: dict, root: Path | None) -> list[str]:
+def _delegation_plan_issues(envelope: dict, grammar: dict, root: Path) -> list[str]:
     """delegates and plan rules, applied only when the envelope carries the field (the contract declares change_rules)."""
-    if root is None or not grammar.get("change_rules"):
+    if not grammar.get("change_rules"):
         return []
     return envelope_rules.delegates_issues(envelope, grammar["change_rules"], lambda key: _resolves(root, key)) + (
         envelope_rules.plan_issues(envelope)
     )
 
 
-def _plan_warnings(envelope: dict, root: Path | None) -> list[str]:
-    if root is None:
-        return []
+def _plan_warnings(envelope: dict, root: Path) -> list[str]:
     return envelope_rules.plan_warnings(envelope, lambda slug: (root / "docs" / "plans" / f"PLAN-{slug}.yaml").exists())
 
 
@@ -403,10 +399,11 @@ def _new_entry_conformance_issues(
             rule_issues += envelope_rules.unknown_key_issues(envelope, grammar["closed_keys"])
         if grammar.get("number"):
             rule_issues += envelope_rules.number_issues(envelope.get("number"), baseline_max)
-        rule_issues += _delegation_plan_issues(envelope, grammar, root)
+        if root is not None:
+            rule_issues += _delegation_plan_issues(envelope, grammar, root)
+            for warning in _plan_warnings(envelope, root):
+                print(f"  WARN: Decision {n} {warning}.")
         issues += [f"  FAIL: Decision {n} {r}." for r in rule_issues]
-        for warning in _plan_warnings(envelope, root):
-            print(f"  WARN: Decision {n} {warning}.")
 
         for conflict in _envelope_body_conflicts(envelope, block):
             issues.append(f"  FAIL: Decision {n} envelope conflicts with its bold-marker twin on {conflict}.")

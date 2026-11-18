@@ -98,7 +98,8 @@ def _delegation_findings(env: dict, bound_files: set[str], meta: dict) -> list[F
     """delegates and plan findings; a key that does not resolve but whose file the plan's sidecar binds is a WARN."""
     rules = [str(r) for r in ((meta.get("field_shapes") or {}).get("delegates") or {}).get("change_rules") or []]
     found = [("FAIL", "delegates", i) for i in envelope_rules.delegates_issues(env, rules, lambda _k: True)] if rules else []
-    for item in env.get("delegates") if isinstance(env.get("delegates"), list) and rules else []:
+    delegates = env.get("delegates")
+    for item in delegates if isinstance(delegates, list) and rules else []:
         split = envelope_rules.split_delegated_key(item.get("key")) if isinstance(item, dict) else None
         if split and not _resolves_at_head(*split):
             severity = "WARN" if split[0] in bound_files else "FAIL"

@@ -25,7 +25,7 @@ from scripts.checks.decisions.validate_decisions_size import (
     _per_entry_cap_failures,
     validate_decisions_size,
 )
-from tests.fixtures.decision_size import ENTRY, FULL, OPTS, gov, make_root
+from tests.fixtures.decision_entry import ENTRY, FULL, OPTS, gov, make_root
 
 
 class TestValidateDecisionsSizeRegisteredCheck:

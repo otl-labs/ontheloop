@@ -14,6 +14,7 @@ from typing import Mapping
 import yaml
 
 from scripts.checks.decisions import entry_measure
+from scripts.checks.decisions.envelope_rules import amended_numbers
 from scripts.decisions_md import extract_entry_envelope
 
 DECISION = 272
@@ -170,7 +171,7 @@ def fail_closed_issues(
         envelope = extract_entry_envelope(block) or {}
         if (envelope.get("kind") or {}).get("value") != "direction":
             continue
-        if delegators & {*envelope.get("amends", []), *envelope.get("supersedes", [])}:
+        if delegators & amended_numbers(envelope):
             return []
     return [
         f"{CONTRACT} dropped size_governance.{key} without a new direction entry amending the Decision that "

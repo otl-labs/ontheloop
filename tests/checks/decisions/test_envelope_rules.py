@@ -218,3 +218,12 @@ class TestShapeDetailNamesNewFields:
     def test_delegates_and_plan_shapes_are_named(self) -> None:
         assert "delegates" in r._shape_detail({"delegates": "x"})
         assert "plan" in r._shape_detail({"plan": 3})
+
+
+class TestAmendedNumbers:
+    def test_amends_and_supersedes_are_united(self) -> None:
+        assert r.amended_numbers({"amends": [1, 2], "supersedes": [3]}) == {1, 2, 3}
+
+    @pytest.mark.parametrize("envelope", [{}, {"amends": 5}, {"amends": "12"}, {"amends": [True, "x", None]}])
+    def test_malformed_values_contribute_nothing(self, envelope: dict) -> None:
+        assert r.amended_numbers(envelope) == set()

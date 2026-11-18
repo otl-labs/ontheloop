@@ -135,6 +135,16 @@ def dotted_value(parsed: Any, dotted: str) -> tuple[bool, Any]:
     return True, node
 
 
+def amended_numbers(envelope: dict) -> set[int]:
+    """The Decision numbers an envelope amends or supersedes; a malformed field contributes nothing."""
+    found: set[int] = set()
+    for field in ("amends", "supersedes"):
+        value = envelope.get(field)
+        if isinstance(value, list):
+            found |= {n for n in value if isinstance(n, int) and not isinstance(n, bool)}
+    return found
+
+
 def _is_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
