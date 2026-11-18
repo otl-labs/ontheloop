@@ -63,7 +63,7 @@ scope:
     purpose: >-
       Two commands. "trees --from --to [--by-root]": reads session_tree_rollup in the existing windows and prints per UTC day
       trees, compact_count, compacted_trees and planning_trees (or one row per tree with --by-root). "plans [--last N] [--as-of
-      REF]": the newest N (default 8, 1..20) first-parent commits on REF (default origin/main) whose subject starts "plan("
+      REF] [--lookback-days D]": the newest N (default 8, 1..20) first-parent commits on REF (default origin/main) whose subject starts "plan("
       (session_presence.git_commits); session_tree_rollup read over every window from the oldest merge's UTC day minus
       --lookback-days (default 56, the producer's root lookback, so no linked root is outside the read) to the newest merge's
       day, and model_usage_rollup only over the windows that hold a linked tree; the floor day is printed. Per merge: the
@@ -193,16 +193,22 @@ verification_plan:
     phase: post-deploy
     action: The governed deploy ships the telemetry reader once the hold allows.
     command: >-
-      bin/venv-python -m scripts.checks.ops_governance.validate_reconcile_pending_gate --telemetry-hold && for id in $(gh api
-      'repos/otl-labs/ontheloop/actions/workflows/deploy-ducklake-lambdas.yml/runs?status=success&per_page=100' --jq
-      '.workflow_runs[].id'); do gh api "repos/otl-labs/ontheloop/actions/runs/$id/jobs" --jq '[.jobs[] |
-      select((.name=="deploy-telemetry" or .name=="telemetry-smoke") and .conclusion=="success")] | length' | grep -qx 2 &&
-      { echo "run $id"; break; }; done
+      bin/venv-python -m scripts.checks.ops_governance.validate_reconcile_pending_gate --telemetry-hold && git fetch -q origin
+      main && build=$(git log -1 --format=%H -E --grep='^Resolves: .*rec-5257([^0-9]|$)' origin/main) && test -n "$build" &&
+      for id in $(gh api 'repos/otl-labs/ontheloop/actions/workflows/deploy-ducklake-lambdas.yml/runs?status=success&per_page=100'
+      --jq '.workflow_runs[].id'); do jobs=$(gh api "repos/otl-labs/ontheloop/actions/runs/$id/jobs" --jq '.jobs[] |
+      select((.name=="deploy-telemetry" or .name=="telemetry-smoke") and .conclusion=="success") | .name + " " + (.id|tostring)');
+      echo "$jobs" | grep -q '^telemetry-smoke ' || continue; job=$(echo "$jobs" | sed -n 's/^deploy-telemetry //p'); deployed=$(gh
+      api "repos/otl-labs/ontheloop/actions/jobs/$job/logs" | grep -oE 'LAMBDA_ARTIFACT_SHA: [0-9a-f]{40}' | head -1 | cut -d' '
+      -f2); echo "run $id deployed $deployed"; if git merge-base --is-ancestor "$build" "$deployed"; then echo contains; ok=1;
+      fi; break; done; test -n "$ok"
     expected: >-
-      stdout held=false, then "run <id>": the newest deploy-ducklake-lambdas run whose deploy-telemetry and telemetry-smoke
-      jobs both succeeded (the smoke reads session_tree_rollup). That run's deploy-telemetry job log names the deployed commit
-      (LAMBDA_ARTIFACT_SHA), which must contain the build commit (the commit carrying "Resolves: rec-5257"); the report names
-      the run id (the same read through mcp__github__actions_list and get_job_logs where gh is unavailable).
+      stdout held=false, then "run <id> deployed <sha>" and contains, exit 0: the newest deploy-ducklake-lambdas run whose
+      deploy-telemetry and telemetry-smoke jobs both succeeded (the smoke reads session_tree_rollup; a gate-skipped run has
+      neither job succeeded, so it is passed over), and the commit it deployed (the deploy-telemetry job's LAMBDA_ARTIFACT_SHA,
+      the gate's sha) contains the build commit (the one squash commit carrying "Resolves: rec-5257"; the plan's own commits
+      carry no such trailer). The report names the run id (the same read through mcp__github__actions_list and get_job_logs
+      where gh is unavailable).
     fix_if: the hold is still on; wait, never bypass it
     hermetic: false
   - step: 6
@@ -229,15 +235,16 @@ verification_plan:
       cl.1; this build never dispatches one) is on a commit that contains this build. Waits on the operator; the build
       reports it pending with this step named, and the coordinator keeps it on the waiting list.
     command: >-
-      git fetch -q origin main && build=$(git log -1 --format=%H --grep='^Resolves: .*rec-5257' origin/main) && test -n
+      git fetch -q origin main && build=$(git log -1 --format=%H -E --grep='^Resolves: .*rec-5257([^0-9]|$)' origin/main) && test -n
       "$build" && for id in $(gh api
       'repos/otl-labs/ontheloop/actions/workflows/deploy-telemetry-content.yml/runs?status=success&per_page=100' --jq
       '.workflow_runs[].id'); do job=$(gh api "repos/otl-labs/ontheloop/actions/runs/$id/jobs" --jq '.jobs[] |
       select(.name=="record" and .conclusion=="success") | .id'); [ -n "$job" ] || continue; deployed=$(gh api
       "repos/otl-labs/ontheloop/actions/jobs/$job/logs" | grep -oE 'LAMBDA_ARTIFACT_SHA: [0-9a-f]{40}' | head -1 | cut -d' '
-      -f2); echo "run $id deployed $deployed"; git merge-base --is-ancestor "$build" "$deployed" && echo contains; break; done
+      -f2); echo "run $id deployed $deployed"; if git merge-base --is-ancestor "$build" "$deployed"; then echo contains; ok=1;
+      fi; break; done; test -n "$ok"
     expected: >-
-      "run <id> deployed <sha>" then contains: the newest deploy-telemetry-content run whose record job succeeded (a run the
+      "run <id> deployed <sha>" then contains, exit 0: the newest deploy-telemetry-content run whose record job succeeded (a run the
       gate skipped has no successful record job, so it is passed over), and the commit that run deployed (its record job's
       LAMBDA_ARTIFACT_SHA, the gate's sha) contains the build commit (the one squash commit carrying "Resolves: rec-5257";
       the plan's own commits carry no such trailer). The report names the run id (the same read through
@@ -292,7 +299,7 @@ test_obligations:
     waiver_reason: Prose describing the verb SQL; steps 1-2 test the SQL and registry it describes, and the words are bound by the approved-text sidecar.
 constraints:
   - "Build after PLAN-merge-annotate-contract-reader's build merges (it edits _USAGE_TREE tl and derive_usage.py's last event, which this verb reuses); rebase on it. The build does not wait for PLAN-merge-annotate-producer: merge_links read [] until that producer writes."
-  - "ducklake_event_read_sql.py stays at or under 500 SLOC: the f-string draft measured 486 on main 6696da07; re-measure after the contract-reader build lands; if the new SQL would cross 500, stop and send a plan-defect report (a split adds a module to the content reader's bundle, a protective manifest edit), never a raise."
+  - "ducklake_event_read_sql.py stays at or under 500 SLOC: the f-string draft measured 486 on main 6696da07; re-measure after the contract-reader build lands; if the new SQL would cross 500, stop and send a plan-defect report (a split adds a module to the content reader's bundle, a protective manifest edit), never a raise; the report proposes the facade split of ducklake_event_read_sql.py (Decision 80/104/124 pattern) with the content reader manifest edit, for the operator's channel ruling."
   - "No token column on the new verb and no single summed token total anywhere (reader contract usage-verbs invariant); plans sums each token class separately."
   - "The oracle stays independent code, never an import of the reader SQL."
   - "Every edit to ducklake_telemetry_reader.yaml is bound word for word by docs/plans/approved/telemetry-planning-cost-reads.yaml (Decision 246); read-engine.yaml takes only the roster entry and its amendment row described in scope. The sidecar's new last amendment row names the three earlier usage verbs, so tests/test_telemetry_usage.py::test_reader_contract_declares_the_usage_verbs (latest row names them) holds unchanged."
@@ -312,10 +319,11 @@ gate_rounds:
   - {gate: wording-check, round: 2, verdict: PASS, digest: f018fe39d1cd81802f69992d5aa1cb682f0cc2066bea674432b3a57f6bcfcbf2, base: 6696da076dadf797f18446926352b9a33aaa28e5, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 4, nits: 6}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 7}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 5}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - "PLAN-merge-annotate-contract-reader's build is on main (git log --oneline origin/main --grep='merge-annotate-contract-reader' -- scripts/telemetry_verify/orphans.py shows its commit); else stop and wait."
 execution_steps:
   - "SQL, registry, fields, client, oracle, smoke list, CLI and tests; contracts from the sidecar; VP 1-3, then the full tier (VP 4)."
-  - "PR with Resolves: rec-5257 (its acceptance is already re-keyed, see context); merge on review PROCEED + green CI; VP 5-7 after deploy."
+  - "PR with Resolves: rec-5257 (its acceptance is already re-keyed, see context); merge on review PROCEED + green CI; VP 5-7 after deploy; VP 8 is reported pending until the operator's next approved content reader deploy."
 rollback: Revert; the verb leaves the served set and the CLI commands go with it. No stored row changes.
