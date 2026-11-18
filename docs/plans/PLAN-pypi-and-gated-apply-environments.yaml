@@ -178,23 +178,29 @@ verification_plan:
       Read the build PR's terraform-github-plan.yml report (the PR-time plan comment; it prints actions and changed
       attribute names, never values) and confirm it lists exactly four rows: tf_gated_apply update (changed names
       include deployment_branch_policy), tf_gated_apply_main create, pypi import with an update whose changed names
-      include deployment_branch_policy (live is not already custom) and not wait_timer, and pypi_main create; nothing
-      else. The build lists pypi's changed names in the PR body (expected also: can_admins_bypass if live allowed
+      include deployment_branch_policy (live is not already custom) and not wait_timer, and pypi_main create. Main's
+      standing baseline is also expected and allowed: the "github_repository_ruleset.main_protection (visibility-gated)
+      | update | bypass_actors" row (the plan App cannot read bypass_actors; the apply's admin plan is authoritative and
+      refuses any ruleset change) and the "Drift detected outside Terraform" line (PR #2214's report shows both).
+      Nothing else. The build lists pypi's changed names in the PR body (expected also: can_admins_bypass if live allowed
       bypass, prevent_self_review if live had it on, reviewers if the live set differs).
     command: >-
       bin/venv-python -c "print('MCP: mcp__github__pull_request_read(method=get_comments) on the build PR; read the terraform-github-plan report')"
     expected: >-
-      Exactly the four rows above, by changed names; the pypi row is an import, not a create. The report's Action
-      column shows the import+update row as update, so import-not-create is decided by the marker line, which starts
-      with the literal "TF_GITHUB_PLAN_REPORT verdict=CHANGES import=1 add=2 change=1 destroy=0 replace=0".
+      Exactly the four rows above plus at most the one visibility-gated ruleset row, by changed names; the pypi row
+      is an import, not a create. The report's Action column shows the import+update row as update, so
+      import-not-create is decided by the marker line: import=1 add=2 destroy=0 replace=0, and change equals 1 plus
+      its gated count (with the baseline row it starts "TF_GITHUB_PLAN_REPORT verdict=CHANGES import=1 add=2 change=2
+      destroy=0 replace=0 gated=1"). The build re-measures the baseline from the latest terraform/github PR-time
+      comment on main before reading it.
     fix_if: >-
       pypi shows as a create (the import id is wrong or the Environment is gone: STOP, report to the plan owner); its
       deployment_branch_policy is unchanged (live already uses custom policies, so a live policy object may exist and
       needs its own import: STOP, plan defect to the plan owner); the pypi row's changed names include wait_timer (a
       UI-set wait timer would be dropped: STOP, report to the plan owner); its changed names include reviewers (the
       live reviewer set differs from var.gated_apply_reviewer_user_ids: the build asks the operator on the PR to
-      confirm the live set holds no reviewer he wants kept before merge); any other row (drift: report to the
-      coordinator). The apply gate already refuses a delete or replace.
+      confirm the live set holds no reviewer he wants kept before merge); any other row besides the visibility-gated
+      ruleset baseline (drift: report to the coordinator). The apply gate already refuses a delete or replace.
     hermetic: false
     graduation: not-applicable
   - step: 5
@@ -204,11 +210,13 @@ verification_plan:
       addresses, and its preview table (allowlisted values) shows: pypi reviewer_count 1, can_admins_bypass false,
       prevent_self_review false, protected_branches false, custom_branch_policies true; tf_gated_apply reviewer_count 1,
       protected_branches false, custom_branch_policies true; tf_gated_apply_main and pypi_main with branch_pattern main
-      and their own environment names.
+      and their own environment names. The preview plans with the plan App, so its table may also carry the
+      visibility-gated github_repository_ruleset.main_protection bypass_actors row: expected baseline, not a gate row
+      (NON_GATE_TYPES), and absent from the unnamed marker.
     command: >-
       bin/venv-python -c "print('MCP: mcp__github__actions_list(list_workflow_runs, terraform-github-apply.yml, event=push), then mcp__github__get_job_logs on its preview job, asserting TF_GITHUB_APPLY_GATE_CHANGE_UNNAMED with exactly the four addresses')"
     expected: The preview log names exactly the four addresses with the values above, and the run concluded success with no apply.
-    fix_if: Other addresses appear, or any value differs; stop before VP 6 and report to the coordinator (values) or the plan owner (a value the HCL does not set).
+    fix_if: The TF_GITHUB_APPLY_GATE_CHANGE_UNNAMED marker names other addresses, the table shows any row besides the four and the visibility-gated ruleset baseline, or any value differs; stop before VP 6 and report to the coordinator (values) or the plan owner (a value the HCL does not set).
     hermetic: false
     graduation: not-applicable
   - step: 6
@@ -216,11 +224,13 @@ verification_plan:
     action: >-
       CI APPLY. The build dispatches terraform-github-apply.yml from main with gate_change
       "github_repository_environment.tf_gated_apply,github_repository_environment_deployment_policy.tf_gated_apply_main,github_repository_environment.pypi,github_repository_environment_deployment_policy.pypi_main";
-      the operator reads the preview (the same four rows) and approves in tf-gated-apply; the build reads the run.
+      the operator reads the preview (the same four rows, plus possibly the visibility-gated ruleset bypass_actors
+      row, which is expected baseline and not grounds to reject: the apply's admin plan refuses any ruleset change)
+      and approves in tf-gated-apply; the build reads the run.
     command: >-
       bin/venv-python -c "print('MCP: mcp__github__actions_run_trigger(method=run_workflow, workflow_id=terraform-github-apply.yml, ref=main, inputs={gate_change}), then mcp__github__actions_get(get_workflow_run) asserting conclusion == success and mcp__github__get_job_logs on its apply job asserting the four addresses applied and a clean re-plan')"
     expected: The run concluded success; its log lists exactly the four addresses, the gate prints the literal "TF_GITHUB_APPLY_CHECKED add=2 change=1 import=1 other=0", and the re-plan is clean.
-    fix_if: The preview lists any other change (the operator rejects it); an apply failure is reported with its error class and finished by a plan amendment, never -target or a CloudShell apply without the operator's word; the same amendment corrects the Decision 248 Update if the branch policy cannot be applied.
+    fix_if: The preview lists any other change besides the visibility-gated ruleset baseline (the operator rejects it); an apply failure is reported with its error class and finished by a plan amendment, never -target or a CloudShell apply without the operator's word; the same amendment corrects the Decision 248 Update if the branch policy cannot be applied.
     hermetic: false
     graduation: not-applicable
   - step: 7
@@ -230,7 +240,8 @@ verification_plan:
       if the squash-merge deleted it, re-push that same branch from the session, never a new branch (git-ops.yaml
       branch_rule), or ask the operator), dispatch
       tf-gated-apply-prototype.yml and publish-ontheloop.yml with proof_only true. The dispatching identity is the
-      operator's (a repo admin; record it). pypi (no admin bypass) must fail at the Environment (not allowed to deploy
+      operator's (a repo admin; MCP dispatches run as the operator's login): read each run's actor first, and a run
+      whose actor is a bot (so the jobs' if: skip them) is not a policy proof. pypi (no admin bypass) must fail at the Environment (not allowed to deploy
       due to environment protection rules) and never enter waiting: that leg is the proof. tf-gated-apply should fail
       the same way; because it keeps admin bypass until rec-4965, a waiting state there is cancelled unapproved and
       filed (get_rec_write_guidance, then file_rec through scripts.ops_data_portal) as a rec depending on rec-4965 that
@@ -392,6 +403,7 @@ context:
   - "red_overlap (2026-11-18 ~15:40 UTC, main 58566acf): blocked by rec-5364 (vp-replay _is_pr_relative, slo_breached at 12.8 h, no shared file). Deferral: this plan touches neither scripts/checks/verification/validate_vp_replay.py nor its tests; the main-reds fix thread owns rec-5364. The build re-runs red_overlap at start (VP 1)."
   - "github-org-transfer.yaml is NEAR_CAP (486 of 500 effective lines): the three blocks are line-neutral (fix -1, amendment_log +1). PLAN-contract-byte-budget (unbuilt) also scopes it; whichever builds second rebases, and a block whose before-text moved is a STOP to the plan owner."
   - "Critique r5 PROCEED; nits N1-N4 applied (docstring residual, follow-on rec widened to tf-gated-apply's bypass, VP 4 and VP 6 marker literals, VP 12 command split). N5 not taken: folding validate_github_settings_apply (k)'s Environment-shape leg into the generic test is a possible later tidy, not this plan's scope. The approved Decision 248 Update keeps clause 9's own 'until rec-4965' framing."
+  - "Critique r6 REVISE: B1 (main's standing visibility-gated ruleset row in plan-App reports, PR #2214) fixed in VP 4, 5 and 6; N2 to N4 applied (read-back ids in the report, the CLAUDE.md repo name in the follow-on rec, VP 7 actor check). N1 noted: this is Decision 248's third trailer, so a fourth should prompt a superseding entry or a compaction."
   - "followon_recs is empty because the one follow-on rec is conditional: execution step 8 files it only if no open rec already covers environment_fail_open.locations and the two policies' import blocks, and the report names its id (critique r4)."
   - "Accepted, not changed: github-org-transfer.yaml transfer_window_checklist step 3 still says pypi's reviewer is rec-4549's; it stays true as a pointer once rec-4549 closes (scout r3). rec-3151's first grep is already true on main; its new acceptance is the Decision 172 citation."
   - "Known residuals, not changed here: environment_fail_open.locations still lists the original six paths (the approved words fix only binding and fix); the two new deployment policies have no import blocks, the same rename re-key gap as the other EXEMPT policy rows (rec-4911's line). The build files one follow-on rec covering both if none exists."
@@ -410,6 +422,7 @@ gate_rounds:
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 6}
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 7}
   - {gate: plan-critique, round: 5, verdict: PROCEED, blocking: 0, nits: 5}
+  - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 1, nits: 4}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -424,5 +437,5 @@ execution_steps:
   - "VP 3; full tier per the handoff policy; open the PR; VP 4 from its plan report; ask the operator for his word on the final diff."
   - "Merge on code review PROCEED, green CI and his word, with Resolves: rec-4549, rec-4651, rec-3151, rec-5098."
   - "VP 5 to VP 9."
-  - "Follow-on: if no open rec already covers them, file one rec (get_rec_write_guidance, then file_rec) for environment_fail_open.locations listing every Environment workflow, import blocks for the two new deployment policies, and setting tf-gated-apply can_admins_bypass = false once rec-4965 lands (terraform/personal's gated apply and reconcile still use it); name its id in the report and to the plan owner."
-  - "Report: what was implemented, verification results."
+  - "Follow-on: if no open rec already covers them, file one rec (get_rec_write_guidance, then file_rec) for environment_fail_open.locations listing every Environment workflow, import blocks for the two new deployment policies, setting tf-gated-apply can_admins_bypass = false once rec-4965 lands (terraform/personal's gated apply and reconcile still use it), and terraform/github/CLAUDE.md's intro still naming benjamin-blake/theseus; name its id in the report and to the plan owner."
+  - "Report: what was implemented, verification results, naming the run id or comment id read back for each of VP 4 to VP 8."
