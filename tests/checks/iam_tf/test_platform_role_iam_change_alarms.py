@@ -182,6 +182,8 @@ def alarm_problems(alarms_text: str) -> list[str]:
         get = lambda a: _attr(body, a)  # noqa: E731
         if get("alarm_actions") != "[local.platform_security_alerts_topic_arn]":
             problems.append(f"{name}: alarm_actions is not the alerts topic")
+        if get("ok_actions") != "[local.platform_security_alerts_topic_arn]":
+            problems.append(f"{name}: ok_actions is not the alerts topic")
         if f'aws_cloudwatch_log_metric_filter.platform_security["{name}"]' not in (get("metric_name") or ""):
             problems.append(f"{name}: metric_name is not its own filter's metric")
         if name == HEARTBEAT:
@@ -193,7 +195,6 @@ def alarm_problems(alarms_text: str) -> list[str]:
                 "period": "900",
                 "statistic": '"Sum"',
                 "threshold": "1",
-                "ok_actions": "[local.platform_security_alerts_topic_arn]",
             }
         else:
             expected = {
@@ -341,6 +342,17 @@ _TEXT_REDS: list[tuple] = [
     ),
     ("missing alarm", "alarm", "alarms", '"platform-security-denied-iam-write"\n', '"platform-security-other"\n'),
     ("alarm targets another topic", "alarm", "alarms", "[local.platform_security_alerts_topic_arn]", "[local.other_topic]"),
+    (
+        "event alarm missing ok_actions",
+        "alarm",
+        "alarms",
+        (
+            "  alarm_actions       = [local.platform_security_alerts_topic_arn]\n"
+            "  ok_actions          = [local.platform_security_alerts_topic_arn]\n"
+            "}\n\nresource"
+        ),
+        "  alarm_actions       = [local.platform_security_alerts_topic_arn]\n}\n\nresource",
+    ),
     ("heartbeat notBreaching", "alarm", "alarms", 'treat_missing_data  = "breaching"', 'treat_missing_data  = "notBreaching"'),
     ("heartbeat two periods", "alarm", "alarms", "evaluation_periods  = 4", "evaluation_periods  = 2"),
     ("heartbeat hourly period", "alarm", "alarms", "period              = 900", "period              = 3600"),
