@@ -54,8 +54,10 @@ scope:
     action: Modify
     purpose: >-
       Docstring: every registered PreToolUse hook ends every block with its own marker. Keeps every existing node
-      unchanged. New nodes: test_rec_writer_tripwire_block_ends_with_its_marker (subprocess, a Bash payload naming
-      https://example.invalid/prod/ops/writer: exit 2, first line still starts 'rec-writer-tripwire: refused.', last line
+      unchanged. Every new subprocess runs with an environment that drops CLAUDE_*, CC_* and GITHUB_ACTIONS (PR CI sets
+      GITHUB_ACTIONS=true, which takes the handoff shim's carve-out; tests/hooks/test_handoff_evidence_gate.py pops it the
+      same way). New nodes: test_rec_writer_tripwire_block_ends_with_its_marker (subprocess, the Bash command
+      'curl -sS https://example.invalid/prod/ops/writer', which rec_writer_match.classify maps to http_client: exit 2, first line still starts 'rec-writer-tripwire: refused.', last line
       equals markers.format_hook_block_marker('rec_writer_tripwire'), hook_block_stems(stderr) == [stem]);
       test_shim_deny_paths_end_with_one_marker, parametrized over each shim and each of its deny paths (a stub adapter
       that writes 'stub deny' and exits 2; a stub adapter that exits 1; the adapter file absent), each run as bash on a
@@ -63,13 +65,18 @@ scope:
       passes that shim's pre-filter (handoff: a git push command; merge: a merge_pull_request call; protected: a command
       naming terraform): exit 2, the last stderr line equals the marker, hook_block_stems(stderr) == [stem] (exactly one),
       and the stub's own line, when it wrote one, precedes the marker; test_shim_allow_paths_print_no_marker (stub adapter
-      exit 0, and each shim's pre-filter skip where it has one: exit 0 and no 'HOOK-BLOCK' in stderr);
+      exit 0, each shim's pre-filter skip where it has one, and the handoff shim's GITHUB_ACTIONS=true carve-out: exit 0
+      and no 'HOOK-BLOCK' in stderr); protected_action_gate's admin-profile deny branch (the shim's AWS_PROFILE test with
+      an aws command and the adapter absent) is one more deny case;
       test_every_registered_pretooluse_hook_prints_its_own_marker (rec-5384's acceptance node: for every PreToolUse
-      command in .claude/settings.json and .claude/hooks/hooks.json, the registered .claude/hooks/<stem>.py or .sh holds
+      command in .claude/settings.json and .claude/hooks/hooks.json, the stem is the last match of
+      '\.claude/hooks/([a-z_]+)\.(py|sh)' in that command (so hooks.json's locate_checkout.bash is never read as a hook),
+      and the registered .claude/hooks/<stem>.py or .sh holds
       the literal 'HOOK-BLOCK v1 hook=<stem>', and a .sh shim's .py adapter, where one exists, holds no 'HOOK-BLOCK v1'
-      literal, so one block prints one marker). The registered set is read from the two files, never a literal list.
+      literal, so one block prints one marker). The registered set is read from the two files, never a literal list; a future advisory-only PreToolUse hook that never
+      blocks goes in an explicit, commented exemption tuple in this test (empty today).
 bundled_recommendations: [rec-5384]
-followon_recs: []
+followon_recs: [rec-5387]
 infrastructure_dependencies: []
 acceptance_criteria:
   - >-
@@ -86,7 +93,8 @@ acceptance_criteria:
     hook:rec_writer_tripwire with marker_version 1 (VP 3); after merge its production row reads the same (VP 6).
   - >-
     Benjamin's word on the final diff of the four hooks is recorded in the PR thread before merge (hook code, the
-    coordinator contract's standing_authorisation), and rec-5384 closes through the Resolves trailer (VP 7).
+    coordinator contract's standing_authorisation; the PR body links his comment), and rec-5384 closes through the
+    Resolves trailer (VP 7).
 verification_plan:
   - step: 1
     phase: pre-deploy
@@ -102,7 +110,9 @@ verification_plan:
     expected_literals:
       - ' passed'
     fix_if: >-
-      A deny path prints no marker or two, an allow path prints one, or an exit code moved. Fix the hook, never the test.
+      A deny path prints no marker or two, an allow path prints one, or an exit code moved: fix the hook, never weaken the
+      test. A failure only in CI: first check the subprocess environment (GITHUB_ACTIONS and CLAUDE_* dropped) before
+      touching any hook; the carve-out is never edited.
     hermetic: true
     graduation: graduate
     graduation_check_id: hook-block-markers-registered-hooks
@@ -120,7 +130,10 @@ verification_plan:
       suites, with no edit to any suite but test_hook_block_marker.py.
     fix_if: 'A suite fails, so the hook edit changed behaviour beyond the marker line; restore it, never edit the suite.'
     hermetic: false
-    graduation: not-applicable
+    graduation: waive
+    graduation_waiver_reason: >-
+      A regression guard over suites the validate tiers already run; green on the plan-only tree by design, so not a
+      red-before check (Decision 189); VP 1 graduates the new behaviour.
   - step: 3
     phase: pre-deploy
     action: >-
@@ -192,19 +205,20 @@ verification_plan:
       for s in [x for x in _invoke_verb(r, 'telemetry_root_sessions', {'day_from': d, 'day_to': d}) if x.get('branch') == b]:
           o = 0
           while True:
-              rows = _invoke_verb(r, 'session_tree_rows', {'session_id': s['session_id'], 'offset': o, 'max_rows': 2000})
+              rows = _invoke_verb(r, 'session_tree_rows', {'session_id': s['session_id'], 'offset': o, 'max_rows': 500})
               for t in rows:
                   x = json.loads(t['row_json']) if t['table_name'] == 'telemetry_observations' else {}
                   n += x.get('name') == 'hook:rec_writer_tripwire' and json.loads(x.get('metadata') or '{}').get('marker_version') == 1
-              if len(rows) < 2000:
+              if len(rows) < 500:
                   break
-              o += 2000
+              o += 500
       print('PROD_MARKER_ROWS', n)
       assert n >= 1
       "
     expected: PROD_MARKER_ROWS at least 1.
     fix_if: >-
-      0 on the build day: the session's capture may lag; re-run once the next day with D set to the build day. Still 0:
+      A 413 response_too_large: halve max_rows and its two page constants (docs/contracts/ducklake_reader.yaml). 0 on
+      the build day: the session's capture may lag; re-run once the next day with D set to the build day. Still 0:
       file a rec through the portal naming the counts; never edit the hook to pass.
     hermetic: false
   - step: 7
@@ -244,7 +258,8 @@ constraints:
     hook=<the registered script's stem>', printed once. For a shim the shim prints it, never its adapter. No exit code,
     message line, timeout bound, pre-filter or allow path changes.
   - >-
-    No edit to src/, the parser, the reader, any contract, settings.json, hooks.json, or the four marked hooks. The
+    No edit to src/, the parser, the reader, any contract, settings.json, hooks.json, or the four already-marked hooks (never_on_main,
+    fresh_branch_base, edit_scope_guard, scheduled_agent_log_only). The
     adapters (handoff_evidence_gate.py, merge_gate.py, protected_action_gate.py) are not edited.
   - 'Public repository (Decision 101): fixtures synthetic; the probes print counts and fixed tokens only.'
   - >-
@@ -253,42 +268,35 @@ constraints:
   - No rescue agents or workaround loops (Decision 55); a failed live step stops for RCA.
 context:
   - >-
-    Decision-scout r1: FLAGS_FOUND (WARN 189: VP 1 was a whole-file run that exits 0 on the plan-only tree; fixed by node
-    selectors, the whole file moved to VP 2, hermetic false). CITE 203, 245, 189, 132, 163, 201, 55, 101. RELATED 235,
-    221, 199, 95, 264, 271, 254, 246, 236, 228, 244, 186, 128, 48, 57, 117, 126. Decisions triaged: 221 of 221. Roadmap
-    items intersected: 1; CONFLICT: 0; RELATED: 1. Serves: mission 4/5.
+    Decision-scout r1: FLAGS_FOUND (WARN 189, fixed: VP 1 uses node selectors; the whole file is VP 2). CITE 203, 245,
+    189, 132, 163, 201, 55, 101. RELATED 235, 221, 199, 95, 264, 271, 254, 246, 236, 228, 244, 186, 128, 48, 57, 117,
+    126. Decisions triaged: 221 of 221. Roadmap items intersected: 1; CONFLICT: 0; RELATED: 1. Serves: mission 4/5.
   - >-
-    Evidence (2026-11-18, production, 60 root sessions of 16-17 Nov via session_tree_rows, counts only): block rows came
-    only from the denied-tool_result path (187 hook:PreToolUse.Bash and 12 hook:PreToolUse.mcp__github__merge_pull_request
-    with no marker; 1 hook:edit_scope_guard named by its marker); no hook attachment with exit code 2 at all. A live block
-    in a cloud session the same day wrote only the denied tool_result. So no parser change: v10's HD-2 names these once
-    the hooks print the marker. rec-5384 re-keyed through the portal the same day (title, file, acceptance, context).
+    Evidence (production, 60 roots of 16-17 Nov, session_tree_rows, counts only): every block row came from v10's
+    denied-tool_result path (187 hook:PreToolUse.Bash and 12 hook:PreToolUse.mcp__github__merge_pull_request unmarked, 1
+    hook:edit_scope_guard marked); no exit-2 hook attachment at all, and a live cloud block on 2026-11-18 wrote only the
+    denied tool_result. So no parser change; rec-5384 re-keyed the same day. Skill name (rec-4701) and input hash
+    (rec-5079) moved to their own typed-column plan (operator, 2026-11-18).
   - >-
-    Dropped from the original ask: naming a labelled exit-2 hook attachment from its marker in observations.py hook_name
-    (no stored row would change). Moved to their own plan by the operator (2026-11-18): skill name on Skill calls
-    (rec-4701) and the tool-input hash (rec-5079), as typed columns under the 2026-10-17 typed-columns ruling.
+    Advisor (blind Fable): /mnt/project-files/parser-v12/advisor-brief/ADVICE.md (Q6 adopted: marker once per shim on
+    every exit-2 path, none in adapters).
   - >-
-    Advisor (blind Fable, 2026-11-18): /mnt/project-files/parser-v12/advisor-brief/ADVICE.md; adopted Q6 (marker once
-    in each shim on every exit-2 path, none in adapters, exit codes pinned by test) and the registered-hook guard.
+    Coupling: the friction coverage plan's rules r06-r09 match these four names (its planner, 2026-11-18); either builds
+    first. Ownership: no open PR touches the four files (2026-11-18); stale #2071 edits merge_gate.py only. Re-check.
   - >-
-    Coupling: the sibling friction coverage plan's rules r06-r09 match hook:handoff_evidence_gate, hook:merge_gate,
-    hook:rec_writer_tripwire and hook:protected_action_gate (confirmed by its planner 2026-11-18); its rules-file guard
-    checks names against the registered hooks. Either plan can build first.
+    red_overlap (main 58566acf): blocked by rec-5364 (vp-replay), SLO breached, shared files none, repair plan #2222.
+    Deferral: unrelated to vp-replay; the build re-runs red_overlap first.
   - >-
-    Ownership: no open PR touches the four edited files at planning (2026-11-18); open PR #2071 (wording-approval
-    routing, stale, dirty) edits merge_gate.py, which this plan does not touch. Re-check at build.
+    Planning-time split: rec-5387 refreshes the two texts this plan makes stale (the envelope's PARSER_VERSION 10 note
+    naming three hooks as unmarked; hook_denials.py's 'four blocking hooks' docstring), after this build merges.
   - >-
-    Known limit: two hooks blocking one call give one denial row named by the last marker (v10 HD-2,
-    hook_denial_markers_disagree). The labelled exit-0 and exit-1 PreToolUse attachments seen in production (hook_success,
-    hook_system_message, hook_non_blocking_error) are not blocks and print no marker; out of scope.
-  - >-
-    red_overlap (2026-11-18 ~15:50 UTC, main 58566acf): blocked by rec-5364 (vp-replay _is_pr_relative misses --base
-    origin/main), past the 4 h repair SLO, shared files none; its repair plan is open as PR #2222 (CI Reform). Deferral:
-    this plan neither touches nor repairs vp-replay; the build re-runs red_overlap before it starts.
-  - >-
-    LAMBDA-DEPLOY: none; .claude/hooks/** and tests/** are in no Lambda manifest (compute_affected_artifacts at build).
+    Known limits: two hooks blocking one call give one row named by the last marker (v10 HD-2). If the harness ever cut
+    a long block message's tail, the row would fall back again (inferred; VP 6 is the standing evidence; a fallback row
+    is a rec, never a hook edit). Labelled exit-0/1 PreToolUse attachments are not blocks; out of scope.
+  - 'LAMBDA-DEPLOY none: .claude/hooks/** and tests/** are in no Lambda manifest (compute_affected_artifacts at build).'
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:4d636dd2eafc4eea42c445100bc400809b4c85f2905d975fcaf283a8d135089a"}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 7}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
