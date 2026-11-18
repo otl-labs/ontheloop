@@ -22,14 +22,14 @@ def _is_int(value: object) -> bool:
 def byte_limit(rel: str, class_row: dict, reg: dict) -> int | None:
     """The file's byte limit: its roster entry (exact depth-1 docs/contracts path), else the row's max_bytes."""
     row_limit = class_row.get("max_bytes")
-    if not _is_int(row_limit):
+    if not isinstance(row_limit, int) or isinstance(row_limit, bool):
         return None
     roster = reg.get("byte_budgets") or {}
     if rel.startswith(_ROSTER_DIR) and "/" not in rel[len(_ROSTER_DIR) :]:
         entry = roster.get(rel[len(_ROSTER_DIR) :])
-        if _is_int(entry):
-            return int(entry)
-    return int(row_limit)
+        if isinstance(entry, int) and not isinstance(entry, bool):
+            return entry
+    return row_limit
 
 
 def file_violations(rel: str, size: int, class_row: dict, reg: dict) -> list[str]:
@@ -58,7 +58,7 @@ def e2_violations(rows: list[dict]) -> list[str]:
                 "that slug. A byte limit is granted per-slug in scripts/checks/structural/_byte_budget.py's "
                 "_PERMITTED_MAX_BYTES, never by editing this config."
             )
-        elif value > ceiling:
+        elif isinstance(value, int) and value > ceiling:
             violations.append(
                 f"E2 (max_bytes): class row `{slug}` declares max_bytes {value}, above the permitted maximum "
                 f"{ceiling}. A higher limit is a code edit in _PERMITTED_MAX_BYTES and a new Decision."

@@ -42,7 +42,8 @@ def _log(data: object) -> list[Any]:
 
 
 def is_terse(row: object, cfg: dict[str, Any]) -> bool:
-    terse = cfg.get("terse_row") if isinstance(cfg.get("terse_row"), dict) else {}
+    terse: dict[str, Any] = cfg.get("terse_row") or {}
+    terse = terse if isinstance(terse, dict) else {}
     keys = tuple(terse.get("keys") or _DEFAULT_TERSE_KEYS)
     limit = terse.get("summary_max_chars", 160)
     if not isinstance(row, dict) or set(row) != set(keys):

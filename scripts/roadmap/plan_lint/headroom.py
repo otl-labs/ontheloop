@@ -95,7 +95,7 @@ def _byte_note(root: Path, rel: str, text: str) -> tuple[str, bool]:
 def _relief(rel: str, text: str) -> str:
     from scripts.checks.structural import _classify  # noqa: PLC0415
 
-    row = next(
+    row: dict[str, Any] = next(
         (
             r
             for r in _classify.load_registry().get("classes") or []
