@@ -44,7 +44,8 @@ scope:
     action: Create
     purpose: >-
       The one egress list file (core-owned, Decision 224 clause 1, precedent config/persona_image.yaml): filter (action,
-      sha, version), filter_supplied (the normalised snapshot of the vendor's list plus the agent's hard-coded hosts, read
+      sha, version, agent_sha256: the sha256 of the agent binary inside the agent v0.18.1 linux amd64 release tarball whose
+      checksum the pinned action verifies, computed at build time), filter_supplied (the normalised snapshot of the vendor's list plus the agent's hard-coded hosts, read
       at build time from https://agent.api.stepsecurity.io/v1/github/meta and agent v0.18.1 agent.go addImplicitEndpoints,
       productionresultssaN folded to productionresultssa*), wildcard_residuals (empty), and jobs: {<workflow path>: {<job>:
       [host:port, ...]}} with one row, the probe workflow's egress-probe job: [sts.amazonaws.com:443]. A header comment says
@@ -80,13 +81,16 @@ scope:
       reached, refused or reported; a reported case prints its result and never fails the run (the c7 AZURE HOST
       ADDRESSES residual, owned by rec-5362). main() (verb egress-probe) expects listed reached, dns_tcp_azure reported and
       every other case refused, prints `EGRESS-PROBE case=<id> expect=<e> got=<g>` per case and `EGRESS-PROBE PASS` or
-      `EGRESS-PROBE FAIL`, exits 0 only on PASS. LISTED = ("sts.amazonaws.com", 443) is the one constant the list
-      file's row must hold.
+      `EGRESS-PROBE FAIL`, exits 0 only on PASS. LISTED = ("sts.amazonaws.com", 443) and AGENT_SHA256 are the constants the
+      list file must hold. Case agent_binary: sha256 of /home/agent/agent (the path the action copies the agent to, in a
+      folder it chowns to the runner user) equal to AGENT_SHA256 is refused-expected-pass (the read agent runs); a
+      different or unreadable binary is reached, which fails the run.
   - file: scripts/personas/egress_self_check.py
     action: Create
     purpose: >-
-      Verb egress-self-check for covered jobs: runs egress_probe's unlisted_name, dns_txt_system, raw_ip_443, ipv6 and
-      sudo cases expecting refused, with the same classification; prints `EGRESS-SELF-CHECK PASS` or `EGRESS-SELF-CHECK FAIL <ids>`, exits non-zero on FAIL.
+      Verb egress-self-check for covered jobs: runs egress_probe's agent_binary, unlisted_name, dns_txt_system,
+      raw_ip_443, ipv6 and sudo cases expecting refused (agent_binary first, so a job under agent-ebpf fails before any
+      other step; scout r4 SPIRIT 181), with the same classification; prints `EGRESS-SELF-CHECK PASS` or `EGRESS-SELF-CHECK FAIL <ids>`, exits non-zero on FAIL.
   - file: scripts/personas/egress_control.py
     action: Create
     purpose: >-
@@ -106,7 +110,7 @@ scope:
       The static check (c7 shell leg; its own module in the misc domain, not the 437-line chain check, Decision 128).
       Over every .github/workflows/persona-verdict*.yml and config/persona_verdict_egress.yaml. A job is covered when it
       holds id-token: write (job or workflow level), names any secrets-context entry other than GITHUB_TOKEN, passes the
-      caller's secrets through with inherit, or has a row in the file. Rules: (1) the file parses with filter.action, a 40-hex filter.sha, filter.version, a
+      caller's secrets through with inherit, or has a row in the file. Rules: (1) the file parses with filter.action, a 40-hex filter.sha, filter.version, a 64-hex filter.agent_sha256, a
       non-empty filter_supplied, wildcard_residuals and jobs; (2) every row names an existing covered job and every covered
       job has a row; (3) a covered job has no job-level uses:, no container: or services:, no docker command, runs-on
       exactly ubuntu-latest; (4) its step 0 uses exactly <action>@<sha>, its uses: line carries the file's version comment,
@@ -142,7 +146,7 @@ scope:
       artifact step), ${{ in with, if: or continue-on-error on step 0 or the self-check, self-check absent or after another
       step, container:, services:, job-level uses:, a non-ubuntu-latest runs-on, a policy-store input, an IP literal, an
       execute-api host, a stale row, a covered job with no row, an id-token job and a secrets job each uncovered by the
-      file, a wrong SHA or version comment, a probe workflow drift; each fails with its message, and the good tree passes.
+      file, a wrong SHA or version comment, a missing or malformed agent_sha256, a probe workflow drift; each fails with its message, and the good tree passes.
   - file: tests/personas/test_egress_probe.py
     action: Create
     purpose: >-
@@ -157,7 +161,7 @@ scope:
     action: Create
     purpose: >-
       rec-5041's acceptance first path (absent on main): the live tree passes check_tree; the probe workflow's step 0 SHA
-      and version equal the file's filter; egress_probe.LISTED as host:port equals the egress-probe row; filter_supplied
+      and version equal the file's filter; egress_probe.LISTED as host:port equals the egress-probe row; egress_probe.AGENT_SHA256 equals filter.agent_sha256; filter_supplied
       holds github.com and a productionresultssa* entry (the snapshot is not empty or stale-shaped).
 bundled_recommendations: []
 followon_recs: [rec-5357, rec-5358, rec-5362]
@@ -246,7 +250,7 @@ verification_plan:
       got=refused (ipv6 included), a got= line for dns_tcp_azure (reported in the run summary to the plan owner) and
       EGRESS-PROBE PASS; the egress-control log shows every asserted case got=reached, VENDOR-LIST ok and EGRESS-CONTROL
       PASS; neither log shows a StepSecurity insights link; the egress-probe filter step log shows `[!] TLS_NOT_ENABLED`
-      and the agent v0.18.1 download (the binary this plan read).
+      and the agent v0.18.1 download (the binary this plan read), and the probe shows agent_binary got=refused.
     fix_if: >-
       Any refused-expected case got=reached in egress-probe (notably dns_udp_azure, unlisted_name or dns_txt_system),
       a control case refused, a wider vendor list, or a filter step that installed agent-ebpf (TLS_ENABLED or the
@@ -347,9 +351,10 @@ context:
   - "Decision-scout r1 FLAGS_FOUND; CITE 101, 205, 246, 263. Decisions triaged: 220 of 220. Roadmap items intersected: 4; CONFLICT: 0; RELATED: 3. Serves: NS.9 4/5. WARN 202 (region literal under .github/) adopted: global STS host, region-derived hosts left to first-key-read. NOTE 212 adopted: SA-15. SPIRIT 224 adopted: every entry core-owned, derived hosts need a resolved form later. SPIRIT 209 adopted: the VENDOR residual is scoped to this public repository and re-decided for adopters (followon rec). Report: /mnt/project-files/persona-verdict-egress/SCOUT-shell-deny-r1.md."
   - "Decision-scout r2 FLAGS_FOUND on the written plan; CITE 101, 205, 212, 246, 263. Decisions triaged: 220 of 220. Roadmap items intersected: 6; CONFLICT: 0; RELATED: 5. Serves: NS.9 4/5 -- a default-deny shell egress gate proven on main before any job can reach a key. r1 flags 202, 224, 209 resolved (RELATED), 212 now CITE. NOTE 246 cl.4 (merge on green vs unseen security code) adopted: the operator card offered the cl.4 final-diff word as its other option (context line below). Report: same file, ## Round 2."
   - "Decision-scout r3 FLAGS_FOUND on the revised plan; CITE 101, 205, 212, 246, 263. Decisions triaged: 220 of 220. Roadmap items intersected: 6; CONFLICT: 0; RELATED: 5. Serves: NS.9 4/5 -- a default-deny shell egress gate, proven on main before any job can reach a key, contains a bad or injected run's exit path. NOTE 212 adopted: SA-15 names the Azure openings and the no-IPv6-route premise. SPIRIT 181 WARN adopted: ipv6 asserted refused in probe and self-check; rec-5362 filed and named as the Azure residual's owner. NOTE 246 adopted: the approval run waits for the Azure card. Report: same file, ## Round 3."
+  - "Decision-scout r4 FLAGS_FOUND on the critique-r2 revision; CITE 101, 205, 212, 246, 263. Decisions triaged: 220 of 220. Roadmap items intersected: 6; CONFLICT: 0; RELATED: 5. Serves: NS.9 4/5 -- a default-deny shell egress gate, proven on main before any job can reach a key, contains a bad or injected run's exit path. SPIRIT 181 NOTE (agent-ebpf leg had no owner) adopted mechanically, not by a rec: the self-check's agent_binary case pins the running agent to v0.18.1's hash, so no covered job runs under the unread binary. Report: same file, ## Round 4."
   - "Brief: /mnt/project-files/persona-verdict-egress/BRIEF-plans-2-5.md row 2. Blind consult: /mnt/project-files/persona-verdict-egress/shell-deny-advisor-brief/ADVICE.md. Presentation: /mnt/project-files/persona-verdict-egress/PRESENTATION-shell-deny.md."
   - "Operator 2026-11-18 00:27 UTC (cards): the filter's built-in GitHub allowance is accepted as a named residual; this plan's build merges on green (the live probe is the proof); the card's other option was a final-diff word first and named Decision 246 cl.4 security code, so this card is the operator's cl.4 word for the build's check, workflow and pinned action (scout r2 NOTE). 'write the plan' 00:27 UTC."
-  - "Vendor facts, read from source this session (step-security/harden-runner v2.22.4 src/setup.ts, index.ts, cleanup.ts; agent v0.18.1 agent.go, firewall.go, dnsproxy.go, apiclient.go, github_dns_experiment.go, global_feature_flags.go): setup returns without installing the agent on a vendor HTTP 409, a skip-harden-runner repository property, a container job or ubuntu-slim, and an install failure leaves the step green; the agent reverts its rules, DNS change and sudo removal if a listed host fails to resolve at start or if its DNS, netmon or procmon goroutine errors later (agent.go:325-331); block mode adds the hard-coded and vendor-served GitHub hosts to every job; disable-telemetry true drops the vendor hosts from the allowlist and stops DNS and connection events; the action and agent print the allowed list and resolved names to the job log; the firewall (firewall.go:111-146) accepts TCP on every port to 168.63.129.16 and 169.254.169.254 and all protocols to 10/8, 172.16/12 and 192.168/16, has no UDP rule for 168.63.129.16 and no IPv6 rules, and lets only the agent's own uid reach 8.8.8.8, 8.8.4.4 and 1.1.1.1 on 443 (its DoH upstream); its DNS proxy sinkholes an unlisted A query to 54.185.253.63 without asking upstream and answers no other query type; GitHub's egress DNS resolver experiment (127.0.0.100) is reverted only under a vendor-served flag, so the probe's TXT case watches for it; the vendor also serves a live global blocklist and feature flags; setup.ts:514-515 and tls-inspect.ts:5-33 pick the agent per run, agent v0.18.1 on a non-200 TLS-status answer and the pinned agent-ebpf v1.9.6 on a 200, a fetch error or a 3 s timeout (install-agent.ts:27-38; agent-ebpf's source was not read, so VP 6 and VP 7 assert which binary ran); the hard-coded productionresultssa*.blob.core.windows.net is a plain prefix-plus-suffix match (dnsproxy.go:354-369) opened in the firewall on resolution, so a third party's storage account under that prefix is probably reachable (inferred, registrability not checked; consult F6, critique r2 B1)."
+  - "Vendor facts, read from source this session (step-security/harden-runner v2.22.4 src/setup.ts, index.ts, cleanup.ts; agent v0.18.1 agent.go, firewall.go, dnsproxy.go, apiclient.go, github_dns_experiment.go, global_feature_flags.go): setup returns without installing the agent on a vendor HTTP 409, a skip-harden-runner repository property, a container job or ubuntu-slim, and an install failure leaves the step green; the agent reverts its rules, DNS change and sudo removal if a listed host fails to resolve at start or if its DNS, netmon or procmon goroutine errors later (agent.go:325-331); block mode adds the hard-coded and vendor-served GitHub hosts to every job; disable-telemetry true drops the vendor hosts from the allowlist and stops DNS and connection events; the action and agent print the allowed list and resolved names to the job log; the firewall (firewall.go:111-146) accepts TCP on every port to 168.63.129.16 and 169.254.169.254 and all protocols to 10/8, 172.16/12 and 192.168/16, has no UDP rule for 168.63.129.16 and no IPv6 rules, and lets only the agent's own uid reach 8.8.8.8, 8.8.4.4 and 1.1.1.1 on 443 (its DoH upstream); its DNS proxy sinkholes an unlisted A query to 54.185.253.63 without asking upstream and answers no other query type; GitHub's egress DNS resolver experiment (127.0.0.100) is reverted only under a vendor-served flag, so the probe's TXT case watches for it; the vendor also serves a live global blocklist and feature flags; setup.ts:514-515 and tls-inspect.ts:5-33 pick the agent per run, agent v0.18.1 on a non-200 TLS-status answer and the pinned agent-ebpf v1.9.6 on a 200, a fetch error or a 3 s timeout (install-agent.ts:27-38 copies the binary to /home/agent/agent in a folder chowned to the runner user; agent-ebpf's source was not read, so the self-check's agent_binary case fails a job under it and VP 6 and VP 7 assert which binary ran; readability of /home/agent/agent to the runner user is UNPROVEN until VP 6, and unreadable fails closed); the hard-coded productionresultssa*.blob.core.windows.net is a plain prefix-plus-suffix match (dnsproxy.go:354-369) opened in the firewall on resolution, so a third party's storage account under that prefix is probably reachable (inferred, registrability not checked; consult F6, critique r2 B1)."
   - "Operator card 2026-11-18 (after critique r1 B2, re-posted after critique r2 B1 to cover the storage wildcard), ANSWER PENDING; the plan is written to its recommended option: the Azure openings the filter leaves (TCP to 168.63.129.16 including its DNS resolver, TCP to 169.254.169.254, the private ranges, unfiltered IPv6, and Azure storage under the productionresultssa prefix) are accepted as named residuals in the c7 amendment (AZURE HOST ADDRESSES), so dns_tcp_azure is a reported case and VP 6 does not STOP on a predicted result; ipv6 stays asserted refused (scout r3 WARN 181: the no-route premise gets a tripwire), and rec-5362 owns the Azure openings. The approval run is dispatched only after this card is answered (scout r3 NOTE 246), so the sidecar's 'per your 2026-11-18 cards' is true when the operator reads it; an answer other than accept reworks the sidecar first. The probe reports each run's dns_tcp_azure result, which is the live read-back of the DNS-tunnel residual."
   - "UNPROVEN until VP 6: the live behaviour of every probe case on a hosted runner, notably whether 168.63.129.16 answers DNS over TCP (reported, not asserted), whether the filter's resolver chain leaves TXT unanswered (asserted refused), and system python3's absence of a needed module in the filtered job (the probe is stdlib only). A throwaway live probe before planning was refused by the handoff-evidence gate (a workflow push needs a full-tier run)."
   - "Control cadence: egress-control runs only when the list file, a probe module, run.py, the probe workflow or a fixture changes, while each covered run trusts the vendor's list served live; a widening between those runs is caught at the next one (named in the c7 amendment). Reading the agent's own fetched list inside the self-check is not planned: /home/agent/agent.log readability to the runner user is UNPROVEN."
@@ -382,3 +387,4 @@ gate_rounds:
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 6, nits: 8}
   - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:cdee1690a4091782a7eb51b678f5e4b40ea9fffe2865849b10fa54f5d756d27a"}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 6}
+  - {gate: decision-scout, round: 4, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:3c3e9e5ae4ffec4b4d0cfb8cbdd86cab4e1bfd8e3ec6cbd830fad7050e94c35e"}
