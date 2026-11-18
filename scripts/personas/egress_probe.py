@@ -64,7 +64,9 @@ def _connect(host: str, port: int) -> bool:
 def _tls(host: str, port: int) -> bool:
     try:
         with socket.create_connection((host, port), timeout=TIMEOUT) as raw:
-            ssl.create_default_context().wrap_socket(raw, server_hostname=host).close()
+            context = ssl.create_default_context()
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
+            context.wrap_socket(raw, server_hostname=host).close()
     except (OSError, ssl.SSLError):
         return False
     return True

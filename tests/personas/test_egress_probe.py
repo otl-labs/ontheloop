@@ -91,8 +91,10 @@ def test_listed_is_a_tls_handshake_with_sni(monkeypatch: pytest.MonkeyPatch) -> 
             return _Sock()
 
     _connect(monkeypatch, True)
-    monkeypatch.setattr(P.ssl, "create_default_context", lambda: Ctx())
+    made: list[Ctx] = []
+    monkeypatch.setattr(P.ssl, "create_default_context", lambda: made.append(Ctx()) or made[-1])
     assert P.attempt(_case("listed")) is True and seen == ["sts.amazonaws.com"]
+    assert made[0].minimum_version == P.ssl.TLSVersion.TLSv1_2
     _connect(monkeypatch, False)
     assert P.attempt(_case("listed")) is False
     _connect(monkeypatch, True)
