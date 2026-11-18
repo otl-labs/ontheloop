@@ -308,3 +308,31 @@ resource "github_repository_environment_deployment_policy" "persona_verdict_over
   environment    = github_repository_environment.persona_verdict_override.environment
   branch_pattern = "main"
 }
+
+# GitHub Environment: persona-verdict-app (PLAN-persona-verdict-app-grant, T4.32 egress E4).
+#
+# The post job's Environment for the verdict App key's role: only persona-verdict.yml's post job may name it, and the
+# role agent-platform-github-ci-persona-verdict-app trusts its subject alone. No reviewer, because verdicts post
+# unattended. Its safety is the main-only deployment policy below and the role's job_workflow_ref binding in
+# terraform/personal, never a secret or variable. Created by the first approved terraform-github-apply.yml dispatch
+# naming both addresses in gate_change (Decision 248).
+resource "github_repository_environment" "persona_verdict_app" {
+  repository        = github_repository.this.name
+  environment       = "persona-verdict-app"
+  can_admins_bypass = false
+
+  deployment_branch_policy {
+    protected_branches     = false
+    custom_branch_policies = true
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "github_repository_environment_deployment_policy" "persona_verdict_app_main" {
+  repository     = github_repository.this.name
+  environment    = github_repository_environment.persona_verdict_app.environment
+  branch_pattern = "main"
+}
