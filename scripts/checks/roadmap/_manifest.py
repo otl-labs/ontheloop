@@ -171,6 +171,8 @@ ENTRIES: tuple[Entry, ...] = (
             "scripts/roadmap/**",
             "scripts/checks/roadmap/**",
             "scripts/checks/decisions/envelope_rules.py",
+            "scripts/checks/decisions/entry_measure.py",
+            "scripts/checks/decisions/decisions_size_measure.py",
             "scripts/north_star_models.py",
             "scripts/checks/_common.py",
             "scripts/checks/registry.py",

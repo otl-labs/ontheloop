@@ -232,3 +232,30 @@ class TestBaselineBodies:
         bodies = _baseline.baseline_decision_bodies(repo)
         assert bodies is not None
         assert repo in _baseline._body_cache
+
+
+class TestBaseFileText:
+    """base_file_text -- one memoized git show per (root, path), shared by every consumer."""
+
+    def _repo(self, tmp_path: Path) -> Path:
+        repo = tmp_path / "repo"
+        _init_repo(repo)
+        (repo / "a.yaml").write_text("k: 1\n", encoding="utf-8")
+        sha = _commit_all(repo, "base")
+        _git(repo, ["update-ref", "refs/remotes/origin/main", sha])
+        _baseline._file_cache.clear()
+        return repo
+
+    def test_returns_the_text_at_origin_main(self, tmp_path: Path) -> None:
+        assert _baseline.base_file_text(self._repo(tmp_path), "a.yaml") == "k: 1\n"
+
+    def test_none_when_the_path_is_absent_there(self, tmp_path: Path) -> None:
+        assert _baseline.base_file_text(self._repo(tmp_path), "missing.yaml") is None
+
+    def test_none_when_git_fails_and_the_result_is_memoized(self, tmp_path: Path) -> None:
+        _baseline._file_cache.clear()
+        failing = subprocess.CompletedProcess([], 128, stdout="", stderr="fatal")
+        with patch("scripts.checks.decisions._baseline._common.run", return_value=failing) as run:
+            assert _baseline.base_file_text(tmp_path, "a.yaml") is None
+            assert _baseline.base_file_text(tmp_path, "a.yaml") is None
+        assert run.call_count == 1
