@@ -400,3 +400,10 @@ def test_plans_call_cap_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "MAX_CALLS", 1)
     code, result, err, _ = _plans([], [], _SHA1)
     assert code == 1 and result is None and "call_cap_exceeded" in err
+
+
+def test_plans_fails_closed_when_the_ref_has_no_plan_merge() -> None:
+    out, err = io.StringIO(), io.StringIO()
+    other = Commit("f" * 40, datetime(2026, 10, 10, tzinfo=timezone.utc), "feat(y): other", "")
+    code = cli.run(["plans"], reader=FakeReader([]), out=out, err=err, commits=lambda root, ref: [other])
+    assert code == 1 and out.getvalue() == "" and "no plan( merge" in err.getvalue()
