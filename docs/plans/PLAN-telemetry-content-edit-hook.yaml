@@ -48,7 +48,8 @@ scope:
     action: Create
     purpose: >-
       PreToolUse adapter for Edit, Write, MultiEdit and NotebookEdit (every other tool exits 0). The target is
-      tool_input file_path, else notebook_path, made relative to CLAUDE_PROJECT_DIR (else the repo root two levels up);
+      tool_input file_path, else notebook_path, normalised (os.path.normpath, so a .. segment cannot dodge an entry) and
+      made relative to CLAUDE_PROJECT_DIR (else the repo root two levels up);
       a target outside the repository, or no target, exits 0. PROTECTED is the union of the PROTECTED tuple parsed
       with ast (never imported) from the working tree's scripts/checks/misc/sensitive_value_detectors.py and from
       `git show origin/main:` of the same file, so a branch can neither shorten the list nor miss a new entry. An
@@ -58,7 +59,9 @@ scope:
       scope row whose file equals the target exactly; .claude/active_plan and CLAUDE_ACTIVE_PLAN are never read, so
       declaring a plan never turns on edit_scope_guard. Otherwise exit 2: no marker, an empty or malformed marker, a
       plan absent at origin/main, an unparseable plan, a plan that does not scope the target, an unparseable PROTECTED
-      on both sides, or a git error (the message names `git fetch origin main`). Malformed hook input exits 0 (the
+      on both sides, or a git error on a covered target (the message names `git fetch origin main`). A git error
+      reading origin/main falls back to the working tree's PROTECTED for coverage, so an uncovered target still exits 0
+      and only a covered one blocks. Malformed hook input exits 0 (the
       never_on_main precedent). Every block message's first line is "BLOCKED by .claude/hooks/protected_path_guard.py: "
       followed by the target (the form test_hook_block_marker's _assert_marked reads); it names the reason and the fix
       (write the merged plan's path to .claude/protected_edit_plan; its scope must list this exact file) and ends with
@@ -121,8 +124,9 @@ scope:
       plan that names a sibling but not the target; a merged plan naming the exact target allows; a merged plan naming
       only the target's directory blocks; an entry added only on the branch and an entry removed only on the branch
       both still block (the union); MultiEdit and NotebookEdit (notebook_path) are covered; Bash, Read and an
-      unprotected path pass; a target outside the repository passes; malformed input allows; a git failure blocks
-      naming git fetch origin main; every block ends with the two pinned lines; .claude/active_plan alone never
+      unprotected path pass; a target outside the repository passes; a target spelled with a .. segment that resolves
+      onto a PROTECTED entry blocks; malformed input allows; a git failure blocks a covered target naming git fetch
+      origin main and lets an uncovered target pass; every block ends with the two pinned lines; .claude/active_plan alone never
       allows; .claude/protected_edit_plan is ignored (git check-ignore -q run against the real repository root, not the
       temporary repository); the shim allows on exit 127-style adapter
       absence for an unprotected path and denies for a protected one; every PROTECTED entry on the real tree contains
@@ -167,7 +171,9 @@ scope:
   - file: scripts/ducklake_smoke/lambda_telemetry_golden_gates.py
     action: Modify
     purpose: >-
-      An opt-in --content-leg flag, off by default. After a clean, unskewed replay it calls
+      An opt-in --content-leg flag, off by default. run() builds its _Run internally today (L322-341), so it is split:
+      a helper returns the started _Run, and run() and the leg share it. main()'s injectable env path also takes a
+      content reader factory, so the leg test drives main() on fakes. After a clean, unskewed replay it calls
       lambda_telemetry_golden_content.run with the same _Run and read_route.content_reader(profile); its mismatch
       classes join the run's alarm findings as golden_replay_mismatch:<class> and a stop as golden_replay_error, and
       any of them makes --assert-zero-mismatches exit 1. A default run never resolves the content route. CI's
@@ -175,7 +181,9 @@ scope:
   - file: tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_content.py
     action: Create
     purpose: >-
-      Leg cases on in-memory fakes (writer, telemetry reader, content reader built over the real mask()): the planted
+      No duckdb guard (the gates module imports no duckdb; the sibling gates test needs it only for its own fakes), so
+      PR CI's fast tier runs this file. Leg cases on in-memory fakes (writer, telemetry reader, content reader built
+      over the real mask()): the planted
       class is in read_masked and not in write_time, survives scrub_text and is masked by mask(..., "read_masked");
       the built tree's root starts within two minutes of the fake clock and carries one row above the advertised
       threshold (rec-4699's acceptance node, test_content_tree_carries_a_blob_tier_row); a faithful content reader
@@ -204,15 +212,22 @@ scope:
     action: Modify
     purpose: >-
       One node per channel (ducklake, prod, telemetry-content) counting record reads (one per function) and showing
-      both outputs come from the same mapping. The fakes in run_resolve and _resolve_channel move to the one
-      record_reader seam and return full mappings ({"source_git_sha": ..., "code_sha256": ...}) carrying the same data
-      their reader= and record_reader= fakes carry today; every existing assertion stays as it is (a fixture change,
-      not a loosening, Decision 235). The deploy-gate-decisions shard's node_id is the whole file and survives.
+      both outputs come from the same mapping. Fixtures: run_resolve and _resolve_channel move to the one
+      record_reader seam and return full mappings ({"source_git_sha": ..., "code_sha256": ...}) or None;
+      test_single_function_channel_emits_record_outputs's fake gains source_git_sha (else record_sha= is not
+      emitted); test_absent_record_and_two_function_channel_emit_no_record_outputs's forbidden fake becomes a fake
+      returning None, its assertion unchanged. test_two_function_channel_never_reads_a_full_record guarded "no second
+      read" by forbidding record_reader; under the one-read seam every function's record is read once, so that node is
+      renamed test_two_function_channel_reads_each_record_once, keeps its no-record-outputs assertion, and asserts one
+      read per function in place of "must not run". Decision 235 disposition: the retired guard's invariant (no
+      second read) is kept and strengthened by the per-channel read-count nodes; no other assertion changes. The
+      deploy-gate-decisions shard's node_id is the whole file and survives the rename.
   - file: .github/workflows/deploy-telemetry-content.yml
     action: Modify
     purpose: >-
       rec-5369 edge 3: the hold step writes only its held= line to GITHUB_OUTPUT (the validator's output goes to the
-      log; grep -x '^held=' selects the line). rec-5323: the deploy job gains a step "Refuse a re-run attempt",
+      log; grep -E '^held=(true|false)$' selects the line, since the validator prints held=true or held=false,
+      validate_reconcile_pending_gate.py:351 and :359). rec-5323: the deploy job gains a step "Refuse a re-run attempt",
       placed immediately after "Check the reviewer approval for telemetry-content-deploy" and before download-artifact
       and configure-aws-credentials (validate_environment_reviewer_preflight leg (c) keeps the approvals step first
       after checkout), that exits 1 with ::error::TELEMETRY_CONTENT_RERUN_REFUSED (a new deploy takes a fresh dispatch)
@@ -229,7 +244,8 @@ scope:
       Pins: the deploy job's step right after the approvals preflight refuses GITHUB_RUN_ATTEMPT other than 1 and comes
       before download-artifact and configure-aws-credentials; the existing node that the approvals preflight is the
       first run step stays as it is; the record job carries no attempt refusal; only a held= line reaches GITHUB_OUTPUT
-      in the hold step.
+      in the hold step, checked by running the step's body against a stub validator that prints noise lines plus
+      held=false and asserting GITHUB_OUTPUT holds exactly held=false (behaviour, not a text pin).
   - file: tests/lambdas/ducklake_telemetry_writer/test_packaging.py
     action: Modify
     purpose: >-
@@ -260,7 +276,6 @@ verification_plan:
     expected: All pass, and the new nodes fail on the unchanged tree.
     fix_if: A failure is fixed in the code, never by narrowing an assertion (Decision 235).
     hermetic: false  # test_lambda_telemetry_golden_gates.py is duckdb-guarded, absent from PR CI's fast tier
-    expected_literals: ["passed"]
     graduation: waive
     graduation_waiver_reason: >-
       PR CI's diff-selected pytest runs these files on every later change, and the test_obligations nodes pin each
@@ -277,8 +292,7 @@ verification_plan:
       The first call prints the block ending in the HOOK-BLOCK line and rc=2 (engine.py is PROTECTED and outside this
       plan's scope, so it blocks with or without the build's marker); the second prints rc=0.
     fix_if: The first allows or the second blocks; fix the adapter or the shim.
-    hermetic: true
-    expected_literals: ["HOOK-BLOCK v1 hook=protected_path_guard", "rc=2", "rc=0"]
+    hermetic: false  # the adapter reads git show origin/main:, which needs a fetched ref
     graduation: waive
     graduation_waiver_reason: tests/hooks/test_protected_path_guard.py runs the same calls on a temporary repository.
   - step: 3
@@ -363,16 +377,17 @@ verification_plan:
       Operator step: after the squash merge, update the ontheloop plugin on claude.ai (Customize > Plugins), since
       project threads take hooks only from that plugin (.claude/hooks/plugin_hooks.py:4-9) and never read
       .claude/settings.json. Then ask the coordinator for a fresh project thread on this repo, on a session branch with
-      no .claude/protected_edit_plan, whose first act is this check: run the command, then call the Edit tool on
-      src/sensitive_values/engine.py with old_string PROTECTED_PATH_GUARD_PROBE and new_string x (text that does not
-      occur, so the edit cannot land even if the hook is missing).
+      no .claude/protected_edit_plan, whose first act is this check: run the command, then call the Write tool to
+      create the new file src/sensitive_values/protected_path_guard_probe.txt with the content probe (a new file needs
+      no prior Read, so the tool's own input checks pass and the hook is reached; src/sensitive_values/ is a PROTECTED
+      directory entry).
     command: bin/venv-python .claude/hooks/plugin_hooks.py check; echo "rc=$?"
     expected: >-
-      The command prints no drift warning and rc=0, and the Edit call is refused with a message ending in
-      "HOOK-BLOCK v1 hook=protected_path_guard".
+      The command prints no drift warning and rc=0, and the Write call is refused with a message ending in
+      "HOOK-BLOCK v1 hook=protected_path_guard"; the probe file does not exist afterwards.
     fix_if: >-
-      A drift warning, or an Edit refused only with "String to replace not found": the plugin was not updated, so the
-      operator updates it and the thread repeats the check. Refused by the hook but with a different tail: fix the
+      A drift warning, or the probe file created: the hook did not run, so the thread deletes the probe file (rm, never
+      committed), the operator updates the plugin and the thread repeats the check. Refused by the hook but with a different tail: fix the
       adapter through a new plan's build.
     hermetic: false
     graduation: not-applicable
@@ -464,14 +479,16 @@ context:
   - "Build marker: the build first writes docs/plans/PLAN-telemetry-content-edit-hook.yaml to .claude/protected_edit_plan; every PROTECTED file it edits (sensitive_value_detectors.py, its test, protected-actions.yaml, deploy-telemetry-content.yml) is in scope."
   - "Friction: blocks land in r90 unmapped_block until a rule is added; the HOOK-BLOCK stem already names them (parser HD-2). The wave-2 friction-coverage planning thread may add rules; not this plan."
   - "rec-5333 (Decision 79 carve-out) stays separate: its planning and plan-critique SKILL.md edits sit under Decision Growth's open #2217 and plan_critic.yaml is Agents in GitHub's persona file."
-  - "Overlapping open work: #2186 (CODEOWNERS, deploy_gate.py, test_deploy_gate.py), #2198 and the unbuilt PLAN-computed-reversal-conditions (docs/DECISIONS.md; the latter moves Decision 267's and 239's review_by lines, not the lines this sidecar binds); the unbuilt PLAN-persona-image-channel (deploy_gate.py resolve, test_deploy_gate.py, CODEOWNERS), PLAN-hook-canary-evidence (.claude/settings.json, .claude/hooks/hooks.json, re-rendered after either lands) and PLAN-sit-organization (its own sidecar on protected-actions.yaml's amendment_log head: whichever lands second takes a new wording run); whichever lands second rebases. #2218 (merged c39dcdeb) already moved CODEOWNERS and the workflow; this plan is written on it."
+  - "Overlapping open work: #2186 (CODEOWNERS, deploy_gate.py, test_deploy_gate.py), #2198 and the unbuilt PLAN-computed-reversal-conditions (docs/DECISIONS.md; the latter moves Decision 267's and 239's review_by lines, not the lines this sidecar binds); the unbuilt PLAN-persona-image-channel (deploy_gate.py resolve, test_deploy_gate.py, CODEOWNERS), PLAN-hook-canary-evidence (.claude/settings.json, .claude/hooks/hooks.json, re-rendered after either lands) and PLAN-sit-organization (its own sidecar on protected-actions.yaml's amendment_log head: whichever lands second takes a new wording run); whichever lands second rebases. plan_obligations lists more unbuilt plans sharing a file (CODEOWNERS: PLAN-environment-gates-fail-closed, PLAN-trusted-plan-cutover, PLAN-trusted-plan-identity, PLAN-bootstrap-ci-gated-apply, which also shares .gitignore; capabilities.yaml: PLAN-persona-verdict-chain, PLAN-wording-approval-routing; and many on docs/DECISIONS.md); the same rule applies to each. #2218 (merged c39dcdeb) already moved CODEOWNERS and the workflow; this plan is written on it."
   - "Reds: red_overlap (2026-11-18, base e68171b1) BLOCKED on slo_breached: rec-5355 (15.1 h) and rec-5364 (12.8 h), both product_regression, shared paths none; owned by CI Reform (coordinator log 2026-11-18 12:55Z). Deferral rationale (Decision 226): this plan repairs neither, shares no file with either, and its words do not depend on them; the operator ruled 2026-11-17 that builds may proceed past reds that share no files. VP 6 runs it again before the first commit."
   - "Rec acceptance (planning, 2026-11-18): rec-5322's and rec-4699's acceptance re-pointed through ops_data_portal update_rec to single nodes this plan creates (test_protected_edit_without_a_merged_plan_is_refused; test_content_tree_carries_a_blob_tier_row). The build confirms all four recs' acceptance holds at the PR head (scripts.rec_trailer_acceptance) before the squash merge."
-  - "Graduated shards kept, node ids unchanged: telemetry-append-writer-edge-request-shared, telemetry-blob-writer-edge-adapter-shared, telemetry-writer-packaging and telemetry-writer-stub-handler (test_packaging.py), deploy-gate-decisions (test_deploy_gate.py). Those files gain or change helper code and nodes only; the build renames and deletes none of a shard's named nodes, and VP 1 runs each file."
+  - "Graduated shards kept, node ids unchanged: telemetry-append-writer-edge-request-shared, telemetry-blob-writer-edge-adapter-shared, telemetry-writer-packaging and telemetry-writer-stub-handler (test_packaging.py), deploy-gate-decisions (test_deploy_gate.py). Those files gain or change helper code and nodes only; the build renames and deletes none of a shard's named nodes (deploy-gate-decisions names the whole file, so the one in-file rename its scope row names keeps it), and VP 1 runs each file."
   - "Decision-scout r2 FLAGS_FOUND (fingerprint v1:7551a722..., the plan as first written): one WARN and one NOTE; Decisions triaged 221 of 221; CONFLICT 0; RELATED 10; Serves NS.9 4/5; CITE unchanged. WARN Decision 246 cl.4: accept-with-deferral (next line). NOTE Decision 270 cl.1: accepted; the Decision 272 note records the verification consumer, worded as reading only its own synthetic project beside the feedback loop 270 cl.1 names; no 270 note."
   - "Decision-scout r3 FLAGS_FOUND (fingerprint v1:17337564...): Decisions triaged: 221 of 221. Roadmap items intersected: 10; CONFLICT: 0; RELATED: 10. Serves: NS.9 4/5. CITE unchanged. 270 cl.1 resolved; 246 cl.4 down to a NOTE, its one gap (the named-edit list left out the code-owned deploy workflow) closed in the next line; advisory taken: the 267 note now says the preflight would not ask a fresh review and that GitHub's own behaviour is unproven (wording r3)."
-  - "Decision 246 cl.4 keeps the operator's final-diff word for CODEOWNERS paths, hooks and security code. Disposition accept-with-deferral, as PLAN-telemetry-content-deploy-channel did: the operator's 2026-11-16 standing rule (an approved plan's build merges on review PROCEED and green CI; rec-5206 narrows cl.4) governs, and this plan's approval request names the hook, shim, settings.json, hooks.json, CODEOWNERS, PROTECTED and boundary_patterns edits and the code-owned deploy workflow deploy-telemetry-content.yml and deploy tooling scripts/ci/deploy_gate.py, so his approval of the plan is his word on them. A build diff beyond scope needs his fresh word."
+  - "Decision-scout r4 FLAGS_FOUND (fingerprint v1:feef512b...): Decisions triaged: 221 of 221. Roadmap items intersected: 10; CONFLICT: 0; RELATED: 10. Serves: NS.9 4/5. CITE unchanged. Round-3 items resolved; the one NOTE left (Decision 246 cl.4: the code-owned detector test was unnamed) is closed in the next line, a plan-only edit."
+  - "Decision 246 cl.4 keeps the operator's final-diff word for CODEOWNERS paths, hooks and security code. Disposition accept-with-deferral, as PLAN-telemetry-content-deploy-channel did: the operator's 2026-11-16 standing rule (an approved plan's build merges on review PROCEED and green CI; rec-5206 narrows cl.4) governs, and this plan's approval request names the hook, shim, settings.json, hooks.json, CODEOWNERS, PROTECTED and boundary_patterns edits and the code-owned deploy workflow deploy-telemetry-content.yml, deploy tooling scripts/ci/deploy_gate.py and the code-owned detector test tests/checks/misc/test_sensitive_value_detectors.py, so his approval of the plan is his word on them. A build diff beyond scope needs his fresh word."
   - "Critique r1 REVISE, all taken: wording-check row recorded (B1); the deploy job's refusal moved after the approvals preflight (B2, guard leg c); resolve's one record_reader seam with fixture-only test changes (B3); the record-job refusal dropped and the words changed with a new wording run (B4); the plugin update made VP 9 (B5); nits N1-N10 folded (the 267 stanza's new arm named in the note; the eight other reviewer-gated workflows named; run 44315711677's attempt read back; overlaps; first block line pinned; too_large bound; check-ignore on the real tree)."
+  - "Critique r2 REVISE, all taken: the hold step's grep now matches held=true|false and is tested by behaviour (R2-B1); test_deploy_gate's three affected nodes and the Decision 235 disposition named (R2-B2); VP 9's probe is a Write of a new file under src/sensitive_values/, which passes the tool's own checks so the hook is reached (R2-B3); nits: git-error fallback to the working-tree list, normpath, VP 2 non-hermetic, no duckdb guard on the leg test, the _Run split, the fuller overlap list. R2-N5 (deploy-paths.yaml has no TELEMETRY_CONTENT_RERUN_REFUSED recovery line) is left: the error line names the recovery (a fresh dispatch), and deploy-paths.yaml is outside this plan's words. R2 risk noted: VP 7 is the first live gates run from a session since proxy signing (Decision 256); a GOLDEN_STOP at describe is an access fault to report, not a content fault."
   - "Why a new hook, not a class in protected_action_gate: that gate's only Edit rule is transcript tamper, and its classes come from protected-actions.yaml's production-action grammar with approve lines; a PROTECTED edit is allowed by a merged plan's scope, not an approve line, and reads a different list (the detector ratchet's PROTECTED). Folding it in would change that contract's class grammar for a different authority; a separate hook keeps both small, and the tamper note's one-line pointer is the only contract change."
   - "Hook residuals (early warning, stated in the hook's docstring and tested where they can be): any plan ever merged that scopes a PROTECTED path authorizes that path whenever it is named in the marker; a target inside a worktree nested in the repository resolves to a non-PROTECTED relative path and passes; a Bash edit bypasses it; until the operator updates the plugin (VP 9) project threads do not run it. CODEOWNERS review stays the binding control (rec-2827)."
 gate_rounds:
@@ -482,6 +499,8 @@ gate_rounds:
   - {gate: wording-check, round: 2, verdict: PASS, digest: d48a96275b36ce15cfc8c6463bbbaa42a1885ad98d43d3fbf4791655d9fece32, base: daae86c4540c5d70f6a4a761535237884c08cee9, selection: complete}  # pragma: allowlist secret
   - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:1733756485a2e489e14bdea763b9b5588fe0001ce6c8a8d2d944fa18a70ac3ee'}  # pragma: allowlist secret
   - {gate: wording-check, round: 3, verdict: PASS, digest: ae3f233b036bdf69a692fe12b79f0e00d20bd46833504abdd37c5019330f7b01, base: daae86c4540c5d70f6a4a761535237884c08cee9, selection: complete}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 4, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:feef512b2dc5991c62a2013b589b529c459bf46a9ef749d1cf52ed95fc5efcae'}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 3, nits: 7}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
