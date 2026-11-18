@@ -9,7 +9,7 @@ intent: >-
   terraform-github-apply dispatch (Decision 248). The forge then refuses an unpinned action at run time, outside any
   branch's edit reach (NS.9), while validate_actions_sha_pinned keeps what the native policy lacks: the PR-time
   signal and the exact version comment. The apply preview shows the setting's value, the weekly GHAS live probe
-  reads it back and alarms if it is ever off, and a one-off canary run proves the forge enforces it.
+  reads it back and alarms if it is ever off, and a one-off canary dispatch proves the forge enforces it.
 plan_type: IMPLEMENTATION
 verification_tier: V3
 plan_path: docs/plans/PLAN-actions-sha-pin-native-policy.yaml
@@ -25,7 +25,8 @@ scope:
     purpose: >-
       github_actions_repository_permissions.this gains sha_pinning_required = true. The block comment is rewritten to
       say: the forge refuses any action not pinned to a full commit SHA (Decision 100; reusable workflows may still use
-      a tag, per GitHub); validate_actions_sha_pinned stays for the PR-time signal and the exact version comment;
+      a tag, per GitHub); validate_actions_sha_pinned stays for what the forge does not do: the PR-time signal, the exact version comment and
+      the docker @sha256 digest leg;
       rollback is a revert PR applied by a gate_change dispatch, and the operator's own untick in the repository's
       Actions settings is break-glass that a revert PR or re-apply must follow (Decision 126).
   - file: tests/checks/iam_tf/test_actions_sha_pinning_required.py
@@ -64,12 +65,23 @@ scope:
       TestValidateGhasProbe::test_check_fails_when_sha_pinning_not_required and
       TestValidateGhasProbe::test_check_fails_when_sha_pinning_field_absent (the check appends a failure naming
       sha_pinning_required) and TestValidateGhasProbe::test_runner_nonzero_when_sha_pinning_not_required.
+      TestProbeErrorBranches::test_disabled_push_protection_is_reported builds a state dict by hand: it gains the key
+      sha_pinning_required "true" so its exact-list assertion is unchanged (adding an input key, not loosening).
   - file: docs/DECISIONS.md
     action: Modify
     purpose: >-
       One dated annotation (Decision 177 dialect) appended after Decision 83's last Update line, worded exactly as the
       execution step gives it: the probe checks a fourth control from this plan, so the reversal conditions' "the
       three controls" reads "the four controls" from that date. No other line of the entry changes.
+  - file: .github/workflows/codeql.yml
+    action: Modify
+    purpose: >-
+      Branch-only canary for VP 13 and VP 16 (operator's choice, 2026-11-18 16:03 UTC), never in any pull request and
+      never on main: after the build PR has merged and the branch was restarted from main (no PR open from it), one
+      commit on the build's harness branch changes only the analyze job's actions/checkout line from its pinned SHA
+      to the tag @v7 (deliberately floating); CodeQL is dispatched with ref set to that branch before and after the
+      apply; then one commit restores the line byte for byte. codeql.yml runs on push only for main, so the branch
+      push starts nothing by itself. Nothing else in the file changes.
 bundled_recommendations: [rec-5290]
 followon_recs: []
 infrastructure_dependencies:
@@ -77,8 +89,8 @@ infrastructure_dependencies:
     terraform/github: an in-place update of github_actions_repository_permissions.this (sha_pinning_required to
     true), applied by a terraform-github-apply.yml dispatch from main whose gate_change names
     github_actions_repository_permissions.this, after one operator approval in Actions (Decision 248 cl.1, cl.3). The
-    merge's push run ends neutral naming the dispatch owed (VP 9). The dispatch is an admin step: it waits for the
-    operator's own words naming it (VP 12).
+    merge's push run ends neutral naming the dispatch owed (VP 11). The dispatch is an admin step: it waits for the
+    operator's own words naming it (VP 14).
   - >-
     Nothing else applies: no terraform/personal or terraform/bootstrap file, no IAM, no Lambda. The GHAS_PROBE_TOKEN
     (read-only Administration scope) already reads /repos/{repo}/actions/permissions.
@@ -86,7 +98,7 @@ acceptance_criteria:
   - terraform/github/repo.tf sets sha_pinning_required = true on github_actions_repository_permissions.this, guarded by a static test.
   - The apply preview's row for github_actions_repository_permissions.this shows sha_pinning_required=true among its allowlisted values.
   - After the approved apply, a ghas-probe dispatch passes and reports sha_pinning_required=true; a dispatch before the apply failed naming it.
-  - A canary run using a tag-pinned action succeeds before the apply and fails after it with GitHub's pinning refusal.
+  - A branch-only CodeQL dispatch whose checkout uses a tag succeeds before the apply and fails after it with GitHub's pinning refusal.
   - No other workflow run fails on the pinning policy after the apply.
   - rec-5290 is closed through the portal after the post-apply read-back, citing the probe run.
 verification_plan:
@@ -137,7 +149,10 @@ verification_plan:
     expected: All tests pass.
     fix_if: Any failure; fix the code, never loosen an assertion (Decision 235).
     hermetic: false
-    graduation: not-applicable
+    graduation: waive
+    graduation_waiver_reason: >-
+      Whole-file re-run of test files this plan creates or modifies; pytest_diff selects them on every PR that touches
+      them, and the behaviour nodes are graduated individually in VP 1-3.
   - step: 5
     phase: pre-deploy
     action: Provider-free format check of the terraform/github root (validate and plan are CI's, Decision 119).
@@ -145,7 +160,10 @@ verification_plan:
     expected: Exit 0, no file listed.
     fix_if: A file is listed; run terraform fmt on it.
     hermetic: false
-    graduation: not-applicable
+    graduation: waive
+    graduation_waiver_reason: >-
+      Duplicates CI's required terraform-validate check, which runs fmt -check on this root for every PR that touches
+      it; a second standing record adds no independence.
   - step: 6
     phase: pre-deploy
     action: >-
@@ -156,12 +174,13 @@ verification_plan:
       bin/venv-python -c "from scripts.checks.ci_guards.validate_actions_sha_pinned import validate_actions_sha_pinned as v; f=[]; v(f); assert not f, f" &&
       for p in $(grep -rhoE 'uses:\s*[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}' .github | sed -E 's/uses:\s*//' | sort -u);
       do r=${p%@*}; s=${p#*@}; repo=$(echo "$r" | cut -d/ -f1-2); sub=$(echo "$r" | cut -d/ -f3-);
-      y=$(curl -fsS "https://raw.githubusercontent.com/$repo/$s/${sub:+$sub/}action.yml" || curl -fsS "https://raw.githubusercontent.com/$repo/$s/${sub:+$sub/}action.yaml");
+      y=$(curl -fsS "https://raw.githubusercontent.com/$repo/$s/${sub:+$sub/}action.yml" || curl -fsS "https://raw.githubusercontent.com/$repo/$s/${sub:+$sub/}action.yaml") || { echo "FETCH_FAILED $r"; exit 1; };
       echo "$y" | grep -qE "using:\s*['\"]?composite" || continue;
       bad=$(echo "$y" | grep -E '^\s*-?\s*uses:' | grep -vE 'uses:\s*\./' | grep -vE '@[0-9a-f]{40}');
       [ -z "$bad" ] && echo "COMPOSITE_PINNED $r" || { echo "COMPOSITE_FLOATING $r: $bad"; exit 1; }; done; echo NESTED_OK
     expected: The check prints PASS; each composite action prints COMPOSITE_PINNED; the run ends NESTED_OK.
     fix_if: >-
+      FETCH_FAILED: no network or proxy denial; the claim is unproven, so stop and report, never treat it as a pass.
       A floating nested ref (COMPOSITE_FLOATING) would fail that workflow once the policy is on; stop and report it
       to the plan owner (re-pin to a release whose nested refs are pinned, or keep the policy off), never apply first.
     hermetic: false
@@ -188,8 +207,32 @@ verification_plan:
     expected: No unmet registration obligation.
     fix_if: An obligation is reported; bring the plan owner a scope amendment.
     hermetic: false
-    graduation: not-applicable
+    graduation: waive
+    graduation_waiver_reason: >-
+      Moment claim about this plan's scope against today's registry (Decision 244 cl.4); validate_plan_scope_closure
+      enforces the same closure at gate time.
   - step: 9
+    phase: pre-deploy
+    action: Fast tier on the build branch before the PR.
+    command: bin/venv-python -m scripts.validate --pre
+    expected: Exit 0.
+    fix_if: Any failing check; fix the cause.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      Diff-aware against origin/main, so it depends on this branch's transient state; the PR's own pr-validate runs the
+      same tier authoritatively (Decision 73), and a validate run can never be a graduated record.
+  - step: 10
+    phase: pre-deploy
+    action: >-
+      Full tier on the ready head, started in the background from the top-level session with a 2 h limit, and its
+      verdict, before the PR is opened (handoff_policy).
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: verify-head reports ok for HEAD.
+    fix_if: Any failure, or a timeout; the handoff is blocked; fix and re-run from the start (handoff_policy).
+    hermetic: false
+    graduation: not-applicable
+  - step: 11
     phase: post-deploy
     action: >-
       The merge's push run of terraform-github-apply.yml ends neutral with the unnamed-gate warning for
@@ -200,33 +243,34 @@ verification_plan:
     expected: Conclusion success (neutral end), the warning names the address, the row shows sha_pinning_required=true.
     fix_if: The run applies, fails, or lists another change; stop and report, never dispatch over it.
     hermetic: false
-  - step: 10
+  - step: 12
     phase: post-deploy
     action: Before the apply, a ghas-probe dispatch fails naming sha_pinning_required (the probe discriminates).
     command: >-
       bin/venv-python -c "print('MCP: mcp__github__actions_run_trigger(method=run_workflow, workflow_id=ghas-probe.yml, ref=main); then actions_get(get_workflow_run) conclusion failure and get_job_logs showing disabled control(s) with sha_pinning_required=false')"
     expected: Conclusion failure; the log names sha_pinning_required=false and no other disabled control.
     fix_if: >-
-      It passes (the setting is already on, or the field reads true): stop and report; it fails on another control or
-      on auth: fix that first, never proceed blind.
+      It passes (the setting is already on, or the field reads true): stop and report. It names
+      sha_pinning_required=unknown: the API does not serve the field here, so VP 15 could never pass; stop and report
+      before the apply. It fails on another control or on auth: fix that first, never proceed blind.
     hermetic: false
-  - step: 11
+  - step: 13
     phase: post-deploy
     action: >-
       Canary, before the apply: on the build's own branch with no pull request open (restarted from main after the
-      merge), push one commit adding .github/workflows/sha-pin-canary.yml (on: push, paths: the file itself; one
-      job running actions/checkout at its major tag, never on main). Its run succeeds.
+      merge), commit the one-line codeql.yml change (analyze job checkout to actions/checkout@v7) and push it; dispatch
+      CodeQL with ref set to the branch. Its run succeeds (the policy is still off).
     command: >-
-      bin/venv-python -c "print('git push the canary commit; MCP: actions_list(list_workflow_runs, resource_id=sha-pin-canary.yml) for that commit; actions_get conclusion success')"
-    expected: The canary run concludes success.
-    fix_if: It fails for any other reason; fix the canary, not the policy.
+      bin/venv-python -c "print('commit the one-line codeql.yml change, then git push -u origin HEAD as its own call (the push hook refuses compound push forms); MCP: mcp__github__actions_run_trigger(method=run_workflow, workflow_id=codeql.yml, ref=<branch>); actions_get(get_workflow_run) conclusion success')"
+    expected: The branch CodeQL run concludes success.
+    fix_if: It fails for any other reason; fix the cause on the branch, never touch the policy or main.
     hermetic: false
-  - step: 12
+  - step: 14
     phase: post-deploy
     action: >-
       ADMIN STEP (operator's words naming it). The build asks: "May I dispatch terraform-github-apply from main with
       gate_change github_actions_repository_permissions.this to turn on required SHA pinning?" On his words it
-      dispatches; he reads the preview (one update: sha_pinning_required=true, enabled=true, allowed_actions=all) and
+      dispatches; he reads the preview (one update row whose allowlisted values read allowed_actions="all", enabled=true, sha_pinning_required=true) and
       approves in Actions; the build reads the run's conclusion and its apply log.
     command: >-
       bin/venv-python -c "print('MCP: mcp__github__actions_run_trigger(method=run_workflow, workflow_id=terraform-github-apply.yml, ref=main, inputs={gate_change: github_actions_repository_permissions.this}); actions_get(get_workflow_run) conclusion success; get_job_logs on the apply job: TF_GITHUB_APPLY_CHECKED change=1 and the clean re-plan')"
@@ -235,28 +279,29 @@ verification_plan:
       The preview lists any other change, or the apply errors on the field: the operator rejects the run and the build
       reports it; never approve a change the preview did not list.
     hermetic: false
-  - step: 13
+  - step: 15
     phase: post-deploy
     action: Live read-back. A ghas-probe dispatch after the apply passes.
     command: >-
-      bin/venv-python -c "print('MCP: mcp__github__actions_run_trigger(method=run_workflow, workflow_id=ghas-probe.yml, ref=main); actions_get conclusion success; get_job_logs: GHAS probe passed with sha_pinning_required=true')"
-    expected: Conclusion success; the summary line shows sha_pinning_required=true.
+      bin/venv-python -c "print('MCP: mcp__github__actions_run_trigger(method=run_workflow, workflow_id=ghas-probe.yml, ref=main); actions_get conclusion success; get_job_logs: the _run_cli line GHAS probe OK with sha_pinning_required=true')"
+    expected: Conclusion success; the runner's GHAS probe OK line shows sha_pinning_required=true.
     fix_if: It fails naming sha_pinning_required; the apply did not take; stop and report (Decision 89 precedent), never mark the rec closed.
     hermetic: false
-  - step: 14
+  - step: 16
     phase: post-deploy
     action: >-
-      Enforcement proof. Push a second canary commit (a one-line change to the canary file); its run fails at job
-      setup with GitHub's refusal of an action not pinned to a full-length commit SHA. Record the run id and the
-      message, then push a commit deleting the canary file. The branch never opens a pull request with the canary.
+      Enforcement proof. Dispatch CodeQL again with ref set to the branch (same commit as VP 13); its run fails with
+      GitHub's refusal of an action not pinned to a full-length commit SHA. Record the run id and the message, then
+      commit the restore of codeql.yml (byte for byte equal to main's) and push it. The branch never opens a pull
+      request carrying the change.
     command: >-
-      bin/venv-python -c "print('git push; MCP: actions_list(list_workflow_runs, resource_id=sha-pin-canary.yml) for that commit; actions_get conclusion failure; get_job_logs (or the run annotations) naming full-length commit SHA pinning; then git push the deletion')"
-    expected: The run fails with the pinning refusal; the deletion commit leaves no canary file on the branch.
+      bin/venv-python -c "print('MCP: mcp__github__actions_run_trigger(method=run_workflow, workflow_id=codeql.yml, ref=<branch>); actions_get conclusion failure or startup_failure; get_job_logs or the run annotations naming full-length commit SHA pinning; then restore the file, commit, and git push -u origin HEAD as its own call; git diff origin/main -- .github/workflows/codeql.yml prints nothing')"
+    expected: The run fails with the pinning refusal message; after the restore, git diff against origin/main for codeql.yml is empty.
     fix_if: >-
       It succeeds: the stored setting does not enforce; stop and report to the plan owner and the operator (the
       native control is then a no-op; the presubmit check is the only control).
     hermetic: false
-  - step: 15
+  - step: 17
     phase: post-deploy
     action: >-
       No breakage. Every workflow run created on the repository from the apply until handoff that failed is checked
@@ -265,12 +310,12 @@ verification_plan:
       if none ran, they are named pending in the report.
     command: >-
       bin/venv-python -c "print('MCP: mcp__github__actions_list(method=list_workflow_runs) created after the apply; for each failed run get_job_logs: no pinning refusal; first ci.yml run on main: conclusion success')"
-    expected: No run failed on the pinning policy; the first main ci.yml run after the apply succeeded.
+    expected: Apart from the two branch CodeQL canary runs, no run failed on the pinning policy; the first main ci.yml run after the apply succeeded.
     fix_if: >-
       A run failed on the policy: report it at once; the operator may untick the setting (break-glass) while a revert
       PR is opened, or the ref is pinned forward.
     hermetic: false
-  - step: 16
+  - step: 18
     phase: post-deploy
     action: rec-5290 is closed through the portal with the probe run as its closure artifact.
     command: >-
@@ -295,10 +340,11 @@ test_obligations:
     test_selector: tests/checks/misc/test_validate_ghas_probe.py::TestValidateGhasProbe::test_check_fails_when_sha_pinning_field_absent
     red_green_expectation: red before (the node is absent; the probe ignores the field), green after
 constraints:
-  - "One build PR: repo.tf, the gate extractor, the probe, their tests and the Decision 83 annotation. ghas-probe.yml and terraform-github-apply.yml are not edited."
-  - "Merge: on green checks once the plan is approved (operator ruling 2026-11-16); the operator's review point is the apply preview he approves in Actions (VP 12). No Resolves trailer: rec-5290 closes through the portal after VP 13, because the setting is not live at merge."
+  - "One build PR: repo.tf, the gate extractor, the probe, their tests and the Decision 83 annotation. ghas-probe.yml and terraform-github-apply.yml are not edited. Named residual: ghas-probe.yml's header still says three confidential-data-boundary controls; its third, Actions permissions, now covers enablement and required pinning, so the header stays true; a comment-only edit would pull the workflow's run: bodies into scope for no behaviour."
+  - "The canary is a branch-only edit of codeql.yml (operator's choice 2026-11-18 16:03 UTC over a new canary file, which would need a ci_rca_taxonomy row in a file at its cap that then goes stale on main): it exists only in post-merge commits on the build's harness branch while no pull request is open from it, is restored at VP 16, and appears in no PR diff."
+  - "Merge: on green checks once the plan is approved (operator ruling 2026-11-16); the operator's review point is the apply preview he approves in Actions (VP 14). No Resolves trailer: rec-5290 closes through the portal after VP 15, because the setting is not live at merge."
   - "The apply dispatch is an admin step: it waits for the operator's own words naming it in the build thread (Decision 248 cl.1); approval in this plan or from another thread does not carry over."
-  - "The canary lives only on the build's harness branch with no open pull request and is deleted after VP 14; it never reaches main and is never pushed to any other branch."
+  - "The codeql.yml canary edit lives only on the build's harness branch with no open pull request and is restored at VP 16; it never reaches main and is never pushed to any other branch. No other line of codeql.yml changes."
   - "If, at build time, a check gates the Decision 83 annotation as approved wording (the unbuilt wording-approval-routing plan adds one), stop and return to the plan owner for a sidecar; never merge it around the gate."
   - "Test fixtures build SHAs from repeated characters, never a literal 40-hex string (detect-secrets)."
   - No rescue agents or workaround loops (Decision 55); never skip or loosen a test to get green (Decision 235).
@@ -307,17 +353,20 @@ context:
   - "Brief: /mnt/project-files/actions-sha-pinned/BRIEF-plans-2-4.md (Plan 4). Blind advisor (claude-fable-5-2, 2026-11-18): /mnt/project-files/actions-sha-pinned/plan4-advisor-brief/ADVICE.md: extend ghas-probe tri-state, add the canary, add the extractor, one PR. Settled by the consult."
   - "Probe 2026-11-18: integrations/github 6.12.1 (the locked version) schema for github_actions_repository_permissions has sha_pinning_required (bool, optional, computed), read with terraform providers schema -json in a scratch directory."
   - "Probe 2026-11-18 on main c39dcdeb: every remote uses: is 40-hex pinned. Third-party composites: anthropics/claude-code-action@6070f08d nests oven-sh/setup-bun@0c5077e5; pypa/gh-action-pypi-publish@7245906f nests actions/setup-python@a309ff8b and a generated local docker action. All others are node actions. No docker:// uses: exists. VP 6 re-checks at build time."
-  - "GitHub docs (read 2026-11-18): with the setting on, all actions must be pinned to a full-length commit SHA; reusable workflows may still be referenced by tag. UNPROVEN until VP 7, VP 13 and VP 14: availability on GitHub Free for a public organisation repository (Decision 89 precedent); whether nested composite refs or a docker action's image tag are checked (moot today: every nested ref is pinned); GitHub-managed dynamic runs (Dependabot updates) under the policy (VP 15 watches)."
+  - "GitHub docs (read 2026-11-18): with the setting on, all actions must be pinned to a full-length commit SHA; reusable workflows may still be referenced by tag. UNPROVEN until VP 7, VP 15 and VP 16: availability on GitHub Free for a public organisation repository (Decision 89 precedent); whether nested composite refs or a docker action's image tag are checked (moot today: every nested ref is pinned); GitHub-managed dynamic runs (Dependabot updates) under the policy (VP 17 watches)."
   - "ghas-probe: weekly Monday 07:00 UTC plus dispatch; ci_rca_taxonomy marks it not_a_gate, ci_rca excluded, so a red blocks nothing. Between merge and apply the scheduled run fails naming sha_pinning_required, a true alarm: apply before Monday 2026-11-23 07:00 UTC or expect it. Its if: skips only otl-workflow-dispatcher[bot]; MCP dispatches run as the operator's account."
   - "Overlap: no open PR edits a scope file (checked 2026-11-18 15:30 UTC; #2221 and #2198 touch neither the gate script nor the probe). Unbuilt plans on main that scope the same files are named by plan_obligations; whichever builds second rebases."
+  - "rec-5289, rec-5341 and rec-5342 still read open on 2026-11-18 15:50 UTC although #2218 (c39dcdeb) carries their Resolves trailer (closure job lag or failure; not this plan's repair, the H1 series' closure owner reads it). The physical premise is met: config/actions_sha_pin_baseline.yaml is gone on main and VP 6 passed (336 references, both composites pinned) when the critic re-ran it."
+  - "Decision 83 annotation (choice, stated): it points to rec-5290's closure for the first live read-back run id rather than carrying the run id itself, because the run happens after the merge that carries the annotation; Decision 83's reversal stanza is satisfied at its next re-verification. VP 4 waives on whole-file re-runs; git push legs stay MCP-print prose because the repo's push hook allows only the standalone canonical push call."
   - "Graduated shards kept, not edited: ghas-probe-401-raises-auth-error (names test_validate_ghas_probe.py), terraform-github-apply-non-push-fails-closed and terraform-github-apply-push-neutral (name test_terraform_github_apply_gate.py); their nodes are unchanged."
   - "Related-work check (scripts.ci_rca.red_overlap, 2026-11-18 15:20 UTC): blocked by rec-5355 (plan-corpus walker budget xdist crash, Critical, 15 h old) and rec-5364 (vp-replay base-collapse, Critical, 13 h old), both past SLO, owner named: CI Reform; shared files none. Deferral rationale: neither is this plan's repair and neither overlaps a scope source, so Decision 226 does not halt this work beyond the SLO rule; the gate is the handoff_policy's own: validation_result --verify-head ok on the PR head."
   - "Cross-project files: scripts/ci/terraform_github_apply_gate.py and its test (Decision 248 apply fence, CODEOWNERS) and scripts/checks/misc/validate_ghas_probe.py and its test. Operator OK to edit them and their tests: given 2026-11-18 15:41 UTC in the plan thread."
-  - "Approvals: operator 'write the plan' 2026-11-18 15:41 UTC; OK to edit the apply gate and the GHAS probe plus their tests 15:41 UTC (plan thread)."
+  - "Approvals: operator 'write the plan' 2026-11-18 15:41 UTC; canary via branch-only codeql.yml edit chosen on the critique-escalation card 16:03 UTC (critique round 1 B1); OK to edit the apply gate and the GHAS probe plus their tests 15:41 UTC (plan thread)."
   - "Plan owner: the rec-5290 planning thread in the Agents in GitHub project; plan defects go back to it through the coordinator. This is the last plan of the rec-5020 series."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:a0d9003fe074f2ece655fd81f0e1f8f4f8e831e8b3673ae7f0b4b224f9af6e4f"}
   - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: "v1:a922ae8de64a4acd18578b8eeaaa609f7edca0eb2e776cc89f442045c755c29d"}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 3, nits: 12, escalated: true, escalation_choice: re-scope}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -330,10 +379,10 @@ execution_steps:
   - "Gate: add the extractor and the two test nodes; VP 2 red on the base, green on the branch."
   - "Probe: add _pin_label, the state key, the disabled-control leg, the summary field and examined 4; update _actions_body and add the three nodes; VP 3 red on the base, green on the branch."
   - "DECISIONS.md: append after Decision 83's last Update line exactly: '> **Update (<merge date>, PLAN-actions-sha-pin-native-policy):** the ghas-probe also checks Actions permissions' sha_pinning_required (rec-5290, Decision 100), so from this date its reversal conditions' \"the three controls\" read \"the four controls\". The first live read-back run is cited in rec-5290's closure.' Regenerate docs/decisions-index.json with its generator."
-  - "VP 4, VP 8; open the PR with the attribution header; VP 7 from its PR-time plan comment; merge (squash) on green checks."
-  - "After merge: VP 9; restart the branch from main; VP 10; VP 11; ask the operator for VP 12 in the words it gives and wait; on his words VP 12; VP 13; VP 14; VP 15."
-  - "Close rec-5290: bin/venv-python -m scripts.ops_data_portal --update-rec rec-5290 --status closed --execution_result success --closure-artifact <VP 13 run URL> --closure-fix-sha <merge SHA> --resolution 'native SHA pinning applied (VP 12 run), read back by ghas-probe (VP 13), enforced (VP 14 canary run)'; VP 16."
-  - "Report: what was implemented, verification results with every run id, and any pending VP 15 workflow."
+  - "VP 4, VP 8, VP 9; commit and push; VP 10 (full tier in the background, 2 h limit, then verify-head ok; a timeout blocks the handoff and reruns from the start); open the PR with the attribution header; VP 7 from its PR-time plan comment; merge (squash) on green checks."
+  - "After merge: VP 11; restart the branch from main; VP 12; VP 13; ask the operator for VP 14 in the words it gives and wait; on his words VP 14; VP 15; VP 16; VP 17."
+  - "Close rec-5290: bin/venv-python -m scripts.ops_data_portal --update-rec rec-5290 --status closed --execution_result success --closure-artifact <VP 15 run URL> --closure-fix-sha <merge SHA> --resolution 'native SHA pinning applied (VP 14 run), read back by ghas-probe (VP 15), enforced (VP 16 canary run)'; VP 18."
+  - "Report: what was implemented, verification results with every run id, and any pending VP 17 workflow."
 rollback: >-
   Primary: a revert PR (sha_pinning_required removed or false) applied by a terraform-github-apply dispatch whose
   gate_change names github_actions_repository_permissions.this, after the operator's approval; the gate extractor and
