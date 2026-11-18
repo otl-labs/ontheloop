@@ -299,20 +299,20 @@ rule. Do not re-author it here.
 ## Commit Flows (Workflow Step 7 -- MANDATORY)
 **Execute the commit flow autonomously once Step 6 completes -- the plan was approved during /plan.**
 
-This workflow runs on Claude Code on the web: the harness assigns this session its own branch (e.g. `claude/...`), the `gh` CLI is NOT available, and the container hibernates between turns. All GitHub operations use the GitHub MCP tools (`mcp__github__*`). Branch protection is LIVE; the squash-merge-after-CI gate transport is the GitHub MCP `merge_pull_request` tool (Decision 76). See `docs/contracts/git-ops.yaml` as the canonical git-ops authority.
+This workflow runs on Claude Code on the web: the harness assigns this session its own branch (e.g. `claude/...`), the `gh` CLI is NOT available, and the container hibernates between turns. All GitHub operations use the GitHub MCP tools (`mcp__github__*`). Branch protection is LIVE; the squash-merge-after-CI gate transport is the GitHub MCP `merge_pull_request` tool (Decision 76). Git-ops flow: `docs/contracts/git-ops.yaml#push_pr_ci_merge_flow`.
 
 ### Run the full gate locally first (in order)
 
 1. Run `bin/venv-python -m scripts.session.github_readiness`. States are independent: `unknown` is unproven, never PASS; fetch/API PASS never authorizes push/PR.
 2. Run `bin/venv-python -m scripts.test_coverage_checker --check-tests --check-coverage`. Repair failures; this is a diagnostic, not an overall gate.
 3. Set `implementation_declared: true` in the plan file, now that the graduation walk above wrote its registry rows.
-4. Run `bin/venv-python -m scripts.validate --pre`. The full tier `bin/venv-python -m scripts.validate` runs once per push in the Commit Flow, on the committed, rebased, clean tree: exit 0, final `Validation Summary (scope: all)` PASS, then `--verify-head` exit 0 (git-ops.yaml `handoff_sequence`). Child output, mypy, CI, and stale evidence cannot substitute. Any incomplete/mismatched result is BLOCKED; fix, commit, rerun.
+4. Run `bin/venv-python -m scripts.validate --pre`. The full tier `bin/venv-python -m scripts.validate` runs once per push in the Commit Flow, on the committed, rebased, clean tree: exit 0, final `Validation Summary (scope: all)` PASS, then `--verify-head` exit 0 (`git-ops.yaml#handoff_sequence`). Child output, mypy, CI, and stale evidence cannot substitute. Any incomplete/mismatched result is BLOCKED; fix, commit, rerun.
 5. Create `/tmp/implementation-retrospective.json` with the ten `scripts.session.postflight_evidence.CATEGORIES` keys. Values are bounded fact-string lists (`[]` if none); exclude credentials/raw output. Run `bin/venv-python -m scripts.session.postflight --evidence /tmp/implementation-retrospective.json` and confirm its gitignored output. `--auto` stops with `evidence_failed` before commit when invalid.
 
 Report readiness, validator verdicts, evidence, review, and real push/PR outcome separately.
 
 ### Wait-for-CI: event-driven, never polled
-Wait for the PR-tier CI (fast `--pre` tier; Decision 73) via subscription, never polling -- the wake mechanism is canonical in `docs/contracts/git-ops.yaml` steps 3-5, not restated here.
+Wait for the PR-tier CI (fast `--pre` tier; Decision 73) via subscription, never polling -- the wake mechanism is canonical in `git-ops.yaml#push_pr_ci_merge_flow`, not restated here.
 
 **On wake**, always confirm check runs via `mcp__github__pull_request_read` (`get_status` / `get_check_runs`) BEFORE merging, then branch on status:
    - **All green** -> for an IMPLEMENTATION PR, Commit Flow step 4 (premerge, squash-merge, readback); otherwise `mcp__github__merge_pull_request(owner, repo, pullNumber, merge_method="squash")`. Then `mcp__github__unsubscribe_pr_activity(...)`. Report the merge with its sha. **Carve-out:** for a PR touching `terraform/personal/**`, do NOT unsubscribe here -- defer to the "Hold subscription through apply" section below (the real outcome is the post-merge apply, not the merge).
@@ -344,7 +344,7 @@ record. The authoritative baseline is still the next planning session's converge
 wake). The gated apply gates the JOB, never from a laptop.
 
 ### Pre-Push Rebase
-See `docs/contracts/git-ops.yaml` `rebase_phase_distinction.commit_flow_time`; once pushed, use
+See `docs/contracts/git-ops.yaml#rebase_phase_distinction.commit_flow_time`; once pushed, use
 `--force-with-lease` (never `--force`).
 
 ### IMPLEMENTATION Commit Flow
@@ -370,7 +370,7 @@ Then via GitHub MCP (owner/repo from `git remote get-url origin`):
 5. **Post-merge closeout fallback (Decision 201, conditional).** WAIT for the
    `trailer-closure` job (`mcp__github__actions_list` by merge sha -> `get_job_logs`, never
    `$GITHUB_STEP_SUMMARY`) to CONCLUDE, then follow the conditional fallback in
-   `docs/contracts/git-ops.yaml::resolves_trailer`: an acceptance-verdict refusal takes that clause's
+   `docs/contracts/git-ops.yaml#resolves_trailer`: an acceptance-verdict refusal takes that clause's
    route, a Decision 186 refusal stays open and is reported, a merge-leg refusal or a non-refusal
    per-rec log line permits the fallback, a trailer readback found missing goes to `merge_step
    recover` (never the fallback); anything else waits.
