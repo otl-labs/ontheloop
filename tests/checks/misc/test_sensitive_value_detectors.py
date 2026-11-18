@@ -27,6 +27,9 @@ BOUNDARY = [
     "src/common/ducklake_content_read_verbs.py",
     "docs/contracts/ducklake_telemetry_content_reader.yaml",
     "tests/lambdas/ducklake_telemetry_content_reader/",
+    ".github/workflows/deploy-telemetry-content.yml",
+    "scripts/ci/telemetry_content_deploy.sh",
+    "scripts/checks/ci_guards/validate_content_reader_lock.py",
     "docs/contracts/protected-actions.yaml",
     ".claude/hooks/protected_action_gate.sh",
     ".claude/hooks/protected_action_gate.py",
@@ -43,6 +46,11 @@ CONTENT_READER_PATHS = [
     "src/common/ducklake_content_read_verbs.py",
     "docs/contracts/ducklake_telemetry_content_reader.yaml",
     "tests/lambdas/ducklake_telemetry_content_reader/",
+]
+CONTENT_DEPLOY_PATHS = [
+    ".github/workflows/deploy-telemetry-content.yml",
+    "scripts/ci/telemetry_content_deploy.sh",
+    "scripts/checks/ci_guards/validate_content_reader_lock.py",
 ]
 PROTECTED_ACTION_GATE_PATHS = BOUNDARY[-10:]
 
@@ -98,7 +106,7 @@ def test_case_swap_text_edit_and_planted_narrowing_fail(monkeypatch: pytest.Monk
     _swap(monkeypatch, lambda cases: [first._replace(text=first.text + " edited")] + cases[1:])
     assert det.registry_violations(registered, det.live_keys())
 
-    _swap(monkeypatch, lambda cases: [first._replace(planted_value=first.planted_value[:-1])] + cases[1:])
+    _swap(monkeypatch, lambda cases: [first._replace(planted_value=(first.planted_value or "")[:-1])] + cases[1:])
     assert det.registry_violations(registered, det.live_keys())
 
 
@@ -131,6 +139,17 @@ def test_content_reader_paths_are_protected() -> None:
     assert det.ownership_violations(det.PROTECTED, head, caps) == []
     owned = "\n".join(line for line in head.splitlines() if "ducklake_telemetry_content_reader" not in line)
     assert any("ducklake_telemetry_content_reader" in v for v in det.ownership_violations(det.PROTECTED, owned, caps))
+
+
+def test_content_deploy_channel_paths_are_protected_owned_and_in_boundary() -> None:
+    assert all(path in det.PROTECTED for path in CONTENT_DEPLOY_PATHS)
+    head = (ROOT / det.CODEOWNERS_REL).read_text(encoding="utf-8")
+    caps = yaml.safe_load((ROOT / det.CAPABILITIES_REL).read_text(encoding="utf-8"))["boundary_patterns"]
+    assert det.ownership_violations(det.PROTECTED, head, caps) == []
+    for path in CONTENT_DEPLOY_PATHS:
+        assert any(path.startswith(p) for p in caps)
+        owned = "\n".join(line for line in head.splitlines() if path not in line)
+        assert any(path in v for v in det.ownership_violations(det.PROTECTED, owned, caps))
 
 
 def test_protected_action_gate_paths_are_protected() -> None:
@@ -170,18 +189,20 @@ def test_narrowing_against_base() -> None:
 
 
 def _declared() -> registry._Declaration:
-    return registry._CURRENT_DECLARATION
+    declaration = registry._CURRENT_DECLARATION
+    assert declaration is not None
+    return declaration
 
 
 def test_ratchet_skips_leg_e_when_origin_unreachable_or_batch_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_common, "origin_main_reachable", lambda _root: False)
     failed: list[str] = []
     det.validate_detector_ratchet(failed)
-    assert failed == [] and "skipped" in _declared().unit
+    assert failed == [] and "skipped" in (_declared().unit or "")
     monkeypatch.setattr(_common, "origin_main_reachable", lambda _root: True)
     monkeypatch.setattr(det, "_batched_base_reader", lambda _root, _paths: None)
     det.validate_detector_ratchet(failed)
-    assert failed == [] and "skipped" in _declared().unit and _declared().kind == "examined"
+    assert failed == [] and "skipped" in (_declared().unit or "") and _declared().kind == "examined"
 
 
 def test_edits_check_skips_when_base_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:

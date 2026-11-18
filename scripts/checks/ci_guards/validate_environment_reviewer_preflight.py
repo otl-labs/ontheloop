@@ -40,6 +40,7 @@ UPSTREAM = {
     "persona-verdict-override.yml": ("render", "approve"),
     "terraform-github-apply.yml": ("preview", "apply"),
     "terraform-bootstrap-apply.yml": ("preview", "apply"),
+    "deploy-telemetry-content.yml": ("build", "deploy"),
 }
 SIDE_CHECKOUT = ".dispatch-tooling"
 TOKEN_EXPR = "${{ github.token }}"

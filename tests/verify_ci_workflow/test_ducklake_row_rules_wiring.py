@@ -45,7 +45,7 @@ def test_data_pipeline_excludes_the_engine_and_is_never_marked_affected_by_it() 
     assert "src/common/ducklake_write_rules.py" in excludes and "src/row_rules" in excludes
     for rel in _FILES:
         affected = compute_affected_artifacts([rel])
-        assert sorted(affected) == sorted(_DUCKLAKE), (rel, sorted(affected))
+        assert sorted(affected) == sorted((*_DUCKLAKE, "ducklake_telemetry_content_reader")), (rel, sorted(affected))
 
 
 def test_workflow_redeploys_on_engine_edits_and_smokes_the_row_rules_gate() -> None:
