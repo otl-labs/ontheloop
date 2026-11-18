@@ -39,7 +39,8 @@ scope:
         probe_record (a fresh probe's CallRecord, or None). The transport fills it by duck typing; this package still
         imports nothing under scripts.
       - cancelled_dict(in_flight, latency_ms): attempt_dict with outcome cancelled and the given latency.
-      - The module docstring names the declared losses this file cannot hold: a run killed before its header is
+      - The module docstring names rec-5396 as the producer that maps this file (it names superseded rec-4028 today)
+        and the declared losses this file cannot hold: a run killed before its header is
         written (during MCP bridge startup) leaves no events file; a warehouse_read run refused for want of an MCP
         server leaves none either (no call is made); and any process exit before a turn record lands (runner lost, job
         timeout, an OSError from write_atomic) loses that turn's attempts (LL-3 prefix rule).
@@ -56,11 +57,12 @@ scope:
         entry (if any) as cancelled with latency_ms = max(0, now_ms minus its started_at_ms) (both time.time in
         production; the clamp covers a fake wall); record = the captured record as a dict (an attempt that returned ok
         before the cancel keeps its CallRecord, so no ok entry ever lacks one); probe_record = the captured probe
-        record and probe_turn 1 when it is set; attempts_known true. failed_over is true when the turn began on role
+        record when set; attempts_known true. failed_over is true when the turn began on role
         primary and the probe record is set or any written entry with attempt 1 or more is warm_fetched_escape_hatch's
         (a fallback call was sent); then the record's role is warm_fetched_escape_hatch, as on_result writes a
         fail-over turn. Otherwise (a probe entry, attempt 0, alone cancelled or raised) role is the turn's starting role
-        and failed_over false, as the fallback_unavailable rule below. turns_used adds one per entry written plus one for the probe record. A deadline during
+        and failed_over false, as the fallback_unavailable rule below. probe_turn is 1 exactly when failed_over is true,
+        as on_result and on_transport_error set it, and turns_used adds one per entry written plus probe_turn. A deadline during
         a retry backoff has no in-flight entry. When capture.filled is false (a transport that ignores capture=), the
         branch keeps today's values: attempts [], attempts_known false, turns_used the upper bound.
       - on_transport_error for kind fallback_unavailable: no fallback call was sent, so the turn record keeps the
@@ -81,7 +83,8 @@ scope:
         0; e.g. a client that turns CancelledError into an error) re-raises CancelledError with in_flight left set:
         it is never classified, retried or slept on past the deadline.
       - capture.probe_record is set when the direct ensure_asserted or the fallback gate returns a fresh probe.
-      - No other behaviour changes; result.attempts and error.attempts keep today's values.
+      - No other behaviour changes; result.attempts and error.attempts keep today's values, except a fallback_unavailable
+        error, which carries the primary attempts and the raised probe the cold-start row adds.
   - file: scripts/llm/litellm_cold_start.py
     action: Modify
     purpose: >-
@@ -148,7 +151,8 @@ scope:
       - test_cancel_leaves_in_flight_set (async: the task is cancelled while the fake completion awaits).
       - test_cancel_in_backoff_leaves_no_in_flight.
       - test_cancel_raised_as_error_is_not_retried: a fake that answers cancellation with an APIConnectionError-shaped
-        error; CancelledError propagates, one completion call, no sleep, in_flight set.
+        error; CancelledError propagates, one completion call, no sleep, in_flight set, nothing appended to
+        capture.attempts.
       - test_probe_record_on_capture (direct fallback role and fail-over gate) and capture.filled set on entry.
       - test_outage_inside_task_group_is_still_classified: an outage raised while the role runs inside an anyio task
         group (as the MCP bridge path does) is classified and retried, never turned into CancelledError (critique r1
@@ -171,8 +175,9 @@ acceptance_criteria:
   - >-
     A turn cut short by the deadline records every attempt the transport made in send order, the call in flight as one
     more entry with outcome cancelled and its selection's provider, billing_shape and started_at_ms, a returned call's
-    CallRecord and a completed fresh probe's record, with attempts_known true and the role and failed_over the scope
-    row states; a deadline in a retry backoff adds no entry, and a transport that fills no capture keeps attempts
+    CallRecord and a completed fresh probe's record, with attempts_known true; the turn's role and failed_over are
+    primary and false unless a fallback call was sent or a fresh probe completed, then warm_fetched_escape_hatch and
+    true, with probe_turn 1; a deadline in a retry backoff adds no entry, and a transport that fills no capture keeps attempts
     unknown.
   - >-
     A fail-over whose fallback cold start fails keeps the primary attempts and, when the probe was sent and raised, the
@@ -321,7 +326,11 @@ constraints:
     The approved LL-3 and LL-4 words (telemetry-event-envelope.yaml) are the specification; where this plan and they
     differ, STOP to this planning thread. The transport_exception path stays without a turn record (LL-4).
   - src/persona_backends imports nothing under scripts; Capture is filled by duck typing.
-  - Every module stays under 500 SLOC (Decision 128); split, never raise.
+  - >-
+    Every module stays under 500 SLOC (Decision 128); split, never raise. The two test files nearest the cap
+    (test_litellm_backend.py 323, test_llm_litellm_transport.py 340 SLOC at planning) stay the coverage homes
+    (map_source_to_test): keep them under 500 by parametrising sync and async faces and putting shared fakes in
+    tests/persona_backends/fakes.py; if a file would still cross 500, STOP to this planning thread for a scope amendment.
   - No rescue agents or workaround loops (Decision 55); never skip, disable or quarantine a test (Decision 235).
 context:
   - >-
@@ -360,6 +369,7 @@ gate_rounds:
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 8}
   - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: "v1:dc29031fe309a7263378d694bae833d92bb71b9a1e8504097152c412f3417d34"}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 4}
+  - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 7}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
