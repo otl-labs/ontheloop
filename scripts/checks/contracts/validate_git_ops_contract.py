@@ -1,14 +1,17 @@
 """git-ops contract pointer-resolution guard (PLAN-ambient-prose-contract-relocation).
 
-Two legs: (1) AGENTS.md still carries a resolvable pointer to docs/contracts/git-ops.yaml (the
+Three legs: (1) AGENTS.md still carries a resolvable pointer to docs/contracts/git-ops.yaml (the
 Class D contract this module itself names, satisfying evaluator_kinds.check's basename-match
-rule), and (2) every repo-relative path the contract's own `referenced_repo_paths` list declares
-exists in the working tree -- so a later relocation that drops or renames a target is caught
-instead of silently breaking the pointer's promise.
+rule) that names a `#<key>` anchor, (2) every repo-relative path the contract's own
+`referenced_repo_paths` list declares exists in the working tree -- so a later relocation that drops
+or renames a target is caught instead of silently breaking the pointer's promise, and (3) every
+`git-ops.yaml#<key>` anchor in AGENTS.md, .claude/commands/*.md and .claude/skills/*/SKILL.md
+resolves by walking mapping keys of the parsed contract.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
@@ -17,6 +20,24 @@ from scripts.checks import _common, registry
 
 _CONTRACT_REL_PATH = "docs/contracts/git-ops.yaml"
 _AGENTS_MD_REL_PATH = "AGENTS.md"
+_ANCHOR_RE = re.compile(r"git-ops\.yaml#([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)")
+_ANCHOR_SURFACE_GLOBS = (".claude/commands/*.md", ".claude/skills/*/SKILL.md")
+
+
+def _key_resolves(data: object, dotted: str) -> bool:
+    node = data
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return False
+        node = node[part]
+    return True
+
+
+def _surfaces(root: Path) -> list[Path]:
+    paths = [root / _AGENTS_MD_REL_PATH]
+    for pattern in _ANCHOR_SURFACE_GLOBS:
+        paths.extend(sorted(root.glob(pattern)))
+    return paths
 
 
 @registry.register("validate_git_ops_contract", owner="platform")
@@ -47,8 +68,22 @@ def validate_git_ops_contract(failed: list[str], *, repo_root: Path | None = Non
         return
 
     agents_text = agents_md_path.read_text(encoding="utf-8")
+    agents_anchors = _ANCHOR_RE.findall(agents_text)
     if _CONTRACT_REL_PATH not in agents_text:
         failed.append(f"git-ops contract: {_AGENTS_MD_REL_PATH} no longer points at {_CONTRACT_REL_PATH}")
+    elif not agents_anchors:
+        failed.append(f"git-ops contract: {_AGENTS_MD_REL_PATH} points at {_CONTRACT_REL_PATH} without a #<key> anchor")
+
+    anchors_checked = 0
+    unresolved = 0
+    for surface in _surfaces(root):
+        for key in _ANCHOR_RE.findall(surface.read_text(encoding="utf-8")):
+            anchors_checked += 1
+            if not _key_resolves(contract_data, key):
+                unresolved += 1
+                failed.append(
+                    f"git-ops contract: {surface.relative_to(root).as_posix()} anchor git-ops.yaml#{key} does not resolve"
+                )
 
     named_paths = contract_data.get("referenced_repo_paths") if isinstance(contract_data, dict) else None
     if not isinstance(named_paths, list) or not named_paths:
@@ -59,7 +94,10 @@ def validate_git_ops_contract(failed: list[str], *, repo_root: Path | None = Non
     if missing:
         failed.append(f"git-ops contract: {_CONTRACT_REL_PATH} names path(s) that do not exist: {missing}")
 
-    registry.examined(len(named_paths), unit="named paths")
+    registry.examined(len(named_paths) + anchors_checked, unit="named paths and anchors")
 
-    if _CONTRACT_REL_PATH in agents_text and not missing and named_paths:
-        print(f"  PASS: {_AGENTS_MD_REL_PATH} points at {_CONTRACT_REL_PATH}; all {len(named_paths)} named path(s) exist.")
+    if agents_anchors and not missing and not unresolved and named_paths:
+        print(
+            f"  PASS: {_AGENTS_MD_REL_PATH} points at {_CONTRACT_REL_PATH}#{agents_anchors[0]}; "
+            f"{anchors_checked} anchor(s) resolve; all {len(named_paths)} named path(s) exist."
+        )

@@ -121,10 +121,9 @@ merge-on-business-key, partitioning) live in `docs/contracts/data-modeling-stand
 planning skill's Data-Model Assessment section is only the read-trigger stub.
 
 ## Git-ops procedure
-Read `docs/contracts/git-ops.yaml` before any push/PR/CI/merge action -- it carries the full
-procedure (branching topology, commit-message conventions, rebase mechanics, wake-signal detail,
-and the CI-credential/OAuth-token runbook); AGENTS.md keeps only the machine-enforced norms and
-one-line triggers below.
+Before any push/PR/CI/merge action read `docs/contracts/git-ops.yaml#push_pr_ci_merge_flow` and the keys it
+names; read its other keys (branching, commit messages, Resolves: trailer, OAuth-token runbook) only when needed.
+AGENTS.md keeps only the machine-enforced norms and one-line triggers below.
 
 - **Presubmit tier**: see the table below -- fast `--pre` gates PRs, full tier runs pre-handoff (local) + post-merge.
 - **Squash-merge**: `mcp__github__merge_pull_request(..., merge_method="squash")` once CI is green.

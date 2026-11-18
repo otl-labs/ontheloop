@@ -7,7 +7,7 @@ model: opus[1m]
 
 **Intent**: Clarify the human's intent, orient against the project, and produce a complete self-contained `PLAN-{slug}.yaml` that any agent can execute without further interaction. Does not implement anything.
 
-*Note: For detailed guidelines on complexity, verification tiers, preflight constraints, and the plan template, invoke your `planning` skill via the Skill tool. For the canonical git-ops procedure (branching, rebase rules, PR/CI/merge flow), see `docs/contracts/git-ops.yaml`.*
+*Note: For detailed guidelines on complexity, verification tiers, preflight constraints, and the plan template, invoke your `planning` skill via the Skill tool. For the git-ops procedure read only the key a step names: branching `docs/contracts/git-ops.yaml#branching_topology`, rebase rules `git-ops.yaml#rebase_phase_distinction`, PR/CI/merge flow `git-ops.yaml#push_pr_ci_merge_flow`.*
 
 ## Step 1: Run Preflight
 
@@ -42,7 +42,7 @@ If vague, ask 2-5 questions. Watch for ROADMAP misalignment (the platform/produc
 Suggest 3-5 open recommendations aligned with the task (`bin/venv-python -m scripts.recs_related` over the likely scope files).
 
 ## Step 4: Identify Affected Files
-1. Use the File Router to locate source files.
+1. Locate source files with `bin/venv-python -m scripts.session.file_router <term>` (rows of `docs/contracts/file-router.yaml#routes`); never read the whole file.
 2. Read those files and check `tests/` for existing test coverage.
 3. Conduct an Infrastructure Assessment if `.tf` files are in scope.
 4. Conduct a Lambda Deployment Assessment if Lambda-packaged files are in scope.
