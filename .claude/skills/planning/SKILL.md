@@ -345,7 +345,7 @@ context: # <= 40 rendered lines; link evidence (ids/paths), never restate it
   - Relevant decisions, phase dependencies, known gotchas
   - "Decision-scout verdict + CITE list (verbatim decision ids)" # REQUIRED ITEM (WF-04a)
 gate_rounds: # REQUIRED on new plans; one row per gate round (+gate_run_id if dispatched)
-  - {gate: decision-scout, round: 1, verdict: NO_FLAGS} # critique rows add blocking, nits; escalated: true + escalation_choice when asked
+  - {gate: decision-scout, round: 1, verdict: NO_FLAGS} # critique rows add blocking, nits, category_consistency (12p per drafted entry); escalated + escalation_choice when asked
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -420,8 +420,6 @@ Every round is a full fresh read and no count caps them. The critic tags each fi
 **Escalate** only on: a finding recurring at a tag+anchor you recorded fixed (oscillation interrupts, not the count); a disputed blocking finding; or a fix that would change approved scope, tier or a cited Decision. Present, per finding, the finding verbatim with tags and anchor; why it did not converge; your recommendation; and, when re-escalating, a clause that starts a new series naming the predecessor rounds -- plus the five choices: accept-with-deferral / re-scope / split / abandon / one more round. Carrier: AskUserQuestion if held, else chat; dispatched, GATE_REQUEST `open_questions`. An open escalation is a stop: no round, no plan edit, until the human answers; record the answer as the row's `escalation_choice` (accept-with-deferral is human-authored only). Revisit when 20 plans carry `gate_rounds`: did a confirming round ever find a blocking finding, and were findings after round 5 real?
 
 **Contested-residue consult:** On a disputed blocking finding only, consult `model: "fable"` per the overseer skill's Fable Advice-Consult Protocol (dispatched: an `open_questions` item of the same GATE_REQUEST) -- a third fresh reading of THIS plan against the repo's own Decisions, not industry practice. It recommends a disposition and decides nothing. Revisit after 10 contested escalations; demote if it changed nothing in 8 or more.
-
-This gate reviews the PLAN artefact, not the report deliverable. For REPORT-ONLY plans, the deliverable gets its own critique in Step 10.
 
 ## Report Critique Gate (Workflow Step 10, REPORT-ONLY only)
 

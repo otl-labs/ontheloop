@@ -254,3 +254,23 @@ def test_drafted_entries_of_a_non_mapping_plan(tmp_path: Path) -> None:
     path = tmp_path / "PLAN-list.yaml"
     path.write_text("- a\n- b\n", encoding="utf-8")
     assert pdd.drafted_entries(path, tmp_path) == []
+
+
+def test_drafted_titles_match_the_scan_count_and_order(tmp_path: Path) -> None:
+    _sidecar(tmp_path, [{"id": "d", "file": "docs/DECISIONS.md", "before": "", "after": _draft(title="Side")}])
+    path = _plan(tmp_path, _draft(title="Text") + "\n" + _draft(title="Text2"))
+    assert pdd.drafted_titles(path, tmp_path) == ["Text", "Text2", "Side"]
+    assert len(pdd.drafted_titles(path, tmp_path)) == pdd._scan_plan(path, tmp_path)[0]
+
+
+def test_drafted_titles_is_total(tmp_path: Path) -> None:
+    assert pdd.drafted_titles(tmp_path / "missing.yaml", tmp_path) == []
+    scalar = tmp_path / "PLAN-list.yaml"
+    scalar.write_text("- a\n", encoding="utf-8")
+    assert pdd.drafted_titles(scalar, tmp_path) == []
+
+
+def test_a_title_drafted_in_text_and_sidecar_appears_twice(tmp_path: Path) -> None:
+    _sidecar(tmp_path, [{"id": "d", "file": "docs/DECISIONS.md", "before": "", "after": _draft(title="Same")}])
+    path = _plan(tmp_path, _draft(title="Same"))
+    assert pdd.drafted_titles(path, tmp_path) == ["Same", "Same"]
