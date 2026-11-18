@@ -234,7 +234,6 @@ INDEX_ROWS = [
         "amends": [1],
         "supersedes": [],
         "serves": ["NS.1"],
-        "triage_excerpt": "excerpt text only",
     },
     {"number": 3, "live": True, "decided_date": "", "amends": [], "supersedes": [2]},
     {"number": 4, "live": False, "decided_date": "2026-03-01", "amends": [], "supersedes": []},
@@ -273,7 +272,7 @@ def test_load_entries_text_related_dates_and_fallbacks(tmp_path: Path) -> None:
     assert by[1].related == (2,)
     assert by[1].kind == "direction"
     assert by[1].serves is None
-    assert by[2].text == "Second title excerpt text only"
+    assert by[2].text == "Second title nothing else"
     assert by[2].serves == ("NS.1",)
     assert by[2].amends == (1,)
     assert by[2].decided == date(2026, 2, 1)
