@@ -49,10 +49,6 @@ _TAXONOMY = {
             "code_vs_infra": "same code path, mocked externals",
             "apply_gating": "auto-apply on push to main behind the deterministic guard",
         },
-        "organization": {
-            "code_vs_infra": "terraform/organization/ only",
-            "apply_gating": "the real protected-actions.yaml maps a live root to this row; not admin-only in this fixture",
-        },
         "mock_vs_real_note": "a string note, not a mapping",
     }
 }

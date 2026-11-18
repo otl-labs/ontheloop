@@ -93,6 +93,23 @@ def lane_problems(files: dict[str, str]) -> list[str]:
             problems.append(f"fallback {local} is not a Deny")
     if '"*"' not in re.search(r"deny_assume_trust_json\s*=.*?\n  \}\)", admin, re.S).group(0):  # type: ignore[union-attr]
         problems.append("the trust fallback does not name every principal")
+    for rtype, rname in (
+        ("aws_iam_user", "org_admin_operator"),
+        ("aws_iam_group", "org_admin_operators"),
+        ("aws_iam_role", "organization_admin"),
+    ):
+        body = _resource_body(admin, rtype, rname) or ""
+        for banned in ("description", "path", "permissions_boundary"):
+            if _attr(body, banned) is not None:
+                problems.append(f"{rtype}.{rname} sets {banned}")
+    return problems
+
+
+def group_problems(files: dict[str, str]) -> list[str]:
+    """Amendment 2: the user's only grant is group agent-platform-org-admin-operators, never a user policy."""
+    problems: list[str] = []
+    admin = _strip_comments(files["management_admin.tf"])
+    resources = [(t, n, name) for n, text in files.items() if n.endswith(".tf") for _, t, name in _resources(text)]
     if any(rtype == "aws_iam_user_policy" for rtype, _, _ in resources):
         problems.append("the root declares an aws_iam_user_policy (banned in every root; the grant goes through the group)")
     group_policies = [name for rtype, _, name in resources if rtype == "aws_iam_group_policy"]
@@ -109,15 +126,6 @@ def lane_problems(files: dict[str, str]) -> list[str]:
         _attr(member, "groups") or ""
     ):
         problems.append("one aws_iam_user_group_membership must name the user and the group")
-    for rtype, rname in (
-        ("aws_iam_user", "org_admin_operator"),
-        ("aws_iam_group", "org_admin_operators"),
-        ("aws_iam_role", "organization_admin"),
-    ):
-        body = _resource_body(admin, rtype, rname) or ""
-        for banned in ("description", "path", "permissions_boundary"):
-            if _attr(body, banned) is not None:
-                problems.append(f"{rtype}.{rname} sets {banned}")
     return problems
 
 
@@ -258,7 +266,7 @@ def template_syntax_problems(files: dict[str, str]) -> list[str]:
     return problems
 
 
-_PREDICATES = (lane_problems, trust_problems, grant_problems, sid_set_problems, template_syntax_problems)
+_PREDICATES = (lane_problems, group_problems, trust_problems, grant_problems, sid_set_problems, template_syntax_problems)
 
 
 @pytest.mark.parametrize("predicate", _PREDICATES, ids=lambda p: p.__name__)
@@ -288,7 +296,7 @@ _REDS: dict[str, tuple[Callable[[dict[str, str]], list[str]], Callable[[dict[str
         _edit("management_admin.tf", '  name = "org-admin-operator"', '  name = "org-admin-operator"\n  path = "/x/"'),
     ),
     "user policy returns": (
-        lane_problems,
+        group_problems,
         lambda f: {
             **f,
             "management_admin.tf": f["management_admin.tf"]
@@ -296,7 +304,7 @@ _REDS: dict[str, tuple[Callable[[dict[str, str]], list[str]], Callable[[dict[str
         },
     ),
     "second group policy": (
-        lane_problems,
+        group_problems,
         lambda f: {
             **f,
             "management_admin.tf": f["management_admin.tf"]
@@ -304,7 +312,7 @@ _REDS: dict[str, tuple[Callable[[dict[str, str]], list[str]], Callable[[dict[str
         },
     ),
     "membership dropped": (
-        lane_problems,
+        group_problems,
         _edit("management_admin.tf", "aws_iam_group.org_admin_operators.name]", "]"),
     ),
     "group description": (
