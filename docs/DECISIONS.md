@@ -255,7 +255,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 271
-review_by: 2027-05-31
+review_by: 2027-05-23
 on_trigger: "re-decide via /plan; never add an agent override"
 conditions:
   - id: app-key-exposed
@@ -426,7 +426,7 @@ unenforced (the scout reads it); a carrier may still pass the bounded telemetry 
 
 ```yaml reversal-conditions
 decision: 270
-review_by: 2027-05-31
+review_by: 2027-05-24
 on_trigger: "re-decide via /plan"
 conditions:
   - id: boundary-size
@@ -497,7 +497,7 @@ the portal's acceptance_lint refusal.
 
 ```yaml reversal-conditions
 decision: 269
-review_by: 2027-05-31
+review_by: 2027-05-24
 on_trigger: "re-decide via /plan"
 conditions:
   - id: findings-ignored
@@ -560,7 +560,7 @@ rec-608, deleted under Decision 70).
 
 ```yaml reversal-conditions
 decision: 268
-review_by: 2027-05-31
+review_by: 2027-05-24
 on_trigger: "re-decide via /plan"
 conditions:
   - id: lookup-cost
@@ -614,7 +614,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 267
-review_by: 2027-05-31
+review_by: 2027-05-25
 on_trigger: "re-decide via /plan"
 conditions:
   - id: lock-available
@@ -707,7 +707,7 @@ rec-5202 and is unenforced until it lands.
 
 ```yaml reversal-conditions
 decision: 266
-review_by: 2027-05-31
+review_by: 2027-05-25
 on_trigger: "re-decide via /plan"
 conditions:
   - id: catalog-stats-growth
@@ -764,7 +764,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 265
-review_by: 2027-05-31
+review_by: 2027-05-26
 on_trigger: "re-decide via /plan"
 conditions:
   - id: rubber-stamp
@@ -821,7 +821,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 264
-review_by: 2027-05-31
+review_by: 2027-05-26
 on_trigger: "re-decide via /plan; never add an agent override"
 conditions:
   - id: native-gate-available
@@ -881,7 +881,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 263
-review_by: 2027-05-31
+review_by: 2027-05-26
 on_trigger: "re-decide via /plan"
 conditions:
   - id: sit-hosts-verdict-jobs
@@ -940,7 +940,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 262
-review_by: 2027-05-31
+review_by: 2027-05-27
 on_trigger: "re-decide via /plan; never add an agent override"
 conditions:
   - id: override-run-built
@@ -1011,7 +1011,7 @@ unenforced residuals that only the decision scout and plan critique read, owned 
 
 ```yaml reversal-conditions
 decision: 258
-review_by: 2027-05-31
+review_by: 2027-05-27
 on_trigger: "re-decide via /plan"
 conditions:
   - id: access-restored
@@ -1100,7 +1100,7 @@ state-reading job (Decision 238 cl.3).
 
 ```yaml reversal-conditions
 decision: 257
-review_by: 2027-05-31
+review_by: 2027-05-27
 on_trigger: "re-decide via /plan; stop CI applies of terraform/bootstrap until then"
 conditions:
   - id: unreviewed-apply
@@ -1222,7 +1222,7 @@ routine session.
 
 ```yaml reversal-conditions
 decision: 256
-review_by: 2027-05-31
+review_by: 2027-05-28
 on_trigger: "re-decide via /plan"
 conditions:
   - id: minting-allowed
@@ -1315,7 +1315,7 @@ Decision 223); SIT gets its own API once its functions exist.
 
 ```yaml reversal-conditions
 decision: 255
-review_by: 2027-05-31
+review_by: 2027-05-28
 on_trigger: "re-decide via /plan"
 conditions:
   - id: proxy-signs-function-urls
@@ -1410,7 +1410,7 @@ main's colour.
 
 ```yaml reversal-conditions
 decision: 254
-review_by: 2027-05-31
+review_by: 2027-05-28
 on_trigger: "re-decide via /plan"
 conditions:
   - id: culprit-misattribution
@@ -1494,7 +1494,7 @@ third-party credential inside SIT's boundary).
 
 ```yaml reversal-conditions
 decision: 253
-review_by: 2027-05-31
+review_by: 2027-05-29
 on_trigger: "re-decide via /plan"
 conditions:
   - id: cutover-rehearsal-failed
@@ -1585,7 +1585,7 @@ PROD.
 
 ```yaml reversal-conditions
 decision: 252
-review_by: 2027-05-31
+review_by: 2027-05-29
 on_trigger: "re-decide via /plan"
 conditions:
   - id: spike-failed
@@ -1678,7 +1678,7 @@ Neon branch, role and database created through the Neon API. No Decision names a
 
 ```yaml reversal-conditions
 decision: 251
-review_by: 2027-05-31
+review_by: 2027-05-29
 on_trigger: "re-decide via /plan"
 conditions:
   - id: residue-left
@@ -1738,7 +1738,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 250
-review_by: 2027-05-31
+review_by: 2027-05-30
 on_trigger: "re-decide via /plan"
 conditions:
   - id: false-reds
@@ -1798,7 +1798,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 249
-review_by: 2027-05-31
+review_by: 2027-05-30
 on_trigger: "re-decide via /plan"
 conditions:
   - id: red-pause-too-costly
@@ -1901,7 +1901,7 @@ rewrite it).
 
 ```yaml reversal-conditions
 decision: 248
-review_by: 2027-05-31
+review_by: 2027-05-30
 on_trigger: "re-decide via /plan; stop CI applies of terraform/github until then"
 conditions:
   - id: approval-bypass
@@ -1996,7 +1996,7 @@ T5.6; cl.3 and cl.5 -- T4.31, interim practice unenforced by design (every child
 
 ```yaml reversal-conditions
 decision: 247
-review_by: 2027-06-30
+review_by: 2027-06-25
 on_trigger: "re-decide via /plan"
 conditions:
   - id: children-miss-parent
@@ -2270,7 +2270,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 243
-review_by: 2027-06-30
+review_by: 2027-06-26
 on_trigger: "re-decide via /plan"
 conditions:
   - id: per-file-split
@@ -2349,7 +2349,7 @@ An independent review reached the same choice (aws-account-path/ADVICE.md).
 
 ```yaml reversal-conditions
 decision: 242
-review_by: 2027-06-30
+review_by: 2027-06-26
 on_trigger: "re-decide via /plan"
 conditions:
   - id: assignment-refused
@@ -2413,7 +2413,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 241
-review_by: 2027-06-30
+review_by: 2027-06-26
 on_trigger: "re-decide via /plan"
 conditions:
   - id: step-adds-nothing
@@ -2468,7 +2468,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 240
-review_by: 2027-06-30
+review_by: 2027-06-27
 on_trigger: "re-decide via /plan"
 conditions:
   - id: relationship-unnamed
@@ -2561,7 +2561,7 @@ enforced; cl.7 -- the bundle tests and rec-4696's boundary tests.
 
 ```yaml reversal-conditions
 decision: 239
-review_by: 2027-04-30
+review_by: 2027-04-25
 on_trigger: "re-decide via /plan"
 conditions:
   - id: detector-gap
@@ -2662,7 +2662,7 @@ check; cl.3 and cl.4, test_terraform_plan_trusted (rec-4637) and the values-stri
 
 ```yaml reversal-conditions
 decision: 238
-review_by: 2027-04-30
+review_by: 2027-04-25
 on_trigger: "re-decide via /plan"
 conditions:
   - id: premises-change
@@ -2740,7 +2740,7 @@ non-features, held by their reversal conditions; cl.6 -- deploy-paths.yaml's sco
 
 ```yaml reversal-conditions
 decision: 237
-review_by: 2027-04-30
+review_by: 2027-04-26
 on_trigger: "re-decide via /plan"
 conditions:
   - id: managed-rotation-wanted
@@ -2831,7 +2831,7 @@ test_telemetry_production_maintenance_tf, the metric-dimension tests and the pos
 
 ```yaml reversal-conditions
 decision: 236
-review_by: 2027-04-30
+review_by: 2027-04-26
 on_trigger: "re-decide via /plan"
 conditions:
   - id: second-tenant
@@ -2892,7 +2892,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 235
-review_by: 2027-06-30
+review_by: 2027-06-27
 on_trigger: "re-decide via /plan"
 conditions:
   - id: unique-catch
@@ -2946,7 +2946,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 234
-review_by: 2027-06-30
+review_by: 2027-06-27
 on_trigger: "re-decide via /plan"
 conditions:
   - id: srt-preview-ends
@@ -3005,7 +3005,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 233
-review_by: 2027-06-30
+review_by: 2027-06-28
 on_trigger: "re-decide via /plan"
 conditions:
   - id: multi-writer-unsafe
@@ -3061,7 +3061,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 232
-review_by: 2027-06-30
+review_by: 2027-06-28
 on_trigger: "re-decide via /plan"
 conditions:
   - id: signaller-unvalidated
@@ -3155,7 +3155,7 @@ Editable guardrails as a security boundary -- rejected: the loop could edit its 
 
 ```yaml reversal-conditions
 decision: 231
-review_by: 2027-06-30
+review_by: 2027-06-28
 on_trigger: "re-decide via /plan"
 conditions:
   - id: grader-insufficient
@@ -3210,7 +3210,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 230
-review_by: 2027-04-30
+review_by: 2027-04-26
 on_trigger: "re-decide via /plan"
 conditions:
   - id: owner-role-refused
@@ -3303,7 +3303,7 @@ rejected: an unverified handoff.
 
 ```yaml reversal-conditions
 decision: 229
-review_by: 2027-04-30
+review_by: 2027-04-27
 on_trigger: "re-decide via /plan"
 conditions:
   - id: session-start-ungovernable
@@ -3409,7 +3409,7 @@ lands.
 
 ```yaml reversal-conditions
 decision: 228
-review_by: 2027-04-30
+review_by: 2027-04-27
 on_trigger: "re-decide via /plan"
 conditions:
   - id: resume-after-threshold
@@ -3462,7 +3462,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 227
-review_by: 2027-06-30
+review_by: 2027-06-29
 on_trigger: "re-decide via /plan"
 conditions:
   - id: archived-records-reassembled
@@ -3548,7 +3548,7 @@ today (rec-4444). cl.5: rec-4441. cl.3 inherits the selector's misses (rec-4429)
 
 ```yaml reversal-conditions
 decision: 226
-review_by: 2027-04-30
+review_by: 2027-04-27
 on_trigger: "re-decide via /plan"
 conditions:
   - id: track-a-misuse
@@ -3649,7 +3649,7 @@ residual owned by rec-3358.
 
 ```yaml reversal-conditions
 decision: 225
-review_by: 2027-04-30
+review_by: 2027-04-28
 on_trigger: "re-decide via /plan; update or re-arm this stanza"
 conditions:
   - id: ci-root-declares-platform-role
@@ -3709,7 +3709,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 224
-review_by: 2027-06-30
+review_by: 2027-06-29
 on_trigger: "re-decide via /plan"
 conditions:
   - id: environment-cannot-carry-secrets
@@ -3755,7 +3755,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 222
-review_by: 2027-04-30
+review_by: 2027-04-28
 on_trigger: "re-decide via /plan"
 conditions:
   - id: ducklake-alter-breaks-table
@@ -3855,7 +3855,7 @@ Pattern B (rec-4043).
 
 ```yaml reversal-conditions
 decision: 223
-review_by: 2027-04-30
+review_by: 2027-04-28
 on_trigger: "re-decide via /plan; update or re-arm this stanza"
 conditions:
   - id: ci-writable-again
@@ -3918,7 +3918,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 221
-review_by: 2027-06-30
+review_by: 2027-06-29
 on_trigger: "re-decide via /plan"
 conditions:
   - id: journal-ratified
@@ -4050,7 +4050,7 @@ and retires the last external use of the Theseus brand (Decision 198 cl.1).
 
 ```yaml reversal-conditions
 decision: 218
-review_by: 2027-04-30
+review_by: 2027-04-29
 on_trigger: "re-decide via /plan"
 conditions:
   - id: transfer-not-executed
@@ -4140,7 +4140,7 @@ Measurement: rec-4321, rec-4322.
 
 ```yaml reversal-conditions
 decision: 217
-review_by: 2027-03-31
+review_by: 2027-03-26
 on_trigger: "re-plan the gated clause via /plan; review_by backstops the manual conditions"
 conditions:
   - id: concurrency-raised
@@ -4199,7 +4199,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 216
-review_by: 2027-04-30
+review_by: 2027-04-29
 on_trigger: "re-decide via /plan"
 conditions:
   - id: owner-identity-changes
@@ -4255,7 +4255,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 215
-review_by: 2027-04-30
+review_by: 2027-04-29
 on_trigger: "re-decide via /plan"
 conditions:
   - id: signal-rows-over-budget
@@ -4549,7 +4549,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 210
-review_by: 2027-03-31
+review_by: 2027-03-27
 on_trigger: "re-decide via /plan"
 conditions:
   - id: write-time-rejects-block-valid-capture
@@ -4617,7 +4617,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 209
-review_by: 2027-03-31
+review_by: 2027-03-27
 on_trigger: "re-decide via /plan"
 conditions:
   - id: split-friction
@@ -4819,7 +4819,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 206
-review_by: 2027-03-31
+review_by: 2027-03-27
 on_trigger: "re-decide via /plan"
 conditions:
   - id: terms-tightened
@@ -4878,7 +4878,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 205
-review_by: 2027-03-31
+review_by: 2027-03-28
 on_trigger: "re-decide via /plan"
 conditions:
   - id: actions-policy
@@ -5292,7 +5292,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 199
-review_by: 2027-03-31
+review_by: 2027-03-29
 on_trigger: "re-decide via /plan"
 conditions:
   - id: derivation-collision-found
@@ -5354,7 +5354,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 200
-review_by: 2027-03-31
+review_by: 2027-03-28
 on_trigger: "re-decide via /plan"
 conditions:
   - id: registration-not-idempotent
@@ -5445,7 +5445,7 @@ is before adoption, not after.
 
 ```yaml reversal-conditions
 decision: 198
-review_by: 2027-03-31
+review_by: 2027-03-29
 on_trigger: "re-decide via /plan"
 conditions:
   - id: trademark-conflict-found
@@ -5505,7 +5505,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 197
-review_by: 2027-03-31
+review_by: 2027-03-29
 on_trigger: "re-decide via /plan"
 conditions:
   - id: two-shapes-after-all
@@ -5575,7 +5575,7 @@ significance:
 
 ```yaml reversal-conditions
 decision: 196
-review_by: 2027-03-31
+review_by: 2027-03-30
 on_trigger: "re-decide via /plan"
 conditions:
   - id: b-too-large
@@ -5653,7 +5653,7 @@ numbered Decision cannot cheaply un-say under Decision 177's append-only rule.
 
 ```yaml reversal-conditions
 decision: 195
-review_by: 2027-03-31
+review_by: 2027-03-30
 on_trigger: "re-decide via /plan"
 conditions:
   - id: assignment-executes
@@ -5773,7 +5773,7 @@ named deferred decision point, not a forgotten one.
 
 ```yaml reversal-conditions
 decision: 194
-review_by: 2027-03-31
+review_by: 2027-03-30
 on_trigger: "re-decide via /plan"
 conditions:
   - id: free-core-complete
