@@ -39,5 +39,5 @@ def test_the_probe_constants_equal_the_files_rows() -> None:
 
 def test_the_filter_supplied_snapshot_is_not_empty_or_stale_shaped() -> None:
     supplied = _config()["filter_supplied"]
-    assert "github.com" in supplied
+    assert any(host == "github.com" for host in supplied)
     assert any(host.startswith("productionresultssa*") for host in supplied)
