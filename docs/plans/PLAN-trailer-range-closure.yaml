@@ -25,20 +25,23 @@ scope:
     purpose: >-
       The range walk and covering logic for the trailer gate (both trailer modules sit near their budgets, and their
       coverage home tests/test_rec_trailer_acceptance.py is at 500 of 500 SLOC). Standard library plus
-      scripts.ci.last_green, scripts.ci.deploy_gate (Git, GithubApi, GateError) and scripts.rec_trailer
-      (parse_resolves_trailer); no module-level I/O, api, git and reader injected. Constants DEFERRED_MARKER =
+      scripts.ci.last_green, scripts.ci.deploy_gate (Git, GithubApi, GateError) and scripts.ci_rca.range_context
+      (compute_range, so the trailer gate and ci-rca read one range by one read order); it does not import
+      scripts.rec_trailer: the trailer parser is passed in as parse_trailer (so validate_full_tier_range's manifest
+      pre_globs, which cover scripts/ci/** and scripts/ci_rca/**, stay complete); no module-level I/O, api, git and
+      reader injected. Constants DEFERRED_MARKER =
       "TRAILER-RANGE DEFERRED", UNREADABLE_MARKER = "TRAILER-RANGE UNREADABLE", ANNOTATION_TITLE = "trailer-range".
       (1) run_covers(api, head) -> True | False | None: last_green.full_tier_state(api, head) == "started"; None on a
-      GateError. (2) range_merges(api, git, head, *, limit=50) -> {prev, range_status, merges}: prev =
-      last_green.resolve_prev(api, git, head, limit=limit), range_status "resolved"; when it is None, prev =
-      last_green.last_green_sha(api, git, ref=head) when that is a strict ancestor of head, range_status "widened";
-      else (or on a GateError) range_status "unresolved", prev None, merges []. merges: the first-parent commits after
-      prev and before head (git rev-list --first-parent prev..head, head dropped), newest first, keeping only those
-      whose full_tier_state is not "started" (all of them when resolved, by resolve_prev's definition; in a widened
-      range a merge that ran its own full tier covered itself) and whose message carries a Resolves trailer, each as
-      {sha, ids}. (3) extend_census(head, ids, entries, *, census_fn, reader, api, git) -> the census document {ids,
+      GateError. (2) range_merges(api, git, head, *, parse_trailer) -> {prev, range_status, merges}:
+      range_context.compute_range(api, git, head, "ci") with no recorded_range (rec-5107 passes one when it lands),
+      taking its prev and range_status (resolved, widened or unresolved) and ignoring its prs; merges: its commits
+      with head dropped, newest first, keeping only those whose full_tier_state is not "started" (all of them when
+      resolved, by resolve_prev's definition; in a widened range a merge that ran its own full tier covered itself;
+      a GateError on a state read makes range_status "unresolved" and merges []) and whose message parse_trailer
+      finds ids in, each as {sha, ids}; unresolved yields merges []. (3) extend_census(head, ids, entries, *,
+      census_fn, parse_trailer, reader, api, git) -> the census document {ids,
       entries, sha: head, covers, prev, range_status}: covers = run_covers(api, head); only when covers is True,
-      range_merges(api, git, head) is walked: for each merge newest first, its ids not in ids and not taken already
+      range_merges(api, git, head, parse_trailer=parse_trailer) is walked: for each merge newest first, its ids not in ids and not taken already
       are read through reader.named("rec_by_id", id=...), rows whose status is not "open" dropped, then
       census_fn(kept_ids, rows=kept_rows, closing_sha=merge sha) and only entries whose route is junit kept; their
       rec ids are appended to ids. When covers is not True, prev is None and range_status is "not_walked". It prints
@@ -56,7 +59,7 @@ scope:
       origin/main oldest first and prints "COVERING <sha>" for the first whose full_tier_state is "started" (a started
       run that later ends cancelled or timed out reads not started, so asking again names the next one), else
       "COVERING pending", exit 0; "COVERING unreadable <error>" exit 2 on a GateError.
-    new_imports: [scripts.ci.last_green, scripts.ci.deploy_gate, scripts.rec_trailer]
+    new_imports: [scripts.ci.last_green, scripts.ci.deploy_gate, scripts.ci_rca.range_context]
   - file: scripts/rec_trailer_acceptance.py
     action: Modify
     purpose: >-
@@ -64,7 +67,7 @@ scope:
       gains a keyword closing_sha (default None) carried on every entry. cmd_census: head = _current_sha(ROOT);
       entries = census(ids, repo_root=ROOT, closing_sha=head) when HEAD carries a trailer, else []; the document is
       trailer_range.extend_census(head, ids, entries, census_fn=<census bound to repo_root=ROOT>,
-      reader=_make_reader(), api=GithubApi(), git=Git(str(ROOT))); the no-op message prints when the document's ids
+      parse_trailer=<the module's existing Resolves parser>, reader=_make_reader(), api=GithubApi(), git=Git(str(ROOT))); the no-op message prints when the document's ids
       are empty; the document is written as today. rejoin(): the synthetic report_unavailable record's sha is its
       entry's closing_sha, falling back to the census sha as today. cmd_close: after rejoin, for each (closing_sha,
       group_ids) in trailer_range.close_groups(census_doc, commit_sha), call close_recs_from_trailer(group_ids,
@@ -83,10 +86,14 @@ scope:
       trailer-census: needs [main-validate] with if always() && github.event_name == 'push' (so its own and earlier
       runs' full-tier states are final when it reads them), permissions gain actions: read, checkout fetch-depth 0,
       and the census step's env gains GITHUB_TOKEN: github.token. trailer-closure: checkout fetch-depth 0 (changed_files
-      of an earlier range merge needs its parent). trailer-acceptance-evaluate and trailer-junit-verdict unchanged
-      (still {contents: read}, no id-token, the junit download names no run-id). No run: body, step name or step id
-      changes (config/composite_action_body_baseline.yaml rows stay); the two jobs' header comments name the range and
-      PLAN-trailer-range-closure.
+      of an earlier range merge needs its parent). trailer-acceptance-evaluate: if becomes always() &&
+      github.event_name == 'push' && needs.trailer-census.result == 'success' (inferred, unproven until VP 13: without
+      always() a failed main-validate skips the census's dependants transitively, which would stop static recs
+      closing; with it they close as today). Its permissions and trailer-junit-verdict's are unchanged (still
+      {contents: read}, no id-token, the junit download names no run-id). No run: body, step name or step id changes
+      (config/composite_action_body_baseline.yaml rows stay); the census job's header comment names the range,
+      PLAN-trailer-range-closure and the DECLARED COST (closure latency grows by the census and evaluate jobs' time,
+      which now start after main-validate).
   - file: docs/contracts/full-tier-range.yaml
     action: Modify
     purpose: >-
@@ -95,16 +102,17 @@ scope:
   - file: docs/contracts/git-ops.yaml
     action: Modify
     purpose: >-
-      Approved text (g01-g04), in place and line-neutral except one new amendment_log entry (contract_version 16 ->
-      17): trailer_acceptance_gate's PROVENANCE sentence (the report is the covering run's, whose range holds each
+      Approved text (g02-g04), in place and line-neutral except one new non-breaking amendment_log row (g02;
+      contract_version unchanged): trailer_acceptance_gate's PROVENANCE sentence (the report is the covering run's, whose range holds each
       entry's closing_sha) and resolves_trailer's FALLBACK sentence (never for a TRAILER-RANGE rec, which waits for the
-      covering run's trailer-closure job). 496 of 500 effective lines at plan time.
+      covering run's trailer-closure job). 496 of 500 effective lines at plan time, 497 after.
   - file: .claude/skills/implement/SKILL.md
     action: Modify
     purpose: >-
-      Approved text (s01): Commit Flow step 5's closeout names the TRAILER-RANGE line, which waits for the covering run
-      and no longer reads as "a non-refusal per-rec log line" that permits the fallback. Byte-neutral (599 to 599 B;
-      config/prose_budgets.yaml pins the file at 33216 B with 0 headroom).
+      Approved text (s01): Commit Flow step 5's closeout tail (from "route, a Decision 186 refusal" to "anything else
+      waits.") names the TRAILER-RANGE line, which waits, and no longer reads as "a non-refusal per-rec log line" that
+      permits the fallback. It leaves the line holding the `git-ops.yaml::resolves_trailer` pointer untouched.
+      Byte-neutral (247 to 247 B; config/prose_budgets.yaml pins the file at 33216 B with 0 headroom).
   - file: .claude/commands/implement.md
     action: Modify
     purpose: Approved text (i01) -- the post-merge closeout sentence sends a TRAILER-RANGE rec to its covering run's job.
@@ -123,11 +131,6 @@ scope:
       trailer_range.DEFERRED_MARKER and UNREADABLE_MARKER; a missing trailer_census section is drift. Its manifest
       pre_globs already include scripts/ci/** and the contract.
     new_imports: [scripts.ci.trailer_range]
-  - file: scripts/checks/ci_guards/_manifest.py
-    action: Modify
-    purpose: >-
-      validate_full_tier_range's Entry pre_globs gain "scripts/rec_trailer.py" (the evaluator now imports
-      scripts.ci.trailer_range, which imports it); nothing else changes.
   - file: tests/ci/test_range_aware_consumers.py
     action: Create
     purpose: >-
@@ -135,7 +138,7 @@ scope:
       Resolves trailers) and a fake GitHub API (runs and jobs per sha) and fake reader, driving the real cmd_census and
       cmd_close (scripts.ops_data_portal.update_rec patched to record calls). test_three_merge_batch_files_one_rec_and_closes_two_junit_recs:
       M0 ran its full tier; M1 (Resolves rec-A, junit node) and M2 (Resolves rec-B, junit node) did not (cancelled,
-      plans-only-free); M3 is head and ran it. ci-rca's range_context.compute_range(M3, "ci") is one range [M1, M2, M3]
+      plans-only-free); M3 is head and ran it. ci-rca's range_context.compute_range(api, git, M3, "ci") is one range [M1, M2, M3]
       with three PR rows (one diagnosis, so one rec); M3's census holds rec-A with closing_sha M1 and rec-B with M2;
       with both nodes passed in M3's junit report, update_rec closes rec-A at M1 and rec-B at M2, each verdict
       record's sha equal to its closing sha. Also: test_parent_ran_full_tier_is_todays_census_and_close (prev = HEAD^:
@@ -144,8 +147,10 @@ scope:
       range read); test_unreadable_state_marks_unreadable; test_closed_rec_in_range_is_not_censused;
       test_widened_range_skips_merges_that_ran_their_own_full_tier; test_unresolved_range_censuses_head_alone_with_error_annotation;
       test_ci_yml_trailer_jobs_shape (trailer-census needs main-validate, always() && push, actions: read, fetch-depth 0,
-      GITHUB_TOKEN on the census step; trailer-closure fetch-depth 0; trailer-junit-verdict permissions exactly
-      {contents: read}).
+      GITHUB_TOKEN on the census step; trailer-acceptance-evaluate's if is exactly always() && push &&
+      needs.trailer-census.result == 'success'; trailer-closure fetch-depth 0; trailer-junit-verdict permissions exactly
+      {contents: read}); test_static_recs_close_when_main_validate_failed (a census document from a run whose
+      main-validate failed: covers False, the static-route rec still closes under HEAD, junit recs DEFERRED).
   - file: tests/ci/test_trailer_range.py
     action: Create
     purpose: >-
@@ -230,10 +235,10 @@ verification_plan:
     graduation_check_id: trailer-junit-record-sha-is-closing-sha
   - step: 6
     phase: pre-deploy
-    action: ci.yml's trailer jobs have the shape the range needs and the junit job stays credential-free.
-    command: bin/venv-python -m pytest "tests/ci/test_range_aware_consumers.py::test_ci_yml_trailer_jobs_shape" tests/checks/ci_guards/test_validate_rec_autoclose_trailer_gate.py -q
-    expected: exit 0; the shape node red before (the test file does not exist); the trailer gate tests green before and after.
-    fix_if: trailer-census lacks needs main-validate, actions read or fetch-depth 0, trailer-closure is shallow, or the junit job gains any permission
+    action: ci.yml's trailer jobs have the shape the range needs, static recs still close when main-validate failed, and the junit job stays credential-free.
+    command: bin/venv-python -m pytest "tests/ci/test_range_aware_consumers.py::test_ci_yml_trailer_jobs_shape" "tests/ci/test_range_aware_consumers.py::test_static_recs_close_when_main_validate_failed" tests/checks/ci_guards/test_validate_rec_autoclose_trailer_gate.py -q
+    expected: exit 0; the two new nodes red before (the test file does not exist); the trailer gate tests green before and after.
+    fix_if: trailer-census lacks needs main-validate, actions read or fetch-depth 0, evaluate's if lacks always() or the census-success guard, trailer-closure is shallow, or the junit job gains any permission
     hermetic: true
     expected_literals: [" passed"]
     graduation: graduate
@@ -251,7 +256,7 @@ verification_plan:
   - step: 8
     phase: pre-deploy
     action: Existing trailer, merge-step, resolver and range suites keep their results; size budgets hold.
-    command: bin/venv-python -m pytest tests/test_rec_trailer_acceptance.py tests/test_rec_trailer_acceptance_junit.py tests/test_rec_trailer_acceptance_premerge.py tests/test_rec_trailer.py tests/test_session_merge_step.py tests/checks/ci_guards/test_validate_full_tier_range.py tests/ci/test_last_green.py tests/test_ci_rca_range_context.py tests/checks/ci_guards/test__manifest.py -q && bin/venv-python -c "from scripts.checks.sloc.sloc_limits import validate_sloc_limits as a; from scripts.checks.structural.size_limits import validate_structural_size_limits as b; f=[]; a(f); b(f); raise SystemExit(1 if f else 0)"
+    command: bin/venv-python -m pytest tests/test_rec_trailer_acceptance.py tests/test_rec_trailer_acceptance_junit.py tests/test_rec_trailer_acceptance_premerge.py tests/test_rec_trailer.py tests/test_session_merge_step.py tests/checks/ci_guards/test_validate_full_tier_range.py tests/ci/test_last_green.py tests/test_ci_rca_range_context.py -q && bin/venv-python -c "from scripts.checks.sloc.sloc_limits import validate_sloc_limits as a; from scripts.checks.structural.size_limits import validate_structural_size_limits as b; f=[]; a(f); b(f); raise SystemExit(1 if f else 0)"
     expected: exit 0
     fix_if: an existing assertion changes result, or a file crosses its budget (compact or decompose, never raise)
     hermetic: false
@@ -273,7 +278,8 @@ verification_plan:
     expected: exit 0, validate_test_coverage reporting no file below 100% (scripts/rec_trailer_acceptance.py from tests/test_rec_trailer_acceptance.py alone, scripts/rec_trailer_acceptance_junit.py from its own home).
     fix_if: a changed line of rec_trailer_acceptance.py is uncovered; move its branch into trailer_range or exercise it through the autouse fixture, never add SLOC past 500
     hermetic: false
-    graduation: not-applicable
+    graduation: waive
+    graduation_waiver_reason: scripts.validate is refused in the graduate partition; the fast tier runs on every PR in pr-validate.
   - step: 11
     phase: pre-deploy
     action: Live read-only check of covering against main (proves the jobs-API reading from a session).
@@ -294,7 +300,8 @@ verification_plan:
   - step: 13
     phase: post-deploy
     action: The merge commit's own push run names itself as covering and its census logged the range line.
-    command: bin/venv-python -m scripts.ci.trailer_range covering --sha <build merge sha>
+    command: >-
+      bin/venv-python -m scripts.ci.trailer_range covering --sha "$(git log -1 --format=%H origin/main --grep 'Resolves: rec-5106')"
     expected: exit 0 with "COVERING <build merge sha>" once that commit's full tier started; its trailer-census job log (mcp__github__get_job_logs) shows "[trailer_range] covers=True" and range_status resolved.
     fix_if: COVERING names another commit while the merge's own full tier ran, or the census log lacks the line; read the job log and file a rec against this plan (forward fix)
     hermetic: false
@@ -339,13 +346,15 @@ test_obligations:
     test_selector: tests/checks/ci_guards/test_validate_full_tier_range.py::test_missing_trailer_census_fails
     red_green_expectation: red before (node absent), green after
 constraints:
-  - "Behaviour-neutral where HEAD^'s main-validate ran the full tier: the range minus head is empty, covers is True, the census document's entries equal today's and trailer-closure makes today's single call. The one timing change: trailer-census now starts after main-validate; closure latency is unchanged because trailer-closure already waits for it through trailer-junit-verdict."
+  - "Behaviour-neutral where HEAD's own full tier started and HEAD^'s main-validate ran the full tier: covers is True, the range minus head is empty, the census document's entries equal today's and trailer-closure makes today's single call."
+  - "DECLARED COST (Decision 181 cl.2, accepted by this plan): trailer-census and trailer-acceptance-evaluate now start after main-validate, so closure latency grows by their run time (trailer-closure already waited for main-validate through trailer-junit-verdict); ci.yml's census header comment states it."
+  - "Graduated node ids keep their names: tests/test_rec_trailer_acceptance.py TestCliStages::test_close_requires_acceptance_verdict, TestCloseReadsLiveRows, TestJunitRouting, TestVerdictMapping and TestCensus::test_undecidable_acceptance_is_out_of_grammar; compaction never renames, merges or moves them."
   - "No second closure path (Decision 201; git-ops.yaml resolves_trailer LATE CLOSURE): one census document, the existing three jobs, rejoin unchanged (its two-source refusal still holds; range entries are junit-only and never reach evaluate's probe)."
   - "Same-run provenance holds: the junit download step keeps no run-id input (validate_rec_autoclose_trailer_gate); trailer-junit-verdict and trailer-acceptance-evaluate keep {contents: read} only (Decision 143)."
   - "A deferred rec is never passed to update_rec, so Decision 201's require_acceptance_verdict refusal and Decision 186's closure obligation are untouched; a DEFERRED line is not an acceptance-verdict refusal and permits no manual fallback (Decision 235: a rec held open is not a weakened check)."
   - "Each group closes under its own closing_sha, so the merge-leg gate (merge_leg_refuses over changed_files) and Decision 186's fixed_by_sha read the merge that named the rec; fetch-depth 0 on trailer-closure makes an earlier merge's diff resolvable."
   - "scripts/rec_trailer_acceptance.py stays thin (delegations only) and tests/test_rec_trailer_acceptance.py stays at or under 500 SLOC: compact, never raise (Decision 128). The covering verb lives in trailer_range, not merge_step.py (tests/test_session_merge_step.py 490 of 500); merge_step.py is not edited."
-  - "Governed wording lands word for word as docs/plans/approved/trailer-range-closure.yaml binds it (Decision 246), {{DATE}} filled with the build date; the implement SKILL edit is byte-neutral and git-ops.yaml grows by the one amendment_log line only."
+  - "Governed wording lands word for word as docs/plans/approved/trailer-range-closure.yaml binds it (Decision 246), {{DATE}} filled with the build date; the implement SKILL edit is byte-neutral and git-ops.yaml grows by the one amendment_log line only (497 of 500)."
   - "ci.yml: no run: body, step name or step id changes (Decision 162 R3 baseline rows stay); the census step gains env only."
   - "Out of scope, rec-5107: main-validate's concurrency group, the prev step and the recorded range (when it lands, extend_census reads the recorded range first, per full-tier-range.yaml read_order -- a rec-5107 change); push_context_base on prev; ci-rca's anchor and manifest on the culprit."
   - "Declared residual (Decision 181 cl.2, owner rec-5107): while main-validate runs in parallel, an earlier merge's run aborted after a later run's census read it as started leaves its deferred recs with no covering census; trailer_census.missed sends them to the operator, never the fallback. An unresolved range (past resolve_prev's 50-commit cap and no last-green) does the same, with the census's ::error annotation as the signal."
@@ -353,11 +362,12 @@ constraints:
 context:
   - "Decision-scout round 1 (draft, 2026-11-18): FLAGS_FOUND, Decisions triaged: 220 of 220; Roadmap items intersected: 9; CONFLICT: 0; RELATED: 9; Serves: NS.6 4/5. CITE 254, 201, 186, 246, 177. WARN 254 cl.1 an unresolved range must not quietly census HEAD alone -> folded (widen to the last-green ref; neither resolving logs an ::error annotation). NOTE 254 cl.4 a started run that is later aborted never completes -> folded (covering re-resolves when asked again; the closeout re-asks after the named job concludes; census now runs after main-validate so states are final). RELATED 159, 72, 226, 103, 143, 163, 128, 168, 170, 181, 235, 203, 245, 249, 264, 262, 86, 127."
   - "Decision-scout round 2 (written plan): FLAGS_FOUND, Decisions triaged: 221 of 221; Roadmap items intersected: 9; CONFLICT: 0; RELATED: 9; Serves: NS.6 4/5. CITE 254, 201, 186, 246, 177. WARN 254 cl.4 a deferred rec can be stranded (an earlier run aborted after the covering run's census read it as started -- possible only while main-validate runs in parallel, before rec-5107 -- or an unresolved range) while the closeout forbade fallback and recover -> folded: trailer_census.missed (a rec the covering run's concluded trailer-closure job does not name goes to the operator), the f02 'final state' claim narrowed to the run's own state, and execution step 1 records the residual on rec-5107 (its serialised queue and recorded range close it; Decision 181 cl.2). Wording-check round 1 FAIL: d01 placed under cl.9 grew Decision 254's capped span past 6144 B -> moved to a trailing annotation."
+  - "Decision-scout round 3: FLAGS_FOUND (NOTE 254: name the missed residual in Decision 254's Update) -> folded (d01's residual clause). Plan-critique round 1: REVISE, blocking 4 (wording PASS row for the final sidecar; evaluate's if under always(); contract_version bump and s01 touching pointer-sections' token; the _manifest.py edit at 498/500), nits 9 -> folded: no bump, s01 narrowed to the tail, trailer_range reuses compute_range and takes parse_trailer (no manifest edit), latency declared, VP 10 waived, VP 13 derives the sha, graduated node ids kept."
   - "Design: rec-4874 report section 3.8 (trailer row), Decision 254 cl.4, blind consult /mnt/project-files/rec-4874-build-plan-2/advisor-brief/ADVICE.md Q4, brief BRIEF-plan-2b.md beside it; presentation /mnt/project-files/rec-4874-build-plan-2b/PRESENTATION.md. Operator 'write the plan' 2026-11-18 13:12 UTC."
   - "fork: census timing | chosen: trailer-census needs main-validate (always()), so covers and earlier merges' states are final when read; the brief's 'no needs, depth-2 checkout, resolve_prev itself' would read a racing earlier run's state before its full-tier step starts and double-census or strand it | class: consistency-only | precedent: Decision 254 cl.4 (bind to the first completed run whose range holds the merge) | precedent_kind: decision | reversible: yes | persisted: docs/contracts/full-tier-range.yaml trailer_census.census"
   - "fork: non-covering run | chosen: DEFERRED line, never an acceptance refusal; the covering run binds | class: consistency-only | precedent: brief (report_unavailable must not count as a refusal), Decision 201 loud-not-red | precedent_kind: decision | reversible: yes | persisted: full-tier-range.yaml trailer_census.run_that_does_not_cover"
   - "fork: covering verb home | chosen: scripts/ci/trailer_range.py CLI, merge_step.py unedited (its test home 490/500) | class: consistency-only | precedent: Decision 128 | precedent_kind: decision | reversible: yes | persisted: scope"
-  - "Overlap: PLAN-contract-pointer-sections (merged #2204, unbuilt) also edits implement SKILL step 5 (its block implement-skill-trailer turns `git-ops.yaml::resolves_trailer` into `#resolves_trailer`) and implement.md's opening note. s01 already uses the `#resolves_trailer` form, so whichever builds second re-anchors only (anchor words are outside the approved-words digest) and re-measures SKILL bytes."
+  - "Overlap: PLAN-contract-pointer-sections (merged #2204, unbuilt) also edits implement SKILL step 5 (its block implement-skill-trailer turns `git-ops.yaml::resolves_trailer` into `#resolves_trailer` on the line above s01's span) and git-ops.yaml's pointer keys. s01 covers only the tail after that line, so the two spans are disjoint and either can build first; each build re-measures SKILL bytes against config/prose_budgets.yaml. If pointer-sections' block grows past that line's end, the second build re-anchors s01's before text (anchor only; the approved words are unchanged)."
   - "fork: a rec named by two merges | chosen: HEAD wins, then the newest range merge | class: consistency-only | precedent: Decision 201 closing-sha key (one sha per closure) | precedent_kind: decision | reversible: yes | persisted: full-tier-range.yaml trailer_census.census"
   - "Live probe 2026-11-18 01:2x UTC: bin/venv-python -m scripts.ci_rca.range_context probe --ref origin/main --depth 8 -> probe=ok skipped=3 started=5 (full_tier_state reads the live jobs API from a session, public reads). UNPROVEN until VP 13: GITHUB_TOKEN with actions: read in trailer-census reads the current run's own just-completed main-validate job as completed (expected: the jobs API lists completed jobs of an in-progress run)."
   - "Graduated shards kept unchanged (their tests extended or compacted, never changed in meaning): late-closure-merge-step-session, merge-step-verb-tests (tests/test_session_merge_step.py, not edited); rec-trailer-acceptance-close-requires-verdict, recs-consumers-read-live-rows, trailer-acceptance-route-is-statically-partitioned, trailer-acceptance-vocabulary-total-and-axis-distinct, trailer-census-executes-decidability-ratchet (tests/test_rec_trailer_acceptance.py); trailer-acceptance-junit-grammar-arms-declared, trailer-acceptance-junit-verdict-positive-evidence-only (tests/test_rec_trailer_acceptance_junit.py). New shards from VP 1-7 are sanction_rows (no scope row)."
@@ -367,6 +377,9 @@ gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:00c9d1f7acf80e857c5759cc00adca0e9d1c683174dc96398c218c23dedcee9f"}  # pragma: allowlist secret
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:88dd7295a77e3b10dc587cbfefc6a026b4e4c4e4eb9043c96917bf452ec8944f"}  # pragma: allowlist secret
   - {gate: wording-check, round: 1, verdict: FAIL, digest: 070c835f49ac00a20091d6e43a16e90c60aa908ed5e740900805366b4bfcd72f, base: 1d1761f88ddca502292174137fbb6c930e0a3696, selection: complete}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:b00455b321d7daca2cab6f18e2ab4c29324376fc99c49a2ad6f1af0b0049687d"}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 4, nits: 9}
+  - {gate: wording-check, round: 2, verdict: PASS, digest: 83c88dcfb2a1fac1623724566349bfa54e5bb2a018251e27cf3dbaffa8c561fe, base: dfcd98df3587e0f099a95e03db850e3669817fe8, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -377,7 +390,7 @@ pre_implementation_checklist:
 execution_steps:
   - "Ownership record (Decision 181 cl.2): read rec-5107 through recs_by_ids; if it is closed or already names this, note that and go on. Else call get_rec_write_guidance(), then update_rec on rec-5107 appending to its CONTEXT only (acceptance untouched): once its serialised main-validate and recorded range land, scripts/ci/trailer_range.py extend_census reads the recorded range first (full-tier-range.yaml read_order), which closes PLAN-trailer-range-closure's declared residual (trailer_census.missed: an earlier run aborted after the covering run's census). Read rec-5107 back and cite the returned text in the build report. A write that fails stops the build (Decision 84 I-4)."
   - "Run bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-trailer-range-closure.yaml; on blocked, stop and report (the reds' owners repair first)."
-  - "Governed text: place sidecar blocks f01, f02, g01-g04, s01, i01 and d01 by hand word for word ({{DATE}} = the build date); VP 9."
+  - "Governed text: place sidecar blocks f01, f02, g02-g04, s01, i01 and d01 by hand word for word ({{DATE}} = the build date); VP 9."
   - "Create scripts/ci/trailer_range.py and tests/ci/test_trailer_range.py; VP 4."
   - "Wire scripts/rec_trailer_acceptance.py (thin) and scripts/rec_trailer_acceptance_junit.py; the autouse fixture and compaction in tests/test_rec_trailer_acceptance.py, the junit node; VP 5, VP 8, VP 10 (coverage)."
   - "ci.yml trailer-census and trailer-closure edits; tests/ci/test_range_aware_consumers.py; VP 1, 2, 3, 6."
