@@ -62,7 +62,8 @@ scope:
   - file: docs/contracts/deploy-paths.yaml
     action: Modify
     purpose: >-
-      Compact amendment_log rows older than the newest 5 by date (not by position: several logs are not ordered) to terse rows (semantic_break rows and test-pinned rows stay
+      Only if the file is over 49,152 bytes on the base (step 5 governs; "base" is the base of the latest rebase), compact
+      amendment_log rows older than the newest 5 by date (not by position: several logs are not ordered) to terse rows (semantic_break rows and test-pinned rows stay
       full); no new amendment_log entry, since only the log changes and the canonical dump is unchanged.
   - file: docs/contracts/ducklake_telemetry_writer.yaml
     action: Modify
@@ -88,6 +89,26 @@ scope:
   - file: docs/contracts/telemetry_sessions.yaml
     action: Modify
     purpose: amendment_log compaction only, as for deploy-paths.yaml; no new amendment_log entry (the canonical dump is unchanged).
+  - file: docs/contracts/ducklake_maintenance.yaml
+    action: Modify
+    purpose: >-
+      amendment_log compaction only, as for deploy-paths.yaml, and only if the file is over 49,152 bytes on the build's base (Decision {{N}} cl.2 lists it; under the limit it is untouched); no new amendment_log entry.
+  - file: docs/contracts/ci-rca-lifecycle.yaml
+    action: Modify
+    purpose: >-
+      amendment_log compaction only, as for deploy-paths.yaml, and only if the file is over 49,152 bytes on the build's base (Decision {{N}} cl.2 lists it; under the limit it is untouched); no new amendment_log entry.
+  - file: docs/contracts/data-modeling-standard.yaml
+    action: Modify
+    purpose: >-
+      amendment_log compaction only, as for deploy-paths.yaml, and only if the file is over 49,152 bytes on the build's base (Decision {{N}} cl.2 lists it; under the limit it is untouched); no new amendment_log entry.
+  - file: docs/contracts/file-router.yaml
+    action: Modify
+    purpose: >-
+      amendment_log compaction only, as for deploy-paths.yaml, and only if the file is over 49,152 bytes on the build's base (Decision {{N}} cl.2 lists it; under the limit it is untouched); no new amendment_log entry.
+  - file: docs/contracts/telemetry-event-envelope.yaml
+    action: Modify
+    purpose: >-
+      amendment_log compaction only, as for deploy-paths.yaml, and only if the file is over 49,152 bytes on the build's base (Decision {{N}} cl.2 lists it; under the limit it is untouched); no new amendment_log entry.
   # ------------------------------------------------- checks (new logic in mapped helper modules, so the full tier's
   # validate_test_coverage measures each against its own mapped test; call sites stay branch-free)
   - file: scripts/checks/structural/_byte_budget.py
@@ -222,7 +243,7 @@ acceptance_criteria:
   - A fixture contract at 500 effective lines that grows by 2,000 bytes with no roster marker fails validate_structural_size_limits; a max_bytes above the code-pinned maximum fails E2.
   - A byte_budgets raise or new entry fails validate_structural_size_budget_raises unless its marker cites a Decision whose text added in that change names the contract; a shrink passes.
   - A change adding a top-level amendment_log row that leaves more full rows than max(5, base count), or dropping a top-level row, fails validate_contract_drift; semantic_break rows, field-level logs and north-star.yaml are exempt; a reworded old row, re-dated or not, never counts as a new row for retention, and on a class_d contract it cannot stand in for the required new row (ritual contracts' description changes keep contracts_enforcement's existing rule).
-  - Every docs/contracts file is within its byte limit on the build's head, byte_budgets holds exactly the four contracts Decision {{N}} cl.2 names, and no compacted contract's non-log content changed; glossary.yaml's read_as rule states the compaction exception.
+  - Every docs/contracts file is within its byte limit on the build's head, byte_budgets holds exactly the contracts still over 49,152 bytes after compaction, each one Decision {{N}} cl.2 lists, and no compacted contract's non-log content changed; glossary.yaml's read_as rule states the compaction exception.
   - plan_obligations' headroom line for a contract shows bytes, bytes per effective line and the 30-day delta.
   - rec-5262 and rec-4119 close through the merge's Resolves trailer.
 verification_plan:
@@ -234,13 +255,14 @@ verification_plan:
       row=[c for c in r['classes'] if c['slug']=='contracts'][0];
       p=yaml.safe_load(open('docs/contracts/contract-population.yaml'));
       over=sorted(os.path.basename(f) for f in glob.glob('docs/contracts/*.y*ml') if os.path.getsize(f) > 49152);
-      nine=sorted(['deploy-paths.yaml','ducklake_telemetry_writer.yaml','git-ops.yaml','github-org-transfer.yaml','iam-simulate-fixture.yaml','ports.yaml','telemetry_agents.yaml','telemetry_observations.yaml','telemetry_sessions.yaml']);
+      listed=['ci-rca-lifecycle.yaml','data-modeling-standard.yaml','deploy-paths.yaml','ducklake_maintenance.yaml','ducklake_telemetry_writer.yaml','file-router.yaml','git-ops.yaml','github-org-transfer.yaml','iam-simulate-fixture.yaml','ports.yaml','telemetry-event-envelope.yaml','telemetry_agents.yaml','telemetry_observations.yaml','telemetry_sessions.yaml'];
       print('no_max_bytes=' + str('max_bytes' not in row) + ' no_roster=' + str('byte_budgets' not in r) + ' no_retention='
-      + str('amendment_log_retention' not in p) + ' over_set_is_nine=' + str(over == nine) + ' over=' + ','.join(over))"
+      + str('amendment_log_retention' not in p) + ' over_in_list=' + str(set(over) <= set(listed)) + ' over=' + ','.join(over))"
     expected: One line; the four named fields are True.
     fix_if: >-
-      A False means another change landed first. over_set_is_nine False: a contract crossed or left 49,152 bytes, so the
-      compaction scope is wrong; stop and send a plan-defect report (scope amendment), never compact an unlisted file.
+      A False means another change landed first. over_in_list False: a contract that Decision {{N}} cl.2 does not list
+      is over 49,152 bytes; stop and send a plan-defect report (the bound words name the list, so seeding it needs a new
+      approval run), never compact or seed an unlisted file. A listed contract crossing or leaving the limit is expected.
     hermetic: false
     graduation: waive
     graduation_waiver_reason: Red-before premise evidence that this build makes false; steps 2-4 are the standing guards.
@@ -290,16 +312,17 @@ verification_plan:
       bb=r.get('byte_budgets') or {}; files=glob.glob('docs/contracts/*.y*ml');
       over=sorted(os.path.basename(f) for f in files if os.path.getsize(f) > 49152);
       within=all(os.path.getsize(f) <= bb.get(os.path.basename(f), 49152) for f in files);
-      four=sorted(['git-ops.yaml','iam-simulate-fixture.yaml','telemetry_observations.yaml','telemetry_sessions.yaml']);
-      import subprocess; nine=['deploy-paths.yaml','ducklake_telemetry_writer.yaml','git-ops.yaml','github-org-transfer.yaml','iam-simulate-fixture.yaml','ports.yaml','telemetry_agents.yaml','telemetry_observations.yaml','telemetry_sessions.yaml'];
+      import subprocess; listed=['ci-rca-lifecycle.yaml','data-modeling-standard.yaml','deploy-paths.yaml','ducklake_maintenance.yaml','ducklake_telemetry_writer.yaml','file-router.yaml','git-ops.yaml','github-org-transfer.yaml','iam-simulate-fixture.yaml','ports.yaml','telemetry-event-envelope.yaml','telemetry_agents.yaml','telemetry_observations.yaml','telemetry_sessions.yaml'];
       strip=lambda d: {k: v for k, v in d.items() if k != 'amendment_log'};
-      same=all(strip(yaml.safe_load(subprocess.run(['git','show','origin/main:docs/contracts/'+n],capture_output=True,text=True,check=True).stdout)) == strip(yaml.safe_load(open('docs/contracts/'+n))) for n in nine);
-      print('roster_is_over_set=' + str(sorted(bb) == over) + ' all_within=' + str(within) + ' roster_is_named_four=' + str(sorted(bb) == four) + ' nonlog_unchanged=' + str(same))"
-    expected: One line; every field True.
+      same=all(strip(yaml.safe_load(subprocess.run(['git','show','origin/main:docs/contracts/'+n],capture_output=True,text=True,check=True).stdout)) == strip(yaml.safe_load(open('docs/contracts/'+n))) for n in listed);
+      print('roster_is_over_set=' + str(sorted(bb) == over) + ' all_within=' + str(within) + ' roster_in_list=' + str(set(bb) <= set(listed)) + ' nonlog_unchanged=' + str(same) + ' unlisted_over=' + ','.join(sorted(set(over) - set(listed))))"
+    expected: One line; the four boolean fields True and unlisted_over empty.
     fix_if: >-
-      roster_is_named_four False means the post-compaction over-limit set differs from the four the bound words name:
-      stop and send a plan-defect report (the sidecar and its approval run must change), never seed an unnamed path or
-      leave a file over the limit. Otherwise re-measure and re-seed from the head, never round up.
+      unlisted_over non-empty or roster_in_list False means a contract Decision {{N}} cl.2 does not list is over the
+      limit: stop and send a plan-defect report (the sidecar and its approval run must change), never seed an unlisted
+      path or leave a file over the limit. A listed contract over the limit that was not compacted (it crossed after
+      step 5, e.g. on a rebase) is compacted per step 5 and its VP 6 selection re-run before it is seeded. Otherwise
+      re-measure and re-seed from the head after compaction, never round up.
     hermetic: false
     graduation: waive
     graduation_waiver_reason: >-
@@ -308,20 +331,20 @@ verification_plan:
   - step: 6
     phase: pre-deploy
     action: >-
-      Tests that pin amendment_log rows of the compacted contracts still pass (about 196 files: run it backgrounded
+      Tests that pin amendment_log rows of the compacted contracts still pass (selected live, about 258 test files and 77 graduated records at planning: run it backgrounded
       from the top-level session, since it can pass the 10-minute foreground limit and a subagent never receives the
       completion).
     command: >-
       bin/venv-python -m pytest -q $(grep -rlE
-      'deploy-paths|ducklake_telemetry_writer|git-ops|github-org-transfer|iam-simulate-fixture|"ports"|ports\.yaml|telemetry_agents|telemetry_observations|telemetry_sessions'
+      'ci-rca-lifecycle|data-modeling-standard|deploy-paths|ducklake_maintenance|ducklake_telemetry_writer|file-router|git-ops|github-org-transfer|iam-simulate-fixture|"ports"|ports\.yaml|telemetry-event-envelope|telemetry_agents|telemetry_observations|telemetry_sessions'
       tests --include='test_*.py' | sort -u)
-      && for id in $(bin/venv-python -c "import glob, yaml; nine=('deploy-paths','ducklake_telemetry_writer','git-ops','github-org-transfer','iam-simulate-fixture','ports','telemetry_agents','telemetry_observations','telemetry_sessions'); [print(d['check_id']) for d in (yaml.safe_load(open(f)) for f in sorted(glob.glob('config/agent/verification_registry/entries/*.yaml'))) if any(n + '.yaml' in str(d) for n in nine)]");
+      && for id in $(bin/venv-python -c "import glob, yaml; listed=('ci-rca-lifecycle','data-modeling-standard','deploy-paths','ducklake_maintenance','ducklake_telemetry_writer','file-router','git-ops','github-org-transfer','iam-simulate-fixture','ports','telemetry-event-envelope','telemetry_agents','telemetry_observations','telemetry_sessions'); [print(d['check_id']) for d in (yaml.safe_load(open(f)) for f in sorted(glob.glob('config/agent/verification_registry/entries/*.yaml'))) if any(n + '.yaml' in str(d) for n in listed)]");
       do bin/venv-python -m scripts.checks.verification.validate_graduated_rerun --check-id "$id" --root . | grep -q '"passed": true' || echo "RERUN_FAIL $id"; done; echo RERUN_DONE
     expected: >-
-      All pytest files pass (every test file that names one of the nine compacted contracts by file name or stem, e.g.
+      All pytest files pass (every test file that names one of the 14 listed contracts by file name or stem, e.g.
       test_late_hook_records_contract_notes.py loading "ports"), then RERUN_DONE whose RERUN_FAIL lines equal the set
       the same loop prints on the build's base before any edit (run it there first): every graduated verification
-      record that names one of the nine (44 at planning, selected live; among them ports-pc08-interim-coordinator and
+      record that names one of the 14 (selected live; among them ports-pc08-interim-coordinator and
       ports-sandbox-runtime-adapters, which read ports.yaml amendment_log summaries) passes as it did. Illustrative (execution step 1's record is the authority): on main
       c37b228a+ the base set was git-ops-trailer-carrier-and-placement-rules (asserts contract_version 6; git-ops is
       at 16) and iam-simulate-budget-marker-recited (asserts a dec-168 marker; the line now cites dec-213): stale
@@ -430,7 +453,7 @@ test_obligations:
     command: *vp5_live_state
     waiver_reason: >-
       No behavior changes: only amendment_log text is compacted. VP 5's nonlog_unchanged field compares each of the
-      nine with origin/main, amendment_log removed (the drift rewrite leg covers class_d contracts only); VP 6's selection of the
+      14 listed contracts with origin/main, amendment_log removed (the drift rewrite leg covers class_d contracts only); VP 6's selection of the
       test files that name the contract pins the rows they read.
   - source: docs/contracts/ducklake_telemetry_writer.yaml
     behavior: amendment_log compaction only; the canonical dump (every non-log key) is unchanged.
@@ -438,7 +461,7 @@ test_obligations:
     command: *vp5_live_state
     waiver_reason: >-
       No behavior changes: only amendment_log text is compacted. VP 5's nonlog_unchanged field compares each of the
-      nine with origin/main, amendment_log removed (the drift rewrite leg covers class_d contracts only); VP 6's selection of the
+      14 listed contracts with origin/main, amendment_log removed (the drift rewrite leg covers class_d contracts only); VP 6's selection of the
       test files that name the contract pins the rows they read.
   - source: docs/contracts/git-ops.yaml
     behavior: amendment_log compaction only; the canonical dump (every non-log key) is unchanged.
@@ -446,7 +469,7 @@ test_obligations:
     command: *vp5_live_state
     waiver_reason: >-
       No behavior changes: only amendment_log text is compacted. VP 5's nonlog_unchanged field compares each of the
-      nine with origin/main, amendment_log removed (the drift rewrite leg covers class_d contracts only); VP 6's selection of the
+      14 listed contracts with origin/main, amendment_log removed (the drift rewrite leg covers class_d contracts only); VP 6's selection of the
       test files that name the contract pins the rows they read.
   - source: docs/contracts/github-org-transfer.yaml
     behavior: amendment_log compaction only; the canonical dump (every non-log key) is unchanged.
@@ -454,7 +477,7 @@ test_obligations:
     command: *vp5_live_state
     waiver_reason: >-
       No behavior changes: only amendment_log text is compacted. VP 5's nonlog_unchanged field compares each of the
-      nine with origin/main, amendment_log removed (the drift rewrite leg covers class_d contracts only); VP 6's selection of the
+      14 listed contracts with origin/main, amendment_log removed (the drift rewrite leg covers class_d contracts only); VP 6's selection of the
       test files that name the contract pins the rows they read.
   - source: docs/contracts/iam-simulate-fixture.yaml
     behavior: amendment_log compaction only; the canonical dump (every non-log key) is unchanged.
@@ -462,7 +485,7 @@ test_obligations:
     command: *vp5_live_state
     waiver_reason: >-
       No behavior changes: only amendment_log text is compacted. VP 5's nonlog_unchanged field compares each of the
-      nine with origin/main, amendment_log removed (the drift rewrite leg covers class_d contracts only); VP 6's selection of the
+      14 listed contracts with origin/main, amendment_log removed (the drift rewrite leg covers class_d contracts only); VP 6's selection of the
       test files that name the contract pins the rows they read.
   - source: docs/contracts/ports.yaml
     behavior: amendment_log compaction only; the canonical dump (every non-log key) is unchanged.
@@ -470,7 +493,7 @@ test_obligations:
     command: *vp5_live_state
     waiver_reason: >-
       No behavior changes: only amendment_log text is compacted. VP 5's nonlog_unchanged field compares each of the
-      nine with origin/main, amendment_log removed (the drift rewrite leg covers class_d contracts only); VP 6's selection of the
+      14 listed contracts with origin/main, amendment_log removed (the drift rewrite leg covers class_d contracts only); VP 6's selection of the
       test files that name the contract pins the rows they read.
   - source: docs/contracts/telemetry_agents.yaml
     behavior: amendment_log compaction only; the canonical dump (every non-log key) is unchanged.
@@ -478,7 +501,7 @@ test_obligations:
     command: *vp5_live_state
     waiver_reason: >-
       No behavior changes: only amendment_log text is compacted. VP 5's nonlog_unchanged field compares each of the
-      nine with origin/main, amendment_log removed (the drift rewrite leg covers class_d contracts only); VP 6's selection of the
+      14 listed contracts with origin/main, amendment_log removed (the drift rewrite leg covers class_d contracts only); VP 6's selection of the
       test files that name the contract pins the rows they read.
   - source: docs/contracts/telemetry_observations.yaml
     behavior: amendment_log compaction only; the canonical dump (every non-log key) is unchanged.
@@ -486,7 +509,7 @@ test_obligations:
     command: *vp5_live_state
     waiver_reason: >-
       No behavior changes: only amendment_log text is compacted. VP 5's nonlog_unchanged field compares each of the
-      nine with origin/main, amendment_log removed (the drift rewrite leg covers class_d contracts only); VP 6's selection of the
+      14 listed contracts with origin/main, amendment_log removed (the drift rewrite leg covers class_d contracts only); VP 6's selection of the
       test files that name the contract pins the rows they read.
   - source: docs/contracts/telemetry_sessions.yaml
     behavior: amendment_log compaction only; the canonical dump (every non-log key) is unchanged.
@@ -494,29 +517,72 @@ test_obligations:
     command: *vp5_live_state
     waiver_reason: >-
       No behavior changes: only amendment_log text is compacted. VP 5's nonlog_unchanged field compares each of the
-      nine with origin/main, amendment_log removed (the drift rewrite leg covers class_d contracts only); VP 6's selection of the
+      14 listed contracts with origin/main, amendment_log removed (the drift rewrite leg covers class_d contracts only); VP 6's selection of the
+      test files that name the contract pins the rows they read.
+  - source: docs/contracts/ducklake_maintenance.yaml
+    behavior: amendment_log compaction only; the canonical dump (every non-log key) is unchanged.
+    verification_step: 5
+    command: *vp5_live_state
+    waiver_reason: >-
+      No behavior changes: only amendment_log text is compacted. VP 5's nonlog_unchanged field compares each of the
+      14 listed contracts with origin/main, amendment_log removed (the drift rewrite leg covers class_d contracts only); VP 6's selection of the
+      test files that name the contract pins the rows they read.
+  - source: docs/contracts/ci-rca-lifecycle.yaml
+    behavior: amendment_log compaction only; the canonical dump (every non-log key) is unchanged.
+    verification_step: 5
+    command: *vp5_live_state
+    waiver_reason: >-
+      No behavior changes: only amendment_log text is compacted. VP 5's nonlog_unchanged field compares each of the
+      14 listed contracts with origin/main, amendment_log removed (the drift rewrite leg covers class_d contracts only); VP 6's selection of the
+      test files that name the contract pins the rows they read.
+  - source: docs/contracts/data-modeling-standard.yaml
+    behavior: amendment_log compaction only; the canonical dump (every non-log key) is unchanged.
+    verification_step: 5
+    command: *vp5_live_state
+    waiver_reason: >-
+      No behavior changes: only amendment_log text is compacted. VP 5's nonlog_unchanged field compares each of the
+      14 listed contracts with origin/main, amendment_log removed (the drift rewrite leg covers class_d contracts only); VP 6's selection of the
+      test files that name the contract pins the rows they read.
+  - source: docs/contracts/file-router.yaml
+    behavior: amendment_log compaction only; the canonical dump (every non-log key) is unchanged.
+    verification_step: 5
+    command: *vp5_live_state
+    waiver_reason: >-
+      No behavior changes: only amendment_log text is compacted. VP 5's nonlog_unchanged field compares each of the
+      14 listed contracts with origin/main, amendment_log removed (the drift rewrite leg covers class_d contracts only); VP 6's selection of the
+      test files that name the contract pins the rows they read.
+  - source: docs/contracts/telemetry-event-envelope.yaml
+    behavior: amendment_log compaction only; the canonical dump (every non-log key) is unchanged.
+    verification_step: 5
+    command: *vp5_live_state
+    waiver_reason: >-
+      No behavior changes: only amendment_log text is compacted. VP 5's nonlog_unchanged field compares each of the
+      14 listed contracts with origin/main, amendment_log removed (the drift rewrite leg covers class_d contracts only); VP 6's selection of the
       test files that name the contract pins the rows they read.
 constraints:
   - "Every edit to docs/DECISIONS.md is a sidecar block, word for word (approved_text_binding); fill only {{N}} and {{DATE}}."
-  - "The nine contract edits change amendment_log text only: no other key, comment or line moves, so validate_contract_drift needs no new row; rows with semantic_break true, field-level logs and rows a test or a graduated verification record reads stay full (today at least ports.yaml's PC-08 row of 2026-10-19 and its Decision 234 sandbox_runtime row of 2026-10-23); never edit a test or a record to fit a compacted row; list every row kept full for a reader in the build PR body."
+  - "The contract edits change amendment_log text only: no other key, comment or line moves, so validate_contract_drift needs no new row; rows with semantic_break true, field-level logs and rows a test or a graduated verification record reads stay full (today at least ports.yaml's PC-08 row of 2026-10-19 and its Decision 234 sandbox_runtime row of 2026-10-23); never edit a test or a record to fit a compacted row; list every row kept full for a reader in the build PR body."
   - "Write terse rows in flow style, one line each, keeping date, semantic_break and change_class and a summary of at most 160 characters led by the PLAN slug, rec or Decision the original names; drop migration_story from compacted rows only; terse summaries use glossary.yaml names (validate_glossary lints added lines)."
   - Seed byte_budgets at the measured head size after compaction, never rounded up; no other budget changes (Decisions 128, 166 point 6).
   - "Merge one at a time with other builds editing docs/DECISIONS.md (reviews and delegation-and-cap first) and with unbuilt plans scoping config/structural_size_budgets.yaml (bootstrap-ci-gated-apply, environment-gates-fail-closed, scheduled-workflow-dispatch, trusted-plan-cutover): whichever builds second rebases."
-  - "Before merge, post on issue #1963 (Decision Growth entry) naming the nine compacted contracts, the 49,152-byte limit, that unbuilt plans adding a full amendment_log row to a contract holding 5 or more full rows must compact one older row in the same change, and that no change may drop a top-level row any more (e.g. telemetry-late-hook-records on ports.yaml and telemetry_*); the operator approved the one-time compaction (thread, 2026-11-17)."
-  - "If more than the four named contracts stay over 49,152 bytes after compaction (telemetry_agents.yaml, ducklake_telemetry_writer.yaml and deploy-paths.yaml are estimated within about 300 to 1,000 bytes of it, less if test-read rows stay full), stop and send a plan-defect report: the bound words name the roster, so a fifth seed needs a new approval run. Measure the compacted sizes in step 5 before writing any other file's change, so a stop costs little."
+  - "Before merge, post on issue #1963 (Decision Growth entry) naming the compacted and seeded contracts, the 49,152-byte limit, that unbuilt plans adding a full amendment_log row to a contract holding 5 or more full rows must compact one older row in the same change, and that no change may drop a top-level row any more (e.g. telemetry-late-hook-records on ports.yaml and telemetry_*); the operator approved the one-time compaction (thread, 2026-11-17)."
+  - "If a contract that Decision {{N}} cl.2 does not list is over 49,152 bytes on the base (VP 1) or after compaction (VP 5), stop and send a plan-defect report: the bound words name the list, so seeding it needs a new approval run. A listed contract over the limit is compacted and, if still over, seeded at its measured size. Measure the compacted sizes in step 5 before writing any other file's change, so a stop costs little."
   - No rescue agents or workaround loops (Decision 55).
 context:
   - "Decision-scout r1 FLAGS_FOUND. Decisions triaged: 217 of 217. Roadmap items intersected: 5; CONFLICT: 0; RELATED: 5. Serves: NS.4 4/5. CITE: 86, 128, 150, 165, 167, 168. WARN 166 adopted: a new Decision authorizes the roster and amends 166 cl.3 and reversal (d); markers never cite dec-166. WARN 243 adopted: north-star.yaml exempt from retention. SPIRIT 165 adopted. RELATED 210 adopted: top-level logs only."
   - "Decision-scout r2 FLAGS_FOUND. Decisions triaged: 217 of 217. Roadmap items intersected: 10; CONFLICT: 0; RELATED: 10. Serves: NS.4 4/5. CITE: 86, 128, 150, 165, 166, 167, 168, 181, 243, 246. Round-1 flags resolved. CONTRADICT 240 WARN (compaction rewrites records): Decision {{N}} amends 240 cl.4 for top-level rows, glossary.yaml read_as.rule in scope; put to the operator. SPIRIT 128 WARN (a seed marker authorizes every later raise by key): adopted, budget_raises binds byte_budgets with exact-key mentions and a fresh-mention state-diff spec. Notes adopted: execution step names no _population.py edit; cl.4 states max(N, base)."
   - "Operator choices (thread, 2026-11-17): blind Fable consult requested (brief and advice: /mnt/project-files/decision-growth/contract-bytes/advisor-brief/); 48 KiB limit with a one-time compaction of the files over it; write the plan 14:07Z."
   - "Census (main 97915110): 82 contracts, ~2.0 MB, 84 B per effective line (63 at 2026-08-07); +593 KB in 30 days; logs 336,805 B in 652 rows (mean 483 B). Over 49,152 B: the nine compacted files; projected after compaction ~40 KB freed, four still over."
+  - "Re-approval (2026-11-18, operator card): main grew about 700 contract lines in a day, so 10 contracts were over 49,152 B on main 1658ce1e (ducklake_maintenance.yaml crossed at 50,463 B with no compactable row) and about 7 project over after compaction, against the four the first approval named. The bound words now list the 14 contracts over 44 KiB that day and seed only those still over at build. A listed name authorizes only in the change that adds the Decision (fresh mention, Decision 165), so the wider list admits no later raise."
+  - "Decision-scout r10 NO_FLAGS on main 1658ce1e with the 14-name list. Decisions triaged: 221 of 221. Roadmap items intersected: 11; CONFLICT: 0; RELATED: 11 (new: T2.52 on data-modeling-standard.yaml, under the limit, untouched). Serves: NS.4 4/5. CITE unchanged. Fresh-mention probe on the live _fresh: the list authorizes only in the install change; a later raise, re-add or in-place rewrite does not, and agents.yaml never matches telemetry_agents.yaml. New entry 6,075 bytes, 69 under the Decision 167 cl.3 cap: any wording growth fails validate_decisions_size."
+  - "Wording check r5 PASS on main 1658ce1e with the 14-name words placed at N=274 (273 is taken by the open Decision 167 amendment build); the earlier approval run 44134446474 bound the four-name words and is superseded."
+  - "Plan-critique r10 REVISE 1/3 (B1: a listed contract crossing on a rebase could be seeded uncompacted; fixed in step 5, step 8 and VP 5 fix_if; nits: deploy-paths row conditional, VP 6 count, VP 5 unlisted_over field) and r11 PROCEED 0/0."
   - "Forward intent stays in recs and tier_items (Decision 86; decision-entry.yaml significance.routing.work_item) with pointer keys in the contract; the growth record is the headroom query plus terse rows and git, nothing stored (advice q4)."
   - "Sizes: test_size_limits.py 486/500 SLOC and test_budget_raises.py 381/500, so the new logic lives in helper modules whose mapped tests (test__byte_budget.py, test__byte_raises.py, test__amendment_retention.py) carry it, which validate_test_coverage also requires; _population.py 496/500 SLOC and imported by gated --pre entries, so it is not edited; contract-population.yaml 321/500 lines."
   - "Rec acceptance re-pointed 2026-11-17 (read back from the warehouse): rec-5262 -> tests/checks/structural/test__byte_budget.py::test_contract_byte_companion_fails_growth_at_line_limit; rec-4119 -> tests/checks/contracts/test__amendment_retention.py::test_adding_a_row_past_keep_full_without_compacting_fails (re-pointed again after critique r4 moved the tests to the coverage-mapped modules). The build creates tests with exactly these names."
-  - "ducklake_maintenance.yaml is 48,739 B with no compactable rows: one more edit may cross 49,152 before this builds (step 1 catches it)."
   - "Decision {{N}} is drafted against the decision grammar on main 97915110 (no delegates envelope key). If the delegation-and-cap build (Decision 167 amendment) lands first, re-run the wording check against that main; a needed change re-dispatches the approval run."
   - "red_overlap (2026-11-17 14:2xZ): blocked. Deferral: rec-5247 (slo_breached; Feedback Loop's telemetry-reader timeout, operator ruling 2026-11-17: plan merges defer to it and proceed) and rec-5276 (overlap, filed 13:51Z; telemetry arrival excuse row for PR #2041 in config/telemetry/arrival.yaml; shared paths are transitive test selections only, no shared scope file). Neither is repaired here; the build waits for green main per the normal rules."
-  - "Amendment-log consumers checked: _population (set membership), validate_tier_a_amendment_guard (north-star only, exempt), _rule_ratchet and contracts_enforcement (field-level and description changes; untouched), approval_routing prefix rule (its contract is not on main), and graduated verification records (ports-pc08-interim-coordinator and ports-sandbox-runtime-adapters read ports.yaml summaries; VP 6 reruns every record naming the nine)."
+  - "Amendment-log consumers checked: _population (set membership), validate_tier_a_amendment_guard (north-star only, exempt), _rule_ratchet and contracts_enforcement (field-level and description changes; untouched), approval_routing prefix rule (its contract is not on main), and graduated verification records (ports-pc08-interim-coordinator and ports-sandbox-runtime-adapters read ports.yaml summaries; VP 6 reruns every record naming the 14 listed contracts)."
   - "Decision-scout r5 FLAGS_FOUND (Decision 181 cl.2 WARN: Coverage residuals named no owning rec; fixed by rec-5298) and r6 NO_FLAGS after the plan-critique r1 revisions. Decisions triaged: 217 of 217. Roadmap items intersected: 10; CONFLICT: 0; RELATED: 10. Serves: NS.4 4/5. New entry 5,657 bytes at N=270."
   - "Decision-scout r7 NO_FLAGS after rebasing onto main 46ef5e26+: Decision 269 (amends 240 cl.5, portal leg) is RELATED only; DECISIONS-2/3 anchors still unique; the ROADMAP-PLATFORM T4.2 split touches no matched item."
   - "Decision 181 cl.2 residual owner: rec-5298 (filed 2026-11-17 by this plan, read back open, depends on rec-4119) owns the semantic_break label bound and the which-subject-to-split judgement, after scout r5's WARN."
@@ -532,10 +598,12 @@ gate_rounds:
   - {gate: decision-scout, round: 7, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:1b789ee2b41b5bd57b9f75c872b2392fd61bc6c308c49d5ed1f05d7df16c477b'}  # pragma: allowlist secret
   - {gate: decision-scout, round: 8, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:06646255053b87494eef9a2842c4e113b6304d28f4d60f921025a4a9497dcc40'}  # pragma: allowlist secret
   - {gate: decision-scout, round: 9, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:18ddd4e3c2c51cbca97ecf7f2ac6011dcb49b4008c7635824f5c754ad01806ab'}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 10, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:0cc5f9bb6a5835b7a22058931cf955878112a673e6338a26c9d20c4955a64c27'}  # pragma: allowlist secret
   - {gate: wording-check, round: 1, verdict: PASS, digest: f3fe06371e10eb6273aa2e37408a2dd5f9a987d66e19b66b505f9237f35257c5, base: 979151102c03fe5d6c8032dff1353c115632ef66, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 2, verdict: FAIL, digest: b8e58b95a063c55075a509b45e6053311cd777c24d2ac20f708cf2ca21ef178b, base: fe6111c78f94eb5ad38081206dd25d931cf1aadf, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 3, verdict: PASS, digest: b8e58b95a063c55075a509b45e6053311cd777c24d2ac20f708cf2ca21ef178b, base: c37b228aa1b5d0b820c45193d3cc35716f774fe5, selection: complete}  # pragma: allowlist secret
   - {gate: wording-check, round: 4, verdict: PASS, digest: ed3e1b506f92fb1d40373bbbea0f0227ff87b8125326b6a5148050d5a5a391ca, base: c37b228aa1b5d0b820c45193d3cc35716f774fe5, selection: complete}  # pragma: allowlist secret
+  - {gate: wording-check, round: 5, verdict: PASS, digest: 0fe9427e0f13950f7c451473989bdb895c663a120ad0ce4fbe258e25fae01be0, base: 1658ce1e7ff880d5a090f15f6164859e31a6f568, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 6, nits: 6}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 3, nits: 5}
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 5}
@@ -545,6 +613,8 @@ gate_rounds:
   - {gate: plan-critique, round: 7, verdict: REVISE, blocking: 1, nits: 4}
   - {gate: plan-critique, round: 8, verdict: PROCEED, blocking: 0, nits: 2}
   - {gate: plan-critique, round: 9, verdict: PROCEED, blocking: 0, nits: 2}
+  - {gate: plan-critique, round: 10, verdict: REVISE, blocking: 1, nits: 3}
+  - {gate: plan-critique, round: 11, verdict: PROCEED, blocking: 0, nits: 0}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -556,8 +626,8 @@ execution_steps:
   - 2. Write the new tests (VP 2-4 selections) and confirm each fails on the base for the reason its test_obligations row names (red before).
   - 3. Implement _amendment_retention.py (with rewrite_violation) and its drift wiring; then size_limits.py, budget_raises.py (legs a-c and the path-scoped base reader) and headroom.py.
   - 4. Add amendment_log_retention to contract-population.yaml and the read_as.rule exception to glossary.yaml (each with its own terse amendment_log row), and max_bytes, relief_valve and the header note to the contracts row.
-  - 5. Compact the nine contracts' amendment_logs per the constraints; run VP 6 and restore word for word any row a test reads.
-  - 6. Measure the nine on the head; seed byte_budgets by bare file name with each still over 49,152 at its exact size and the marker; place the sidecar words with the assigned {{N}} and {{DATE}}.
+  - 5. Compact the amendment_logs of the listed contracts that VP 1's over= output names (over 49,152 bytes on the base; after a rebase, the base of the latest rebase) per the constraints; run VP 6 and restore word for word any row a test reads.
+  - 6. Measure the compacted and listed contracts on the head; seed byte_budgets by bare file name with each still over 49,152 at its exact size and the marker; place the sidecar words with the assigned {{N}} and {{DATE}}.
   - "7. Execute Verification Plan steps 2-7; loop until pass. On an unrecoverable failure stop and RCA (Decision 55)."
   - >-
     8. Commit Flow (implement skill, git-ops.yaml handoff_sequence and resolves_trailer, in order). Readiness:
@@ -566,7 +636,8 @@ execution_steps:
     carries Resolves: rec-5262, rec-4119. Rebase onto origin/main (scripts.session.rebase_resolve); if the rebase moved
     any sidecar before-text or another Decision took {{N}}, stop and re-run the wording check and a new approval run
     unless the change is anchor-only or number-only (Decision 246 cl.2); re-run VP 5 on the rebased tree (its all_within and
-    roster_is_over_set catch a contract that newly crossed the limit on main; VP 1 measures pre-edit state only). Step 8 full tier and --verify-head on the rebased clean HEAD. Postflight evidence, push, PR
+    roster_is_over_set catch a contract that newly crossed the limit on main; VP 1 measures pre-edit state only); a listed
+    contract that newly crossed is compacted per step 5 and its VP 6 selection re-run before it is seeded (VP 5 fix_if). Step 8 full tier and --verify-head on the rebased clean HEAD. Postflight evidence, push, PR
     (Resolves block and the VP table in the body), subscribe. Post the #1963 entry. Merge under standing_authorisation
     (code review PROCEED, green CI, validate_merge_step green; the only always_ask content is sidecar-bound text):
     merge_step premerge --slug contract-byte-budget --expect <the approved= value of the recorded approval run>,
