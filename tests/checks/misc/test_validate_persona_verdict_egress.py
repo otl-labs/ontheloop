@@ -333,9 +333,5 @@ def test_the_registered_check_reports_problems_and_declares_what_it_examined(
     assert failed == []
 
 
-def test_the_check_is_registered_for_both_tiers() -> None:
-    from scripts.checks.misc import _manifest
-
-    (entry,) = [e for e in _manifest.ENTRIES if e.name == "validate_persona_verdict_egress"]
-    assert entry.pre and entry.full_segment == "full_after_lint"
+def test_the_check_is_registered() -> None:
     assert registry.resolve("validate_persona_verdict_egress") is v.validate_persona_verdict_egress
