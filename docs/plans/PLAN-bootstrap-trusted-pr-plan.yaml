@@ -86,7 +86,8 @@ scope:
       1, TF_INPUT 0, MASK_AWS_ROLE_ID_ACCOUNT_PART. Steps, every action SHA-pinned to the pin terraform-plan-trusted.yml
       uses: checkout (persist-credentials false); ./.github/actions/aws-region; overlay (OVERLAY_ROOT=terraform/bootstrap
       python3 -I scripts/ci/trusted_plan_overlay.py, tee overlay.txt); the generic screen (python3 -I
-      scripts/ci/terraform_hcl_screen.py screen --root terraform/bootstrap, tee screen.txt); the bootstrap gate's own
+      scripts/ci/terraform_hcl_screen.py screen --root terraform/bootstrap --policy terraform/bootstrap, tee screen.txt,
+      since a root with a row of its own is refused as root_policy_mismatch under the default row); the bootstrap gate's own
       screen (python3 -I scripts/ci/terraform_bootstrap_apply_gate.py screen, appended to screen.txt); only then assume
       role/bootstrap-pr-plan (configure-aws-credentials, role-session-name tf-bootstrap-pr-plan); pinned terraform
       version and setup-terraform (wrapper off); mirror sync of the hashicorp/aws prefix only (aws s3 sync of
@@ -100,14 +101,16 @@ scope:
       trusted_plan_env.sh and quiet_run.sh (terraform -chdir=terraform/bootstrap plan -lock=false -input=false -no-color
       -out=plan.bin); show -json to a private file through quiet_run.sh; rm plan.bin in the same step; backstop
       (terraform_hcl_screen.py backstop --plan-json, --policy terraform/bootstrap); the analyzer (--plan-json, --invariants
-      config/iam-invariants.json, --event-name pull_request_target, --out analyzer.json, stdout to analyzer.txt; exit 2
-      recorded as ANALYZER_FAILED); the gate preview (--plan-json, --analyzer-json, --github-output
+      config/iam-invariants.json, --event-name pull_request_target, --out analyzer.json, stdout to analyzer.txt; exit 1, its
+      REFUSED verdict, recorded as ANALYZER_REFUSED whatever the gate's verdict, so a protected change the analyzer
+      refuses still fails the job; exit 2 recorded as ANALYZER_FAILED); the gate preview (--plan-json, --analyzer-json, --github-output
       "$RUNNER_TEMP/gate.out", --event-name pull_request_target, stdout to preview.md; exit 0, or exit 1 with
-      verdict=CLOUDSHELL_REQUIRED in gate.out, is a planned verdict; any other exit 1 is GATE_FAILED); the comment step
+      verdict=CLOUDSHELL_REQUIRED or ANALYZER_REFUSED in gate.out, is a planned verdict; any other exit 1 is
+      GATE_FAILED); the category is the first of OVERLAY_REFUSED, SCREEN_REFUSED, INIT_FAILED, PLAN_FAILED,
+      BACKSTOP_REFUSED, ANALYZER_FAILED, ANALYZER_REFUSED and GATE_FAILED that applies, else OK; the comment step
       (if !cancelled() and the overlay step ran): the category from the step outcomes, the body from
       terraform_bootstrap_plan_report.py run under trusted_plan_env.sh --scrub-only, redaction_check.py assert-clean
-      under the same wrapper, then gh pr comment; a final step fails the job unless category is OK and the verdict is
-      not ANALYZER_REFUSED; an always() step deletes plan.bin, plan.json, analyzer.*, gate.out and preview.md. No step
+      under the same wrapper, then gh pr comment; a final step fails the job unless the category is OK; an always() step deletes plan.bin, plan.json, analyzer.*, gate.out and preview.md. No step
       persists or uploads a plan, plan JSON or log, no LLM step, no workflow_call, and no run body interpolates a
       PR-controlled expression (PR_NUMBER and HEAD_SHA reach run bodies as env only).
   - file: scripts/ci/terraform_hcl_screen_policy.py
@@ -128,11 +131,11 @@ scope:
       aws_iam_user, aws_iam_user_policy_attachment, aws_lambda_function, aws_lambda_permission, aws_s3_bucket and its
       _lifecycle_configuration, _ownership_controls, _policy, _public_access_block, _server_side_encryption_configuration
       and _versioning, aws_scheduler_schedule, aws_scheduler_schedule_group, aws_secretsmanager_secret_policy,
-      aws_servicequotas_service_quota, aws_sfn_state_machine, aws_ssm_parameter); functions today's outside main-only
-      files (jsonencode, jsondecode, length, flatten, contains, can, split, concat, regex, one, keys, anytrue, alltrue,
-      toset, sort, sha1), no try and no file; validation_only_functions regex and can; file_paths empty; top_level_blocks
+      aws_servicequotas_service_quota, aws_sfn_state_machine, aws_ssm_parameter); functions the eleven used outside main-only
+      files today (concat, flatten, jsondecode, jsonencode, keys, length, one, sha1, sort, split, toset) plus regex and
+      can, which validation_only_functions confines to validation blocks; no try and no file; validation_only_functions regex and can; file_paths empty; top_level_blocks
       resource, data, locals, variable, output, moved, removed, import; backstop_providers aws; imports_allowed true with
-      import_id_vars empty (literal ids only, the existing _import_id_ok); refused_references var.platform_dev_external_id,
+      import_id_vars empty (quoted string literal ids only: scope row 7's rule 2b, since the existing _import_id_ok also admits a bare var.X); refused_references var.platform_dev_external_id,
       var.platform_admin_external_id, var.owner_email, aws_iam_role.platform_dev and aws_iam_role.platform_admin (the role
       roots admitting only .arn, .name and .id); refused_import_ids PlatformDev and PlatformAdmin, compared casefolded since IAM
       role names are case-insensitive (an import of either role to a second address would carry its trust document, Decision 225 cl.1; their inline-policy ids such as
@@ -146,11 +149,22 @@ scope:
       today. (1) secret_data_shape: a data "aws_secretsmanager_secret" block whose body is anything but one line name =
       "<literal>" with the literal in secret_metadata_names. (2) confidential_reference: a traversal var.X or
       resource.name.attr in a screened file whose root is in refused_references, except .arn, .name and .id on the two
-      role roots, and any resource or data traversal whose attribute is in refused_attributes (tags_all); inside a
-      string interpolation too. (2b) refused_import_id: an import block whose literal id, casefolded, equals a casefolded
-      refused_import_ids entry. (3) meta_argument (amended for meta_argument_locals rows): count or
+      role roots; any resource or data traversal whose attribute, named or string-indexed, is in refused_attributes
+      (tags_all); and, for a row that sets refused_attributes, any resource or data traversal that does not continue,
+      after its optional instance key or splat, to a named attribute (a whole-object, bare-instance or splat-only
+      reference such as jsonencode(aws_lambda_function.x), aws_iam_role.x[0], one(aws_iam_role.x[*]) or
+      aws_iam_role.x["tags_all"]), except inside depends_on, replace_triggered_by and the to or from of import, moved
+      and removed blocks, and except as the source of a for-expression whose value iterator is used only as
+      <iterator>.<named attribute> outside refused_attributes (main's agent_ducklake_api.tf:207-208 and
+      agent_session_user.tf:10 iterate resource collections that way); inside a string interpolation too. (2b) refused_import_id: for a row that
+      sets refused_import_ids, an import id that is not a quoted string literal without interpolation (the existing
+      _import_id_ok also admits a bare var.X, which would carry any default) and a literal id that, casefolded, equals a
+      casefolded refused_import_ids entry. (3) meta_argument (amended for meta_argument_locals rows): count or
       for_each in a resource or data block is allowed when every traversal on its right side is local.<n> with n a
-      literal local, or a for-expression's own iterator; a literal local is defined exactly once in the tree (main-only
+      literal local or (for for_each only) a literal-keyed local, or a for-expression's own iterator; a literal-keyed
+      local is a map literal, or a map literal of map literals indexed by var.environment, whose keys are all literal
+      strings and whose values rule 2 already governs (agent_ducklake_api.tf's ducklake_api_routes, whose
+      telemetry/content value is a resource attribute, is one); a literal local is defined exactly once in the tree (main-only
       files included, since their text is main's) by an expression whose only traversals are var.environment and other
       literal locals (fixpoint), with no resource, data, path, each, count or self reference; the existing rule
       stays for other rows. backstop: for a meta_argument_locals row, a resource whose count_expression or
@@ -169,7 +183,7 @@ scope:
       verdict word or FAIL and the check name, the loc token dropped) and Protected; the Allow actions gained and
       Resources cells are never printed, since unreviewed HCL authors those values (Decision 238 cl.4); a cell whose text
       fails its name grammar (the normalised, key-free Terraform address form plan_names_core.normalise_address yields,
-      so any [..] instance key prints as "?", Decision 238 cl.4; lower-snake attribute names; the fixed flag,
+      with the gate's optional " (xN)" group-count suffix, so any [..] instance key prints as "?", Decision 238 cl.4; lower-snake attribute names; the fixed flag,
       verdict and protected-reason words) prints as "?"; then the BOOTSTRAP_APPLY_PREVIEW line and the analyzer's
       ANALYZER lines reduced to address, check and verdict, with every line starting "::" dropped; a one-line note that
       CLOUDSHELL_REQUIRED means the merged change goes to the operator's CloudShell apply and is not a refusal of the PR;
@@ -292,9 +306,14 @@ scope:
       main's real tree passes; each new rule is red on a synthetic tree (a secret lookup by an unlisted name, by a
       var-built name, with a second argument; var.owner_email in a resource argument and in an interpolation;
       aws_iam_role.platform_admin.assume_role_policy; an import with id "PlatformAdmin", "PlatformDev" or "platformadmin";
-      aws_iam_role.github_ci_apply.tags_all["Owner"] and the same inside an interpolation; for_each over split of a non-literal local; count over a local
+      an import with id = var.x whose default is "PlatformAdmin"; aws_iam_role.github_ci_apply.tags_all["Owner"] and the
+      same inside an interpolation; jsonencode(aws_lambda_function.x), aws_iam_role.x[0], one(aws_iam_role.x[*]),
+      aws_iam_role.x["tags_all"], a bare aws_iam_role.platform_admin and aws_iam_role.platform_admin["assume_role_policy"];
+      [for r in aws_iam_role.x : r] and [for r in aws_iam_role.x : r.tags_all] (a bare or refused iterator use); for_each over split of a non-literal local; count over a local
       built from var.account_id; a local defined twice; for_each over a resource attribute) and green on its allowed twin
-      (aws_iam_role.platform_admin.arn, an import with id "PlatformDev:DailyOps", count over a { sandbox = 1, sit = 0 }[var.environment] local, for_each over a
+      (aws_iam_role.platform_admin.arn, an import with id "PlatformDev:DailyOps", depends_on = [aws_iam_role.x],
+      aws_api_gateway_resource.x["ops"].id, { for k, m in aws_api_gateway_method.x : k => [m.id, m.http_method] }, for_each over a literal-keyed local whose value is a resource attribute,
+      count over a { sandbox = 1, sit = 0 }[var.environment] local, for_each over a
       comprehension of keys of a literal local); a heredoc, a try() form and a file() call in a screened file stay red;
       the personal and github rows give the same findings as before on their real trees and on a meta-argument fixture
       (the new fields default off); backstop accepts a local-only count_expression for the bootstrap row and refuses it
@@ -310,7 +329,9 @@ scope:
     action: Create
     purpose: >-
       BUILD PR 2. The report on fixtures: OK with a REVIEWABLE preview prints the table, no "::" line and the exact final
-      token line; CLOUDSHELL_REQUIRED prints the note and verdict=CLOUDSHELL_REQUIRED; a refusal prints only rule and
+      token line; CLOUDSHELL_REQUIRED prints the note and verdict=CLOUDSHELL_REQUIRED; category ANALYZER_REFUSED with a
+      CLOUDSHELL_REQUIRED or ANALYZER_REFUSED preview prints the table, the analyzer's FAIL verdicts and
+      category=ANALYZER_REFUSED; a refusal prints only rule and
       file:line tokens and verdict=NONE rows=0; a malformed gate.out exits 2 naming only the role; on a fixture whose Allow actions gained, Resources,
       Sid and analyzer loc cells carry an address-like value, an owner-like value and an ARN, no output line holds any of
       them, a twelve-digit run matched by redaction_check.ACCOUNT_ID_SHAPE (token-bounded, so the 40-hex head sha is no
@@ -322,7 +343,9 @@ scope:
       the environment mapping with deployment false; the three permissions; the overlay and both screens before the
       credentials step; the role is role/bootstrap-pr-plan; init holds -plugin-dir, -lockfile=readonly and
       -backend-config="region=$AWS_REGION" and no terraform-init-retry; plan holds -lock=false and runs through
-      trusted_plan_env.sh; analyzer and gate both pass --event-name pull_request_target; no step uploads an artifact,
+      trusted_plan_env.sh; the generic screen passes --policy terraform/bootstrap; analyzer and gate both pass --event-name
+      pull_request_target; an analyzer exit 1 sets category ANALYZER_REFUSED and the final step fails it even when the
+      gate's verdict is CLOUDSHELL_REQUIRED; no step uploads an artifact,
       runs aws s3 cp or names tfplan/; the comment step pipes through redaction_check.py assert-clean before gh pr
       comment; the cleanup step is always(). Each assertion has a red twin on a mutated copy.
   - file: tests/test_provider_mirror_seed.py
@@ -464,7 +487,8 @@ verification_plan:
     action: >-
       BUILD PR 2. Main's tree, as overlaid on an empty PR, passes both screens the job runs before any credential.
     command: >-
-      python3 -I scripts/ci/terraform_hcl_screen.py screen --root terraform/bootstrap && python3 -I
+      python3 -I scripts/ci/terraform_hcl_screen.py screen --root terraform/bootstrap --policy terraform/bootstrap &&
+      python3 -I
       scripts/ci/terraform_bootstrap_apply_gate.py screen && echo SCREENS_OK
     expected: The generic screen prints PASS, the gate's screen exits 0 and SCREENS_OK prints.
     expected_literals: ["PASS", "SCREENS_OK"]
@@ -590,7 +614,7 @@ verification_plan:
       -backend-config="region=$R" > /dev/null 2>> "$L" || { echo INIT_FAILED; exit 1; }; terraform -chdir="$B" plan
       -input=false -no-color -var-file="$W/vars.tfvars" -var "account_id=$A" -var "aws_profile=" -out="$W/apply.bin" >
       "$W/plan.txt" 2>> "$L"; S=$(grep -E '^Plan: ' "$W/plan.txt"); echo "$S"; G=$(terraform -chdir="$B" show -json
-      "$W/apply.bin" | jq -r '.resource_changes[] | select(.change.actions != ["no-op"]) | .address' | LC_ALL=C sort |
+      "$W/apply.bin" 2>> "$L" | jq -r '.resource_changes[] | select(.change.actions != ["no-op"]) | .address' | LC_ALL=C sort |
       tr '\n' ' '); [ "$S" = "Plan: 6 to add, 0 to change, 0 to destroy." ] && [ "$G" = "aws_iam_policy.bootstrap_pr_plan_guard
       aws_iam_policy.bootstrap_pr_plan_reads aws_iam_role.bootstrap_pr_plan aws_iam_role_policy_attachment.bootstrap_pr_plan_guard
       aws_iam_role_policy_attachment.bootstrap_pr_plan_reads aws_iam_role_policy_attachment.bootstrap_pr_plan_shared_reads " ]
@@ -674,8 +698,10 @@ verification_plan:
       token-bounded hex, so no false positive). The PR is closed unmerged.
     fix_if: >-
       (a) INIT_FAILED: the mirror lacks the locked hashicorp/aws package or the role cannot read it; dispatch
-      terraform-provider-mirror-seed.yml (scope row 9) and re-push, or a plan amendment if the read is denied. PLAN_FAILED
-      with an AccessDenied class: a plan-time read the shared policy lacks (the same gap would fail the post-merge
+      terraform-provider-mirror-seed.yml (scope row 9) and re-push, or a plan amendment if the read is denied. PLAN_FAILED (the
+      job prints no diagnostic by design, quiet_run.sh keeps it in the runner's never-printed log): the operator runs
+      deploy-paths' CloudShell pre-merge plan at the same head, and an AccessDenied there is a plan-time read the shared
+      policy lacks (the same gap would fail the post-merge
       preview); file a rec and fix both roles through the shared policy, a protected CloudShell change. BACKSTOP_REFUSED
       provisioner_or_meta_argument: the plan JSON's meta-argument references differ from the backstop's reading; a plan
       amendment, never a weaker text rule. (b) or (c) passing: the overlay or the screen did not refuse; revert PR 2's
@@ -878,7 +904,7 @@ context:
   - "Approvals at build start: the operator's 'write the plan' of 2026-11-18 13:23Z (covering the identity choice, no plan reviewer, the validate_admin_root_premerge_gate loosening and the residual) and the operator's GitHub approval of this plan's approval run, which the plan PR records; no final-diff word is asked (operator, 2026-11-16). VP 7-9 are the operator's CloudShell pastes."
   - "V3 resolution: VP 8's operator-run pre-merge plan at PR 1's head substitutes for pre-merge post-deploy evidence for PR 1; PR 2 changes no file under terraform/. Behavioural acceptance is VP 9 (apply, simulation, trust read), VP 10 (the post-merge preview after PR 2) and VP 11 (the probe PR, the first live run of the new job), with the operator's returned lines labelled operator-reported in counts-only PR comments naming the applied sha."
   - "Split: one plan, two build PRs, disjoint files. PR 1 (scope rows 1-4) is protected-set, so CloudShell plan and apply; PR 2 (rows 5-33) touches nothing under terraform/ and merges after VP 9."
-  - "Coverage measured 2026-11-18 over the 19 non-Markdown bootstrap commits since 2026-10-20: 15 touch only files this row screens; 4 touch a main-only file (main.tf and the lock; variables.tf, backend-sit.hcl and platform_admin_data_policies.tf; platform_admin_policies.tf twice) and would still take the CloudShell pre-merge plan. A personal-style row over today's tree fails 7 of 20 screenable files: meta_argument in 4 (count/for_each over literal locals, scope row 7's rule 3), try forms and validation-only functions in the two platform_admin policy files and the canary's heredoc (those three are main-only)."
+  - "Coverage measured 2026-11-18 over the 19 non-Markdown bootstrap commits since 2026-10-20: 15 touch only files this row screens; 4 touch a main-only file (main.tf and the lock; variables.tf, backend-sit.hcl and platform_admin_data_policies.tf; platform_admin_policies.tf twice) and would still take the CloudShell pre-merge plan. A personal-style row over today's tree fails 7 of 20 screenable files: meta_argument in 4 (count/for_each over literal locals in three, and for_each over agent_ducklake_api.tf's literal-keyed ducklake_api_routes, whose one value is a resource attribute: scope row 7's rule 3 admits both), try forms and validation-only functions in the two platform_admin policy files and the canary's heredoc (those three are main-only)."
   - "UNPROVEN until VP 11: the hermetic init of terraform/bootstrap from the mirror under -lockfile=readonly (same hashicorp/aws 5.100.0 lock as terraform/personal, whose mirror copy is proven); the shape of count_expression and for_each_expression references in the plan JSON for the backstop's local-only acceptance (Terraform's documented expression representation; no fixture holds one); the analyzer's changed mode on pull_request_target (full_sweep_wanted returns False off push, read in code). Checked 2026-11-18: the data-lake bucket policy only denies non-HTTPS, so the identity grant suffices for the mirror read."
   - "Overlaps: #2196 (PLAN-actions-sha-pin-codeowners PR A) merged 13:13Z; its PR B still scopes validate_trusted_plan_environment.py and CODEOWNERS (whichever builds second rebases; the new workflow is SHA-pinned from the start). #2186 (persona image channel) edits deploy-paths.yaml; whichever lands second rebases and re-measures the 4-line headroom. plan_obligations lists further unbuilt plans on DECISIONS.md, deploy-paths.yaml, environment-taxonomy.yaml, CODEOWNERS and SKILL.md (PLAN-bootstrap-ci-gated-apply, PLAN-sit-organization, PLAN-trusted-plan-cutover, PLAN-trusted-plan-identity, PLAN-wording-approval-routing among them); rebase rules apply."
   - "Red overlap (scripts.ci_rca.red_overlap, 2026-11-18): blocked by the past-SLO rule only, on rec-5355 and rec-5364 (the re-run at plan revision; rec-5353 no longer listed), which share no file with this plan. Deferral: this plan repairs none of them and touches none of their files; the build re-runs red_overlap before each PR and stops on any shared file."
@@ -897,6 +923,7 @@ gate_rounds:
   - {gate: wording-check, round: 4, verdict: PASS, digest: e00f62dc50c93e0f17f63949414d942f9d602b4d4c548fef2a769bfde46255e2, base: 1658ce1e7ff880d5a090f15f6164859e31a6f568, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 5, nits: 8}
   - {gate: wording-check, round: 5, verdict: PASS, digest: 06373209bc651778515cdc42da08251cda32a3c76b422a8f3b7eb47a152a6fd1, base: f32b10e452f87d66a10bd947ef0484e7bae78ec7, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 5, nits: 5}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
