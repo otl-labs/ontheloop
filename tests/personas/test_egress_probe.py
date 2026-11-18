@@ -341,7 +341,9 @@ def test_control_fails_on_a_wider_vendor_list(
     assert "VENDOR-LIST wider: new.example.com" in out and "EGRESS-CONTROL FAIL vendor_list" in out
 
 
-@pytest.mark.parametrize("error", [OSError("down"), ValueError("bad json"), KeyError("domains")])
+@pytest.mark.parametrize(
+    "error", [OSError("down"), ValueError("bad json"), KeyError("domains"), egress_control.http.client.IncompleteRead(b"")]
+)
 def test_control_fails_when_the_vendor_list_cannot_be_fetched(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path, error: Exception
 ) -> None:

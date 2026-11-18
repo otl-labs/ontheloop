@@ -162,6 +162,10 @@ def _probe_job(d: Docs, name: str = "egress-probe") -> dict[str, Any]:
 
 RED = [
     _red("step0-missing", "step 0 must use exactly", lambda d: _job(d)["steps"].pop(0)),
+    _red("self-check-shell", "must be the self-check", lambda d: _job(d)["steps"][3].update({"shell": "true {0}"})),
+    _red("self-check-env", "must be the self-check", lambda d: _job(d)["steps"][3].update({"env": {"X": "1"}})),
+    _red("job-defaults", "sets defaults:", lambda d: _job(d).update({"defaults": {"run": {"shell": "true {0}"}}})),
+    _red("workflow-defaults", "sets defaults:", lambda d: d["keyed"].update({"defaults": {"run": {"shell": "true {0}"}}})),
     _red("no-steps", "no steps", lambda d: _job(d).update({"steps": []})),
     _red("filter-second", "step 0 must use exactly", _insert(0, {"uses": CHECKOUT})),
     _red(
@@ -272,6 +276,7 @@ def test_the_good_tree_passes(tmp_path: Path) -> None:
 def test_each_red_fixture_fails_with_its_message(tmp_path: Path, edit: Callable[[Docs], None], message: str) -> None:
     problems = _problems(tmp_path, edit)
     assert any(message in p for p in problems), problems
+    assert all(isinstance(p, str) for p in problems)
 
 
 def test_a_job_overriding_a_workflow_level_id_token_stays_uncovered(tmp_path: Path) -> None:

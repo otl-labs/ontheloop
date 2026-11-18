@@ -8,6 +8,7 @@ filter_supplied is, and fails if the vendor's list holds a host the file's snaps
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import urllib.request
@@ -63,7 +64,7 @@ def main(argv: Sequence[str]) -> int:
     try:
         snapshot = [str(host) for host in yaml.safe_load(CONFIG.read_text(encoding="utf-8"))["filter_supplied"]]
         wider = vendor_widening(fetch_vendor_hosts(), snapshot)
-    except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError) as exc:
+    except (OSError, http.client.HTTPException, ValueError, KeyError, TypeError, yaml.YAMLError) as exc:
         print(f"EGRESS-CONTROL VENDOR-LIST fetch-failed: {type(exc).__name__}")
         bad.append("vendor_list")
     else:

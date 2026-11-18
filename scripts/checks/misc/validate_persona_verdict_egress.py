@@ -91,6 +91,7 @@ def _load_list(root: Path, out: list[str]) -> dict[str, Any] | None:
         out.append(f"{LIST_FILE}: filter_supplied is empty")
     if not isinstance(data.get("wildcard_residuals"), list):
         out.append(f"{LIST_FILE}: wildcard_residuals must be a list")
+        return None
     if not isinstance(data.get("jobs"), dict):
         out.append(f"{LIST_FILE}: jobs must be a mapping")
         return None
@@ -166,7 +167,7 @@ def _checkout_problems(where: str, step: dict[str, Any], probe: bool) -> list[st
 
 def _self_check_ok(step: dict[str, Any], probe: bool, seen_main: bool) -> bool:
     run = str(step.get("run", "")).strip()
-    if "if" in step or "continue-on-error" in step:
+    if {"if", "continue-on-error", "shell", "env", "working-directory"} & set(step):
         return False
     if probe:
         return run in (PROBE_PREFIX + "egress-probe", PROBE_PREFIX + "egress-self-check")
@@ -188,10 +189,8 @@ def _order_problems(where: str, steps: list[Any], probe: bool) -> list[str]:
         elif str(step.get("run", "")).strip() != MKDIR:
             if not _self_check_ok(step, probe, seen_main):
                 out.append(
-                    out.append(
-                        f"{where}: the first step after the filter that is not a checkout or the work-directory mkdir "
-                        "must be the self-check"
-                    )
+                    f"{where}: the first step after the filter that is not a checkout or the work-directory mkdir "
+                    "must be the self-check"
                 )
             return out
     out.append(f"{where}: no self-check step")
@@ -202,6 +201,8 @@ def _job_problems(rel: str, name: str, workflow: dict[str, Any], data: dict[str,
     out: list[str] = []
     where, probe, job, row = f"{rel}::{name}", rel == PROBE, workflow["jobs"][name], data["jobs"][rel][name]
     steps = job.get("steps") or []
+    if "defaults" in job or "defaults" in workflow:
+        out.append(f"{where}: a covered job or its workflow sets defaults:, which can change how the self-check runs")
     if "uses" in job or "container" in job or "services" in job:
         out.append(f"{where}: a covered job has a job-level uses:, container: or services:")
     if job.get("runs-on") != "ubuntu-latest":
