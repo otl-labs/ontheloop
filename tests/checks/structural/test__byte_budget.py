@@ -1,4 +1,4 @@
-"""Tests for the byte leg of the structural-size engine (Decision 274, rec-5262)."""
+"""Tests for the byte leg of the structural-size engine (Decision 275, rec-5262)."""
 
 from __future__ import annotations
 

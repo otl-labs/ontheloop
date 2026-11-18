@@ -1,4 +1,4 @@
-"""Pass 2 wiring of the amendment_log retention and rewrite checks (Decision 274 cl.4, rec-4119)."""
+"""Pass 2 wiring of the amendment_log retention and rewrite checks (Decision 275 cl.4, rec-4119)."""
 
 from __future__ import annotations
 

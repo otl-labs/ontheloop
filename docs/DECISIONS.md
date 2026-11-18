@@ -2,10 +2,10 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
-## Decision 274: Contracts are budgeted in bytes as well as lines, and a contract at its budget compacts its amendment_log or splits off a second subject before any raise (amends Decisions 166 and 240) (Decided)
+## Decision 275: Contracts are budgeted in bytes as well as lines, and a contract at its budget compacts its amendment_log or splits off a second subject before any raise (amends Decisions 166 and 240) (Decided)
 
 ```yaml
-number: 274
+number: 275
 status: Decided
 decided_date: "2026-11-18"
 kind:
@@ -25,7 +25,7 @@ significance:
 
 **Status:** Decided
 **Date:** 2026-11-18
-**Warehouse ID:** dec-274 (per Decision 84 backfill)
+**Warehouse ID:** dec-275 (per Decision 84 backfill)
 
 **Problem:** The contracts budget counts lines while readers pay in bytes. At the limit, edits arrive line-neutral
 (sampled commits kept or lost lines while adding 1,190 to 5,297 bytes), and bytes per effective line rose from 63 to
@@ -75,7 +75,7 @@ and glossary.yaml's read_as rule. Residual: which subject to split, and whether 
 judgement, owned by rec-5298.
 
 ```yaml reversal-conditions
-decision: 274
+decision: 275
 review_by: 2027-02-17
 on_trigger: "re-decide via /plan"
 conditions:
@@ -2486,7 +2486,7 @@ conditions:
 
 > **Update (2026-11-02):** clause 4's older text is now the records: the files glossary.yaml's read_as.records lists (Decision bodies older than this entry, plans, audit prompts, the roadmap below its header, the two archives), amendment_log rows, and recs filed before this entry. Records keep their wording and read through the read_as rows. PLAN-glossary-sweep (rec-4676) rewrote the rest to glossary names, README.md and the roadmap's header included; no other clause's meaning changes. Coverage: the reads-through note on each Decision in read_as.noted_decisions -- validate_glossary's note leg; clause 3's other files -- its whole-file leg; records -- the read_as rows. The reversal stanza's read-as-misread was re-armed to match.
 
-> **Amended by Decision 274 (2026-11-18):** a top-level amendment_log row may be compacted to a terse row naming its plan, rec or Decision (Decision 274 cl.4); that is the one rewrite of a record clause 4 allows, and the full wording stays in git history.
+> **Amended by Decision 275 (2026-11-18):** a top-level amendment_log row may be compacted to a terse row naming its plan, rec or Decision (Decision 275 cl.4); that is the one rewrite of a record clause 4 allows, and the full wording stays in git history.
 
 > **Amended by Decision 269 (2026-11-16):** Clause 5's portal leg reports, never refuses: the rec portal runs glossary_lint on a rec title, context or verification and reports each finding while the write proceeds; the Coverage line's "the portal's glossary_lint rule" reads as that report plus rec-5239's scheduled re-run, an unenforced residual until it runs (Decision 269 cl.1).
 
@@ -7961,7 +7961,7 @@ T1.5 (the STRATEGIC, CD.17-frozen portal cutover that eventually retires `docs/d
 
 [Amendment 2026-08-24: Decision 176 supersedes point 6's CD.29 archival pre-commitment and reversal condition (f)'s response for `config/agent/verification_registry/registry.yaml` -- the file is re-grained to one record per file under `entries/<check_id>.yaml` and its calibrated 6,000-effective-line / 2,315-character ceiling is retired outright (no replacement roster entry). Both `budgets:`/`long_line_budgets:` roster entries this point seeded are removed from `config/structural_size_budgets.yaml`. See Decision 176 for the full path selection and rationale.]
 
-[Amendment 2026-11-18: Decision 274 adds a per-file byte companion to the contracts class (clause 3) and counts the byte_budgets roster from its install seed for reversal condition (d).]
+[Amendment 2026-11-18: Decision 275 adds a per-file byte companion to the contracts class (clause 3) and counts the byte_budgets roster from its install seed for reversal condition (d).]
 
 ---
 

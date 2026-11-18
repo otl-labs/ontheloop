@@ -1,4 +1,4 @@
-"""Tests for amendment_log retention and new-row identity (Decision 274 cl.4, rec-4119)."""
+"""Tests for amendment_log retention and new-row identity (Decision 275 cl.4, rec-4119)."""
 
 from __future__ import annotations
 

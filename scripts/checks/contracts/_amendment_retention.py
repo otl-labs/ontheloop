@@ -1,4 +1,4 @@
-"""Top-level amendment_log retention and new-row identity (Decision 274 cl.4, rec-4119).
+"""Top-level amendment_log retention and new-row identity (Decision 275 cl.4, rec-4119).
 
 Pure helpers behind validate_contract_drift's Pass 2: the retention rule held at
 docs/contracts/contract-population.yaml `amendment_log_retention`, the dropped-row guard, and the rewrite check
@@ -89,7 +89,7 @@ def retention_violation(name: str, base_data: object, head_data: object, cfg: di
     base_log, head_log = _log(base_data), _log(head_data)
     if rows_dropped(base_log, head_log):
         return (
-            f"top-level amendment_log lost {len(base_log) - len(head_log)} row(s); Decision 274 compacts rows to terse "
+            f"top-level amendment_log lost {len(base_log) - len(head_log)} row(s); Decision 275 compacts rows to terse "
             "rows, never drops them"
         )
     if genuinely_new(base_log, head_log) == 0:

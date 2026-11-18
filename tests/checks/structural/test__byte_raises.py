@@ -1,4 +1,4 @@
-"""Tests for the byte_budgets raise-marker legs (Decision 274, rec-5262)."""
+"""Tests for the byte_budgets raise-marker legs (Decision 275, rec-5262)."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from scripts.checks.structural.budget_raises import validate_structural_size_bud
 _REG = "config/structural_size_budgets.yaml"
 _HEAD_REG = "schema_version: 1\nbyte_budgets:\n{entries}\nlong_line_budgets: {{}}\n"
 
-_SEED = "ports.yaml: 100  # raise-approved: dec-274 seed"
+_SEED = "ports.yaml: 100  # raise-approved: dec-275 seed"
 
 
 def _registry(*entries: str) -> str:
@@ -56,7 +56,7 @@ class TestRaiseNeedsFreshMention:
         assert out
 
     def test_raise_citing_the_seed_decision_again_fails(self, tmp_path: Path) -> None:
-        head = _registry("ports.yaml: 200  # raise-approved: dec-274 again")
+        head = _registry("ports.yaml: 200  # raise-approved: dec-275 again")
         out = _run(tmp_path, _registry(_SEED), head, _decisions(**_NAMES_PORTS), _decisions(**_NAMES_PORTS))
         assert out
 
@@ -91,7 +91,7 @@ class TestNewEntriesNeedFreshMention:
 
     def test_entry_dropped_and_re_added_citing_the_seed_decision_fails(self, tmp_path: Path) -> None:
         d = _decisions(**_NAMES_PORTS)
-        head = _registry("ports.yaml: 100  # raise-approved: dec-274 back again")
+        head = _registry("ports.yaml: 100  # raise-approved: dec-275 back again")
         out = _run(tmp_path, _registry(), head, d, d)
         assert any("no text added" in m for m in out)
 
@@ -145,7 +145,7 @@ class TestSkips:
 
 
 def test_entry_count_counts_roster_entries() -> None:
-    assert _byte_raises.entry_count(_registry(_SEED, "git-ops.yaml: 5  # raise-approved: dec-274 x")) == 2
+    assert _byte_raises.entry_count(_registry(_SEED, "git-ops.yaml: 5  # raise-approved: dec-275 x")) == 2
     assert _byte_raises.entry_count(_registry()) == 0
 
 

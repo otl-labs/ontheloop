@@ -1,4 +1,4 @@
-"""Raise-marker legs over the `byte_budgets:` roster (Decision 274, amends Decision 166).
+"""Raise-marker legs over the `byte_budgets:` roster (Decision 275, amends Decision 166).
 
 Three legs, all bound to scripts/checks/_marker_guard.py (Decision 165), which stays unchanged. Keys are bare
 contract file names, every spec uses boundary_match, so a mention of another contract, of docs/contracts alone, or
@@ -31,7 +31,7 @@ _DIFF_SPEC = _marker_guard.RegistrySpec(
     gated_direction="up",
     extractor=_extract,
     gates_new_entry=lambda _value: True,
-    label="Structural-size budget-raise guardrail (Decision 274, byte_budgets)",
+    label="Structural-size budget-raise guardrail (Decision 275, byte_budgets)",
     mention_candidates=lambda key: [key],
     boundary_match=True,
 )
@@ -42,7 +42,7 @@ _STATE_SPEC = _marker_guard.RegistrySpec(
     gated_direction="up",
     extractor=_extract,
     gates_new_entry=lambda _value: True,
-    label="Structural-size budget-raise guardrail (Decision 274, byte_budgets freshness)",
+    label="Structural-size budget-raise guardrail (Decision 275, byte_budgets freshness)",
     mention_candidates=lambda key: [key],
     state_extractor=_states,
     weakened=lambda base, head: isinstance(base, int) and isinstance(head, int) and head > base,

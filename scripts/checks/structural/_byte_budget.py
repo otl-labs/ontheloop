@@ -1,4 +1,4 @@
-"""Byte leg of the structural-size engine (Decision 274, amends Decision 166).
+"""Byte leg of the structural-size engine (Decision 275, amends Decision 166).
 
 Pure functions over the parsed registry and file sizes, called branch-free from size_limits.py so that
 test__byte_budget.py is the mapped test for every line here. A class row carrying `max_bytes` has a per-file
