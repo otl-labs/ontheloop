@@ -8,6 +8,7 @@ it explicitly. A later adapter adds an ADAPTERS entry, never a second suite. Nee
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -82,7 +83,14 @@ def daemon() -> None:
 
 @pytest.fixture(scope="module")
 def image_id(daemon: None) -> str:
-    return build_image(ROOT)
+    prebuilt = os.environ.get("PERSONA_IMAGE_UNDER_TEST")
+    if prebuilt is None:
+        return build_image(ROOT)
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", prebuilt):
+        pytest.fail(f"PERSONA_IMAGE_UNDER_TEST is not sha256:<64 hex>: {prebuilt!r}")
+    if _docker("image", "inspect", prebuilt, check=False).returncode != 0:
+        pytest.fail(f"PERSONA_IMAGE_UNDER_TEST names no local image: {prebuilt}")
+    return prebuilt
 
 
 @pytest.fixture(scope="module")
