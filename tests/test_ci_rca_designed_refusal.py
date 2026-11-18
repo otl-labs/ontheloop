@@ -20,6 +20,7 @@ from scripts.ci_rca.designed_refusal import (
     _load_jobs_payload,
     is_designed_refusal,
     is_persona_gate_refusal,
+    is_rejected_deployment,
     main,
     resolve_failing_jobs,
 )
@@ -72,7 +73,7 @@ class TestIsDesignedRefusal:
         assert is_designed_refusal("deploy-ducklake-lambdas", payload) is False
 
     def test_does_not_skip_on_empty_job_set(self) -> None:
-        payload = {"jobs": []}
+        payload: dict = {"jobs": []}
         assert is_designed_refusal("deploy-ducklake-lambdas", payload) is False
 
     def test_does_not_skip_on_empty_payload(self) -> None:
@@ -240,11 +241,16 @@ def test_live_designed_refusal_command_uses_only_declared_arguments() -> None:
     import re
 
     text = Path(".github/workflows/ci-rca.yml").read_text(encoding="utf-8")
-    line = next(ln for ln in text.splitlines() if "scripts.ci_rca.designed_refusal" in ln)
+    lines = [ln for ln in text.splitlines() if "scripts.ci_rca.designed_refusal" in ln]
     main_text = Path("scripts/ci_rca/designed_refusal.py").read_text(encoding="utf-8")
     declared = {"--jobs-json", "--workflow-slug"}
-    assert set(re.findall(r"--[a-z-]+", line)) <= declared
-    for arg in declared:
+    assert len(lines) == 2
+    for line in lines:
+        flags = set(re.findall(r"--[a-z-]+", line))
+        rejected = "--rejected-deployment-only" in flags
+        assert flags - ({"--rejected-deployment-only"} if rejected else set()) <= declared
+        assert rejected == ("OUTPUT=$(" in line and "skip=false" in line)
+    for arg in declared | {"--rejected-deployment-only"}:
         assert f'"{arg}"' in main_text
 
 
@@ -252,3 +258,45 @@ def test_persona_gate_refusal_ignores_non_dict_job_entries() -> None:
     payload = _gate_jobs()
     payload["jobs"].insert(0, "not-a-job")
     assert is_persona_gate_refusal(payload, _MARKER_LOG)
+
+
+def _rejected_payload(steps: object = None, name: str = "deploy") -> dict:
+    job: dict = {"name": name, "conclusion": "failure"}
+    if steps is not None:
+        job["steps"] = steps
+    return {"jobs": [job, {"name": "gate / gate", "conclusion": "success"}, {"name": "record", "conclusion": "skipped"}]}
+
+
+class TestRejectedDeployment:
+    def test_stepless_failing_deploy_job_of_the_content_channel_is_rejected(self) -> None:
+        assert is_rejected_deployment("deploy-telemetry-content", _rejected_payload())
+        assert is_rejected_deployment("deploy-telemetry-content", _rejected_payload([]))
+
+    def test_a_step_failure_after_approval_is_not_skipped(self) -> None:
+        steps = [{"name": "Deploy", "conclusion": "failure"}]
+        assert not is_rejected_deployment("deploy-telemetry-content", _rejected_payload(steps))
+
+    def test_build_failure_and_other_slug_are_not_skipped(self) -> None:
+        assert not is_rejected_deployment("deploy-telemetry-content", _rejected_payload(name="build"))
+        assert not is_rejected_deployment("deploy-prod-lambdas", _rejected_payload())
+
+    def test_uncertain_shapes_fail_closed(self) -> None:
+        assert not is_rejected_deployment("deploy-telemetry-content", {})
+        payload = _rejected_payload()
+        payload["jobs"].append({"name": "build", "conclusion": "failure"})
+        assert not is_rejected_deployment("deploy-telemetry-content", payload)
+
+    def test_flag_reads_no_log_and_persona_refusal_still_skips_on_the_default_path(self, tmp_path: Path, capsys) -> None:
+        jobs = tmp_path / "jobs.json"
+        jobs.write_text(json.dumps(_rejected_payload()), encoding="utf-8")
+        missing = tmp_path / "absent.log"
+        args = ["--jobs-json", str(jobs), "--workflow-slug", "deploy-telemetry-content", "--failed-log", str(missing)]
+        assert main([*args, "--rejected-deployment-only"]) == 0
+        assert capsys.readouterr().out.strip() == "skip=true"
+        persona = tmp_path / "persona.json"
+        persona.write_text(json.dumps(_gate_jobs()), encoding="utf-8")
+        log = tmp_path / "persona.log"
+        log.write_text(_MARKER_LOG, encoding="utf-8")
+        base = ["--jobs-json", str(persona), "--workflow-slug", "terraform-apply-sandbox", "--failed-log", str(log)]
+        assert main(base) == 0 and capsys.readouterr().out.strip() == "skip=true"
+        assert main([*base, "--rejected-deployment-only"]) == 0 and capsys.readouterr().out.strip() == "skip=false"

@@ -123,8 +123,21 @@ def test_append_modules_bundled_request_shared_with_reader() -> None:
         assert rel in includes, rel
         assert (_ROOT / rel).is_file(), rel
     assert sorted(compute_affected_artifacts(["src/common/ducklake_telemetry_append.py"])) == ["ducklake_telemetry_writer"]
-    assert sorted(compute_affected_artifacts(["src/telemetry/request.py"])) == ["ducklake_telemetry_writer"]
+    assert sorted(compute_affected_artifacts(["src/telemetry/request.py"])) == _writer_and_active_content_reader(
+        "src/telemetry/request.py"
+    )
     assert "append_telemetry" in _telemetry_manifest()["notes"]
+
+
+def _writer_and_active_content_reader(rel: str) -> list[str]:
+    """The writer, plus the content reader once active, when that manifest also bundles the shared module."""
+    content = yaml.safe_load(
+        (_ROOT / "src" / "lambdas" / "ducklake_telemetry_content_reader" / "manifest.yaml").read_text(encoding="utf-8")
+    )
+    names = ["ducklake_telemetry_writer"]
+    if content["status"] == "active" and rel in content["includes"]:
+        names.append("ducklake_telemetry_content_reader")
+    return sorted(names)
 
 
 def test_blob_modules_bundled_adapter_shared_with_reader() -> None:
@@ -138,7 +151,7 @@ def test_blob_modules_bundled_adapter_shared_with_reader() -> None:
     )
     for rel in blob_modules:
         assert rel in manifest["includes"] and (_ROOT / rel).is_file(), rel
-        assert sorted(compute_affected_artifacts([rel])) == ["ducklake_telemetry_writer"], rel
+        assert sorted(compute_affected_artifacts([rel])) == _writer_and_active_content_reader(rel), rel
     assert not [rel for rel in manifest["includes"] if rel.startswith("src/telemetry_client")]
     reader = yaml.safe_load((_ROOT / "src" / "lambdas" / "ducklake_reader" / "manifest.yaml").read_text(encoding="utf-8"))
     for rel in blob_modules:

@@ -27,6 +27,7 @@ on:
         "rec-autoclose",
         "deploy-ducklake-lambdas",
         "deploy-prod-lambdas",
+        "deploy-telemetry-content",
         "telemetry-arrival",
         "notice-digest",
       ]
@@ -194,25 +195,6 @@ jobs:
         if: steps.meta.outputs.workflow_slug != 'ci' || hashFiles('scripts/ci_rca/range_context.py') == ''
         run: echo "diff_base=HEAD^" >> "$GITHUB_OUTPUT"
 
-      # rec-2857 forward fix: the fetch/classify/retry logic (previously an inline content grep
-      # against the merged stdout+stderr stream, which false-positived on a genuine HTTP-5xx log
-      # BODY) now lives in scripts/ci_rca/fetch_logs.py, unit-tested and structurally guarded by
-      # _check_ci_rca_fetch_classification (an allowlist over this step's run: body -- see
-      # scripts/checks/ci_guards/validate_ci_workflow_guards.py). The rec-2117 / rec-2118 /
-      # rec-2718 retry provenance lives in that module's docstring. Decision 72 is provenance
-      # for workflow_run-triggered CI-RCA failed-run log retrieval. `test -s` below is a local
-      # YAML-side fail-closed guard pinned to this default-branch-checked-out file, independent
-      # of the module's own exit status.
-      - name: Fetch failed run logs
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          RUN_ID="${{ steps.meta.outputs.run_id }}"
-          bin/venv-python -m scripts.ci_rca.fetch_logs --run-id "$RUN_ID" --repo "${{ github.repository }}" --out /tmp/ci-rca-log-evidence.json
-          bin/venv-python -m scripts.ci_rca.log_evidence --validate /tmp/ci-rca-log-evidence.json --extract-body /tmp/ci-rca-failed.log
-          test -s /tmp/ci-rca-log-evidence.json
-          test -s /tmp/ci-rca-failed.log
-
       - name: Fetch jobs JSON
         id: jobs_json
         env:
@@ -223,7 +205,40 @@ jobs:
           gh run view "$RUN_ID" --repo "${{ github.repository }}" --json jobs \
             > /tmp/ci-rca-jobs.json 2>/dev/null || echo '{}' > /tmp/ci-rca-jobs.json
 
+      - name: Rejected-deployment check
+        # A rejected telemetry-content-deploy review leaves the deploy job unstarted with no log, so it is classified here, from
+        # the jobs JSON alone, before the log fetch. Fails closed: a failing predicate (an older checkout rejects the flag)
+        # reads skip=false, so the run still fetches its log and files.
+        id: rejected_deployment
+        run: |
+          WORKFLOW_SLUG="${{ steps.meta.outputs.workflow_slug }}"
+          OUTPUT=$(bin/venv-python -m scripts.ci_rca.designed_refusal --jobs-json /tmp/ci-rca-jobs.json --workflow-slug "$WORKFLOW_SLUG" --rejected-deployment-only) || OUTPUT="skip=false"
+          echo "$OUTPUT"
+          SKIP=$(echo "$OUTPUT" | grep '^skip=' | cut -d= -f2) || SKIP="false"
+          echo "skip=${SKIP}" >> "$GITHUB_OUTPUT"
+
+      # rec-2857 forward fix: the fetch/classify/retry logic (previously an inline content grep
+      # against the merged stdout+stderr stream, which false-positived on a genuine HTTP-5xx log
+      # BODY) now lives in scripts/ci_rca/fetch_logs.py, unit-tested and structurally guarded by
+      # _check_ci_rca_fetch_classification (an allowlist over this step's run: body -- see
+      # scripts/checks/ci_guards/validate_ci_workflow_guards.py). The rec-2117 / rec-2118 /
+      # rec-2718 retry provenance lives in that module's docstring. Decision 72 is provenance
+      # for workflow_run-triggered CI-RCA failed-run log retrieval. `test -s` below is a local
+      # YAML-side fail-closed guard pinned to this default-branch-checked-out file, independent
+      # of the module's own exit status.
+      - name: Fetch failed run logs
+        if: steps.rejected_deployment.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RUN_ID="${{ steps.meta.outputs.run_id }}"
+          bin/venv-python -m scripts.ci_rca.fetch_logs --run-id "$RUN_ID" --repo "${{ github.repository }}" --out /tmp/ci-rca-log-evidence.json
+          bin/venv-python -m scripts.ci_rca.log_evidence --validate /tmp/ci-rca-log-evidence.json --extract-body /tmp/ci-rca-failed.log
+          test -s /tmp/ci-rca-log-evidence.json
+          test -s /tmp/ci-rca-failed.log
+
       - name: Designed-refusal check (fail-closed skip predicate)
+        if: steps.rejected_deployment.outputs.skip != 'true'
         # PLAN-ci-rca-ops-plane-coverage: a STANDING, self-documenting refusal (e.g.
         # deploy-ducklake-lambdas' reconcile-gate) should not mint a fresh L5/L6 critical on every
         # push. No network call -- consumes the jobs JSON the step above already wrote. Fails
@@ -237,6 +252,7 @@ jobs:
           echo "skip=${SKIP}" >> "$GITHUB_OUTPUT"
 
       - name: Fetch junit report (v2 fingerprint substrate)
+        if: steps.rejected_deployment.outputs.skip != 'true'
         # ci-rca-identity-lifecycle: best-effort download of the failing run's own pytest-junit
         # artifact (uploaded by ci.yml's main-validate / main-canary.yml's canary job, per
         # scripts.checks._scaffolding._build_unit_test_cmd's --junitxml). Absent for a non-pytest
@@ -252,6 +268,7 @@ jobs:
             || echo "No pytest-junit artifact for run ${RUN_ID} -- falling back to log-tail signature."
 
       - name: Fetch validation-result artifact (CI-RCA attribution substrate)
+        if: steps.rejected_deployment.outputs.skip != 'true'
         # ci-rca-evidence-fidelity: best-effort download of the failing run's own
         # validation-result artifact (uploaded by ci.yml's main-validate / main-canary.yml's
         # canary job -- scripts.checks.validation_result.write_completed). Absent for a workflow
@@ -268,6 +285,7 @@ jobs:
             || echo "No validation-result artifact for run ${RUN_ID} -- falling back to log-derived classification."
 
       - name: Fetch merged PR's selection-manifest (Decision 135 escape-attribution)
+        if: steps.rejected_deployment.outputs.skip != 'true'
         # ci-rca-identity-lifecycle: this workflow only ever fires post-merge on the default
         # branch (see the job-level `if:` gate above), so the failing commit IS a merge onto
         # main. Best-effort: resolve the PR that produced it, then its --pre selection-manifest
@@ -303,6 +321,7 @@ jobs:
 
       - name: Generate evidence bundle
         id: evidence
+        if: steps.rejected_deployment.outputs.skip != 'true'
         continue-on-error: true
         env:
           S3_LOG_BUCKET: agent-platform-data-lake
@@ -362,6 +381,7 @@ jobs:
 
       - name: Dedup guard
         id: dedup
+        if: steps.rejected_deployment.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -439,7 +459,7 @@ jobs:
         # decision logic is unit-tested (tests/test_ci_rca_dedup.py) rather than living in this
         # shell. A matched-open bundle is skipped+bumped independently of any co-occurring novel
         # bundle; a genuinely-novel fingerprint always runs the agent (Decision 55).
-        if: steps.dedup.outputs.already_filed != 'true'
+        if: steps.dedup.outputs.already_filed != 'true' && steps.rejected_deployment.outputs.skip != 'true'
         run: |
           FORCE_FLAG=""
           if [ "${{ github.event.inputs.force_rca }}" = "true" ]; then
@@ -454,7 +474,7 @@ jobs:
         id: persona_gate
         # Admits only a maintainer's user dispatch or this workflow's own re-dispatch for a failed watched run;
         # anything else fails this step so the LLM step is skipped (scripts/ci/persona_dispatch_gate.py).
-        if: github.event_name == 'workflow_dispatch' && steps.dedup.outputs.already_filed != 'true' && steps.fp_dedup.outputs.deduped != 'true' && steps.designed_refusal.outputs.skip != 'true'
+        if: github.event_name == 'workflow_dispatch' && steps.dedup.outputs.already_filed != 'true' && steps.fp_dedup.outputs.deduped != 'true' && steps.designed_refusal.outputs.skip != 'true' && steps.rejected_deployment.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GATE_RUN_ID: ${{ steps.meta.outputs.run_id }}
@@ -467,7 +487,7 @@ jobs:
       - name: Run ci-rca agent
         id: rca_agent
         timeout-minutes: 17
-        if: steps.dedup.outputs.already_filed != 'true' && steps.fp_dedup.outputs.deduped != 'true' && steps.designed_refusal.outputs.skip != 'true' && steps.persona_gate.outputs.refused != 'true'
+        if: steps.dedup.outputs.already_filed != 'true' && steps.fp_dedup.outputs.deduped != 'true' && steps.designed_refusal.outputs.skip != 'true' && steps.persona_gate.outputs.refused != 'true' && steps.rejected_deployment.outputs.skip != 'true'
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           GH_TOKEN: ${{ github.token }}
