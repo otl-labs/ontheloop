@@ -12,6 +12,8 @@ from typing import Any
 
 from scripts.checks.ci_guards.validate_trusted_plan_environment import _arg, _blocks
 from scripts.verify_ci_workflow import _load
+from tests.checks.iam_tf._ci_platform_role_iam import _attr_raw, _jsonencode_statement_blocks
+from tests.checks.iam_tf._platform_security_hcl import _strip_comments
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _TF_GITHUB_DIR = _REPO_ROOT / "terraform" / "github"
@@ -20,6 +22,19 @@ _ENV = "persona-verdict-app"
 _ENV_WORKFLOW = "persona-verdict.yml"
 _ENV_JOB = "post"
 _ROLE_NAME = "agent-platform-github-ci-persona-verdict-app"
+_BOOTSTRAP_DIR = _REPO_ROOT / "terraform" / "bootstrap"
+_READS_FILE = _BOOTSTRAP_DIR / "github_ci_apply_reads.tf"
+_BOUNDARY_FILE = _BOOTSTRAP_DIR / "github_ci_apply_boundary.tf"
+_ROLE_ARN = f"arn:aws:iam::${{var.account_id}}:role/{_ROLE_NAME}"
+_DENY_SID = "DenyVerdictAppKeyRead"
+_KEY = "arn:aws:ssm:${var.aws_region}:*:parameter/secret/agent-platform-persona-verdict-app-key"
+_DENY_RESOURCES = {
+    _KEY,
+    "arn:aws:ssm:${var.aws_region}:*:parameter",
+    "arn:aws:ssm:${var.aws_region}:*:parameter/",
+    "arn:aws:ssm:${var.aws_region}:*:parameter/secret",
+    "arn:aws:ssm:${var.aws_region}:*:parameter/secret/",
+}
 _SECRET_TYPES = ("github_actions_environment_secret", "github_actions_environment_variable", "github_actions_secret")
 
 
@@ -166,3 +181,72 @@ def test_red_workflow_fence() -> None:
     assert workflow_problems({"other.yml": {"on": "push", "jobs": {"j": assume}}})
     assert workflow_problems({_ENV_WORKFLOW: {"on": "push", "jobs": {"other": assume}}})
     assert workflow_problems({_ENV_WORKFLOW: {"on": "push", "jobs": {_ENV_JOB: {**job, **assume}}}}) == []
+
+
+def _iam_roles_read_resources(text: str) -> list[str]:
+    match = re.search(r'[Ss]id\s*=\s*"IAMRolesRead".*?[Rr]esources?\s*=\s*\[(.*?)\n\s*\]', text, re.DOTALL)
+    assert match, "IAMRolesRead statement not found"
+    return re.findall(r'"([^"]+)"', re.sub(r"#[^\n]*", "", match.group(1)))
+
+
+def reads_problems(text: str) -> list[str]:
+    count = _iam_roles_read_resources(text).count(_ROLE_ARN)
+    return [] if count == 1 else [f"IAMRolesRead names the role {count} times, expected once"]
+
+
+def boundary_deny_problems(text: str) -> list[str]:
+    blocks = [b for b in _jsonencode_statement_blocks(text) if f'"{_DENY_SID}"' in b]
+    if len(blocks) != 1:
+        return [f"expected exactly one {_DENY_SID}, found {len(blocks)}"]
+    block = blocks[0]
+    problems: list[str] = []
+    if _attr_raw(block, "Effect") != '"Deny"':
+        problems.append("Effect must be Deny")
+    if _attr_raw(block, "Action") != '"ssm:GetParameter*"':
+        problems.append('Action must be exactly the scalar "ssm:GetParameter*"')
+    resources = set(re.findall(r'"([^"]+)"', _attr_raw(block, "Resource") or ""))
+    if resources != _DENY_RESOURCES:
+        problems.append(f"Resource set differs: {sorted(resources ^ _DENY_RESOURCES)}")
+    cond = re.search(r"Condition\s*=\s*\{(.*)\}", _strip_comments(block), re.DOTALL)
+    condition = cond.group(1) if cond else ""
+    if not re.search(r"\bArnNotLike\b", condition) or "StringNotLike" in condition:
+        problems.append("Condition must be ArnNotLike")
+    if re.findall(r'"([^"]+)"', condition) != ["aws:PrincipalArn", f"arn:aws:iam::*:role/{_ROLE_NAME}"]:
+        problems.append("Condition must name exactly the role")
+    return problems
+
+
+def test_bootstrap_pre_stage_names_the_role() -> None:
+    assert reads_problems(_READS_FILE.read_text(encoding="utf-8")) == []
+
+
+def test_boundary_deny_shape() -> None:
+    assert boundary_deny_problems(_BOUNDARY_FILE.read_text(encoding="utf-8")) == []
+
+
+def test_red_pre_stage() -> None:
+    text = _READS_FILE.read_text(encoding="utf-8")
+    assert reads_problems(text.replace(_ROLE_ARN, "arn:aws:iam::${var.account_id}:role/other"))
+
+
+def test_red_boundary_deny() -> None:
+    text = _BOUNDARY_FILE.read_text(encoding="utf-8")
+    broken = (
+        text.replace('"arn:aws:ssm:${var.aws_region}:*:parameter/secret/",', "", 1),
+        text.replace(
+            f'ArnNotLike = {{ "aws:PrincipalArn" = "arn:aws:iam::*:role/{_ROLE_NAME}"',
+            f'StringNotLike = {{ "aws:PrincipalArn" = "arn:aws:iam::*:role/{_ROLE_NAME}"',
+            1,
+        ),
+        text.replace(f'role/{_ROLE_NAME}"', 'role/x"', 1),
+        text.replace('Action = "ssm:GetParameter*"', 'Action = ["ssm:GetParameter*"]', 1),
+        text.replace(f'"{_DENY_SID}"', '"Other"', 1),
+        text.replace(
+            'Effect = "Deny"\n        Action = "ssm:GetParameter*"',
+            'Effect = "Allow"\n        Action = "ssm:GetParameter*"',
+            1,
+        ),
+    )
+    for variant in broken:
+        assert variant != text
+        assert boundary_deny_problems(variant), variant
