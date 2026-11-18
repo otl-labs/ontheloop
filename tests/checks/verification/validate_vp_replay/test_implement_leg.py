@@ -10,7 +10,10 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 import yaml as _yaml
+
+from scripts.checks.verification.validate_vp_replay import _is_pr_relative
 
 from .conftest import (
     _commit_all,
@@ -322,6 +325,99 @@ class TestImplementLeg:
                     "hermetic": True,
                     "action": "PR-relative step, replayed against a distinct base.",
                     "command": "git diff origin/main -- README.md > /dev/null; echo REPLAYED",
+                    "expected": "n/a",
+                    "fix_if": "n/a",
+                }
+            ],
+        )
+        failed: list[str] = []
+        validate_vp_replay(failed, changed_files=[rel], root=repo)
+        out = capsys.readouterr().out
+        assert failed == []
+        assert f"PASS: {rel}:1 replayed" in out
+        assert "EXCLUDED" not in out
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "bin/venv-python -m scripts.roadmap.approved_text verify --slug s --base origin/main",
+            "bin/venv-python -m scripts.roadmap.approved_text verify --slug s --base=origin/main",
+            "git merge-base origin/main HEAD",
+            "python -c \"import subprocess; subprocess.run(['git','merge-base','origin/main','HEAD'])\"",
+            "git merge-base --is-ancestor HEAD origin/main",
+        ],
+    )
+    def test_is_pr_relative_matches_approved_text_base_origin_main(self, command: str) -> None:
+        """rec-5364: shapes whose answer depends on a pre-merge base are PR-relative."""
+        assert _is_pr_relative(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo 'assertion failed: origin/main missing'",
+            "python -c \"base = _common.push_context_base() or 'origin/main'\"",
+            "git rev-parse origin/main",
+            "git fetch origin main",
+            "approved_text verify --slug s --base origin/mainline",
+        ],
+    )
+    def test_is_pr_relative_ignores_non_base_mentions(self, command: str) -> None:
+        assert not _is_pr_relative(command)
+
+    def _collapsed_fixture(self, tmp_path: Path, monkeypatch, slug: str, command: str) -> tuple[Path, str]:
+        repo = tmp_path / "repo"
+        _init_repo(repo)
+        (repo / "README.md").write_text("base\n", encoding="utf-8")
+        _commit_all(repo, "base")
+        rel = _write_vp_replay_plan(
+            repo,
+            slug,
+            [
+                {
+                    "step": 1,
+                    "phase": "pre-deploy",
+                    "hermetic": True,
+                    "action": "Base-flag step.",
+                    "command": command,
+                    "expected": "n/a",
+                    "fix_if": "n/a",
+                }
+            ],
+            declared=False,
+        )
+        _commit_all(repo, "add plan")
+        plan_path = repo / rel
+        plan_dict = _yaml.safe_load(plan_path.read_text(encoding="utf-8"))
+        plan_dict["implementation_declared"] = True
+        plan_path.write_text(_yaml.dump(plan_dict), encoding="utf-8")
+        head_sha = _commit_all(repo, "declare implementation")
+        _git(repo, ["update-ref", "refs/remotes/origin/main", head_sha])
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
+        monkeypatch.delenv("GITHUB_EVENT_BEFORE", raising=False)
+        return repo, rel
+
+    def test_base_flag_step_excluded_when_base_collapsed(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        command = "printf '%s\\n' --base origin/main > /dev/null; exit 1"
+        repo, rel = self._collapsed_fixture(tmp_path, monkeypatch, "vpr-base-flag", command)
+        failed: list[str] = []
+        validate_vp_replay(failed, changed_files=[rel], root=repo)
+        out = capsys.readouterr().out
+        assert failed == []
+        assert f"EXCLUDED: {rel}:1 (pr-relative-base-collapsed)" in out
+
+    def test_base_flag_step_still_replayed_when_base_distinct(self, tmp_path: Path, capsys) -> None:
+        command = "printf '%s\\n' --base origin/main > /dev/null; echo REPLAYED"
+        assert _is_pr_relative(command)
+        repo, rel = _ResolvedFixture().build(
+            tmp_path,
+            "vpr-base-flag-distinct",
+            [
+                {
+                    "step": 1,
+                    "phase": "pre-deploy",
+                    "hermetic": True,
+                    "action": "Base-flag step, replayed against a distinct base.",
+                    "command": command,
                     "expected": "n/a",
                     "fix_if": "n/a",
                 }

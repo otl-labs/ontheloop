@@ -192,6 +192,18 @@ EVENT_READS: dict[str, EventRead] = {
             ),
         ),
         EventRead(
+            verb="session_tree_rollup",
+            tables=(sql.SESSIONS, sql.OBSERVATIONS),
+            sql=sql.TREE_ROLLUP_SQL,
+            params=("day_from", "day_to"),
+            binding="window",
+            max_window_days=MAX_WINDOW_DAYS,
+            description=_derived_rows_note(
+                "One row per tree with its compact_count and compacted_session_count, the distinct workflows of its sessions "
+                "and its merge_links (merge_sha, merged_at, pr_url, rec_ids, ci_outcome); no token column" + _TREE_NOTE
+            ),
+        ),
+        EventRead(
             verb="sessions_window_all_purposes",
             tables=_ALL,
             sql=sql.SESSIONS_WINDOW_ALL_SQL,

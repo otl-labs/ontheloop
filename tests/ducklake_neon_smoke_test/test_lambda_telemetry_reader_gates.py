@@ -44,7 +44,7 @@ HEALTH_OK = {"ok": True, "rows": [{"table_name": t, "record_count": 0} for t in 
 EMPTY_OK = {"ok": True, "rows": [], "row_count": 0}
 INPUT_400 = {"ok": False, "error_type": "named_read_input", "error": "session_id is not canonical"}
 MARKER = "MARKER"
-USAGE_VERBS = ("model_usage_rollup", "tool_use_rollup", "session_startup_baseline")
+USAGE_VERBS = ("model_usage_rollup", "tool_use_rollup", "session_startup_baseline", "session_tree_rollup")
 
 
 def _j(status, payload):
@@ -142,6 +142,7 @@ def test_happy_path_prints_the_fixed_line(wired, capsys):
         "model_usage_rollup",
         "tool_use_rollup",
         "session_startup_baseline",
+        "session_tree_rollup",
         "session_state_and_duration",
         "session_state_and_duration",
         "session_tree_rows",
