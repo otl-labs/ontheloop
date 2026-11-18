@@ -151,15 +151,21 @@ def _info_lines(number: str, title: str, block: str) -> list[str]:
     return out
 
 
-def _draft_findings(content: str, root: Path, skip_quoted: bool) -> tuple[int, list[Finding], list[str]]:
+def _drafted_blocks(content: str, root: Path, skip_quoted: bool) -> Iterator[tuple[str, str, str]]:
+    """(number, title, block) of each drafted entry: the skip-and-count loop the report and drafted_titles share."""
     concrete = any(n != PLACEHOLDER_NUMBER for n, _, _ in _blocks(content))
     existing = _existing_headings(root) if skip_quoted and concrete else set()
-    drafted = 0
-    findings: list[Finding] = []
-    infos: list[str] = []
     for number, title, block in _blocks(content):
         if number != PLACEHOLDER_NUMBER and (int(number), title) in existing:
             continue
+        yield number, title, block
+
+
+def _draft_findings(content: str, root: Path, skip_quoted: bool) -> tuple[int, list[Finding], list[str]]:
+    drafted = 0
+    findings: list[Finding] = []
+    infos: list[str] = []
+    for number, title, block in _drafted_blocks(content, root, skip_quoted):
         drafted += 1
         findings += _rule_findings(number, title, block)
         infos += _info_lines(number, title, block)
@@ -257,6 +263,24 @@ def drafted_entries(plan_path: str | Path, root: Path | None = None) -> list[dic
             {"title": title, "kind": kind.get("value") if isinstance(kind, dict) else None, "amends": amends, "block": text}
         )
     return entries
+
+
+def drafted_titles(plan_path: str | Path, root: Path | None = None) -> list[str]:
+    """The title of every drafted entry _scan_plan counts, in its order; total ([] on an unreadable plan).
+
+    A title drafted in both plan text and sidecar appears twice: consumers compare it as a set.
+    """
+    root = root or ROOT
+    try:
+        plan = yaml.safe_load(Path(plan_path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return []
+    if not isinstance(plan, dict):
+        return []
+    titles = [title for text in _strings(plan) for _, title, _ in _drafted_blocks(text, root, True)]
+    for text in _sidecar_contents(plan, root)[0]:
+        titles.append(next(iter(_blocks(text)))[1])
+    return titles
 
 
 def _report(drafted: int, findings: list[Finding], infos: list[str]) -> list[str]:

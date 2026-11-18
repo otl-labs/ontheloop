@@ -151,7 +151,7 @@ Ask the following five questions against the plan's chosen approach. For each, w
 
 **Graduation Dispositions (12o):** Complete and honest / REVISE -- [step number(s) and sub-check failed]
 
-**Category Consistency (12p, Decision 167 clause 2):** N/A -- plan drafts no numbered Decision text / PASS -- "[verbatim body quote]" supports claimed [row, kind, NS.n] / REVISE -- claimed [row, kind, NS.n] but body reads: "[verbatim quote]" or no sentence supports it
+**Category Consistency (12p):** one line per drafted entry, title first: N/A -- no drafted Decision / PASS -- "[verbatim body quote]" supports claimed [row, kind, NS.n] / REVISE -- claimed [row, kind, NS.n] but body reads: "[verbatim quote]" or no sentence supports it
 
 **Finding-Origin Attribution and severity:** blocking (correctness, safety, scope, a Decision conflict or failed check above; when unsure) or nit (wording, citation form, ordering; never a Frame Challenge contradiction); mechanical (a deterministic check could catch it -- name it) / critic judgement -- tag each finding, with a stable anchor (plan field path or VP step id)
 

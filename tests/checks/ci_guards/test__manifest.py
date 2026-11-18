@@ -136,10 +136,21 @@ class TestGatedEntryInputClosures:
         assert {
             ".github/workflows/**",
             ".github/actions/**",
-            "config/actions_sha_pin_baseline.yaml",
             "scripts/checks/ci_guards/validate_actions_sha_pinned.py",
             "scripts/checks/*.py",
         } <= self._globs("validate_actions_sha_pinned")
+
+    def test_shared_pin_predicate_selects_every_importing_entry(self) -> None:
+        shared = "scripts/checks/ci_guards/_shared.py"
+        for name in (
+            "validate_actions_sha_pinned",
+            "validate_trusted_plan_environment",
+            "validate_github_settings_apply",
+            "validate_persona_verdict_chain",
+            "validate_bootstrap_apply",
+            "validate_environment_reviewer_preflight",
+        ):
+            assert any(fnmatch(shared, g) for g in self._globs(name)), name
 
     def test_persona_github_agnosticism_entry_closes_over_its_inputs(self) -> None:
         """Every path the agnosticism check reads (the pin, the lock, the persona closure, the pin loader, its

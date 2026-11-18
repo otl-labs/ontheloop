@@ -97,6 +97,9 @@ locals {
           # two trusted-plan entries above): the gated apply that creates the role reads it back, so this applies
           # before that create merges.
           "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-persona-verdict",
+          # Pre-staged ahead of the role's own creation (PLAN-persona-verdict-app-grant, the same precedent as the
+          # entries above): the gated apply that creates the role reads it back, so this applies before that create merges.
+          "arn:aws:iam::${var.account_id}:role/agent-platform-github-ci-persona-verdict-app",
           # Pre-staged ahead of the role's own creation (PLAN-scheduled-workflow-dispatch, the precedent of the entries
           # above): the gated apply that creates the role reads it back, so this applies before that create merges.
           "arn:aws:iam::${var.account_id}:role/agent-platform-workflow-dispatcher",

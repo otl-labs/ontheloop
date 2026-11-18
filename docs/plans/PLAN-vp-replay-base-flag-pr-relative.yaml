@@ -1,0 +1,232 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: vp-replay-base-flag-pr-relative
+intent: >-
+  Clear the post-merge red class behind rec-5364 by teaching validate_vp_replay's PR-relative recognizer two more
+  command shapes that only mean something against a pre-merge base: a --base origin/main flag (as in approved_text
+  verify) and git merge-base with origin/main. Such a step is then left out of the post-merge replay once the base has
+  collapsed, as git diff and git show origin/main steps already are, and still replays at PR time.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-vp-replay-base-flag-pr-relative.yaml
+phase: >-
+  ci_rca (soft-warn exception category): repair of the main red rec-5364 the operator gave CI Reform on 2026-11-18. No
+  tier_item is claimed and no exit criterion is closed.
+closes_criteria: []
+cites: [dec:148, dec:189, dec:201, dec:226, dec:246]
+scope:
+  - file: scripts/checks/verification/validate_vp_replay.py
+    action: Modify
+    purpose: >-
+      _PR_RELATIVE_RE gains two alternatives: git followed by merge-base followed by origin/main (so the shell form
+      git merge-base origin/main HEAD and the Python argv form ['git','merge-base','origin/main','HEAD'] both match),
+      and a --base flag whose value is origin/main (--base origin/main or --base=origin/main, any program). The existing
+      git diff/show alternative is unchanged. The comment above the regex names the four shapes and keeps "ADVISORY,
+      never refuses". _partition_steps, _base_ref_collapsed and every other function are unchanged.
+    new_imports: []
+  - file: tests/checks/verification/validate_vp_replay/test_implement_leg.py
+    action: Modify
+    purpose: >-
+      New nodes in TestImplementLeg. test_is_pr_relative_matches_approved_text_base_origin_main (parametrized): true for
+      approved_text verify --slug s --base origin/main, --base=origin/main, git merge-base origin/main HEAD, the
+      Python argv form, and git merge-base --is-ancestor HEAD origin/main (a decided TRUE case: it is false at PR time
+      and true only after the merge, so its answer depends on the base; no hermetic plan step holds one today).
+      test_is_pr_relative_ignores_non_base_mentions (parametrized): false for origin/main inside an assertion message,
+      base=_common.push_context_base() or 'origin/main', git rev-parse origin/main, git fetch origin main, and
+      --base origin/mainline. test_base_flag_step_excluded_when_base_collapsed: the existing collapse
+      fixture with the command printf '%s\n' --base origin/main > /dev/null; exit 1 prints EXCLUDED with reason
+      pr-relative-base-collapsed and no failure (red before: the step replays and fails).
+      test_base_flag_step_still_replayed_when_base_distinct: the same command shape, ending in echo REPLAYED, asserts
+      _is_pr_relative(command) is true and that the step still replays at PR time (so it proves recognized but
+      replayed, not an unrecognized pass). The module gains import pytest and imports _is_pr_relative from validate_vp_replay.
+    new_imports: [scripts.checks.verification.validate_vp_replay]
+  - file: docs/contracts/vp-red-before.yaml
+    action: Modify
+    purpose: >-
+      Operator-approved wording only, bound by the sidecar docs/plans/approved/vp-replay-base-flag-pr-relative.yaml:
+      implement_leg_partition names the two new shapes beside the git diff and git show ones; one amendment_log entry
+      (field_add, semantic_break false); contract_version 8 -> 9. contract.description is not edited (see context).
+    new_imports: []
+  - file: docs/plans/approved/vp-replay-base-flag-pr-relative.yaml
+    action: Create
+    purpose: The approved-text sidecar for the three vp-red-before.yaml blocks (Decision 246).
+    new_imports: []
+bundled_recommendations: [rec-5364]
+followon_recs: [rec-5380]
+infrastructure_dependencies: []
+acceptance_criteria:
+  - "_is_pr_relative is true for --base origin/main, --base=origin/main and git merge-base ... origin/main (shell and Python argv forms), and still false for an origin/main that is only text, a fallback value, rev-parse or fetch."
+  - "A hermetic pre-deploy step with one of those shapes is EXCLUDED as pr-relative-base-collapsed once HEAD is an ancestor of origin/main, and still replays when the base is distinct."
+  - "Every hermetic pre-deploy step in docs/plans whose command runs approved_text verify --base origin/main or git merge-base ... origin/main is PR-relative, and none of the seven deliberately unmatched origin/main steps (assertion-message text, push_context_base() fallbacks, rev-parse against a pinned sha) is. On 2026-11-18 that is nine newly PR-relative steps (VP 2)."
+  - "vp-red-before.yaml carries exactly the approved sidecar's words."
+  - "After merge, the merge push's main-validate is green and its log shows this plan's own approved_text verify step EXCLUDED as pr-relative-base-collapsed."
+  - "rec-5364 is closed by the merge's Resolves trailer, against an acceptance node that exists, through the Decision 186 closure obligation against its closure_artifact shard:vp-replay-base-flag-pr-relative."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The new recognizer and partition nodes pass.
+    command: >-
+      bin/venv-python -m pytest tests/checks/verification/validate_vp_replay/test_implement_leg.py -q
+      -k "is_pr_relative or base_flag_step"
+    expected: >-
+      exit 0. At plan-PR time the nodes are absent (exit 5, target_absent). In the build, after the nodes are added and
+      before the regex edit, the --base and merge-base cases fail, the collapse node's step replays and fails, and the
+      distinct-base node fails its _is_pr_relative assertion
+    fix_if: a non-base mention matches, or the collapsed step is not excluded
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: vp-replay-base-flag-pr-relative
+  - step: 2
+    phase: pre-deploy
+    action: Corpus census of the newly recognized steps (a moment claim about today's plans).
+    command: >-
+      bin/venv-python -c "import glob, re, yaml; from scripts.checks.verification import validate_vp_replay as v;
+      old = re.compile(r'\bgit\b.*?\b(?:diff|show)\b.*?\borigin/main\b', re.DOTALL);
+      hits = sorted((p.split('/')[-1], s['step']) for p in glob.glob('docs/plans/PLAN-*.yaml') for d in [yaml.load(open(p), Loader=yaml.CSafeLoader)] if isinstance(d, dict)
+      for s in (d.get('verification_plan') or []) if s.get('phase') == 'pre-deploy' and s.get('hermetic') and v._is_pr_relative(str(s.get('command', ''))) and not old.search(str(s.get('command', ''))));
+      print(len(hits), hits)"
+    expected: >-
+      as measured 2026-11-18 with a prototype regex, 9 hits: PLAN-billing-shape-local 4,
+      PLAN-governance-and-work-item-boundary 16, PLAN-litellm-producer-envelope 2, PLAN-persona-verdict-app-grant 6,
+      PLAN-persona-verdict-chain 5, PLAN-persona-verdict-egress 2, PLAN-persona-verdict-override 5,
+      PLAN-persona-verdict-shell-deny 3 and this plan's own step 3, plus any plan merged since with the same shape; none
+      of the seven unmatched steps in context[2] appears
+    fix_if: a step outside those shapes appears; narrow the regex
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A moment claim over the live plan corpus (exact set), which graduation_disposition_authoring names as waive.
+  - step: 3
+    phase: pre-deploy
+    action: The contract carries exactly the approved wording.
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug vp-replay-base-flag-pr-relative --base origin/main
+    expected: APPROVED-TEXT OK
+    fix_if: any block mismatch; restore the sidecar's words, never edit the sidecar
+    hermetic: true
+    expected_literals: ["APPROVED-TEXT OK"]
+    graduation: waive
+    graduation_waiver_reason: PR-relative by construction (it compares against origin/main), so it cannot be a standing guard; step 7 reads its post-merge exclusion as the live proof of this plan.
+  - step: 4
+    phase: pre-deploy
+    action: The whole vp-replay test package still passes.
+    command: bin/venv-python -m pytest tests/checks/verification/validate_vp_replay tests/checks/verification/test__vp_replay_budget.py tests/checks/verification/test__vp_replay_classify.py -q
+    expected: exit 0
+    fix_if: an existing node fails; the partition changed beyond the regex
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: The package already runs in the full tier; step 1 carries the new regression.
+  - step: 5
+    phase: pre-deploy
+    action: Re-key rec-5364's acceptance to the node that exists. Its filed acceptance names tests/checks/verification/test_validate_vp_replay.py, which is not a file (the tests live in the validate_vp_replay package); the node name is kept.
+    command: >-
+      bin/venv-python -m scripts.ops_data_portal --update-rec rec-5364 --acceptance "bin/venv-python -m pytest
+      'tests/checks/verification/validate_vp_replay/test_implement_leg.py::TestImplementLeg::test_is_pr_relative_matches_approved_text_base_origin_main' -q"
+    expected: the update returns the rec with the new acceptance; read it back with recs_by_ids
+    fix_if: the portal refuses; report the refusal, never write the rec another way
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: pre-deploy
+    action: Full tier, then HEAD attestation, after the build commit and rebase and before the push (handoff_policy); start it backgrounded from the top-level session with a 2 h limit.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: the full tier exits 0 and the validation result attests the current HEAD's tree
+    fix_if: any failure; fix and rerun the full tier from the start
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion).
+  - step: 7
+    phase: post-deploy
+    action: >-
+      Read the first completed main-validate run whose range holds the merge commit (Decision 254 cl.1 and cl.4; today
+      ci.yml runs main-validate per push, so it is the merge push's own run, which the command finds). Its
+      main-validate replays this plan (implementation_declared flips in that push), so it must exclude step 3 and
+      pass. The command needs the session's GitHub auth for gh; where gh is not
+      authenticated, the same read is mcp__github__actions_list for the merge SHA, then mcp__github__get_job_logs on
+      the main-validate job and a search for the same line.
+    command: >-
+      SHA=$(git fetch -q origin main && git log origin/main -1 --format=%H -E --grep='^(build|fix|feat)\(vp-replay-base-flag-pr-relative\)') && test -n "$SHA" &&
+      RUN=$(gh run list --repo otl-labs/ontheloop --workflow ci.yml --commit "$SHA" --json databaseId,conclusion --jq '.[0].databaseId') && test -n "$RUN" &&
+      test "$(gh run view "$RUN" --repo otl-labs/ontheloop --json jobs --jq '.jobs[] | select(.name == "main-validate") | .conclusion')" = success &&
+      gh run view "$RUN" --repo otl-labs/ontheloop --log | grep -F 'EXCLUDED: docs/plans/PLAN-vp-replay-base-flag-pr-relative.yaml:3 (pr-relative-base-collapsed)'
+    expected: >-
+      exit 0 (the main-validate job concluded success and grep found the line); its log holds the line
+      EXCLUDED: docs/plans/PLAN-vp-replay-base-flag-pr-relative.yaml:3 (pr-relative-base-collapsed); record the run id
+    fix_if: >-
+      the step replayed and failed (the regex did not engage on main): revert and report. The run still in progress, or
+      cancelled or absorbed by a batched run: wait for, or find, the first completed run whose range holds the merge
+      commit; neither is grounds for a revert. A failure elsewhere from another open rec is recorded, not this plan's
+    hermetic: false
+  - step: 8
+    phase: post-deploy
+    action: >-
+      rec-5364 is closed by the merge's Resolves trailer through the Decision 186 closure obligation: it is
+      escape-classified (no-edge), and its closure_artifact shard:vp-replay-base-flag-pr-relative was recorded at plan
+      write, so the trailer closure resolves it once the shard (VP 1's graduation) is on main.
+    command: >-
+      AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids,
+      make_reader; rows, _ = fetch_recs_by_ids(make_reader(), ['rec-5364']); print([(r['id'], r['status']) for r in rows])"
+    expected: rec-5364 closed after the closure job runs on the merge commit
+    fix_if: >-
+      still open; read the closure job log for a ClosureArtifactRequired or acceptance refusal marker and fix its cause
+      (the shard file missing from the merge, the acceptance not re-keyed, or no Resolves line in the squash body),
+      never a direct status write
+    hermetic: false
+test_obligations:
+  - source: scripts/checks/verification/validate_vp_replay.py
+    behavior: --base origin/main and git merge-base origin/main steps are PR-relative and excluded once the base collapses
+    verification_step: 1
+    test_selector: tests/checks/verification/validate_vp_replay/test_implement_leg.py::TestImplementLeg::test_base_flag_step_excluded_when_base_collapsed
+    red_green_expectation: red before (the step replays and fails), green after
+  - source: docs/contracts/vp-red-before.yaml
+    behavior: implement_leg_partition names the two new PR-relative shapes, with a version bump and amendment entry
+    verification_step: 3
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug vp-replay-base-flag-pr-relative --base origin/main
+    waiver_reason: >-
+      Contract wording only, bound word for word by the Decision 246 sidecar (VP 3), with validate_contract_drift
+      checking the version bump and amendment entry. The partition behavior the words describe is proven by the
+      validate_vp_replay.py obligation above, so a separate red-before test of the prose would add nothing.
+constraints:
+  - "The recognizer stays advisory: a shape it misses still replays, never refuses (validate_vp_replay.py comment above _PR_RELATIVE_RE)."
+  - "PR-time replay is unchanged: an excluded shape still replays whenever the base has not collapsed (vp-red-before.yaml implement_leg_partition)."
+  - "approved_text verify is not changed: making it pass on a collapsed base would make 'base already equals after' look like an approved edit (advisor point 2)."
+  - "No test or assertion is loosened (Decision 235)."
+  - "No rescue agents or workaround loops (Decision 55)."
+context:
+  - "Red: CI run 44218370104 on main (754efbde, #2197): validate_vp_replay replayed PLAN-evaluator-coverage-live-surfaces step 4 (approved_text verify --base origin/main) after the merge, where every sidecar 'before' block is already replaced, and failed. #2199 made that step non-hermetic (CI green since run 44226000420). The same class hit #2163 earlier (run 44199827317, PLAN-persona-verdict-override step 5)."
+  - "Unbuilt plans with the same shape would red main again on their build merge: PLAN-persona-verdict-chain step 5 and PLAN-persona-verdict-egress step 2 (Agents in GitHub), and three merged 2026-11-18 with approved_text verify --base origin/main steps: PLAN-litellm-producer-envelope step 2 (#2192), PLAN-persona-verdict-app-grant step 6 (#2207) and PLAN-persona-verdict-shell-deny step 3 (#2208). PLAN-billing-shape-local step 4 asserts a non-empty numstat from git merge-base origin/main HEAD, which is empty post-merge."
+  - "Census 2026-11-18 of hermetic pre-deploy steps naming origin/main that today's regex misses, outside this plan: 15 (re-measured during plan critique). Eight in other plans become PR-relative: the six unbuilt ones above plus PLAN-governance-and-work-item-boundary 16 and PLAN-persona-verdict-override 5 (already built); this plan's own step 3 is a ninth. Not matched on purpose: four where origin/main is only assertion-message text (PLAN-executor-two-plane-roadmap-encoding 2, 3, 8, 9), two push_context_base() or 'origin/main' fallbacks (resolved at run time), and one git rev-parse origin/main compared with a pinned sha (PLAN-raises-discrimination-guard-advisory 4; not PR-relative)."
+  - "contract.description's parenthetical '(diffs/shows against origin/main)' is left as is: editing contract.description needs its own prose_improvement entry under validate_contract_drift category 6 (scripts/contracts_enforcement.py:91-124), and the description already points to implement_leg_partition for the rule."
+  - "Advisor (blind Fable consult, /mnt/project-files/main-reds-2026-11-18/ADVICE.md): named idioms, not any origin/main mention; do not change approved_text verify; keep the recognizer advisory. Its suggested authoring-time warning lint is follow-on rec-5380 (filed 2026-11-18 with the operator's approval)."
+  - "Approval: the operator wrote write the plans in this plan's thread 2026-11-18T14:25Z after the alignment presentation, covering this plan, the rec-5364 acceptance re-key and the two follow-up recs. The contract wording is bound by the sidecar's own approval run (Decision 246)."
+  - "Graduated shards kept unchanged: vp-replay-failed-step-reports-duration, vp-replay-green-leg-labels-missing-tool-unmeasurable, vp-replay-pr-relative-excluded-on-base-collapse, vp-replay-pr-relative-replayed-at-pr-time, and the two that guard _is_pr_relative directly: vp-replay-pr-relative-predicate-population (asserts at least 9 matches, so widening keeps it green) and vp-replay-predicate-recognises-rec3845-step (the git show shape is unchanged)."
+  - "Size: validate_vp_replay.py is 483 of 500 SLOC (NEAR_CAP, plan_obligations 2026-11-18); the regex edit adds about 3. The build measures it against main first; if the edit would cross 500, that is a plan defect to report (no budget raise, Decision 128)."
+  - "Decision-scout verdict FLAGS_FOUND (round 1). CITE: 148, 189, 201, 226, 246. CONTRADICT: 235 NOTE (fewer post-merge replays near a red check): accepted as a measurement correction (Decision 159 framing) -- the newly excluded steps are vacuous or wrong once HEAD is an ancestor of origin/main, PR-time replay is unchanged, and the operator's write the plan plus the sidecar approval are the human gate if a reviewer reads it as in-class. SPIRIT: 226 NOTE (a recurring class closed by enumeration): the authoring-time warning lint goes to the operator as a follow-up rec. RELATED: 159, 132, 244, 187, 181, 186, 163, 128, 168, 254, 55, 215, 84. Decisions triaged: 220 of 220. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2 (T2.54 and T4.23, path-prefix matches only). Serves: NS.6 3/5 -- keeping the GREEN-AFTER replay discriminating protects the evidence plane."
+  - "Red overlap (scripts.ci_rca.red_overlap, 2026-11-18): blocked by rec-5355 (overlap on tests/session/preflight/test_yaml_parse_budget.py through the test selector). Deferral rationale: rec-5355 is repaired by the sibling plan PLAN-yaml-parse-spy-frame-walk (same owner, same thread); this plan edits none of its files, and both are red repairs."
+  - "rec-5364 closure (Decision 186): escape_class no-edge; closure_artifact shard:vp-replay-base-flag-pr-relative recorded at plan write without a status change (update_rec read back 2026-11-18: status open, closure_artifact set)."
+  - "Accepted over-match: the merge-base alternative also matches git merge-base --is-ancestor origin/main HEAD (branch-is-current), which still passes after merge; those steps are non-hermetic today, and excluding one post-merge would only drop a check that cannot fail there. Not recognized: a --base argv form ('--base', 'origin/main') or a quoted value; no plan uses either today, and rec-5380's lint is the backstop."
+  - "Critique round 3 (the confirming round after round 2's PROCEED) PROCEED, 5 nits: three applied (VP 7 reads the main-validate job's own conclusion, VP 1's red-before list completed, the --is-ancestor rationale corrected); two left: contract.description's '(diffs/shows against origin/main)' stays because editing it changes the operator-approved wording (a later approved-text change or rec-5380 can fold it in), and VP 7 keeps gh as its shell lookup with the mcp__github__ read named in its action."
+  - "rec-5364's filed acceptance path does not exist (step 5 re-keys it to the same node name in the real file); the operator approves that re-key with this plan."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:5cb40c81566d5d1d887fc8a82c680ea4c93a6612aaa5bac334486a63a74a3a68"}  # pragma: allowlist secret
+  - {gate: wording-check, round: 1, verdict: PASS, digest: d7791d5f3aec195ba7cbaf5f5bf27097c981c11a3a218b16b28069022da3ab6f, base: f32b10e452f87d66a10bd947ef0484e7bae78ec7, selection: complete}  # pragma: allowlist secret
+  - {gate: wording-check, round: 2, verdict: PASS, digest: d7791d5f3aec195ba7cbaf5f5bf27097c981c11a3a218b16b28069022da3ab6f, base: 58566acfe7bc1084236e25079f710428766d34e7, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 4}
+  - {gate: plan-critique, round: 2, verdict: PROCEED, blocking: 0, nits: 7}
+  - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 5}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "test_implement_leg.py: add the four nodes first; keep the node id TestImplementLeg::test_is_pr_relative_matches_approved_text_base_origin_main exactly (rec-5364's acceptance names it). Run VP 1 on the old regex: the positive recognizer cases and test_base_flag_step_excluded_when_base_collapsed fail (the red before)."
+  - "validate_vp_replay.py: measure its SLOC against main first (483 of 500, NEAR_CAP); add the merge-base and --base alternatives to _PR_RELATIVE_RE and update its comment; measure again, and if it would pass 500, stop and report a plan defect (no budget raise, Decision 128). Post: VP 1 green; then VP 2 and 4."
+  - "vp-red-before.yaml: apply the sidecar's blocks word for word, filling {{DATE}}; run VP 3."
+  - "VP 5 (re-key rec-5364's acceptance) before the commit that carries Resolves: rec-5364 (Decision 201 cl.2-3: the closure job refuses a rec whose acceptance does not hold at the closing sha)."
+  - "Add the graduated shard config/agent/verification_registry/entries/vp-replay-base-flag-pr-relative.yaml for VP 1 (node test_base_flag_step_excluded_when_base_collapsed)."
+  - "CLOSURE (implement skill Commit Flows): commit with Resolves: rec-5364; rebase; VP 6; push; PR titled build(vp-replay-base-flag-pr-relative); code review in a fresh context; merge on PROCEED and green CI (the sidecar's operator approval is read by validate_merge_step) with Resolves: rec-5364 in the squash body; then VP 7 and 8."
+  - "Report: what was implemented, verification results, run ids"
+rollback: Revert the build PR; --base origin/main and merge-base steps replay post-merge again and red main on their build merges.

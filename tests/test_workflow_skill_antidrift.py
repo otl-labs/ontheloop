@@ -217,10 +217,16 @@ def test_plan_template_records_gate_rounds_not_a_gates_line() -> None:
     assert "plan-critique=<verdict> after <N> round(s)" not in planning
     assert "gate_rounds: # REQUIRED on new plans; one row per gate round (+gate_run_id if dispatched)" in planning
     assert (
-        "- {gate: decision-scout, round: 1, verdict: NO_FLAGS} # critique rows add blocking, nits; "
-        "escalated: true + escalation_choice when asked"
+        "- {gate: decision-scout, round: 1, verdict: NO_FLAGS} # critique rows add blocking, nits, "
+        "category_consistency (12p per drafted entry); escalated + escalation_choice when asked"
     ) in planning
     assert "**Verdict handling** (add a `gate_rounds` row per scout round):" in planning
+
+
+def test_critique_output_line_asks_per_entry_12p() -> None:
+    """Plan-critique's Phase 3 output line asks for one 12p verdict per drafted entry, title first (rec-5261)."""
+    critique = Path(".claude/skills/plan-critique/SKILL.md").read_text(encoding="utf-8")
+    assert "**Category Consistency (12p):** one line per drafted entry, title first:" in critique
 
 
 def test_plan_command_and_overseer_contract_defer_to_the_skill_rule() -> None:
