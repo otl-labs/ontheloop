@@ -10,6 +10,7 @@ import pytest
 
 import scripts.checks.hygiene.validate_placement  # noqa: F401  -- registers "validate_placement" regardless of run order
 from scripts.checks.contracts import _population
+from scripts.checks.contracts._evaluator_coverage import CoverageRow, LiveTable
 from scripts.contracts_schema import EvaluatorSpec
 
 _ROOT = Path(__file__).resolve().parents[3]
@@ -286,13 +287,15 @@ class TestResolveEvaluatorModuleBoundary:
     def test_agent_surface_pass_and_fail(self, tmp_path) -> None:
         present = tmp_path / "present.md"
         present.write_text("mentions target.yaml here\n", encoding="utf-8")
+        live = LiveTable(globs=("*.md",))
+        rows = {"target.yaml": CoverageRow(triggers=("mentions target.yaml here",))}
         resolves, _detail = _population.resolve_evaluator(
-            "target.yaml", EvaluatorSpec(agent_surface="present.md"), root=tmp_path
+            "target.yaml", EvaluatorSpec(agent_surface="present.md"), root=tmp_path, live_table=live, coverage=rows
         )
         assert resolves
 
         resolves2, detail2 = _population.resolve_evaluator(
-            "target.yaml", EvaluatorSpec(agent_surface="missing.md"), root=tmp_path
+            "target.yaml", EvaluatorSpec(agent_surface="missing.md"), root=tmp_path, live_table=live, coverage=rows
         )
         assert not resolves2
         assert "does not contain" in detail2
@@ -434,6 +437,50 @@ class TestCensus:
 
         broken = _population.Census(scanned=3, ritual=1, declared=1, grandfathered=0, skipped=0)
         assert not broken.bucket_identity_holds()
+
+
+def test_agent_surface_evaluator_must_be_live(tmp_path: Path) -> None:
+    (tmp_path / "retired.md").write_text("reads target.yaml first\n", encoding="utf-8")
+    (tmp_path / "other.txt").write_text("reads target.yaml first\n", encoding="utf-8")
+    (tmp_path / "live.md").write_text("reads target.yaml first\n", encoding="utf-8")
+    live = LiveTable(globs=("*.md",), retired=("retired.md",))
+    rows = {"target.yaml": CoverageRow(triggers=("reads target.yaml first",))}
+
+    def run(surface: str) -> tuple[bool, str]:
+        return _population.resolve_evaluator(
+            "target.yaml", EvaluatorSpec(agent_surface=surface), root=tmp_path, live_table=live, coverage=rows
+        )
+
+    ok, detail = run("retired.md")
+    assert not ok and "not live" in detail
+    ok, detail = run("other.txt")
+    assert not ok and "live table" in detail
+    ok, detail = run("live.md")
+    assert ok, detail
+    ok, detail = _population.resolve_evaluator(
+        "target.yaml", EvaluatorSpec(agent_surface="live.md"), root=tmp_path, live_table=live, coverage={}
+    )
+    assert not ok and "no evaluator_coverage triggers row" in detail
+
+
+def test_check_evaluator_asserts_need_evidence(tmp_path: Path) -> None:
+    (tmp_path / "primary.py").write_text('_A = "target.yaml"\n_K = "present_key"\n', encoding="utf-8")
+
+    def run(key: str) -> tuple[bool, str]:
+        return _population.resolve_evaluator(
+            "target.yaml",
+            EvaluatorSpec(check="synthetic_check"),
+            root=tmp_path,
+            registered_checks={"synthetic_check": object()},
+            sequenced_names={"synthetic_check"},
+            check_module_resolver=lambda _n: tmp_path / "primary.py",
+            coverage={"target.yaml": CoverageRow(asserts=(key,))},
+            body=["present_key", "missing_key"],
+        )
+
+    assert run("present_key")[0]
+    ok, detail = run("missing_key")
+    assert not ok and "no literal" in detail
 
 
 @pytest.mark.parametrize("kind", ["check", "agent_surface"])
