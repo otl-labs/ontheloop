@@ -21,6 +21,19 @@ _GIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
 _FINGERPRINT_RE = re.compile(r"v[1-9][0-9]*:[0-9a-f]{64}")
 
 
+class CategoryVerdict(BaseModel):
+    """Plan-critique step 12p's verdict for one drafted Decision entry.
+
+    A verdict, not a finding or a directive: findings stay with rec-4434's telemetry_persona_findings and
+    directives in check-run output (Decision 205 cl.5). The title is stored raw, as drafted_titles returns it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    entry: str = Field(min_length=1)
+    verdict: Literal["PASS", "REVISE"]
+
+
 class GateRound(BaseModel):
     """One gate round as the planner reports it (planning SKILL.md Step 9 convergence rule).
 
@@ -47,6 +60,7 @@ class GateRound(BaseModel):
     selection: Literal["complete", "degraded"] | None = None
     pending_evaluators: int | None = Field(default=None, ge=1)
     scout_input_fingerprint: str | None = None
+    category_consistency: list[CategoryVerdict] | None = None
 
     @model_validator(mode="after")
     def _verdict_matches_gate(self) -> GateRound:
@@ -58,7 +72,25 @@ class GateRound(BaseModel):
             raise ValueError("escalation_choice records the human's answer to an escalation; set escalated: true")
         self._check_run_facts()
         self._check_scout_fingerprint()
+        self._check_category_consistency()
         return self
+
+    def _check_category_consistency(self) -> None:
+        if self.category_consistency is None:
+            return
+        if self.gate != "plan-critique":
+            raise ValueError("category_consistency is allowed only on a plan-critique row")
+        titles = [item.entry.strip() for item in self.category_consistency]
+        if not all(titles):
+            raise ValueError("a category_consistency entry is empty after strip")
+        if len(set(titles)) != len(titles):
+            raise ValueError("category_consistency names a drafted entry more than once")
+        revised = sum(item.verdict == "REVISE" for item in self.category_consistency)
+        if revised and (self.verdict != "REVISE" or self.blocking < revised):
+            raise ValueError(
+                "a REVISE category_consistency entry needs a REVISE row whose blocking count is at least the number of "
+                "REVISE entries (12p is blocking on its own)"
+            )
 
     def _check_scout_fingerprint(self) -> None:
         if self.scout_input_fingerprint is None:
