@@ -93,7 +93,27 @@ def lane_problems(files: dict[str, str]) -> list[str]:
             problems.append(f"fallback {local} is not a Deny")
     if '"*"' not in re.search(r"deny_assume_trust_json\s*=.*?\n  \}\)", admin, re.S).group(0):  # type: ignore[union-attr]
         problems.append("the trust fallback does not name every principal")
-    for rtype, rname in (("aws_iam_user", "org_admin_operator"), ("aws_iam_role", "organization_admin")):
+    if any(rtype == "aws_iam_user_policy" for rtype, _, _ in resources):
+        problems.append("the root declares an aws_iam_user_policy (banned in every root; the grant goes through the group)")
+    group_policies = [name for rtype, _, name in resources if rtype == "aws_iam_group_policy"]
+    policy = _resource_body(admin, "aws_iam_group_policy", "assume_organization_admin") or ""
+    if group_policies != ["assume_organization_admin"] or _attr(policy, "name") != '"AssumeOrganizationAdmin"':
+        problems.append("the group does not hold exactly the one AssumeOrganizationAdmin policy")
+    if _attr(policy, "group") != "aws_iam_group.org_admin_operators.name":
+        problems.append("the group policy is not on group agent-platform-org-admin-operators")
+    group = _resource_body(admin, "aws_iam_group", "org_admin_operators") or ""
+    if _attr(group, "name") != '"agent-platform-org-admin-operators"':
+        problems.append("the group is not agent-platform-org-admin-operators")
+    member = _resource_body(admin, "aws_iam_user_group_membership", "org_admin_operator") or ""
+    if _attr(member, "user") != "aws_iam_user.org_admin_operator.name" or "aws_iam_group.org_admin_operators.name" not in (
+        _attr(member, "groups") or ""
+    ):
+        problems.append("one aws_iam_user_group_membership must name the user and the group")
+    for rtype, rname in (
+        ("aws_iam_user", "org_admin_operator"),
+        ("aws_iam_group", "org_admin_operators"),
+        ("aws_iam_role", "organization_admin"),
+    ):
         body = _resource_body(admin, rtype, rname) or ""
         for banned in ("description", "path", "permissions_boundary"):
             if _attr(body, banned) is not None:
@@ -194,7 +214,15 @@ def sid_set_problems(files: dict[str, str]) -> list[str]:
             "iam:GetUserPolicy",
             "iam:ListUserPolicies",
             "iam:ListAttachedUserPolicies",
-            "iam:PutUserPolicy",
+            "iam:ListGroupsForUser",
+        },
+        "SelfGroup": {
+            "iam:GetGroup",
+            "iam:GetGroupPolicy",
+            "iam:ListGroupPolicies",
+            "iam:ListAttachedGroupPolicies",
+            "iam:PutGroupPolicy",
+            "iam:AddUserToGroup",
         },
         "SelfRole": {
             "iam:GetRole",
@@ -258,6 +286,38 @@ _REDS: dict[str, tuple[Callable[[dict[str, str]], list[str]], Callable[[dict[str
     "user description": (
         lane_problems,
         _edit("management_admin.tf", '  name = "org-admin-operator"', '  name = "org-admin-operator"\n  path = "/x/"'),
+    ),
+    "user policy returns": (
+        lane_problems,
+        lambda f: {
+            **f,
+            "management_admin.tf": f["management_admin.tf"]
+            + 'resource "aws_iam_user_policy" "x" {\n  name = "x"\n  user = "u"\n  policy = "{}"\n}\n',
+        },
+    ),
+    "second group policy": (
+        lane_problems,
+        lambda f: {
+            **f,
+            "management_admin.tf": f["management_admin.tf"]
+            + 'resource "aws_iam_group_policy" "other" {\n  name = "o"\n  group = "g"\n  policy = "{}"\n}\n',
+        },
+    ),
+    "membership dropped": (
+        lane_problems,
+        _edit("management_admin.tf", "aws_iam_group.org_admin_operators.name]", "]"),
+    ),
+    "group description": (
+        lane_problems,
+        _edit(
+            "management_admin.tf",
+            '  name = "agent-platform-org-admin-operators"',
+            '  name = "agent-platform-org-admin-operators"\n  path = "/x/"',
+        ),
+    ),
+    "self group attach verb": (
+        sid_set_problems,
+        _edit(_ADMIN, '"iam:PutGroupPolicy"', '"iam:PutGroupPolicy", "iam:AttachGroupPolicy"'),
     ),
     "trust without mfa": (
         trust_problems,

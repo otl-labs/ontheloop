@@ -1,5 +1,5 @@
 # The management account's admin lane (rec-5026, Decision 256 cl.3): a console-only IAM user that can
-# only assume role OrganizationAdmin (MFA required). The operator's step-4 root seed creates the four
+# only assume role OrganizationAdmin (MFA required), through group membership. The operator's step-4 root seed creates the
 # entities from the same templates; the blocks below adopt them. The user's password and MFA device
 # are set by the operator in the console and never declared, so no secret reaches state (Decision 237).
 # No access key, login profile or virtual MFA device resource exists, and none may be added.
@@ -12,8 +12,18 @@ import {
 }
 
 import {
-  to = aws_iam_user_policy.assume_organization_admin
-  id = "org-admin-operator:AssumeOrganizationAdmin"
+  to = aws_iam_group.org_admin_operators
+  id = "agent-platform-org-admin-operators"
+}
+
+import {
+  to = aws_iam_group_policy.assume_organization_admin
+  id = "agent-platform-org-admin-operators:AssumeOrganizationAdmin"
+}
+
+import {
+  to = aws_iam_user_group_membership.org_admin_operator
+  id = "org-admin-operator/agent-platform-org-admin-operators"
 }
 
 import {
@@ -59,10 +69,21 @@ resource "aws_iam_user" "org_admin_operator" {
   name = "org-admin-operator"
 }
 
-resource "aws_iam_user_policy" "assume_organization_admin" {
+# The user's only grant is through this group (Amendment 2): tests/checks/iam_tf/test_agent_session_user.py bans
+# aws_iam_user_policy in every root, and the group form is what CIS and Security Hub IAM.2 ask for.
+resource "aws_iam_group" "org_admin_operators" {
+  name = "agent-platform-org-admin-operators"
+}
+
+resource "aws_iam_group_policy" "assume_organization_admin" {
   name   = "AssumeOrganizationAdmin"
-  user   = aws_iam_user.org_admin_operator.name
+  group  = aws_iam_group.org_admin_operators.name
   policy = try(templatefile("${path.module}/policies/assume_organization_admin.json.tftpl", local.organization_admin_template_vars), local.deny_all_policy_json)
+}
+
+resource "aws_iam_user_group_membership" "org_admin_operator" {
+  user   = aws_iam_user.org_admin_operator.name
+  groups = [aws_iam_group.org_admin_operators.name]
 }
 
 resource "aws_iam_role" "organization_admin" {

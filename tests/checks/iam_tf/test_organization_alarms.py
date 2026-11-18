@@ -26,7 +26,8 @@ ROLE, SIGNIN, POLICY, ROOT, TAMPER = (
     _P + n for n in ("admin-role-assumed", "signin-anomaly", "policy-change", "root-activity", "detector-tamper")
 )
 _POLICY_EVENTS = (
-    "PutRolePolicy PutUserPolicy AttachRolePolicy AttachUserPolicy CreateAccessKey CreateRole UpdateAssumeRolePolicy "
+    "PutRolePolicy PutUserPolicy PutGroupPolicy AttachRolePolicy AttachUserPolicy AttachGroupPolicy AddUserToGroup "
+    "CreateAccessKey CreateRole UpdateAssumeRolePolicy "
     "AttachPolicy DetachPolicy UpdatePolicy DisablePolicyType"
 ).split()
 
@@ -75,7 +76,7 @@ def pattern_problems(text: str) -> list[str]:
             problems.append(f"{name}: pattern over 1,024 characters")
     policy = pats[POLICY]
     if sorted(re.findall(r'eventName = "(\w+)"', policy)) != sorted(_POLICY_EVENTS):
-        problems.append("the policy-change filter does not name exactly the eleven events")
+        problems.append("the policy-change filter does not name exactly the fourteen events")
     if any(clause in policy for clause in ("userIdentity", "errorCode", "requestParameters", "readOnly")):
         problems.append("the policy-change filter carries an actor, error, parameter or read clause")
     role = pats[ROLE]

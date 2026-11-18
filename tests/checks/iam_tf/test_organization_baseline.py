@@ -38,7 +38,8 @@ _FIXED_NAMES = {
 }
 _NAME_ATTRS = {
     "aws_iam_user": "name",
-    "aws_iam_user_policy": "name",
+    "aws_iam_group": "name",
+    "aws_iam_group_policy": "name",
     "aws_iam_role": "name",
     "aws_iam_role_policy": "name",
     "aws_s3_bucket": "bucket",
