@@ -1,18 +1,41 @@
-"""rec-5288 drain: no floating uses: reference outside CODEOWNERS-covered paths remains."""
+"""rec-5288 and rec-5289 drains: no floating uses: reference remains outside, then inside, CODEOWNERS-covered paths."""
 
 from __future__ import annotations
 
+import fnmatch
 from pathlib import Path
 
+import yaml
+
 from scripts.checks import _common
-from scripts.checks.ci_guards.validate_actions_sha_pinned import BASELINE_REL, parse_baseline, render_baseline
+from scripts.checks.ci_guards.validate_actions_sha_pinned import scan
+
+_BASELINE = "config/actions_sha_pin_baseline.yaml"
+
+
+def _codeowners_patterns(root: Path) -> list[str]:
+    lines = (root / ".github/CODEOWNERS").read_text(encoding="utf-8").splitlines()
+    return [line.split()[0].lstrip("/") for line in (s.strip() for s in lines) if line and not line.startswith("#")]
+
+
+def _covered(path: str, patterns: list[str]) -> bool:
+    return any(path.startswith(p) if p.endswith("/") else fnmatch.fnmatch(path, p) for p in patterns)
 
 
 def test_no_baseline_entry_outside_codeowners_paths() -> None:
     root = Path(_common.ROOT)
-    _, shipped, errors = parse_baseline((root / BASELINE_REL).read_text(encoding="utf-8"))
-    assert not errors, errors
-    assert "rec-5288" not in set(shipped.values()), sorted(k for k, v in shipped.items() if v == "rec-5288")
-    _, live, errors = parse_baseline(render_baseline(root))
-    assert not errors, errors
-    assert "rec-5288" not in set(live.values()), sorted(k for k, v in live.items() if v == "rec-5288")
+    patterns = _codeowners_patterns(root)
+    live, unreadable, _ = scan(root)
+    outside = sorted(k for k in live if not _covered(k.split("::", 1)[0], patterns))
+    assert not outside and not unreadable, (outside, unreadable)
+
+
+def test_baseline_is_empty() -> None:
+    root = Path(_common.ROOT)
+    live, unreadable, _ = scan(root)
+    assert not live, dict(live)
+    assert not unreadable, unreadable
+    baseline = root / _BASELINE
+    if baseline.is_file():
+        drains = (yaml.safe_load(baseline.read_text(encoding="utf-8")) or {}).get("drains") or {}
+        assert not any(drains.values()), {k: sorted(v) for k, v in drains.items() if v}
