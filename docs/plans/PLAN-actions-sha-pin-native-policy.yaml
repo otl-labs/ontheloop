@@ -271,15 +271,17 @@ verification_plan:
       (analyze job checkout to actions/checkout@v7). The handoff evidence gate needs full-tier evidence for that exact
       tree (a zero-diff push is never exempt, so there is exactly one push): start the full tier in the background
       (2 h limit), then validation_result --verify-head, expecting failed_run (validate_actions_sha_pinned refuses the
-      floating checkout; the gate passes failed_run with a warning). Push once, as its own call: git push
-      --force-with-lease -u origin HEAD, or git push -u origin HEAD if the merge deleted the remote branch. The branch
+      floating checkout; the gate passes failed_run with a warning). Push once, as its own call: git push -u origin
+      HEAD (the squash merge deletes the head branch; delete_branch_on_merge is on). If the remote branch still
+      exists, first delete it with git push origin :<branch> as its own call (force-with-lease is denied in auto
+      mode), then push. The branch
       then holds merged history plus the canary, and no pull request is open from it. Dispatch CodeQL with ref set to
       the branch; its run succeeds (the policy is still off). Expected side effect: with security-events write, each
       branch dispatch uploads a code-scanning analysis for that branch ref; it goes stale when VP 16 deletes the
       branch and touches no main alert. Start this right after the merge so the apply is not delayed past Monday
       2026-11-23 07:00 UTC.
     command: >-
-      bin/venv-python -c "print('start in the background, 2 h limit: bin/venv-python -m scripts.validate')"; bin/venv-python -m scripts.checks.validation_result --verify-head; bin/venv-python -c "print('expect failed_run only for validate_actions_sha_pinned; then git push --force-with-lease -u origin HEAD as its own call; MCP: mcp__github__actions_run_trigger(method=run_workflow, workflow_id=codeql.yml, ref=<branch>); actions_get(get_workflow_run) conclusion success')"
+      bin/venv-python -c "print('start in the background, 2 h limit: bin/venv-python -m scripts.validate')"; bin/venv-python -m scripts.checks.validation_result --verify-head; bin/venv-python -c "print('expect failed_run only for validate_actions_sha_pinned; then git push -u origin HEAD as its own call; MCP: mcp__github__actions_run_trigger(method=run_workflow, workflow_id=codeql.yml, ref=<branch>); actions_get(get_workflow_run) conclusion success')"
     expected: verify-head reports failed_run whose failing checks are validate_actions_sha_pinned plus, at most, the open main reds rec-5355 and rec-5364; the branch CodeQL run concludes success.
     fix_if: >-
       The CodeQL run fails for another reason, or verify-head names another failing check: stop and report; never
@@ -323,7 +325,10 @@ verification_plan:
       It succeeds: the stored setting does not enforce; stop and report to the plan owner and the operator (the
       native control is then a no-op; the presubmit check is the only control). The dispatch call is refused or no run
       appears: record the API response as the evidence, delete the branch all the same, and report. ls-remote still finds
-      the branch: the delete was refused; read the refusal, fix the call form, and delete again before reporting.
+      the branch: the delete was refused; read the refusal and fix the call form; if the session proxy refuses ref
+      deletes outright, dispatch branch-cleanup.yml with dry_run=false, min_age_hours=0 and extra_branches=<branch>,
+      else ask the operator to delete it; re-run the ls-remote leg before reporting. Afterwards git reset --hard
+      origin/main locally, so no later push re-publishes the canary commit.
     hermetic: false
   - step: 17
     phase: post-deploy
@@ -359,6 +364,11 @@ test_obligations:
     verification_step: 2
     test_selector: tests/test_terraform_github_apply_gate.py::TestRows::test_actions_permissions_row_carries_allowlisted_values
     red_green_expectation: red before (the node is absent; the row's values are empty), green after
+  - source: scripts/ci/terraform_github_apply_gate.py
+    behavior: an applied Actions-permissions value that differs from the reviewed one is reported unreviewed
+    verification_step: 2
+    test_selector: tests/test_terraform_github_apply_gate.py::TestCheck::test_actions_permissions_value_differing_from_review_is_unreviewed
+    red_green_expectation: red before (the node is absent; check() compares empty values), green after
   - source: scripts/checks/misc/validate_ghas_probe.py
     behavior: the probe fails loud when the live sha_pinning_required is false or absent
     verification_step: 3
@@ -391,7 +401,7 @@ context:
   - "rec-5288, rec-5289, rec-5341 and rec-5342 read closed (critique round 2, 2026-11-18). The physical premise is met: config/actions_sha_pin_baseline.yaml is gone on main and VP 6 passed (336 references, both composites pinned) when the critic re-ran it."
   - "Decision 83 annotation (choice, stated): it points to rec-5290's closure for the first live read-back run id rather than carrying the run id itself, because the run happens after the merge that carries the annotation; Decision 83's reversal stanza is satisfied at its next re-verification. VP 4 waives on whole-file re-runs; Pushes run as their own canonical call: the handoff evidence gate (git-ops.yaml handoff_evidence_gate, Decision 203) admits only canonical forms, and a non-exempt tree needs full-tier evidence for that exact tree, and a zero-diff push is never exempt (handoff_evidence._is_exempt), so the restart is local and the canary commit gets its own full-tier run before its single push (VP 13); VP 16 removes the canary with an agent-branch delete, which the gate passes (_decide_delete), and its evidence leg reads the remote, not the local tree."
   - "Graduated shards kept, not edited: ghas-probe-401-raises-auth-error (names test_validate_ghas_probe.py), terraform-github-apply-non-push-fails-closed, terraform-github-apply-push-neutral and terraform-github-apply-gate (the whole of test_terraform_github_apply_gate.py, which must stay green with the two added nodes); cc-web-signing-premise-corrected (greps repo.tf for 'do not add' and forbids 'signing is unavailable', 'commits land unsigned', '0-byte placeholder') and backlog-health-not-a-required-check (repo.tf must not contain 'backlog-health'): the rewritten comment keeps the first string and adds none of the others. Their nodes are unchanged."
-  - "Related-work check (scripts.ci_rca.red_overlap, 2026-11-18 15:20 UTC): blocked by rec-5355 (plan-corpus walker budget xdist crash, Critical, 15 h old) and rec-5364 (vp-replay base-collapse, Critical, 13 h old), both past SLO, owner named: CI Reform; shared files none. Deferral rationale: neither is this plan's repair and neither overlaps a scope source, so Decision 226 does not halt this work beyond the SLO rule; the gate is the handoff_policy's own: validation_result --verify-head ok on the PR head."
+  - "Related-work check (scripts.ci_rca.red_overlap, 2026-11-18 15:20 UTC): blocked by rec-5355 (plan-corpus walker budget xdist crash, Critical, 15 h old) and rec-5364 (vp-replay base-collapse, Critical, 13 h old), both past SLO, owner named: CI Reform; shared files none. Neither is this plan's repair and neither overlaps a scope source, but both are past SLO, so red-main-recovery.yaml halt rule 1 reads blocked: the build is not dispatched, and a build reaching handoff waits (slo_clock), until rec-5355 and rec-5364 are repaired. The handoff gate is also verify-head ok on the PR head (VP 10). A red ghas-probe while the apply waits is a true alarm."
   - "Cross-project files: scripts/ci/terraform_github_apply_gate.py and its test (Decision 248 apply fence, CODEOWNERS) and scripts/checks/misc/validate_ghas_probe.py and its test. Operator OK to edit them and their tests: given 2026-11-18 15:41 UTC in the plan thread."
   - "Approvals: operator 'write the plan' 2026-11-18 15:41 UTC; canary via branch-only codeql.yml edit chosen on the critique-escalation card 16:03 UTC (critique round 1 B1); OK to edit the apply gate and the GHAS probe plus their tests 15:41 UTC (plan thread)."
   - "Plan owner: the rec-5290 planning thread in the Agents in GitHub project; plan defects go back to it through the coordinator. This is the last plan of the rec-5020 series."
@@ -404,6 +414,7 @@ gate_rounds:
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 2, nits: 7}
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 6}
   - {gate: plan-critique, round: 5, verdict: PROCEED, blocking: 0, nits: 6}
+  - {gate: plan-critique, round: 6, verdict: PROCEED, blocking: 0, nits: 5}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
