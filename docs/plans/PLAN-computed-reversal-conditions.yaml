@@ -5,9 +5,10 @@ handoff_policy:
 slug: "computed-reversal-conditions"
 intent: >-
   Make the reversal-condition monitor compute what can be computed and give every due review an owner: register
-  repository-only predicates for Decision 179's index-read and inflow-per-plan conditions (fired only at review, as
-  their wording says), have a scheduled sensor file exactly one recommendation per overdue or fired stanza, spread the
-  bunched month-end review dates, and stop the fast-tier stanza gate from running predicates at all.
+  repository-only predicates for Decision 179's index-read and inflow-per-plan measures with a fires-at-review key
+  (rec-5366 wires the stanza to them once this is on main), have a scheduled sensor file exactly one recommendation
+  per overdue or fired stanza, spread the bunched month-end review dates, and keep history-reading predicates out of
+  the fast-tier stanza gate.
 plan_type: IMPLEMENTATION
 implementation_declared: false
 verification_tier: V3
@@ -15,7 +16,7 @@ plan_path: docs/plans/PLAN-computed-reversal-conditions.yaml
 phase: >-
   ad_hoc_rec (soft-warn exception category; no tier_item claimed, so the Tier Item Freshness Gate is skipped): rec-5264
   (Medium), the contract-first retrospective's CFR-06. Closes no roadmap criterion. Remit: Decision Growth.
-cites: []
+cites: [dec:61, dec:62, dec:84, dec:133, dec:177, dec:179, dec:194, dec:215, dec:246]
 amends: []
 introduces: []
 closes_criteria: []
@@ -25,9 +26,14 @@ scope:
     purpose: >-
       (1) Optional condition key `fires` (on_true, the default, or at_review), valid on kind repo_state only; a
       condition carries `holds` (the predicate's value, None when not run) apart from `fired`; an at_review condition
-      fires only when holds and review_by <= today. (2) evaluate(run_predicates=True): False checks registration but
-      calls no predicate. (3) Register decision_index_bytes_exceed(max_bytes, index_path="docs/decisions-index.json")
-      and decision_entries_per_plan_exceed(window_days, max_entries_per_plan) as thin wrappers over corpus_measures.
+      fires only when holds and review_by <= today. (2) register_predicate(name, *, gate=True); evaluate(gate=False):
+      with gate=True a predicate registered gate=False is checked for registration and that the stanza's params bind
+      to its signature (inspect.signature(fn).bind) but is not called; every other predicate runs as today, so
+      Decision 194 clause 2's raising roadmap predicate still reddens the PR gate. A
+      predicate that declares an `as_of` parameter receives min(today, review_by), so an at-review window ends at
+      review_by and the result reproduces. (3) Register decision_index_bytes_exceed(max_bytes,
+      index_path="docs/decisions-index.json") and decision_entries_per_plan_exceed(window_days, max_entries_per_plan,
+      as_of=None, registered gate=False: it reads git history) as thin wrappers over corpus_measures.
       (4) review_date_load(results) and the constants REVIEW_DATE_TARGET = 3 and REVIEW_DATE_CEILING = 10;
       next_review_date(target, results) returns the latest date on or before target carrying fewer than
       REVIEW_DATE_TARGET stanzas. (5) preflight_bucket gains a `computed` list (decision, condition id, fires, holds),
@@ -44,30 +50,36 @@ scope:
   - file: scripts/preflight/reversal_reviews.py
     action: Create
     purpose: >-
-      The overdue-review sensor. For each stanza evaluate() reports fired or manual-review-due, look up an owning rec
+      The overdue-review sensor. For each stanza evaluate() reports fired, manual-review-due or MALFORMED (on main
+      only a raising predicate can make one, since the gate refuses unparseable stanzas), look up an owning rec
       with recs_by_title_prefix for "Review Decision N %" and "Supersede Decision N %" (status open or in_progress); if
       none, file one rec through scripts.ops_data_portal.file_rec in rec-5082's form: title "Review Decision N before
-      <review_by>: reversal review due" (or "...: reversal condition fired (<ids>)"), file docs/DECISIONS.md, source
+      <review_by>: reversal review due" (or "...: reversal condition fired (<ids>)", or "Review Decision N: reversal
+      stanza unreadable (<error>)"), file docs/DECISIONS.md, source
       reversal_review, priority High, effort S, acceptance `bin/venv-python -m scripts.preflight.decision_conditions
       --assert-not-surfaced N`, context naming the on_trigger text, each condition's kind and computed holds, and the
-      --next-review-date suggestion. Prints one `[reversal_review]` line per due stanza (filed, owned by rec-X, or
-      dry-run) and a summary line. CLI `python -m scripts.preflight.reversal_reviews [--dry-run] [--profile P]`; exits 1
-      after processing the rest when any stanza is MALFORMED; a reader or portal failure raises (Decision 84 I-4, no
+      --next-review-date suggestion. It never closes or edits a rec: a filed rec closes through its acceptance when
+      the review re-arms or supersedes the stanza, and a closed owner on a still-due stanza gets a new rec (never
+      silently renew). Prints one `[reversal_review]` line per due stanza (filed rec-X, owned by rec-X, would-file in
+      dry-run, or a warning naming every owner when more than one is open) and a summary line `[reversal_review]
+      summary due=<n> filed=<n> owned=<n> malformed=<n>`. CLI `python -m scripts.preflight.reversal_reviews [--dry-run]
+      [--profile P]`; exit 0 once every due stanza has an owner; a reader or portal failure raises (Decision 84 I-4, no
       outbox).
   - file: scripts/checks/ops_governance/validate_reversal_stanzas.py
     action: Modify
     purpose: >-
-      Call evaluate(run_predicates=False) so the fast tier never runs a predicate (today two run, 0.34 s of the gate's
-      0.43 s; the new inflow predicate needs full git history a PR checkout lacks), and fail any review date carrying
-      more than REVIEW_DATE_CEILING stanzas, naming the date, its decisions and the --next-review-date command.
+      Call evaluate(gate=True): the two predicates the gate runs today and the new file-size one still run (Decision
+      194 clause 2); the history-reading inflow predicate does not (a local or worktree --pre may be shallow, and it
+      would make the PR verdict depend on history depth). Fail any review date carrying more than REVIEW_DATE_CEILING
+      stanzas, naming the date, its decisions and the --next-review-date command.
   - file: .github/workflows/convergence-health.yml
     action: Modify
     purpose: >-
       One step "File reversal reviews (rec-5264)" after "Assert scheduled loop liveness (LSA-02)" and before the two
       capacity steps, `if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}`, GH_TOKEN not needed, run `set -euo
       pipefail` then `.venv/bin/python -m scripts.preflight.reversal_reviews`, plus one header paragraph in the
-      file's existing style (alarm-only: files and never closes, red only on a portal or reader failure or a MALFORMED
-      stanza, never a required check). The job already has fetch-depth 0, the OIDC branch role that files recs, and
+      file's existing style (alarm-only: files and never closes, red only on a portal or reader failure, never a
+      required check). The job already has fetch-depth 0, the OIDC branch role that files recs, and
       reads recs_by_title_prefix (sensor_liveness).
   - file: config/agent/data_quality/source_registry.yaml
     action: Modify
@@ -75,10 +87,10 @@ scope:
   - file: docs/DECISIONS.md
     action: Modify
     purpose: >-
-      Exactly the 63 blocks of docs/plans/approved/computed-reversal-conditions.yaml: Decision 179's two predicate
-      lines and fires key, one dated Update note after Decision 179's last note ({{DATE}} = build date, UTC), and 60
-      two-line review_by moves, each earlier, none later. docs/decisions-index.json is regenerated (generator-touched,
-      no row).
+      Exactly the 60 blocks of docs/plans/approved/computed-reversal-conditions.yaml: two-line review_by moves inside
+      stanzas, each earlier, none later, no note (Decision 177 clause 4 keeps review_by bumps legal in the stanza
+      interior). Decision 179's stanza is not edited here (rec-5366). docs/decisions-index.json is regenerated
+      (generator-touched, no row).
   - file: scripts/checks/ops_governance/check_source_registry.py
     action: Modify
     purpose: Add scripts/preflight/reversal_reviews.py to SCANNED_PATHS, as every rec-filing sensor is (dispatch_integrity precedent).
@@ -89,8 +101,11 @@ scope:
     action: Create
     purpose: >-
       fires semantics (on_true unchanged, at_review gated on review_by, fires on a manual condition MALFORMED, unknown
-      value MALFORMED), holds vs fired, run_predicates=False, review_date_load / next_review_date, both CLI flags, and
-      the two new predicates registered with Decision 179's params on the real tree. A new file because
+      value MALFORMED), holds vs fired, as_of injection, gate=True skipping only gate=False predicates while still
+      calling the others, review_date_load / next_review_date, both CLI flags, the two new predicates registered
+      with signatures that bind Decision 179's params, and test_gate_exempt_predicates_are_pinned (the set of
+      gate=False predicates equals exactly {decision_entries_per_plan_exceed}, so demoting roadmap_items_complete or the
+      ports predicate out of the PR gate fails a test, Decisions 187 and 194). A new file because
       tests/test_decision_conditions.py has 12 SLOC of headroom; that file is not edited.
   - file: tests/test_corpus_measures.py
     action: Create
@@ -100,11 +115,11 @@ scope:
     purpose: >-
       test_overdue_stanza_yields_exactly_one_rec (rec-5264's acceptance selector: two sensor runs over a fixture with
       one overdue stanza and an in-memory reader and portal file exactly one rec; an owned stanza files none), rec
-      fields, both owner prefixes, the prefix boundary (13 never matches 133), dry-run, the MALFORMED exit, fail-loud
-      reads, and the source registered.
+      fields, both owner prefixes, the prefix boundary (17 never matches 173), dry-run, a MALFORMED stanza filed once,
+      the two-owner warning, fail-loud reads, and the source registered.
   - file: tests/checks/ops_governance/test_validate_reversal_stanzas.py
     action: Modify
-    purpose: The gate never calls a predicate and fails a date over the ceiling.
+    purpose: The gate still calls gate-safe predicates (a raising one fails it), never calls a gate=False one, and fails a date over the ceiling.
   - file: tests/ci/test_actions_capacity_steps.py
     action: Modify
     purpose: >-
@@ -114,13 +129,13 @@ scope:
     action: Create
     purpose: The workflow step exists, sits before the capacity steps, is gated on main and unless-cancelled, and runs the module.
 bundled_recommendations: [rec-5264]
-followon_recs: []
+followon_recs: [rec-5365, rec-5366]
 infrastructure_dependencies: []
 acceptance_criteria:
-  - docs/DECISIONS.md equals main's text with the 63 approved sidecar blocks applied and {{DATE}} filled (approved_text verify exits 0).
-  - On the real tree, evaluate() reads Decision 179 not-due with index-read-context-cost holds true and inflow-per-plan holds false, both fires at_review, and no stanza MALFORMED.
+  - docs/DECISIONS.md equals main's text with the 60 approved sidecar blocks applied (approved_text verify exits 0).
+  - On the real tree the two new predicates compute from the repository with no reader and Decision 179's params (index holds today; inflow per plan reads under 0.30), and no stanza is MALFORMED.
   - No review date carries more than 3 stanzas on the built tree, and validate_reversal_stanzas fails a fixture date carrying 11.
-  - validate_reversal_stanzas calls no predicate.
+  - validate_reversal_stanzas still runs every predicate it runs today and never runs a gate=False one.
   - An overdue stanza yields exactly one open rec across repeated sensor runs, and a stanza already owned by a "Review Decision N" or "Supersede Decision N" rec yields none (rec-5264's acceptance test).
   - After merge, a convergence-health run on main concludes the reversal-review step successfully and files nothing for Decisions 133 and 173 (owned by rec-5273 and rec-5082) unless their owners closed.
   - rec-5264 is closed by the merge.
@@ -130,7 +145,7 @@ verification_plan:
     action: Prove the committed Decision text is exactly the approved text.
     command: >-
       bin/venv-python -m scripts.roadmap.approved_text verify --slug computed-reversal-conditions --expect
-      c3d7fc5fd25abca1b7584164eefcfadd7c91a2edc4e54187cb7aa61f7e0ae3e7  # pragma: allowlist secret
+      469c3b8f51121c9616d32d82386c9050f2bc7f6422778cb7668a3f59640b5640  # pragma: allowlist secret
     expected: Exit 0.
     fix_if: A difference is reported -- restore the approved words; any other change is an approved_text plan defect.
     hermetic: false
@@ -154,30 +169,28 @@ verification_plan:
       whenever a PR touches the verification registry.
   - step: 3
     phase: pre-deploy
-    action: On the real tree, Decision 179's two conditions are computed, hold as measured, and fire only at review.
+    action: On the real tree, the two new predicates compute Decision 179's measures from the repository with its params.
     command: >-
-      bin/venv-python -c "from scripts.preflight.decision_conditions import evaluate;
-      r={x.decision_id: x for x in evaluate()};
-      bad=[d for d, x in r.items() if x.state == 'MALFORMED']; assert not bad, bad;
-      c={x.id: x for x in r[179].conditions};
-      i, f = c['index-read-context-cost'], c['inflow-per-plan'];
-      assert (i.predicate, i.fires, i.holds, i.fired) == ('decision_index_bytes_exceed', 'at_review', True, False), vars(i);
-      assert (f.predicate, f.fires, f.holds, f.fired) == ('decision_entries_per_plan_exceed', 'at_review', False, False), vars(f);
-      assert r[179].state == 'not-due', r[179].state; print('D179_COMPUTED_OK')"
+      bin/venv-python -c "from scripts.preflight import decision_conditions as dc;
+      r=dc.evaluate(); bad=[x.decision_id for x in r if x.state == 'MALFORMED']; assert not bad, bad;
+      reg=dc._PREDICATE_REGISTRY;
+      i=reg['decision_index_bytes_exceed'](max_bytes=110608);
+      f=reg['decision_entries_per_plan_exceed'](window_days=90, max_entries_per_plan=0.30);
+      assert (i, f) == (True, False), (i, f); print('D179_MEASURES_OK')"
     expected: Prints the marker and exits 0.
     fix_if: >-
-      holds None means the predicate did not run; a MALFORMED 179 with a history message means the clone is shallow
-      (git fetch --unshallow) -- never default the predicate to False. If rec-3250 has landed and the index is under
-      110,608 bytes, index holds False is correct: record the measured size instead.
+      A history error means the clone is shallow (git fetch --unshallow) -- never default the predicate to False. If
+      rec-3250 has landed and the index is under 110,608 bytes, index False is correct: record the measured size
+      instead; an inflow True means the measured ratio passed 0.30, which is real news to report, not a fix.
     hermetic: false
     graduation: waive
     graduation_waiver_reason: Moment claim (the index size and the inflow ratio move with every merge); the unit tests guard the semantics.
   - step: 4
     phase: pre-deploy
-    action: The spread holds on the built tree and the gate passes without running a predicate.
+    action: The spread holds on the built tree and the gate passes, running every gate-safe predicate and skipping only the gate=False one.
     command: >-
       bin/venv-python -c "import collections; from scripts.preflight.decision_conditions import evaluate;
-      n=collections.Counter(x.review_by for x in evaluate(run_predicates=False));
+      n=collections.Counter(x.review_by for x in evaluate(gate=True));
       top=max(n.values()); assert top <= 3, n.most_common(3);
       from scripts.checks.ops_governance.validate_reversal_stanzas import validate_reversal_stanzas;
       f=[]; validate_reversal_stanzas(f); assert not f, f; print('SPREAD_OK max=%d' % top)"
@@ -224,11 +237,13 @@ verification_plan:
       convergence-health.yml, ref main, no inputs), wait for completion, save the health-check job log
       (mcp__github__get_job_logs) to $CH_LOG and the run's jobs (list_workflow_jobs, with steps) to $CH_JOBS.
     command: >-
-      grep -E "\[reversal_review\] summary due=[0-9]+ filed=[0-9]+ owned=[0-9]+ malformed=0" "$CH_LOG" &&
+      grep -E "\[reversal_review\] summary due=[0-9]+ filed=[0-9]+ owned=[0-9]+ malformed=[0-9]+" "$CH_LOG" &&
       bin/venv-python -c "import json,os; j=json.load(open(os.environ['CH_JOBS'])); j=j.get('jobs',j);
       st={x['name']: x.get('conclusion') for y in j for x in y.get('steps',[])};
       assert st.get('File reversal reviews (rec-5264)') == 'success', st; print('STEP_OK')"
-    expected: One summary line with malformed=0, then STEP_OK. Report the summary line verbatim.
+    expected: >-
+      One summary line, then STEP_OK. Report the summary line verbatim; malformed above 0 means a predicate raised on
+      main, and the line names the rec filed for it.
     fix_if: >-
       No line means the step did not run (check the main gate) or crashed: read the log and fix forward. A red step
       with a portal error is a write failure to root-cause; never mark the step continue-on-error. A run red from
@@ -251,10 +266,15 @@ verification_plan:
     graduation: not-applicable
 test_obligations:
   - source: scripts/preflight/decision_conditions.py
-    behavior: fires on_true/at_review semantics, holds vs fired, run_predicates=False, the review-date load and next date, --assert-not-surfaced.
+    behavior: fires on_true/at_review semantics, holds vs fired, as_of, gate=True skipping only gate=False predicates, the review-date load and next date, --assert-not-surfaced.
     verification_step: 2
     test_selector: tests/test_decision_conditions_computed.py::test_at_review_condition_fires_only_once_review_by_passes
     red_green_expectation: red before (fires key rejected as unknown, node absent), green after
+  - source: scripts/preflight/decision_conditions.py
+    behavior: the gate-exempt predicate set is pinned, so no existing predicate leaves the PR gate silently.
+    verification_step: 2
+    test_selector: tests/test_decision_conditions_computed.py::test_gate_exempt_predicates_are_pinned
+    red_green_expectation: red before (no gate flag, node absent), green after
   - source: scripts/preflight/corpus_measures.py
     behavior: new-entry and added-plan counts over a first-parent window, and the loud failure on a short history.
     verification_step: 2
@@ -266,10 +286,10 @@ test_obligations:
     test_selector: tests/test_reversal_reviews.py::test_overdue_stanza_yields_exactly_one_rec
     red_green_expectation: red before (module absent), green after
   - source: scripts/checks/ops_governance/validate_reversal_stanzas.py
-    behavior: the gate runs no predicate and fails a date over the ceiling.
+    behavior: the gate keeps running gate-safe predicates, skips gate=False ones, and fails a date over the ceiling.
     verification_step: 2
-    test_selector: tests/checks/ops_governance/test_validate_reversal_stanzas.py::test_gate_never_runs_a_predicate
-    red_green_expectation: red before (the gate calls predicates), green after
+    test_selector: tests/checks/ops_governance/test_validate_reversal_stanzas.py::test_gate_skips_history_predicates_and_runs_the_rest
+    red_green_expectation: red before (the gate calls every predicate), green after
   - source: .github/workflows/convergence-health.yml
     behavior: the reversal-review step's position, gate and command.
     verification_step: 2
@@ -287,14 +307,16 @@ test_obligations:
     red_green_expectation: red before (unregistered), green after
 constraints:
   - "No rescue agents or workaround loops (Decision 55)."
-  - "Only the 63 approved blocks change docs/DECISIONS.md; no other entry, clause or line is edited. A wording change needs a new approval run through the plan owner, never an in-build edit."
+  - "Only the 60 approved blocks change docs/DECISIONS.md; no other entry, clause or line is edited. A wording change needs a new approval run through the plan owner, never an in-build edit."
   - "Review dates only ever move earlier; this plan postpones no review (Decision 133's stanza: never silently renew)."
   - "Surfacing, not gating: nothing here blocks a merge on a review date or a fired condition; the gate fails only a malformed stanza or a date over the ceiling, which only a stanza-editing PR can cause."
-  - "The fast tier gets cheaper, never dearer: no predicate in --pre, no new --pre check, no verification-registry shard."
+  - "The fast tier gets no dearer: the gate runs the predicates it runs today plus one file stat, no new --pre check, no verification-registry shard."
   - "Abort (audit step 1): a registered predicate that misfires on two consecutive sessions reverts to predicate null by a new approval run."
-  - "No assertion is loosened (Decision 235); the capacity-steps order test keeps the capacity steps last."
+  - "No assertion is loosened (Decision 235): the gate keeps every predicate it runs today (a raising one still fails it); the only predicate it does not call is the new history-reading one, which it never ran; the capacity-steps order test keeps the capacity steps last."
 context:
-  - "Decision-scout: PENDING (first round dispatched against this draft)."
+  - "Decision-scout: round 1 FLAGS_FOUND on Decision 194 (a parse-only gate would stop a raising roadmap predicate reddening the PR, clause 2). Pivot taken: register_predicate(gate=False) marks only the new history-reading predicate; the gate keeps calling every predicate it calls today. Round 2 FLAGS_FOUND, NOTE only: the pivot resolves the 194 WARN; three lines still said parse-only (reworded) and Decision 187's spirit (a later gate=False flip would demote a predicate silently) is met by test_gate_exempt_predicates_are_pinned. Decisions triaged: 220 of 220. Roadmap items intersected: 6; CONFLICT: 0; RELATED: 6. Serves: NS.6 3/5. CITE: dec:61, dec:62, dec:84, dec:133, dec:177, dec:179, dec:194, dec:215, dec:246."
+  - "Two-step split (wording check round 1 FAIL): main's gate rejects a stanza naming a predicate main has not registered, so this plan's sidecar holds only the 60 review_by moves; rec-5366 (filed 2026-11-18) wires Decision 179's two conditions to the predicates once this build is on main."
+  - "D215: the sensor calls recs_by_title_prefix without a limit, so every open or in_progress owner row is read; a partial read raises rather than filing (Decision 84 I-4)."
   - "Audit: audits/contract-first-retrospective-177c8f37.yaml CFR-06 and improvement_sequence step 1. Acceptance targets: 179's inflow and index conditions evaluate from the repository with no reader; an overdue stanza yields exactly one open rec; no date carries more than 10 stanzas (this plan targets 3, ceiling 10)."
   - "rec-5264 context note (from PLAN-condition-reviews-167-177-179 critique): evaluate() fires a true repo_state predicate at once, before review_by, and the index is over its figure, so the predicates must be gated on review_by -- hence fires: at_review."
   - "Probes 2026-11-18 (main 4197aa93): docs/decisions-index.json 189,569 bytes (max_bytes 110,608, so holds); inflow-per-plan over 2026-08-20..2026-11-17 is 95 entries / 462 plans = 0.206 (< 0.30). The same measure reproduces the audit's periods: P1 21/110 = 0.191, P2 76/346 = 0.220 (audit 0.221 from 344 plans); P0 differs (82 vs 79) across the Decision 178 deletion."
@@ -302,14 +324,19 @@ context:
   - "Gate timing 2026-11-18: evaluate() 0.43 s with predicates, 0.09 s without; validate_reversal_stanzas is pre=True with no pre_globs, so it runs on every PR."
   - "Approved-but-unbuilt sidecars that add a stanza: decision-delegation-and-cap-measure (2027-01-29), telemetry-content-deploy-channel and wording-approval-routing (both 2027-05-31). They take 2027-05-31 from 3 to 5, under the ceiling of 10, so no approved text is wedged. No unbuilt sidecar's before text touches a stanza moved here."
   - "Owners today: Decision 133 overdue since 2026-09-30, owned by rec-5273 (Supersede Decision 133); Decision 173 due 2026-11-19, owned by rec-5082 (Review Decision 173 before 2026-11-19). recs_by_title_prefix projects id, title, status, source; convergence-health's sensor_liveness already calls it from this job's role."
-  - "Skill-embedded review triggers (planning SKILL Revisit when 20 plans carry gate_rounds, passed at 154 plans; Revisit after 10 contested escalations; decision-scout SKILL 40 consecutive CONFLICT: 0, rec-3499) have no owning Decision to hold a stanza: split to a follow-on rec (PENDING)."
+  - "Advisor consult (blind; /mnt/project-files/decision-growth/computed-conditions/advisor-brief/ADVICE.md): adopted fires at_review with the window anchored at review_by, the convergence-health step, the two-prefix owner lookup under a dedicated source, earlier-only bare re-dates, the split of the skill triggers, waived pytest graduation, and the signature-bind check; adapted: the gate stays a predicate-running gate that skips only gate=False predicates (scout round 1, Decision 194), not the advisor's parse-only gate; a MALFORMED stanza files a rec instead of reddening the step, and in_progress also counts as an owner. Disagreed: the target per date (advisor 10, this plan 3; put to the operator)."
+  - "Skill-embedded review triggers (planning SKILL Revisit when 20 plans carry gate_rounds, passed at 154 plans; Revisit after 10 contested escalations; decision-scout SKILL 40 consecutive CONFLICT: 0, rec-3499) have no owning Decision to hold a stanza: split at planning to rec-5365 (filed 2026-11-18; bundles rec-3499 when planned)."
   - "Red-overlap 2026-11-18 03:55Z: verdict blocked by rec-5353 (telemetry-arrival ReadDeadlineExceededError; rule slo_breached, shared none), rec-5355 (xdist crash in test_plan_walkers_stay_under_budget; overlap only through tests/session/preflight/test_yaml_parse_budget.py in the affected test set) and rec-5364 (vp-replay _is_pr_relative; overlap only through transitively selected ci_guards and _common test modules). Deferral rationale: this plan edits none of their source or test files and repairs none of them; the overlap is test selection by import distance, not a shared path. Each is deferred to its own ci-rca repair."
   - "Ordering: docs/DECISIONS.md is merge_serial with the Decision 167 amendment build (PR #2198, Decision 272); whichever builds second rebases; no sidecar block overlaps."
   - "Cross-project: convergence-health.yml is also scoped by Agents in GitHub's SHA-pin plan (uses: lines only); whichever builds second rebases. Before merge the build posts one #1963 line: the new step, the reversal_review source, and the ceiling of 10 stanzas per review date."
   - "Graduated shards kept, node ids unchanged: actions-capacity-evaluator-and-steps (tests/ci/test_actions_capacity_steps.py, tests/checks/ops_governance/test_check_source_registry.py), backlog-health-package-suite and source-registry-guard-producer-scan (test_check_source_registry.py), dec-194-roadmap-predicate-semantics and ports-coupling-threshold-predicate (tests/test_decision_condition_predicates.py, run in VP 2, not edited)."
   - "rec-5264's acceptance was re-pointed at planning to tests/test_reversal_reviews.py::test_overdue_stanza_yields_exactly_one_rec (tests/test_decision_conditions.py has 12 SLOC of headroom)."
   - "Approvals at build start: the Decision wording only, bound by the sidecar and its approval run (Decision 246); the build merges under standing_authorisation once validate_merge_step is green."
-gate_rounds: []
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:f4d66206256ee55050aaa1aafe32de0739999cea16dceaaa52cdd93667473891'}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:d7b01cc73f5a46fc5271f9d31d4dce00528a66e6b8c2dcd24167f46e6ee72fbc'}  # pragma: allowlist secret
+  - {gate: wording-check, round: 1, verdict: FAIL, digest: c3d7fc5fd25abca1b7584164eefcfadd7c91a2edc4e54187cb7aa61f7e0ae3e7, base: 4197aa9366bb8cb824f5bcd9d3f55b71a383b550, selection: complete}  # pragma: allowlist secret
+  - {gate: wording-check, round: 2, verdict: PASS, digest: 469c3b8f51121c9616d32d82386c9050f2bc7f6422778cb7668a3f59640b5640, base: 4197aa9366bb8cb824f5bcd9d3f55b71a383b550, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -321,12 +348,12 @@ execution_steps:
   - "decision_conditions.py: fires key, holds, run_predicates, the two predicate wrappers, review-date load and next date, the computed bucket rows, the two CLI flags. Post: its tests in VP 2 pass."
   - "corpus_measures.py and its hermetic tests. Post: VP 2's corpus tests pass."
   - "reversal_reviews.py, the source_registry row, the SCANNED_PATHS entry and their tests (including test_overdue_stanza_yields_exactly_one_rec). Post: VP 2 and VP 5 pass."
-  - "validate_reversal_stanzas.py parse-only plus ceiling. Post: VP 2's gate tests pass."
+  - "validate_reversal_stanzas.py: evaluate(gate=True), which runs every gate-safe predicate and skips only gate=False ones, plus the ceiling. Post: VP 2's gate tests pass."
   - "convergence-health.yml step and the two workflow tests. Post: VP 2's workflow tests pass."
-  - "Apply the 63 sidecar blocks verbatim ({{DATE}} = build date, UTC) and regenerate docs/decisions-index.json (`bin/venv-python -m scripts.decisions_index --write`). Post: VP 1, 3 and 4 pass."
+  - "Apply the 60 sidecar blocks verbatim and regenerate docs/decisions-index.json (`bin/venv-python -m scripts.decisions_index --write`). Post: VP 1, 3 and 4 pass."
   - "CLOSURE, each outcome reported separately (implement skill Commit Flows; docs/contracts/git-ops.yaml handoff_sequence): (a) readiness: bin/venv-python -m scripts.session.github_readiness; (b) set implementation_declared: true in this plan; (c) postflight evidence via bin/venv-python -m scripts.session.postflight --evidence <path>; (d) commit with `Resolves: rec-5264`; git fetch origin main && bin/venv-python -m scripts.session.rebase_resolve; (e) VP 6 on the committed clean tree, the full tier backgrounded with a 2 h limit; (f) post the #1963 line, push, open the PR, CI green, merge (squash) under standing_authorisation, and report PR, CI conclusion and merge SHA on their own line."
   - "Execute Verification Plan: run each step; loop until pass; on an unrecoverable failure stop and RCA (Decision 55)."
   - "Report: what changed; the readiness, postflight, --verify-head and merge lines; then VP 7's summary line and VP 8's result."
 rollback: >-
-  A revert PR removes the sensor step and the predicates; Decision 179's two conditions return to predicate null and the
-  60 dates to their month-ends only through a new approval run (Decision text). Filed review recs stay open and valid.
+  A revert PR removes the sensor step and the predicates (no stanza names them until rec-5366 builds); the 60 dates
+  return to their month-ends only through a new approval run (Decision text). Filed review recs stay open and valid.
