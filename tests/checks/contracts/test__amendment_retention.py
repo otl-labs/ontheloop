@@ -76,12 +76,6 @@ class TestIdentity:
 
 
 class TestRetention:
-    def test_adding_a_row_past_keep_full_without_compacting_fails(self) -> None:
-        base = [_full(n) for n in range(5)]
-        head = [_full(9)] + base
-        msg = ar.retention_violation("c.yaml", _doc(base), _doc(head, "b"), _CFG)
-        assert msg is not None and "compact an older row" in msg
-
     def test_adding_a_row_with_a_compaction_passes(self) -> None:
         base = [_full(n) for n in range(5)]
         head = [_full(9)] + base[:4] + [_terse(4)]
@@ -162,6 +156,13 @@ class TestLoad:
         assert ar.load_retention(tmp_path) is None
         (target / "contract-population.yaml").write_text("amendment_log_retention: {keep_full: 3}\n", encoding="utf-8")
         assert ar.load_retention(tmp_path) == {"keep_full": 3}
+
+
+def test_adding_a_row_past_keep_full_without_compacting_fails() -> None:
+    base = [_full(n) for n in range(5)]
+    head = [_full(9)] + base
+    msg = ar.retention_violation("c.yaml", _doc(base), _doc(head, "b"), _CFG)
+    assert msg is not None and "compact an older row" in msg
 
 
 def test_real_retention_mapping() -> None:
