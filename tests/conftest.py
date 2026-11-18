@@ -52,7 +52,8 @@ def _clear_executor_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _clear_push_context_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Strip GITHUB_EVENT_NAME/GITHUB_EVENT_BEFORE for every test.
+    """Strip GITHUB_EVENT_NAME/GITHUB_EVENT_BEFORE, FULL_TIER_PREV, FULL_TIER_LAST_GREEN and CI_RCA_RANGE_PREV
+    for every test (the last three are job-global once rec-5107 sets them for the full-tier step).
 
     GITHUB_EVENT_NAME is a GitHub Actions default env var present for the WHOLE job
     process (e.g. "push" throughout main-validate's push-triggered run), not just for
@@ -64,6 +65,9 @@ def _clear_push_context_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
     monkeypatch.delenv("GITHUB_EVENT_BEFORE", raising=False)
+    monkeypatch.delenv("FULL_TIER_PREV", raising=False)
+    monkeypatch.delenv("FULL_TIER_LAST_GREEN", raising=False)
+    monkeypatch.delenv("CI_RCA_RANGE_PREV", raising=False)
 
 
 _NONEXISTENT_AWS_DIR_SEGMENT = "nonexistent-aws-config-dir"

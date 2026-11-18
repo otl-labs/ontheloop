@@ -108,6 +108,13 @@ def _list(value: Any) -> list[str]:
     return value if isinstance(value, list) else [value]
 
 
+def _oidc(stmt: dict[str, Any]) -> bool:
+    """The shape the real check-no-public-access rejects with InvalidParameterException (VP 9): a federated OIDC provider."""
+    principal = stmt.get("Principal")
+    federated = principal.get("Federated") if isinstance(principal, dict) else None
+    return any(isinstance(v, str) and (v == "*" or "oidc-provider/" in v) for v in _list(federated))
+
+
 class FakeAws:
     """RUN replacement: sts identity plus an in-memory accessanalyzer; every call is recorded for the tests."""
 
@@ -130,6 +137,8 @@ class FakeAws:
         sub = args[2]
         access = json.loads(flags["--access"]) if "--access" in flags else []
         self.calls.append({"sub": sub, "docs": docs, "access": access})
+        if sub == "check-no-public-access" and any(_oidc(s) for s in _statements(docs["--policy-document"])):
+            return 254, "", f"An error occurred (InvalidParameterException) when calling: {FINDING_TEXT}"
         return 0, json.dumps(getattr(self, "_" + sub.replace("-", "_"))(docs, access)), ""
 
     def _validate_policy(self, docs: dict[str, Any], _access: list[Any]) -> dict[str, Any]:

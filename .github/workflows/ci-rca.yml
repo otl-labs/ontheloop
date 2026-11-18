@@ -174,6 +174,26 @@ jobs:
           echo "workflow_slug=${WORKFLOW_SLUG}" >> "$GITHUB_OUTPUT"
           echo "workflow_name=${WORKFLOW_NAME}" >> "$GITHUB_OUTPUT"
 
+      # Decision 254 cl.4: a CI red's range (prev..head) is resolved by scripts/ci_rca/range_context.py. The proof that
+      # this step completed is its ci-rca-range notice (stdout is not redirected), never the step's conclusion.
+      - name: Resolve run range
+        id: range
+        if: steps.meta.outputs.workflow_slug == 'ci' && hashFiles('scripts/ci_rca/range_context.py') != ''
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RANGE_RUN_ID: ${{ steps.meta.outputs.run_id }}
+          RANGE_SLUG: ${{ steps.meta.outputs.workflow_slug }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RANGE_RUN_ID}" > /tmp/ci-rca-range-run.json
+          bin/venv-python -m scripts.ci_rca.range_context resolve --run-json /tmp/ci-rca-range-run.json --workflow-slug "$RANGE_SLUG" --repo "$GITHUB_REPOSITORY" --out /tmp/ci-rca-range.json
+
+      - name: Range fallback
+        id: range_fallback
+        if: steps.meta.outputs.workflow_slug != 'ci' || hashFiles('scripts/ci_rca/range_context.py') == ''
+        run: echo "diff_base=HEAD^" >> "$GITHUB_OUTPUT"
+
       # rec-2857 forward fix: the fetch/classify/retry logic (previously an inline content grep
       # against the merged stdout+stderr stream, which false-positived on a genuine HTTP-5xx log
       # BODY) now lives in scripts/ci_rca/fetch_logs.py, unit-tested and structurally guarded by
@@ -286,6 +306,7 @@ jobs:
         continue-on-error: true
         env:
           S3_LOG_BUCKET: agent-platform-data-lake
+          CI_RCA_RANGE_PREV: ${{ steps.range.outputs.diff_base || steps.range_fallback.outputs.diff_base }}
         run: |
           RUN_ID="${{ steps.meta.outputs.run_id }}"
           WORKFLOW_NAME="${{ steps.meta.outputs.workflow_name }}"
@@ -456,6 +477,7 @@ jobs:
           # inside file_rec(), which the agent invokes as a Bash tool call within this step --
           # env vars set here propagate to that child process.
           CI_RCA_FORCE_RCA: ${{ github.event.inputs.force_rca }}
+          RANGE_NOTE: ${{ steps.range.outputs.prompt_note }}
         run: |
           RUN_ID="${{ steps.meta.outputs.run_id }}"
           BUNDLE_SHA="${{ steps.evidence.outputs.bundle_sha }}"
@@ -480,7 +502,7 @@ jobs:
           # Pass the prompt via stdin: --allowedTools is variadic and would otherwise swallow a
           # trailing positional prompt, leaving claude with no input ("Input must be provided
           # either through stdin or as a prompt argument when using --print").
-          PROMPT="Apply the .claude/agents/scheduled/ci-rca.md instructions to failed CI run ${RUN_ID}. The failed log is at /tmp/ci-rca-failed.log.${EVIDENCE_CONTEXT}"
+          PROMPT="Apply the .claude/agents/scheduled/ci-rca.md instructions to failed CI run ${RUN_ID}. The failed log is at /tmp/ci-rca-failed.log.${EVIDENCE_CONTEXT}${RANGE_NOTE}"
           printf '%s' "$PROMPT" | ${GITHUB_WORKSPACE}/scripts/ci/claude_p_retry.sh /tmp/ci-rca-output.json -- \
             --output-format json \
             --max-turns 30 \

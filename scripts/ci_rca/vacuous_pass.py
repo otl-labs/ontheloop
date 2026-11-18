@@ -15,6 +15,7 @@ the local git checkout. HEAD^ must exist (fetch-depth: 2 in ci-rca.yml).
 from __future__ import annotations
 
 import logging
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).parent.parent.parent
 _UNDETERMINED = "undetermined"
+RANGE_PREV_ENV = "CI_RCA_RANGE_PREV"
 
 # mirrors scripts/validate.py:3871 -- keep in sync
 _TEST_FILE_RE = re.compile(r"tests/.*test_[^/]+\.py$")
@@ -66,8 +68,15 @@ def parse_vacuous_pass(log_text: str) -> bool | str:
 
 
 def _run_git_diff(extra_args: list[str]) -> list[str] | str:
-    """Run git diff --name-only HEAD^ HEAD and return file list, or "undetermined" on failure."""
-    cmd = ["git", "diff", "--name-only"] + extra_args + ["HEAD^", "HEAD"]
+    """Run git diff --name-only <base> HEAD and return the file list, or "undetermined" on failure.
+
+    base is CI_RCA_RANGE_PREV when set (a sha, or HEAD^ as ci-rca passes for a non-CI slug); set but empty (an
+    unresolved CI range) is "undetermined", never a HEAD^ diff; unset (a local caller) is HEAD^.
+    """
+    base = os.environ.get(RANGE_PREV_ENV)
+    if base is not None and not base.strip():
+        return _UNDETERMINED
+    cmd = ["git", "diff", "--name-only"] + extra_args + [base.strip() if base else "HEAD^", "HEAD"]
     try:
         result = subprocess.run(
             cmd,
@@ -87,7 +96,7 @@ def _run_git_diff(extra_args: list[str]) -> list[str] | str:
 
 
 def merged_diff_files() -> list[str] | str:
-    """Return files changed in the merged commit via git diff HEAD^ HEAD.
+    """Return files changed over the range (git diff CI_RCA_RANGE_PREV HEAD; HEAD^ HEAD when unset).
 
     Returns "undetermined" when HEAD^ is absent or git fails (fetch-depth: 2 required).
     """
@@ -95,7 +104,7 @@ def merged_diff_files() -> list[str] | str:
 
 
 def deleted_test_files() -> list[str] | str:
-    """Return test files deleted in the merged commit via git diff --diff-filter=D HEAD^ HEAD.
+    """Return test files deleted in the merged commit over the range (git diff --diff-filter=D, same base rule).
 
     Returns "undetermined" when HEAD^ is absent or git fails.
     """
