@@ -175,14 +175,14 @@ def test_rule2_unknown_baseline_deploys(repo: Repo, record: Optional[str]) -> No
 
 def test_rule3_already_deployed_and_force_bypasses(repo: Repo) -> None:
     c = gate_repo(repo)
-    records = {"a": c[4], "b": c[4]}
+    records: dict[str, str | None] = {"a": c[4], "b": c[4]}
     assert dg.decide(c[4], records, PATHSPECS, repo.git, False) == (False, "already_deployed")
     assert dg.decide(c[4], records, PATHSPECS, repo.git, True) == (True, "source_changed")
 
 
 def test_rule4_no_source_change_skips_and_force_bypasses(repo: Repo) -> None:
     c = gate_repo(repo)
-    records = {"a": c[2], "b": c[3]}
+    records: dict[str, str | None] = {"a": c[2], "b": c[3]}
     assert dg.decide(c[4], records, PATHSPECS, repo.git, False) == (False, "no_source_change")
     assert dg.decide(c[4], records, PATHSPECS, repo.git, True) == (True, "source_changed")
 
@@ -191,7 +191,7 @@ def test_rule4_oldest_record_anchor_under_a_hold(repo: Repo) -> None:
     c = gate_repo(repo)
     c6 = repo.commit("src/w/b.py")
     c7 = repo.commit()
-    records = {"maintenance": c[2], "serving": c6}
+    records: dict[str, str | None] = {"maintenance": c[2], "serving": c6}
     assert dg.decide(c7, records, PATHSPECS, repo.git, False) == (True, "source_changed")
 
 
@@ -343,3 +343,100 @@ def test_module_imports_only_stdlib() -> None:
 def test_channel_inputs_resolve_real_functions_and_pathspecs(channel: str) -> None:
     functions, pathspecs = dg._channel_inputs(channel)
     assert functions and pathspecs and all(isinstance(f, str) for f in functions)
+
+
+CONTENT_CONFIG = dg.PRE_CHANNEL_FILE
+CONTENT_SPECS = (
+    "src/lambdas/ducklake_telemetry_content_reader",
+    "src/common/ducklake_content_read_verbs.py",
+    "src/sensitive_values",
+)
+
+
+def test_telemetry_content_channel_resolves_its_function_and_pathspecs() -> None:
+    functions, pathspecs = dg._channel_inputs("telemetry-content")
+    assert functions == ["agent-platform-ducklake-telemetry-content"]
+    assert pathspecs == CONTENT_SPECS
+
+
+def test_an_unknown_channel_raises_instead_of_falling_through_to_prod() -> None:
+    with pytest.raises(dg.GateError):
+        dg._channel_inputs("telemetry-contnet")
+
+
+def test_pathspecs_subcommand_prints_exactly_the_protective_set(capsys: Any) -> None:
+    assert dg.main(["pathspecs", "--channel", "telemetry-content"]) == 0
+    assert capsys.readouterr().out.splitlines() == list(CONTENT_SPECS)
+
+
+def test_a_target_without_deploy_config_is_pre_channel_and_never_deploys(repo: Repo) -> None:
+    c1 = repo.commit(dg.GATE_MODULE)
+    assert dg.decide(c1, {"f": None}, CONTENT_SPECS, repo.git, False, CONTENT_CONFIG) == (False, "pre_channel_target")
+    c2 = repo.commit(CONTENT_CONFIG)
+    assert dg.decide(c2, {"f": None}, CONTENT_SPECS, repo.git, False, CONTENT_CONFIG) == (True, "baseline_unknown")
+
+
+def test_shared_module_change_is_no_source_change_and_masking_change_is_source_changed(repo: Repo) -> None:
+    base = repo.commit(dg.GATE_MODULE, CONTENT_CONFIG)
+    shared = repo.commit("src/common/ducklake_runtime.py")
+    assert dg.decide(shared, {"f": base}, CONTENT_SPECS, repo.git, False, CONTENT_CONFIG) == (False, "no_source_change")
+    masked = repo.commit("src/sensitive_values/engine.py")
+    assert dg.decide(masked, {"f": base}, CONTENT_SPECS, repo.git, False, CONTENT_CONFIG) == (True, "source_changed")
+
+
+def _resolve_channel(
+    repo: Repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, functions: list[str], records: dict, full: Any
+) -> list[str]:
+    out = tmp_path / "out.txt"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    sha = repo.commit(dg.GATE_MODULE, CONTENT_CONFIG)
+    api = FakeApi()
+    api.add(sha)
+    repo.git.out("update-ref", "refs/remotes/origin/main", sha)
+    seen = {fn: (sha if records.get(fn) else None) for fn in functions}
+    dg.resolve(
+        "telemetry-content",
+        False,
+        str(tmp_path / "m.json"),
+        api=api,
+        git=repo.git,
+        reader=lambda channel, fn: seen[fn],
+        inputs=(functions, CONTENT_SPECS),
+        record_reader=full,
+    )
+    return out.read_text(encoding="utf-8").splitlines()
+
+
+def test_single_function_channel_emits_record_outputs(repo: Repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    lines = _resolve_channel(repo, tmp_path, monkeypatch, ["f"], {"f": True}, lambda ch, fn: {"code_sha256": "ZGlnZXN0"})
+    assert any(line.startswith("record_sha=") for line in lines) and "record_code_sha256=ZGlnZXN0" in lines
+
+
+def test_absent_record_and_two_function_channel_emit_no_record_outputs(
+    repo: Repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def forbidden(ch: str, fn: str) -> dict:
+        raise AssertionError("record_reader must not run")
+
+    lines = _resolve_channel(repo, tmp_path, monkeypatch, ["f"], {}, forbidden)
+    assert not any(line.startswith("record_") for line in lines)
+
+
+def test_two_function_channel_never_reads_a_full_record(repo: Repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(ch: str, fn: str) -> dict:
+        raise AssertionError("record_reader must not run")
+
+    lines = _resolve_channel(repo, tmp_path, monkeypatch, ["f", "g"], {"f": True, "g": True}, forbidden)
+    assert not any(line.startswith("record_") for line in lines)
+
+
+def test_read_record_returns_the_mapping_and_none_when_absent() -> None:
+    import types
+
+    ok = types.SimpleNamespace(returncode=0, stdout='{"source_git_sha": "abc", "code_sha256": "x"}', stderr="")
+    assert dg.read_record("c", "f", run=lambda *a, **k: ok) == {"source_git_sha": "abc", "code_sha256": "x"}
+    absent = types.SimpleNamespace(returncode=1, stdout="", stderr=dg.ABSENT_RECORD_TEXT)
+    assert dg.read_record("c", "f", run=lambda *a, **k: absent) is None
+    notmap = types.SimpleNamespace(returncode=0, stdout="[1]", stderr="")
+    assert dg.read_record("c", "f", run=lambda *a, **k: notmap) is None

@@ -31,6 +31,10 @@ ABSENT_RECORD_TEXT = "(404) when calling the HeadObject operation"
 DEFAULT_REPO = "otl-labs/ontheloop"
 
 
+CHANNELS = ("ducklake", "prod", "telemetry-content")
+CONTENT_FUNCTION = "agent-platform-ducklake-telemetry-content"
+
+
 class GateError(RuntimeError):
     """The gate could not decide; callers fail closed and never fall back to main HEAD."""
 
@@ -127,16 +131,22 @@ def _oldest_record(git: Git, shas: list[str]) -> Optional[str]:
     return None
 
 
+PRE_CHANNEL_FILE = "src/lambdas/ducklake_telemetry_content_reader/deploy_config.json"
+
+
 def decide(
     target: str,
     records: dict[str, Optional[str]],
     pathspecs: tuple[str, ...],
     git: Git,
     force: bool,
+    pre_channel_file: Optional[str] = None,
 ) -> tuple[bool, str]:
     """(deploy, reason) for `target` against the channel's deploy records; rules 0-5 in order."""
     if not git.ok("cat-file", "-e", f"{target}:{GATE_MODULE}"):
         return False, "pre_gate_target"
+    if pre_channel_file and not git.ok("cat-file", "-e", f"{target}:{pre_channel_file}"):
+        return False, "pre_channel_target"
     for sha in records.values():
         if _resolvable(git, sha) and sha != target and git.ok("merge-base", "--is-ancestor", target, str(sha)):
             return False, "newer_deployed"
@@ -152,8 +162,8 @@ def decide(
     return True, "source_changed"
 
 
-def read_record_sha(channel: str, function: str, run: Optional[Callable[..., Any]] = None) -> Optional[str]:
-    """source_git_sha of a deploy record; None for an absent record or a null sha; GateError on any other failure."""
+def read_record(channel: str, function: str, run: Optional[Callable[..., Any]] = None) -> Optional[dict[str, Any]]:
+    """A deploy record mapping; None for an absent record; GateError on any other failure."""
     runner = run or subprocess.run
     cmd = ["aws", "s3", "cp", f"s3://{RECORD_BUCKET}/deploy-records/{channel}/{function}.json", "-"]
     if os.environ.get("AWS_REGION"):
@@ -164,16 +174,27 @@ def read_record_sha(channel: str, function: str, run: Optional[Callable[..., Any
             return None
         raise GateError(f"aws s3 cp failed for {channel}/{function}: {(result.stderr or '').strip()[-300:]}")
     try:
-        return json.loads(result.stdout).get("source_git_sha") or None
+        record = json.loads(result.stdout)
     except ValueError as exc:
         raise GateError(f"deploy record {channel}/{function} is not JSON: {exc}") from exc
+    return record if isinstance(record, dict) else None
+
+
+def read_record_sha(channel: str, function: str, run: Optional[Callable[..., Any]] = None) -> Optional[str]:
+    """source_git_sha of a deploy record; None for an absent record or a null sha; GateError on any other failure."""
+    record = read_record(channel, function, run)
+    return (record or {}).get("source_git_sha") or None
 
 
 def _channel_inputs(channel: str) -> tuple[list[str], tuple[str, ...]]:
+    if channel not in CHANNELS:
+        raise GateError(f"unknown channel {channel!r}")
     # importlib, not an import statement: only `resolve` has pyyaml/pydantic installed, and `freshness` runs on the
     # runner's bare system python3, so the dependency closure of this module must stay stdlib.
     config = importlib.import_module("scripts.build_lambda_config")
     drift = importlib.import_module("scripts.convergence_health.code_drift")
+    if channel == "telemetry-content":
+        return [CONTENT_FUNCTION], drift.TELEMETRY_CONTENT_SOURCE_PATHSPECS
     if channel == "ducklake":
         return list(config._build_ducklake_function_zip_keys()), drift.DUCKLAKE_SOURCE_PATHSPECS
     return list(config._build_prod_function_names()), drift.PROD_SOURCE_PATHSPECS
@@ -195,6 +216,7 @@ def resolve(
     git: Optional[Git] = None,
     reader: Callable[[str, str], Optional[str]] = read_record_sha,
     inputs: Optional[tuple[list[str], tuple[str, ...]]] = None,
+    record_reader: Callable[[str, str], Optional[dict[str, Any]]] = read_record,
 ) -> int:
     git = git or Git()
     api = api or GithubApi()
@@ -206,11 +228,17 @@ def resolve(
         functions, pathspecs = inputs or _channel_inputs(channel)
         sha = newest_green_sha(api, git)
         records = {fn: reader(channel, fn) for fn in functions}
+        record_sha = record_code_sha256 = ""
+        if len(functions) == 1 and records[functions[0]]:
+            record_sha = str(records[functions[0]])
+            full = record_reader(channel, functions[0]) or {}
+            record_code_sha256 = str(full.get("code_sha256") or "")
         if sha is None:
             deploy, reason = False, "no_green_in_window"
             print("::notice::DEPLOY-GATE no green main commit within the window; skipping")
         else:
-            deploy, reason = decide(sha, records, pathspecs, git, force)
+            pre_file = PRE_CHANNEL_FILE if channel == "telemetry-content" else None
+            deploy, reason = decide(sha, records, pathspecs, git, force, pre_file)
     except GateError as exc:
         print(f"::error::DEPLOY-GATE failed closed: {exc}", file=sys.stderr)
         return 2
@@ -224,7 +252,12 @@ def resolve(
         "records": records,
         "run_id": os.environ.get("GITHUB_RUN_ID"),
     }
-    _emit({"sha": sha or "", "deploy": str(deploy).lower(), "reason": reason}, manifest, manifest_path)
+    outputs = {"sha": sha or "", "deploy": str(deploy).lower(), "reason": reason}
+    if record_sha:
+        outputs["record_sha"] = record_sha
+    if record_code_sha256:
+        outputs["record_code_sha256"] = record_code_sha256
+    _emit(outputs, manifest, manifest_path)
     return 0
 
 
@@ -259,16 +292,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="deploy_gate")
     sub = parser.add_subparsers(dest="cmd", required=True)
     res = sub.add_parser("resolve")
-    res.add_argument("--channel", choices=["ducklake", "prod"], required=True)
+    res.add_argument("--channel", choices=list(CHANNELS), required=True)
     res.add_argument("--force", action="store_true")
     res.add_argument("--manifest", required=True)
     fresh = sub.add_parser("freshness")
-    fresh.add_argument("--channel", choices=["ducklake", "prod"], required=True)
+    fresh.add_argument("--channel", choices=list(CHANNELS), required=True)
+    paths = sub.add_parser("pathspecs")
+    paths.add_argument("--channel", choices=list(CHANNELS), required=True)
     fresh.add_argument("--expected-sha", required=True)
     fresh.add_argument("functions", nargs="+")
     args = parser.parse_args(argv)
     if args.cmd == "resolve":
         return resolve(args.channel, args.force, args.manifest)
+    if args.cmd == "pathspecs":
+        print("\n".join(_channel_inputs(args.channel)[1]))
+        return 0
     return freshness(args.channel, args.expected_sha, args.functions)
 
 
