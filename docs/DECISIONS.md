@@ -845,6 +845,13 @@ conditions:
 > policies (the API route, App key and trail policies) and policy blocks inside a role are not checked; a trust is
 > checked for public access only.
 
+> **Update (2026-11-17):** CheckNoPublicAccess rejects a trust statement whose principal is a federated OIDC
+> provider (the GitHub Actions roles), so the analyzer checks each federated statement other than SAML by its own
+> rule: one that allows access refuses the run unless it names only OIDC providers of the account and pins its sub
+> condition to exact repository subjects, with no wildcard or policy variable. The document's other statements
+> still go to Access Analyzer. Which repository a subject names is not checked; 'a trust is checked for public
+> access only' stands for every other trust statement.
+
 > **Amended by Decision 270 (2026-11-17):** Clause 3's protected set gains the telemetry-content-* roles and their policies: bootstrap-apply's DenyProtectedRoleWrite and the apply classifier name role/telemetry-content-*, and bootstrap-apply holds no Lambda write on the content function.
 
 ---
