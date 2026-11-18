@@ -58,6 +58,8 @@ conditions:
 
 **Related:** Decisions 83, 143, 181, 203, 205, 212, 224, 229, 237, 245, 263, 264, 267; T4.2, T4.32; rec-4624, rec-5241, rec-5271.
 
+> **Update (2026-11-17):** PLAN-persona-verdict-egress re-cut T4.32's egress hint into five plans, and the operator ruled on 2026-11-17 that the verdict App's key gets its own Environment and role. So "PLAN-persona-verdict-egress" in clause 4 and the Coverage line reads as two plans: PLAN-persona-verdict-app-grant holds the App, its key home and the role that reads the key (a separate role, used only by the post job, under its own Decision in the Decision 267 clause 5 form, so Decision 263 clause 2's grant list does not widen), and PLAN-persona-verdict-app-post holds the post job's token mint; the app-key-exposed reversal's "the egress plan's declared readers" reads as PLAN-persona-verdict-app-grant's declared readers, and the gates.verdict_app.app_id row's note in docs/contracts/project-configuration.yaml reads the same way (rec-5351).
+
 ---
 
 ## Decision 270: The telemetry content reader is reached through a fifth DuckLake API route, and its change lock lives in the CI apply boundary, paid for by prefix-named URL-only Denies (amends Decisions 144, 202, 213, 230, 239, 255, 256, 257 and 258) (Decided)
@@ -605,6 +607,8 @@ conditions:
 
 **Related:** Decisions 144, 172, 205, 212, 213, 223, 224, 237, 238, 248, 252; T4.32.
 
+> **Update (2026-11-17):** "The verdict-jobs plan" in clause 4 and the Coverage line reads as the PLAN-persona-verdict-* plans of T4.32's decomposition_hints. PLAN-persona-verdict-egress records clause 4's coupling as ports.yaml PC-12, and the telemetry writer principal registry (docs/contracts/telemetry-writer-principals.yaml, rec-4420) holds this role's principal row. PLAN-persona-verdict-first-key-read is to prove the live assume and decryption under the role, and that a job holding id-token: write without the Environment is refused; a pull_request job's refusal stays with the fixture run (T4.32 c3). The verdict App's key is to be read by a separate role in its own Environment under PLAN-persona-verdict-app-grant's own Decision (the operator's 2026-11-17 ruling), so this role's grant list does not change.
+
 ---
 
 ## Decision 262: A plan PR whose last decision-scout row is BLOCK fails its check, with no exemption and no agent override -- the operator's admin bypass merge is the release valve (amends Decision 83) (Decided)
@@ -840,6 +844,13 @@ conditions:
 > policies; other AWS-managed attachments, documents and trusts unknown until apply, IAM group policies, resource
 > policies (the API route, App key and trail policies) and policy blocks inside a role are not checked; a trust is
 > checked for public access only.
+
+> **Update (2026-11-17):** CheckNoPublicAccess rejects a trust statement whose principal is a federated OIDC
+> provider (the GitHub Actions roles), so the analyzer checks each federated statement other than SAML by its own
+> rule: one that allows access refuses the run unless it names only OIDC providers of the account and pins its sub
+> condition to exact repository subjects, with no wildcard or policy variable. The document's other statements
+> still go to Access Analyzer. Which repository a subject names is not checked; 'a trust is checked for public
+> access only' stands for every other trust statement.
 
 > **Amended by Decision 270 (2026-11-17):** Clause 3's protected set gains the telemetry-content-* roles and their policies: bootstrap-apply's DenyProtectedRoleWrite and the apply classifier name role/telemetry-content-*, and bootstrap-apply holds no Lambda write on the content function.
 

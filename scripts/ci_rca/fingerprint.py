@@ -30,6 +30,9 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 
 _V2_SALT = "v2"
 
+# Workflows that run the same full tier: a failure of one cause in any of them is one rec (rec-4900, Decision 142).
+FULL_TIER_SIBLING_SLUGS = ("ci", "main_canary")
+
 
 def compute_fingerprint_v2(workflow_slug: str, failure_category: str, error_signature: str) -> str:
     """Deterministic sha256 hex over (v2-salt, workflow_slug, failure_category, error_signature).

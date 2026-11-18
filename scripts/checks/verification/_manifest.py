@@ -246,6 +246,7 @@ ENTRIES: tuple[Entry, ...] = (
             "scripts/checks/_marker_guard_state_options.py",
             "scripts/checks/_schema.py",
             "scripts/checks/contracts/_population.py",
+            "scripts/checks/contracts/_evaluator_coverage.py",
             "scripts/checks/contracts/_ratchet.py",
             "scripts/checks/deps/validate_pre_glob_closure.py",
             "scripts/checks/structural/_classify.py",
