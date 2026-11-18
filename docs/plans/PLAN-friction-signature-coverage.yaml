@@ -1,0 +1,364 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: friction-signature-coverage
+intent: >-
+  Make the friction classifier's coverage measurable and raise it before any review or rec filing builds on it (feedback-loop
+  wave 2, first plan). A new agent-facing window verb, friction_signature_counts, returns per tree one row per friction
+  signature (observation type, name, disposition, the rule that labelled it, label, class and whether that rule is generic)
+  with fact and session counts, so the unmapped share per classifier_version and the signatures behind it are readable;
+  friction classifier_version 3 adds prefix rules for repo-check and pre-commit failures and exact rules for the blocking
+  hooks that have none, and its unmapped_count counts every process-event fact a generic rule labelled; a rules-file guard
+  holds the rules to registered signatures with no ties. The telemetry_usage CLI gains a friction command that sums the
+  rows and prints the unmapped share per classifier_version.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-friction-signature-coverage.yaml
+phase: >-
+  Feedback-loop wave 2 (operator-directed 2026-11-18): the friction detector the loop's daily analysis (T3.3) reads, the
+  CD.45 pilot item pwi-friction-classifier (part_of T3.20) criteria c1-c2. Closes no roadmap exit criterion (T3.20's one
+  open criterion, c9, is CI capture; T3.3's criteria wait on the daily detector and the filer), so closes_criteria is
+  empty. T3.3's stale files_in_scope (a telemetry_analysis_agent Lambda) is re-grounded by the daily detector plan, the
+  first plan that realizes T3.3's detector shape.
+closes_criteria: []
+cites: [dec:79, dec:84, dec:128, dec:199, dec:236, dec:246, dec:249, dec:254, dec:272]
+scope:
+  - file: src/common/ducklake_event_read_verbs.py
+    action: Modify
+    purpose: >-
+      FRICTION_RULES becomes classifier_version 3. New rules, each (rule_id, observation_type, signature, signature_prefix,
+      disposition, label, class): r05 hook:scheduled_agent_log_only error scheduled_agent_write_block exception; r06
+      hook:handoff_evidence_gate error handoff_evidence_block exception; r07 hook:merge_gate error merge_gate_block
+      exception; r08 hook:rec_writer_tripwire error rec_write_block exception; r09 hook:protected_action_gate error
+      protected_action_block exception; r20 prefix gate: error check_failure exception; r21 prefix precommit: error
+      precommit_failure exception. Existing rules unchanged (an exact signature still beats a prefix, which beats a generic
+      rule, so gate:validate_scope_boundary stays r04 scope_creep). EVENT_READS gains friction_signature_counts: tables
+      (SESSIONS, OBSERVATIONS), params (day_from, day_to), binding window, max_window_days MAX_WINDOW_DAYS, agent-facing,
+      data FRICTION_RULES, sql FRICTION_SIGNATURE_SQL composed in this module (see the sql row), a description naming the
+      grain and that it returns derived rows only. session_friction_rollup's description says unmapped_count counts the
+      process-event facts a generic rule labelled. FRICTION_SIGNATURE_SQL is composed here, not in a new module, so neither
+      reader manifest changes (the content reader's manifest directory is in its operator-gated protective set, Decision
+      272); the sql module's headroom is spent by unbuilt plans first.
+  - file: src/common/ducklake_event_read_sql.py
+    action: Modify
+    purpose: >-
+      FRICTION_CTES' labelled CTE also carries rule_id and generic (r.signature IS NULL AND r.signature_prefix IS NULL) and
+      the fact's observation_type, name and disposition; the friction CTE carries them through (the repeat-run arm carries
+      rule_id 'run', generic false, observation_type tool_call, the tool name and disposition error). FRICTION_ROLLUP_SQL's
+      unmapped_count becomes count(*) FILTER (WHERE observation_type = 'process_event' AND generic). No other text changes;
+      the verbs module reads the window pieces (_USAGE_TREE, _TREE_COLS, _TREE_STAMPS, _TREE_USING) through the sql module
+      namespace, as it already reads sql.* names. Net change a few SLOC against 29 of headroom on main dfcd98df+, which
+      unbuilt plans spend first: the build measures headroom at build time and, if the change would cross 500, moves the
+      friction block (FRICTION_CTES, FRICTION_FACTS_SQL, FRICTION_ROLLUP_SQL) into the verbs module instead, never a raise.
+  - file: src/common/event_usage_fields.py
+    action: Modify
+    purpose: >-
+      FRICTION_SIGNATURE_FIELDS, the new verb's derived columns in SQL order: root_session_id, harness_session_key, branch,
+      session_started_at, roots_in_tree, workflow, observation_type, signature, disposition, rule_id, label, class, generic,
+      fact_count, session_count, classifier_version (stamps appended by VERB_FIELDS).
+    new_imports: []
+  - file: src/common/ducklake_reader_client.py
+    action: Modify
+    purpose: VERB_FIELDS gains friction_signature_counts = (*FRICTION_SIGNATURE_FIELDS, *_STAMP_FIELDS).
+    new_imports: []
+  - file: scripts/telemetry_verify/derive.py
+    action: Modify
+    purpose: >-
+      The friction oracle's facts carry rule_id, generic, observation_type, name and disposition; session_friction_rollup's
+      unmapped_count counts generic process-event facts (matching the SQL); the module docstring's unmapped_count line
+      follows.
+  - file: scripts/telemetry_verify/derive_usage.py
+    action: Modify
+    purpose: >-
+      Independent oracle friction_signature_counts(tables, projects, day_from, day_to) over the usage trees: the same rows
+      from raw rows through derive.friction_facts, grouped per tree and workflow.
+  - file: scripts/telemetry_usage.py
+    action: Modify
+    purpose: >-
+      A friction command over the existing windows: sums friction_signature_counts rows across trees and windows and prints
+      one JSON object with, per classifier_version, process_event_facts, generic_process_event_facts,
+      unmapped_failure_share (generic over all process-event facts; null when there are none, never 0), tool_call_facts,
+      and the signatures ranked by fact_count with their rule_id, label, generic flag and session count; --workflow
+      filters on the workflow column (interactive sessions have workflow null).
+  - file: scripts/ducklake_smoke/lambda_telemetry_reader_gates.py
+    action: Modify
+    purpose: _USAGE_VERBS gains friction_signature_counts, so the reader smoke reads it and checks its rows carry exactly VERB_FIELDS.
+  - file: docs/contracts/ducklake_telemetry_reader.yaml
+    action: Modify
+    purpose: >-
+      Sidecar-bound words (docs/plans/approved/friction-signature-coverage.yaml): a friction-signature invariant after the
+      usage-verbs invariant naming friction_signature_counts, its window, grain, columns and that it returns no content and
+      no cross-tree sum; one amendment_log line.
+  - file: docs/contracts/read-engine.yaml
+    action: Modify
+    purpose: >-
+      Registration, not sidecar-bound (a roster mirror validate_read_engine_verbs holds equal to the registry):
+      friction_signature_counts joins read_surface.named_verbs under telemetry_observations, with a new amendment_log entry
+      (field_add, semantic_break false) naming this plan.
+  - file: docs/plans/approved/friction-signature-coverage.yaml
+    action: Create
+    purpose: Approved-text sidecar (Decision 246) for the ducklake_telemetry_reader.yaml block.
+  - file: tests/telemetry/fixtures/friction_vectors.yaml
+    action: Modify
+    purpose: >-
+      New vectors v28-v35: a gate: failure takes check_failure; a precommit: failure takes precommit_failure; an exact gate
+      rule still beats the prefix (gate:validate_scope_boundary scope_creep); a gate: warning stays the generic hook_fault;
+      each of the five new hook rules; an optional unmapped key asserts unmapped_count (generic process-event facts,
+      r91 included). Existing vectors keep their expected labels. tests/common/test_ducklake_event_read_verbs.py (483 of 500
+      SLOC) is not edited: its parametrized test_friction_vectors runs the new vectors as they are added.
+  - file: tests/common/test_friction_rules_guard.py
+    action: Create
+    purpose: >-
+      The pilot c2 guard, fast tier (no duckdb): test_exact_hook_signatures_name_registered_hooks (stems of
+      .claude/hooks/hooks.json commands); test_exact_gate_signatures_name_registered_checks
+      (scripts.checks.registry.all_checks); test_exact_precommit_signatures_name_config_ids (.pre-commit-config.yaml);
+      test_prefixes_are_declared_signature_prefixes (config/telemetry/parser_versions.yaml signature_prefixes);
+      test_no_two_rules_tie; test_each_label_has_one_class; test_each_fact_class_has_one_generic_fallback.
+  - file: tests/common/test_ducklake_event_read_friction_signatures.py
+    action: Create
+    purpose: >-
+      Full tier (importorskip duckdb), over the golden chain: test_verb_matches_oracle_on_every_golden_tree;
+      test_generic_flag_marks_only_rules_without_signature_or_prefix; test_repeat_run_row_carries_rule_run;
+      test_unmapped_count_counts_generic_process_event_facts (every vector carrying the unmapped key, through the
+      session verb, classifier_version 3 stamped);
+      test_absorbed_close_is_not_a_row; test_window_reads_real_purpose_projects_only.
+  - file: tests/telemetry_verify/test_derive.py
+    action: Modify
+    purpose: The oracle's unmapped_count counts generic process-event facts (a vector with r91 hook_fault), matching the verb.
+  - file: tests/telemetry/fixtures/derived_golden_rollups.yaml
+    action: Modify
+    purpose: >-
+      Re-derived expectations for classifier_version 3 on the golden trees whose facts the new rules or the unmapped_count
+      change touch; every changed row is listed in the PR body with its before and after (no other row changes).
+  - file: tests/test_event_usage_fields.py
+    action: Modify
+    purpose: _BY_VERB gains friction_signature_counts.
+  - file: tests/ducklake_neon_smoke_test/test_lambda_telemetry_reader_gates.py
+    action: Modify
+    purpose: test_reader_gate_reads_the_usage_verbs covers friction_signature_counts.
+  - file: tests/test_telemetry_usage.py
+    action: Modify
+    purpose: >-
+      With a fake reader: test_friction_sums_signatures_across_trees_and_windows; test_friction_share_is_null_without_process_events;
+      test_friction_share_is_per_classifier_version; test_friction_workflow_filter; test_friction_verb_is_registered_agent_facing_window_verb.
+bundled_recommendations: []
+followon_recs: []
+infrastructure_dependencies:
+  - >-
+    Lambda gating disposition (Decision 79): compute_affected_artifacts flags ducklake_telemetry_reader (the SQL and verbs
+    modules; deploy-ducklake-lambdas.yml deploys the last-green main ref (Decision 254 cl.5), so the merge ships on the first
+    run whose batch full tier covering it is green, paused while main is red (Decision 249 cl.3); covered by VP 6-8) and the content reader (it bundles
+    the same two modules, serves no event verb and its protective set excludes them, so a merge does not wake its
+    operator-gated channel (Decision 272 cl.1); Decision 79's deploy step for it is VP 9, read on the next deploy-telemetry-content
+    run the operator approves, which this build never dispatches, as PLAN-telemetry-planning-cost-reads' VP 8; the change is
+    inert there because the new verb is outside CONTENT_READS); data-pipeline only through ducklake_reader_client.py and event_usage_fields.py,
+    which no data-pipeline handler reads. No Terraform or IAM change.
+acceptance_criteria:
+  - friction_signature_counts is a registered agent-facing 7-day window verb whose rows match the independent oracle on every golden tree.
+  - Every friction vector passes at classifier_version 3, including the new gate, pre-commit and hook vectors.
+  - The rules guard fails on an unregistered exact signature, an undeclared prefix, a tie or a label with two classes.
+  - >-
+    After deploy, the CLI prints an unmapped_failure_share for classifier_version 3 over a live 7-day window that is lower
+    than VP 4's baseline over the same window. Both figures use one definition, pre-registered here: generic-rule
+    process-event facts over all process-event facts. VP 4 reads it from the deployed classifier_version 2 reader, where
+    the generic process-event labels are exactly unmapped_block (r90, r94) and hook_fault (r91) and no specific rule shares
+    either label.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The rules guard and the friction vectors at classifier_version 3.
+    command: >-
+      bin/venv-python -m pytest tests/common/test_friction_rules_guard.py
+      tests/common/test_ducklake_event_read_verbs.py::test_friction_vectors tests/telemetry_verify/test_derive.py -q
+    expected: exit 0; red before (the guard file and vectors v28-v35 are absent).
+    fix_if: a vector mislabels, the guard passes a tie, or oracle and SQL disagree on unmapped_count
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: friction-rules-v3-guard-and-vectors
+  - step: 2
+    phase: pre-deploy
+    action: The new verb against the oracle over the golden chain.
+    command: bin/venv-python -m pytest tests/common/test_ducklake_event_read_friction_signatures.py -q
+    expected: exit 0 with every test passing; red before (the verb is not registered).
+    fix_if: the verb and the oracle disagree, a run or absorbed close is miscounted, or a drill project leaks in
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: friction-signature-counts-verb
+  - step: 3
+    phase: pre-deploy
+    action: Column registration, the smoke gate, the read-engine roster and the CLI.
+    command: >-
+      bin/venv-python -m pytest tests/test_event_usage_fields.py tests/ducklake_neon_smoke_test/test_lambda_telemetry_reader_gates.py
+      tests/checks/contracts/test_validate_read_engine_verbs.py tests/common/ducklake_event_reads/test_describe.py
+      tests/test_telemetry_usage.py -q
+    expected: exit 0.
+    fix_if: VERB_FIELDS, the smoke list or read-engine.yaml misses the verb, or the CLI sums across classifier versions
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: friction-signature-registration-and-cli
+  - step: 4
+    phase: pre-deploy
+    action: >-
+      Baseline before the merge, read from the deployed classifier_version 2 reader with AC4's definition: generic
+      process-event facts (labels unmapped_block and hook_fault) over all process-event facts (those two plus
+      branch_policy_block, stale_branch_base, scope_creep, reported_skip, reported_failure), summed over every session in the
+      window.
+    command: >-
+      PYTHONPATH=. bin/venv-python -c "from scripts.telemetry_capture.read_route import TelemetryReader as R;
+      from scripts.aws_profile import resolve_aws_profile as p; r=R(profile=p('agent_platform'));
+      s=list(r.named('sessions_window', day_from='DAY_FROM', day_to='DAY_TO', as_of='AS_OF'));
+      rows=[w for x in s for w in r.named('session_friction_rollup', session_id=x['session_id'])];
+      assert all(w['classifier_version']==2 for w in rows);
+      c=[l for w in rows for l in w['label_counts']];
+      g={'unmapped_block','hook_fault'}; pe=g|{'branch_policy_block','stale_branch_base','scope_creep','reported_skip','reported_failure'};
+      t=sum(l['n'] for l in c if l['label'] in pe); u=sum(l['n'] for l in c if l['label'] in g);
+      print('SESSIONS', len(s), 'PROCESS_EVENT_FACTS', t, 'GENERIC', u, 'V2_SHARE', round(u/t, 4) if t else None)"
+    expected: >-
+      The build replaces DAY_FROM, DAY_TO (the last full 7 UTC days before the build) and AS_OF, runs it before the merge,
+      and records the printed line in the PR body; V2_SHARE is the figure VP 8 compares against.
+    fix_if: the reader answers 5xx or 504; retry once, then record the window as unread and VP 8 reports no comparison
+    hermetic: false
+    graduation: not-applicable
+  - step: 5
+    phase: pre-deploy
+    action: Full tier, then HEAD attestation, after the build commit and rebase and before the push; started from the top-level session, backgrounded with a 2 h limit.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: the full tier exits 0 and the validation result attests the current HEAD's tree
+    fix_if: any failure; fix and rerun the full tier from the start
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion), and steps 1-3 carry the durable regressions.
+  - step: 6
+    phase: post-deploy
+    action: The governed deploy shipped the telemetry reader with the merge (last-green ref, Decision 254 cl.5).
+    command: >-
+      git fetch -q origin main && build=$(git log -1 --format=%H --grep='^feat(friction-signature-coverage)' origin/main) &&
+      test -n "$build" && ok= && for id in $(gh api
+      'repos/otl-labs/ontheloop/actions/workflows/deploy-ducklake-lambdas.yml/runs?status=success&per_page=100' --jq
+      '.workflow_runs[].id'); do jobs=$(gh api "repos/otl-labs/ontheloop/actions/runs/$id/jobs" --jq '.jobs[] |
+      select((.name=="deploy-telemetry" or .name=="telemetry-smoke") and .conclusion=="success") | .name + " " +
+      (.id|tostring)'); echo "$jobs" | grep -q '^telemetry-smoke ' || continue; job=$(echo "$jobs" | sed -n
+      's/^deploy-telemetry //p'); deployed=$(gh api "repos/otl-labs/ontheloop/actions/jobs/$job/logs" | grep -oE
+      'LAMBDA_ARTIFACT_SHA: [0-9a-f]{40}' | head -1 | cut -d' ' -f2); echo "run $id deployed $deployed"; if git merge-base
+      --is-ancestor "$build" "$deployed"; then echo contains; ok=1; fi; break; done; test -n "$ok"
+    expected: >-
+      the newest successful run with a green telemetry-smoke job deployed a LAMBDA_ARTIFACT_SHA that has the build commit as
+      an ancestor (prints contains); before that run exists the step waits, it does not fail
+    fix_if: the run is held or failed; read deploy-paths.yaml's code-deploy recovery, never break-glass by default
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: post-deploy
+    action: The deployed reader describes the verb as an agent-facing window verb.
+    command: >-
+      PYTHONPATH=. bin/venv-python -c "from scripts.telemetry_capture.read_route import TelemetryReader as R;
+      from scripts.aws_profile import resolve_aws_profile as p; d=R(profile=p('agent_platform')).describe();
+      v=[x for x in d['verbs'] if x['verb']=='friction_signature_counts']; print('DESCRIBED', len(v)); assert v"
+    expected: DESCRIBED 1
+    fix_if: the verb is absent; the deploy did not ship the merge
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: post-deploy
+    action: Live coverage over the same 7-day window as VP 4.
+    command: bin/venv-python -m scripts.telemetry_usage friction --from DAY_FROM --to DAY_TO
+    expected: >-
+      exit 0; one classifier_version 3 entry whose unmapped_failure_share is below VP 4's V2_SHARE (same window, same
+      definition, AC4); the top generic signatures are listed (cloud-labelled hook records stay generic until rec-5384's
+      parser fix ships)
+    fix_if: the share did not fall; read the ranked signatures and report them, never edit rules post-merge outside a plan
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: post-deploy
+    action: >-
+      Decision 79 for the content reader: its next deploy-telemetry-content run that the operator approves (Decision 272
+      cl.1; this build never dispatches one) is on a commit that contains this build. Waits on the operator; the build
+      reports it pending with this step named, and the coordinator keeps it on the waiting list.
+    command: >-
+      git fetch -q origin main && build=$(git log -1 --format=%H --grep='^feat(friction-signature-coverage)' origin/main) &&
+      test -n "$build" && ok= && for id in $(gh api
+      'repos/otl-labs/ontheloop/actions/workflows/deploy-telemetry-content.yml/runs?status=success&per_page=100' --jq
+      '.workflow_runs[].id'); do job=$(gh api "repos/otl-labs/ontheloop/actions/runs/$id/jobs" --jq '.jobs[] |
+      select(.name=="record" and .conclusion=="success") | .id'); [ -n "$job" ] || continue; deployed=$(gh api
+      "repos/otl-labs/ontheloop/actions/jobs/$job/logs" | grep -oE 'LAMBDA_ARTIFACT_SHA: [0-9a-f]{40}' | head -1 | cut -d' '
+      -f2); echo "run $id deployed $deployed"; if git merge-base --is-ancestor "$build" "$deployed"; then echo contains; ok=1;
+      fi; break; done; test -n "$ok"
+    expected: >-
+      "run <id> deployed <sha>" then contains, exit 0: the newest deploy-telemetry-content run whose record job succeeded,
+      and the commit it deployed contains the build's squash commit (the one whose subject starts
+      feat(friction-signature-coverage)). The report names the run id.
+    fix_if: no approved run since the merge yet (wait, never dispatch), or the run failed (the content channel's own recovery)
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: src/common/ducklake_event_read_verbs.py
+    behavior: classifier_version 3 rules label gate, pre-commit and the five hooks; the new verb is registered agent-facing
+    verification_step: 1
+    test_selector: tests/common/test_ducklake_event_read_verbs.py::test_friction_vectors
+    red_green_expectation: red before (v28-v35 fail at classifier_version 2), green after
+  - source: src/common/ducklake_event_read_sql.py
+    behavior: unmapped_count counts generic process-event facts; labelled facts carry rule_id and generic
+    verification_step: 2
+    test_selector: tests/common/test_ducklake_event_read_friction_signatures.py::test_generic_flag_marks_only_rules_without_signature_or_prefix
+    red_green_expectation: red before, green after
+  - source: src/common/event_usage_fields.py
+    behavior: the new verb's columns are unique and stamp-ordered
+    verification_step: 3
+    test_selector: tests/test_event_usage_fields.py
+    red_green_expectation: red before (no FRICTION_SIGNATURE_FIELDS), green after
+  - source: src/common/ducklake_reader_client.py
+    behavior: VERB_FIELDS carries the new verb
+    verification_step: 3
+    test_selector: tests/ducklake_neon_smoke_test/test_lambda_telemetry_reader_gates.py::test_reader_gate_reads_the_usage_verbs
+    red_green_expectation: red before, green after
+  - source: scripts/telemetry_verify/derive.py
+    behavior: the oracle's unmapped_count matches the verb
+    verification_step: 1
+    test_selector: tests/telemetry_verify/test_derive.py
+    red_green_expectation: red before (r91 vector), green after
+  - source: scripts/telemetry_verify/derive_usage.py
+    behavior: the oracle derives the signature rows independently
+    verification_step: 2
+    test_selector: tests/common/test_ducklake_event_read_friction_signatures.py::test_verb_matches_oracle_on_every_golden_tree
+    red_green_expectation: red before, green after
+  - source: scripts/telemetry_usage.py
+    behavior: the friction command sums per classifier_version and reports a null share without process events
+    verification_step: 3
+    test_selector: tests/test_telemetry_usage.py::test_friction_share_is_null_without_process_events
+    red_green_expectation: red before, green after
+  - source: scripts/ducklake_smoke/lambda_telemetry_reader_gates.py
+    behavior: the smoke reads the new verb
+    verification_step: 3
+    test_selector: tests/ducklake_neon_smoke_test/test_lambda_telemetry_reader_gates.py::test_reader_gate_reads_the_usage_verbs
+    red_green_expectation: red before, green after
+constraints:
+  - Derived at read, never stored (Decision 199 cl.1); per-tree rows, no cross-tree sum in the verb.
+  - No transcript content or content_uri selected; names are process_event signatures and tool names only.
+  - Fix the SQL, never the vectors; golden rollup changes are listed one by one in the PR body.
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - "Decision-scout r2: FLAGS_FOUND (r1 WARN 254 resolved by the last-green pivot; r2 WARN 79: the content reader's deploy step, added as VP 9; NOTE NS.6: VP 4 and VP 8 compared two definitions, now one pre-registered in AC4). CITE 79, 84, 128, 199, 236, 246, 249, 254, 272. Decisions triaged: 221 of 221. Roadmap items intersected: 3; CONFLICT: 0; RELATED: 3. Serves: NS.6 4/5."
+  - "red_overlap (2026-11-18 ~15:20 UTC, main e2570a33): blocked by rec-5355 (plan-walker budget test xdist crash) and rec-5364 (vp-replay _is_pr_relative), both slo_breached with no shared paths; deferral: this plan touches neither file nor their checks, and both are ci-rca owned on their repair track."
+  - "Wave 2 split and forks: /mnt/project-files/wave2/PRESENTATION.md; blind consult /mnt/project-files/wave2/advisor-brief/ADVICE.md."
+  - "Measurement 2026-11-18 (session_tree_rows over 40 sampled roots, 11-17 Nov): 100 process-event facts; 44 are hook:PreToolUse.Bash or hook:PreToolUse.mcp__github__merge_pull_request (rec-5384, the parser fix, lands separately), about 45 are gate: and precommit: failures no prefix rule maps."
+  - "Cross-plan coupling: rec-5384's parser fix names hooks by their script stem, which r05-r09 match."
+  - "Kept graduated shards (assertions additive only): telemetry-local-cost-derives-null, telemetry-reader-deploy-gate, telemetry-reader-smoke-covers-verification-verbs, telemetry-reads-gated-on-the-telemetry-reader, telemetry-usage-cli-fails-closed, telemetry-usage-verbs-registered, telemetry-verify-oracle-matches-committed-cases, telemetry-verify-oracle-session-end."
+  - "Overlap: PLAN-telemetry-planning-cost-reads (unbuilt) edits the same sql, verbs, fields, client, derive_usage, CLI and smoke files; also unbuilt on shared files: PLAN-billing-shape-local, PLAN-merge-annotate-contract-reader, PLAN-telemetry-claude-p-capture-adapter, PLAN-telemetry-capture-hook-labels, PLAN-telemetry-late-hook-records, PLAN-agent-proxy-signed-access; whichever builds second rebases."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:83657cf26afb6529cb109ca4feba2f5065a98f115fada3fc3d83fe4b032793ac'}
+  - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:d5d2cb83048cac1b24876f5776a38a854b5d5e4a7e2545fd6920fa91d980ebba'}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - Rules and SQL (scope rows 1-2), fields and client (3-4), oracles (5-6).
+  - CLI and smoke (7-8); contract and roster (9-11) with the sidecar text verbatim.
+  - Tests and fixtures (12-20); run VP 1-3 until green; VP 4 before the push.
+  - Execute the Verification Plan; loop until pass; on an unrecoverable V3 failure stop and RCA (Decision 55).
+  - 'Report: what was implemented, verification results, the VP 4 and VP 8 shares'
