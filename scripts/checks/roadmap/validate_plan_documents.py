@@ -8,7 +8,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from scripts.checks import _common, registry
-from scripts.checks.roadmap import _plan_rescout_wiring, _plan_sidecar_approval
+from scripts.checks.roadmap import _plan_category_verdicts, _plan_rescout_wiring, _plan_sidecar_approval
 from scripts.roadmap import approved_text_provenance as prov
 
 _NON_BEHAVIOR_PREFIXES = ("tests/", "docs/plans/")
@@ -187,6 +187,7 @@ def validate_plan_documents(
     plans_dir: Path | None = None,
     added_plan_names: set[str] | None = None,
     modified_plan_names: set[str] | None = None,
+    changed_sidecar_slugs: set[str] | None = None,
 ) -> None:
     """Validate every docs/plans/PLAN-*.yaml against the PlanDocument Pydantic schema (T1.11 / CD.22).
 
@@ -197,7 +198,8 @@ def validate_plan_documents(
 
     plans_dir overrides the scanned directory and added_plan_names overrides the git-derived
     new-plan set (test seams for malformed-fixture and new-plan proofs); modified_plan_names is the
-    matching seam for plans the re-scout barrier treats as modified, used only when plans_dir is given.
+    matching seam for plans the re-scout barrier treats as modified, used only when plans_dir is given;
+    changed_sidecar_slugs is the seam for the sidecars the diff adds or changes (12p category verdict leg).
     """
     print("\n=== Plan document schema validation ===")
 
@@ -227,6 +229,7 @@ def validate_plan_documents(
         in_push = _common.push_context_base(_common.ROOT) is not None
         deadline = prov.Deadline(prov.DEADLINE_SECONDS)
         sidecar_unchecked = False
+        sidecar_slugs = _plan_category_verdicts.changed_sidecar_slugs(changed_sidecar_slugs, plans_dir)
         docs: dict[str, Any] = {}
         for path in plan_paths:
             # One parse per plan feeds both the schema verdict and the semantic gates -- this
@@ -242,6 +245,11 @@ def validate_plan_documents(
             if wording_base is None and doc.schema_version >= _MIN_NEW_PLAN_SCHEMA_VERSION:
                 sidecar_unchecked = sidecar_unchecked or _has_sidecar(doc.slug)
             gaps = _gate_round_gaps(path, doc, added_names)
+            category_gaps, category_advisories = _plan_category_verdicts.run(
+                path, doc, _common.ROOT, added_names, sidecar_slugs
+            )
+            gaps += category_gaps
+            advisories += category_advisories
             if wording_base is not None:
                 gaps += _wording_check_gaps(path, doc, wording_base)
                 approval_failures, approval_advisories = _approval_gaps(path, doc, wording_base, in_push, deadline)
