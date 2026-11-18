@@ -80,7 +80,8 @@ scope:
       BUILD PR 2. Header comment (Decision {{N}}, Decision 238; the PR is data, never steps; advisory, never a required
       check; never workflow_call; validate_trusted_plan_environment polices it). on: pull_request_target types [opened,
       synchronize, reopened], paths terraform/bootstrap/**; permissions: {}; concurrency per PR number with
-      cancel-in-progress. One job plan: if same-repo head, base main and github.event.pull_request.user.login not
+      cancel-in-progress; defaults: run: shell: bash (GitHub then runs each step as bash --noprofile --norc -eo pipefail,
+      so a refused overlay or screen fails its tee'd step instead of passing through tee). One job plan: if same-repo head, base main and github.event.pull_request.user.login not
       dependabot[bot]; ubuntu-latest; timeout 20; environment {name: tf-trusted-plan, deployment: false}; permissions
       contents read, id-token write, pull-requests write; env PR_NUMBER, HEAD_SHA, TF_VAR_aws_profile "", TF_IN_AUTOMATION
       1, TF_INPUT 0, MASK_AWS_ROLE_ID_ACCOUNT_PART. Steps, every action SHA-pinned to the pin terraform-plan-trusted.yml
@@ -106,11 +107,16 @@ scope:
       refuses still fails the job; exit 2 recorded as ANALYZER_FAILED); the gate preview (--plan-json, --analyzer-json, --github-output
       "$RUNNER_TEMP/gate.out", --event-name pull_request_target, stdout to preview.md; exit 0, or exit 1 with
       verdict=CLOUDSHELL_REQUIRED or ANALYZER_REFUSED in gate.out, is a planned verdict; any other exit 1 is
-      GATE_FAILED); the category is the first of OVERLAY_REFUSED, SCREEN_REFUSED, INIT_FAILED, PLAN_FAILED,
-      BACKSTOP_REFUSED, ANALYZER_FAILED, ANALYZER_REFUSED and GATE_FAILED that applies, else OK; the comment step
-      (if !cancelled() and the overlay step ran): the category from the step outcomes, the body from
-      terraform_bootstrap_plan_report.py run under trusted_plan_env.sh --scrub-only, redaction_check.py assert-clean
-      under the same wrapper, then gh pr comment; a final step fails the job unless the category is OK; an always() step deletes plan.bin, plan.json, analyzer.*, gate.out and preview.md. No step writes
+      GATE_FAILED); two comment steps, as terraform-plan-trusted.yml splits them. The refusal
+      comment (if !cancelled(), the overlay step not skipped and the assume step not success): category ASSUME_FAILED,
+      or OVERLAY_REFUSED when the overlay failed, else SCREEN_REFUSED when a screen failed; the body from the report's
+      --refusal-file mode run with no wrapper (no credential or tfvars exists yet, and trusted_plan_env.sh would fail
+      fetching them); then gh pr comment. The plan comment (if !cancelled() and the assume step succeeded): the category
+      is the first failure in the map tfver, setup_tf, mirror and init to INIT_FAILED, plan and show to PLAN_FAILED,
+      backstop to BACKSTOP_REFUSED, analyzer exit 2 to ANALYZER_FAILED, analyzer exit 1 to ANALYZER_REFUSED, gate to
+      GATE_FAILED, else OK; the body from terraform_bootstrap_plan_report.py run under trusted_plan_env.sh --scrub-only,
+      redaction_check.py assert-clean under the same wrapper, then gh pr comment. The gate preview's and the report's
+      stderr go to "$RUNNER_TEMP/tools.err", which no step prints, so a traceback never reaches the PR-visible log; a final step fails the job unless the category is OK; an always() step deletes plan.bin, plan.json, analyzer.*, gate.out and preview.md. No step writes
       $GITHUB_STEP_SUMMARY or prints preview.md, analyzer.txt, gate.out or plan.json to the log: every tool's stdout goes
       to its file and only the report's names-only text reaches the comment (Decision 238 cl.4; the post-merge preview
       prints its table because its HCL is reviewed). No step
@@ -210,16 +216,20 @@ scope:
     action: Create
     purpose: >-
       BUILD PR 2. Stdlib only, python3 -I, no network. CLI: --category, --head-sha, --run-url and either --refusal-file
-      (overlay.txt or screen.txt) or --preview-file, --analyzer-file and --gate-output. Prints a Markdown comment: a header
-      naming terraform/bootstrap, the head sha and the run; for a refusal only the rule and file:line tokens of REFUSED or
-      OVERLAY_REFUSED lines (never text from the PR beyond those tokens' file names); else a names-only table rebuilt from the
+      (overlay.txt or screen.txt; for ASSUME_FAILED neither is read) or --preview-file, --analyzer-file, --analyzer-json and --gate-output. Prints a Markdown comment: a header
+      naming terraform/bootstrap, the head sha and the run; for a refusal only the rule and file:line tokens of OVERLAY_REFUSED, REFUSED and the gate screen's
+      SCREEN_REFUSED <rule> <file>:<line> lines, and the bare rule of a token-less REFUSED root_policy_mismatch or
+      unknown_root line (never text from the PR beyond those tokens' file names); the ANALYZER_SUMMARY verdict and mode words
+      when the analyzer ran; else a names-only table rebuilt from the
       gate's preview table: Resource, Action, Changed attributes, Flags (the bracketed Sid list dropped), Analyzer (the
       verdict word or FAIL and the check name, the loc token dropped) and Protected; the Allow actions gained and
       Resources cells are never printed, since unreviewed HCL authors those values (Decision 238 cl.4); a cell whose text
       fails its name grammar (the normalised, key-free Terraform address form plan_names_core.normalise_address yields,
       with the gate's optional " (xN)" group-count suffix, so any [..] instance key prints as "?", Decision 238 cl.4; lower-snake attribute names; the fixed flag,
       verdict and protected-reason words) prints as "?"; then the BOOTSTRAP_APPLY_PREVIEW line and the analyzer's
-      ANALYZER lines reduced to address, check and verdict, with every line starting "::" dropped; a one-line note that
+      ANALYZER lines reduced to address, check and verdict, each address rebuilt through plan_names_core.normalise_address
+      from analyzer.json's address field, never the stdout token (the analyzer's _safe() form keeps a literal instance
+      key, which 238 cl.4 keeps out of PR-visible output), with every line starting "::" dropped; a one-line note that
       CLOUDSHELL_REQUIRED means the merged change goes to the operator's CloudShell apply and is not a refusal of the PR;
       last line exactly "BOOTSTRAP_PR_PLAN category=<C> verdict=<V> rows=<N> head=<sha>" (V NONE and N 0 when no preview
       ran; V and N from gate.out and the preview line). It exits 2 on an unreadable or malformed input file, printing
@@ -378,7 +388,9 @@ scope:
       token line; CLOUDSHELL_REQUIRED prints the note and verdict=CLOUDSHELL_REQUIRED; category ANALYZER_REFUSED with a
       CLOUDSHELL_REQUIRED or ANALYZER_REFUSED preview prints the table, the analyzer's FAIL verdicts and
       category=ANALYZER_REFUSED; a refusal prints only rule and
-      file:line tokens and verdict=NONE rows=0; a malformed gate.out exits 2 naming only the role; on a fixture whose Allow actions gained, Resources,
+      file:line tokens and verdict=NONE rows=0, for overlay, generic-screen and gate-screen SCREEN_REFUSED lines and the
+      token-less root_policy_mismatch line; ASSUME_FAILED reads no file; the ANALYZER_SUMMARY verdict and mode words print;
+      an analyzer.json address with an instance key prints its normalised key-free form, never the _safe() token; a malformed gate.out exits 2 naming only the role; on a fixture whose Allow actions gained, Resources,
       Sid and analyzer loc cells carry an address-like value, an owner-like value and an ARN, no output line holds any of
       them, a twelve-digit run matched by redaction_check.ACCOUNT_ID_SHAPE (token-bounded, so the 40-hex head sha is no
       false positive) or "arn:"; a cell failing its grammar prints "?", including a keyed address such as aws_iam_role.x["k"].
@@ -396,7 +408,11 @@ scope:
       comment; no step writes $GITHUB_STEP_SUMMARY and no run body cats, tees to stdout, echoes, heads or tails
       preview.md, analyzer.txt, gate.out, plan.json or overlay and screen output other than through the report (the
       job log of a pull_request_target run is PR-visible, and preview.md and analyzer.txt carry PR-authored values,
-      unlike terraform-bootstrap-apply.yml's preview, which prints both); the cleanup step is always(). Each assertion has a red twin on a mutated copy.
+      unlike terraform-bootstrap-apply.yml's preview, which prints both); the cleanup step is always(); defaults.run.shell is bash; the refusal comment step runs only when the assume step
+      did not succeed, calls no trusted_plan_env.sh and sets ASSUME_FAILED, OVERLAY_REFUSED or SCREEN_REFUSED; the plan
+      comment step runs only after a successful assume, under the wrapper, with the step-to-category map row 5 names; the
+      gate preview's and the report's stderr go to tools.err and nothing prints it. Each assertion has a red twin on a
+      mutated copy.
   - file: tests/test_provider_mirror_seed.py
     action: Modify
     purpose: >-
@@ -404,7 +420,7 @@ scope:
       a version absent from the mirror fails with MIRROR_MISSING (fake terraform on PATH, as the existing nodes do).
       Kept graduated record: provider-mirror-seed-both-roots (this file; nodes added, existing assertions unchanged, and
       the both-roots node's expected init list gains the third root as a planned-change disposition citing
-      test_obligations[11]).
+      test_obligations[12]).
   - file: tests/checks/ci_guards/test_validate_trusted_plan_environment.py
     action: Modify
     purpose: >-
@@ -432,7 +448,7 @@ scope:
   - file: tests/checks/verification/test_validate_admin_root_premerge_gate_trusted.py
     action: Create
     purpose: >-
-      BUILD PR 2 (the mapped test file is at 462 of 500 SLOC). Plans over a tmp repository: screenable bootstrap scope with
+      BUILD PR 2 (the mapped test file, scope row 35, is at 462 of 500 SLOC, so the wider matrix lives here). Plans over a tmp repository: screenable bootstrap scope with
       a trusted step passes and needs no ADMIN_CHAIN_OK step; the same with a main-only file (variables.tf,
       platform_roles.tf) or a terraform/github file fails without the CloudShell pair; a trusted step missing either
       marker fails; the CloudShell pair alone still passes for screenable scope; a policy module with no bootstrap row is
@@ -447,6 +463,20 @@ scope:
       Kept graduated records: deploy-paths-admin-self-access-isolation-step and
       deploy-paths-split-apply-excludes-platform-iam (assert unchanged) and deploy-paths-pre-merge-live-plan-pointers (the
       TestPreMergeLivePlan class; no method is renamed and the class node still runs).
+  - file: tests/checks/verification/test_validate_admin_root_premerge_gate.py
+    action: Modify
+    purpose: >-
+      BUILD PR 2. validate_test_coverage measures validate_admin_root_premerge_gate.py by running only this mapped file
+      (coverage_baseline.py), and the check is at 100% under it today with no baseline entry, so this file gains the nodes
+      that execute every new line: screenable bootstrap scope with a trusted step passes with no ADMIN_CHAIN_OK step; a
+      main-only file in scope falls back to the CloudShell pair; a trusted step missing one marker fails; a policy module
+      with no bootstrap row is the fail-closed finding. Reuses the file's existing tmp-repo helpers; measured at build to
+      stay under 500 SLOC (38 lines of headroom; over that, the nodes move here and the trusted file splits as a declared
+      concern-split package, never a coverage baseline entry). Existing nodes unchanged; the build confirms 100% with
+      bin/venv-python -m pytest tests/checks/verification/test_validate_admin_root_premerge_gate.py
+      --cov=scripts.checks.verification.validate_admin_root_premerge_gate --cov-report=term-missing. Kept graduated
+      records (asserts unchanged): admin-chain-check-caller-arn, admin-root-premerge-approvals-clause,
+      admin-root-premerge-gate-validator-tests.
 bundled_recommendations: [rec-5168, rec-5195, rec-4349]
 followon_recs: []
 infrastructure_dependencies:
@@ -587,7 +617,9 @@ verification_plan:
       printing neither; inits with the committed lock and plans terraform/bootstrap read-only (-lock=false) to a saved
       plan and its show -json, printing only the summary and the action and address of each change. An EXIT trap deletes
       the folder; errors go to $HOME/bpp-tf.err, read in CloudShell only. The build records the returned lines as a
-      counts-only PR comment on PR 1.
+      counts-only PR comment on PR 1. The request carries the PR 1 link and its head sha and says in its own words that
+      pasting this block at that head is the operator's final-diff word on PR 1's IAM diff (Decision 246 cl.4), to be
+      read at the link first, since the block prints names, not values (Decision 257 cl.8).
     command: >-
       ( set -o pipefail; PR_HEAD_SHA=<full PR 1 head sha>; W="${TMPDIR:-/tmp}/bpp"; L="$HOME/bpp-tf.err"; rm -rf "$W";
       mkdir -p "$W/bin"; : > "$L"; trap 'rm -rf "$W"' EXIT; unset AWS_PROFILE; git init -q "$W/repo" 2>> "$L"; { git -C
@@ -683,14 +715,15 @@ verification_plan:
       "ContextKeyName=s3:prefix,ContextKeyValues=tfstate/,ContextKeyType=string"; sim state_write s3:PutObject
       "arn:aws:s3:::agent-platform-bootstrap-tfstate/terraform.tfstate"; sim other_object s3:GetObject
       "arn:aws:s3:::agent-platform-data-lake/tfstate/x"; sim iam_write iam:CreatePolicy
-      "arn:aws:iam::$A:policy/agent-platform-sim-probe"; aws iam get-role --role-name bootstrap-pr-plan --query
+      "arn:aws:iam::$A:policy/agent-platform-sim-probe"; sim other_secret ssm:GetParameter
+      "arn:aws:ssm:$R:$A:parameter/secret/agent-platform-sim-probe"; aws iam get-role --role-name bootstrap-pr-plan --query
       'Role.AssumeRolePolicyDocument.Statement[0].Condition.StringEquals."token.actions.githubusercontent.com:job_workflow_ref"'
       --output text 2>> "$L" | sed 's/^/TRUST_REF /'; aws iam get-role --role-name bootstrap-pr-plan --query
       'Role.PermissionsBoundary' --output text 2>> "$L" | sed 's/^/BOUNDARY /'; echo "M $M" )
     expected: >-
       SCREEN_OK; Plan: 6 to add, 0 to change, 0 to destroy.; APPLY_DONE; REPLAN_EXIT 0; SIM mirror_read allowed; SIM
       state_read allowed; SIM tfvars_read allowed; SIM analyzer allowed; SIM mirror_list allowed; SIM other_list implicitDeny; SIM state_write explicitDeny; SIM other_object
-      explicitDeny; SIM iam_write explicitDeny; TRUST_REF
+      explicitDeny; SIM iam_write explicitDeny; SIM other_secret explicitDeny; TRUST_REF
       otl-labs/ontheloop/.github/workflows/terraform-bootstrap-plan.yml@refs/heads/main; BOUNDARY None; M.
     fix_if: >-
       SCREEN_REFUSED or a setup line: nothing initialised; as VP 8. APPLY_SKIPPED: nothing applied; stop and report the
@@ -797,7 +830,7 @@ test_obligations:
     test_selector: tests/checks/test_bootstrap_trusted_plan_screen.py::test_bootstrap_root_has_screen_row
     red_green_expectation: red before (no row), green after
   - source: scripts/ci/terraform_hcl_screen.py
-    behavior: The secret-lookup, confidential-reference and literal-local meta-argument rules and the backstop's local-only acceptance, active only for the bootstrap row.
+    behavior: The lazy import of the rules module for a row that sets the new fields and the backstop's local-only acceptance; the personal and github rows screen as today.
     verification_step: 4
     test_selector: tests/checks/test_bootstrap_trusted_plan_screen.py
     red_green_expectation: red before (the rules absent, so each red twin passes and the real tree fails on meta_argument), green after
@@ -869,8 +902,13 @@ test_obligations:
   - source: scripts/checks/verification/validate_admin_root_premerge_gate.py
     behavior: A trusted-plan verdict step satisfies the gate for screenable bootstrap scope only; the CloudShell pair still does everywhere.
     verification_step: 4
-    test_selector: tests/checks/verification/test_validate_admin_root_premerge_gate_trusted.py
+    test_selector: tests/checks/verification/test_validate_admin_root_premerge_gate.py
     red_green_expectation: red before (a trusted step alone fails the ADMIN_CHAIN_OK clause), green after
+  - source: tests/checks/verification/test_validate_admin_root_premerge_gate.py
+    behavior: The nodes that cover every new line of the gate check under its mapped-file coverage run.
+    verification_step: 4
+    test_selector: tests/checks/verification/test_validate_admin_root_premerge_gate.py
+    red_green_expectation: red before (the trusted step alone fails the ADMIN_CHAIN_OK clause), green after
   - source: tests/checks/verification/test_validate_admin_root_premerge_gate_trusted.py
     behavior: The trusted-step nodes and their main-only and non-bootstrap red twins.
     verification_step: 4
@@ -957,12 +995,12 @@ context:
   - "Design evidence: /mnt/project-files/bootstrap-trusted-plan/ADVICE.md (blind Fable consult, 2026-11-18): a dedicated role, not bootstrap-preview reused; main-only confidential references refused; Access Analyzer at PR time is fine (the checks return verdicts and read no account resource); no LLM plan reviewer at PR time. The operator chose 'New dedicated role' on the thread's card at 13:23Z and said 'write the plan' at 13:23Z."
   - "Approvals at build start: the operator's 'write the plan' of 2026-11-18 13:23Z (covering the identity choice, no plan reviewer, the validate_admin_root_premerge_gate loosening and the residual) and the operator's GitHub approval of this plan's approval run, which the plan PR records. PR 2's final diff (CODEOWNERS, the screen and its rules, the fences, a pull_request_target workflow with id-token write) is outside any sidecar, so Decision 246 cl.4's final-diff word is asked once, with the PR 2 link, until rec-5206 narrows that clause; PR 1's IAM diff is covered by the operator's own VP 8 plan at its head. VP 7-9 are the operator's CloudShell pastes."
   - "V3 resolution: VP 8's operator-run pre-merge plan at PR 1's head substitutes for pre-merge post-deploy evidence for PR 1; PR 2 changes no file under terraform/. Behavioural acceptance is VP 9 (apply, simulation, trust read), VP 10 (the post-merge preview after PR 2) and VP 11 (the probe PR, the first live run of the new job), with the operator's returned lines labelled operator-reported in counts-only PR comments naming the applied sha."
-  - "Split: one plan, two build PRs, disjoint files. PR 1 (scope rows 1-4) is protected-set, so CloudShell plan and apply; PR 2 (rows 5-34) touches nothing under terraform/ and merges after VP 9."
+  - "Split: one plan, two build PRs, disjoint files. PR 1 (scope rows 1-4) is protected-set, so CloudShell plan and apply; PR 2 (rows 5-35) touches nothing under terraform/ and merges after VP 9."
   - "Coverage measured 2026-11-18 over the 19 non-Markdown bootstrap commits since 2026-10-20: 15 touch only files this row screens; 4 touch a main-only file (main.tf and the lock; variables.tf, backend-sit.hcl and platform_admin_data_policies.tf; platform_admin_policies.tf twice) and would still take the CloudShell pre-merge plan. A personal-style row over today's tree fails 7 of 20 screenable files: meta_argument in 4 (count/for_each over literal locals in three, and for_each over agent_ducklake_api.tf's literal-keyed ducklake_api_routes, whose one value is a resource attribute: scope row 7's rule 3 admits both), try forms and validation-only functions in the two platform_admin policy files and the canary's heredoc (those three are main-only)."
   - "UNPROVEN until VP 11: the hermetic init of terraform/bootstrap from the mirror under -lockfile=readonly (same hashicorp/aws 5.100.0 lock as terraform/personal, whose mirror copy is proven); the shape of count_expression and for_each_expression references in the plan JSON for the backstop's local-only acceptance (Terraform's documented expression representation; no fixture holds one); the analyzer's changed mode on pull_request_target (full_sweep_wanted returns False off push, read in code). Checked 2026-11-18: the data-lake bucket policy only denies non-HTTPS, so the identity grant suffices for the mirror read."
-  - "Overlaps: PLAN-contract-byte-budget (approved, unbuilt) scopes deploy-paths.yaml with a byte cap (scope row 20 measures and relieves). PLAN-actions-sha-pin-codeowners merged both PRs (#2196, #2218 at 15:05Z); this build rebases on #2218's validate_trusted_plan_environment.py, _shared.is_sha_pinned and CODEOWNERS rows, and the new workflow is SHA-pinned with exact vX.Y.Z comments from the start. #2186 (persona image channel) edits deploy-paths.yaml; whichever lands second rebases and re-measures the 4-line headroom. plan_obligations lists further unbuilt plans on DECISIONS.md, deploy-paths.yaml, environment-taxonomy.yaml, CODEOWNERS and SKILL.md (PLAN-bootstrap-ci-gated-apply, PLAN-sit-organization, PLAN-trusted-plan-cutover, PLAN-trusted-plan-identity, PLAN-wording-approval-routing among them); rebase rules apply."
+  - "Overlaps: PLAN-contract-byte-budget (approved, unbuilt) scopes deploy-paths.yaml with a byte cap (scope row 20 measures and relieves). PLAN-actions-sha-pin-codeowners merged both PRs (#2196, #2218 at 15:05Z); this build rebases on #2218's validate_trusted_plan_environment.py, _shared.is_sha_pinned and CODEOWNERS rows, and the new workflow is SHA-pinned with exact vX.Y.Z comments from the start. #2186 (persona image channel) edits deploy-paths.yaml; whichever lands second rebases and re-measures the 4-line headroom. plan_obligations lists further unbuilt plans on DECISIONS.md, deploy-paths.yaml, environment-taxonomy.yaml, CODEOWNERS and SKILL.md (PLAN-bootstrap-ci-gated-apply, PLAN-sit-organization, PLAN-trusted-plan-cutover, PLAN-trusted-plan-identity, PLAN-wording-approval-routing, PLAN-sit-organization and the PLAN-persona-verdict-* plans among them; #2221 took Decision 273, so {{N}} is 274 or later); rebase rules apply."
   - "Red overlap (scripts.ci_rca.red_overlap, 2026-11-18): blocked by the past-SLO rule only, on rec-5355 and rec-5364 (the re-run at plan revision; rec-5353 no longer listed), which share no file with this plan. Deferral: this plan repairs none of them and touches none of their files; the build re-runs red_overlap before each PR and stops on any shared file."
-  - "plan_obligations (2026-11-18): NEAR_CAP deploy-paths.yaml 496 of 500 (about +2, scope row 20), environment-taxonomy.yaml 483 of 500, config/ci_rca_taxonomy.yaml 500 of 500 (scope row 18's reflow), scripts/checks/ci_guards/_manifest.py 497 of 500 after #2218 (+2), test_platform_role_metadata_admin_scope.py 500 of 500 (scope row 3's fixture move), planning SKILL.md 0 B (5 B shorter, row 23 lowers the entry)."
+  - "plan_obligations (2026-11-18): NEAR_CAP deploy-paths.yaml 496 of 500 (about +2, scope row 20), environment-taxonomy.yaml 483 of 500, config/ci_rca_taxonomy.yaml 500 of 500 (scope row 18's reflow), scripts/checks/ci_guards/_manifest.py 497 of 500 after #2218 (+2), test_platform_role_metadata_admin_scope.py 500 of 500 (scope row 3's fixture move), planning SKILL.md 0 B (5 B shorter, row 24 lowers the entry)."
   - "Fork notices (decided with notice, overseer-dispatch.yaml record_grammar): two build PRs, role first (protected set), workflow and checks second; a new numbered Decision rather than dated Updates (one ruling amends 144 cl.3, 238 cl.2 and 257 cl.3 and cl.5, as Decision 270 did); the heartbeat canary and both PlatformAdmin policy files are main-only rather than widening the try() and heredoc rules; the init runs inline (terraform-github-plan.yml's shape) rather than through terraform-init-retry; not adopted from the consult: a runner egress allowlist (no native control on GitHub-hosted runners) and an alarm on screen refusals (the refusal comment is on the PR), either a possible follow-on rec."
   - "Recs: rec-5168's stored acceptance runs tests/checks/test_bootstrap_trusted_plan_screen.py::test_bootstrap_root_has_screen_row (scope row 25 creates it under that name); rec-5195's checks that deploy-paths no longer holds 'the implementing session checks' and names CloudShell; rec-4349's that it names terraform-github-plan.yml and axis_a.github. The sidecar's words satisfy both."
 gate_rounds:
@@ -985,6 +1023,9 @@ gate_rounds:
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 4, nits: 5}
   - {gate: wording-check, round: 7, verdict: PASS, digest: 2edf4098f03596a0b4e6f75707eb1a7d81391e26d901f11f751db7b866e26fce, base: c39dcdeb798548fdf3affaab81ac94fe41774c44, selection: complete}  # pragma: allowlist secret
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 2, nits: 6}
+  - {gate: decision-scout, round: 9, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:56b5c074b757dd10abc9d90f13cfe635bac4c6ee4f9cb5e862c284e2ee69cf47"}  # pragma: allowlist secret
+  - {gate: wording-check, round: 8, verdict: PASS, digest: 35979a2aa404298c79e70ec176869573b0753fb82613d4f5c8007125cde91b94, base: daae86c4540c5d70f6a4a761535237884c08cee9, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 3, nits: 8, category_consistency: [{entry: 'terraform/bootstrap PRs get a screened PR-time trusted plan under their own read-only role, which replaces the operator''s CloudShell pre-merge plan for every PR it accepts (amends Decisions 144, 225, 238 and 257) (Decided)', verdict: PASS}]}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -994,7 +1035,7 @@ pre_implementation_checklist:
   - "Start condition: this plan merged; no other bootstrap change merged and unapplied when PR 1 merges."
 execution_steps:
   - "BUILD PR 1. Tests first (rows 2-4), seen red on the unchanged tree; then bootstrap_pr_plan.tf (row 1). Post: VP 1-2 pass; VP 3; push; PR."
-  - "BUILD PR 2, on its own branch from main (no dependency on PR 1's files). Tests first (rows 15 and 25-34), seen red; then the policy row, the screen and the rules (rows 6-8), the report (row 9), the workflow (row 5), the seed script, the fences, the gate check and the manifests (rows 10-14, 16-17), the taxonomy row and CODEOWNERS (rows 18-19); hand-apply the sidecar's blocks verbatim ({{N}} the next free Decision number, {{DATE}} the build date) and lower the prose budget (row 24). Post: VP 4-6 pass; VP 3; push; PR."
+  - "BUILD PR 2, on its own branch from main (no dependency on PR 1's files). Tests first (rows 15, 25-34 and 35), seen red; then the policy row, the screen and the rules (rows 6-8), the report (row 9), the workflow (row 5), the seed script, the fences, the gate check and the manifests (rows 10-14, 16-17), the taxonomy row and CODEOWNERS (rows 18-19); hand-apply the sidecar's blocks verbatim ({{N}} the next free Decision number, {{DATE}} the build date) and lower the prose budget (row 24). Post: VP 4-6 pass; VP 3; push; PR."
   - "With PR 1 CI green: post VP 7 and VP 8 to the operator with the PR 1 link and its full head sha (the operator's VP 8 paste at that head is the final-diff word for PR 1's IAM diff); record the lines on PR 1; merge PR 1 (squash) at the head VP 8 covered; post VP 9 at the merge sha in the same sitting and record its lines."
   - "Rebase PR 2 onto main after VP 9, re-run VP 3-6 on the new head, ask the operator once for the final-diff word with the PR 2 link (Decision 246 cl.4), merge (squash) with Resolves: rec-5168, rec-5195, rec-4349; then VP 10, VP 11 and VP 12."
   - "Execute Verification Plan: run each step; loop until pass; on an unrecoverable V3 failure stop and RCA (Decision 55)."
