@@ -259,3 +259,30 @@ def test_gate_fails_closed_on_malformed_table(
     validate_contract_drift(failed, contracts_dir=contracts)
     assert len(failed) == 1, failed
     assert failed[0].startswith("Contract drift (coverage):") and "retired_surfaces.paths" in failed[0]
+
+
+def test_gate_fails_closed_on_malformed_coverage_table_and_unknown_row(
+    tmp_path, monkeypatch, install_fake_git, FakeGit, write_contract, class_d_yaml
+) -> None:
+    contracts = _gate_tree(
+        tmp_path,
+        monkeypatch,
+        install_fake_git,
+        FakeGit,
+        write_contract,
+        class_d_yaml,
+        surface=None,
+        population="ratchet:\n  grandfathered_max: 2\n  status_active_max: 0\nevaluator_coverage: nope\n",
+    )
+    failed: list[str] = []
+    validate_contract_drift(failed, contracts_dir=contracts)
+    assert len(failed) == 1 and failed[0].startswith("Contract drift (coverage):"), failed
+
+    write_contract(
+        contracts,
+        "contract-population.yaml",
+        "ratchet:\n  grandfathered_max: 2\n  status_active_max: 0\nevaluator_coverage:\n  ghost.yaml: {triggers: [x]}\n",
+    )
+    failed = []
+    validate_contract_drift(failed, contracts_dir=contracts)
+    assert len(failed) == 1 and "ghost.yaml" in failed[0], failed

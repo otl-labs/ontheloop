@@ -549,3 +549,46 @@ class TestDeclaredSubtrees:
         root = self._tree(tmp_path, index)
         (root / "sub" / "a.yaml").write_text("persona: a\n", encoding="utf-8")
         assert _population.subtree_member_failures(root, [self.ROW]) == []
+
+
+def _surface_tree(tmp_path: Path) -> None:
+    (tmp_path / "live.md").write_text("reads target.yaml first\n", encoding="utf-8")
+
+
+def test_agent_surface_load_errors_and_trigger_failures_are_reported(tmp_path: Path) -> None:
+    _surface_tree(tmp_path)
+    spec = EvaluatorSpec(agent_surface="live.md")
+    ok, detail = _population.resolve_evaluator("target.yaml", spec, root=tmp_path)
+    assert not ok and "live table unreadable" in detail
+
+    live = LiveTable(globs=("*.md",))
+    ok, detail = _population.resolve_evaluator("target.yaml", spec, root=tmp_path, live_table=live)
+    assert not ok and "coverage table unreadable" in detail
+
+    rows = {"target.yaml": CoverageRow(triggers=("never written down target.yaml",))}
+    ok, detail = _population.resolve_evaluator("target.yaml", spec, root=tmp_path, live_table=live, coverage=rows)
+    assert not ok and "does not occur" in detail
+
+    rows = {"target.yaml": CoverageRow(triggers=("reads target.yaml first",))}
+    ok, detail = _population.resolve_evaluator("target.yaml", spec, root=tmp_path, live_table=live, coverage=rows, body=["a"])
+    assert ok, detail
+    (tmp_path / "live.md").write_text("see target.yaml#nope\n", encoding="utf-8")
+    rows = {"target.yaml": CoverageRow(triggers=("see target.yaml#nope",))}
+    ok, detail = _population.resolve_evaluator("target.yaml", spec, root=tmp_path, live_table=live, coverage=rows, body=["a"])
+    assert not ok and "anchor names no top-level key" in detail
+
+
+def test_check_evaluator_reports_a_malformed_coverage_table(tmp_path: Path) -> None:
+    (tmp_path / "primary.py").write_text('_A = "target.yaml"\n', encoding="utf-8")
+    (tmp_path / "docs" / "contracts").mkdir(parents=True)
+    (tmp_path / "docs" / "contracts" / "contract-population.yaml").write_text("evaluator_coverage: nope\n", encoding="utf-8")
+    ok, detail = _population.resolve_evaluator(
+        "target.yaml",
+        EvaluatorSpec(check="synthetic_check"),
+        root=tmp_path,
+        registered_checks={"synthetic_check": object()},
+        sequenced_names={"synthetic_check"},
+        check_module_resolver=lambda _n: tmp_path / "primary.py",
+        body=["a"],
+    )
+    assert not ok and "coverage table" in detail

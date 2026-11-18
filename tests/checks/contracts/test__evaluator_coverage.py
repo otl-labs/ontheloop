@@ -151,3 +151,62 @@ def test_real_tree_retired_and_live() -> None:
     assert all(not cov.directly_live(path, table) for path in table.retired)
     assert cov.directly_live(".claude/skills/planning/SKILL.md", table)
     assert cov.retired_marker_errors(_ROOT, table) == []
+
+
+def test_body_keys_drops_envelope_and_tolerates_non_mapping() -> None:
+    assert cov.body_keys({"contract": {}, "status": "x", "rules": 1, "alpha": 2}) == ["alpha", "rules"]
+    assert cov.body_keys(["not", "a", "mapping"]) == []
+
+
+def test_live_table_malformed_variants_each_return_an_error(tmp_path: Path) -> None:
+    bad = [
+        "- a\n- b\n",
+        "layers:\n  - content_locations: nope\n",
+        "consumers: nope\n",
+        "consumers:\n  c:\n    loads: nope\n",
+        "retired_surfaces: nope\n",
+        "layers: [: bad yaml",
+    ]
+    for text in bad:
+        _write(tmp_path, _ARCH, text)
+        assert isinstance(cov.load_live_table(tmp_path), str), text
+
+
+def test_surface_that_is_not_a_class_d_contract_is_not_live(tmp_path: Path) -> None:
+    table = _arch(tmp_path)
+    _write(tmp_path, "docs/contracts/plain.yaml", "contract:\n  class: A\n")
+    live, detail = cov.surface_liveness("x.yaml", "docs/contracts/plain.yaml", tmp_path, table)
+    assert not live and "live table" in detail
+    live, _ = cov.surface_liveness("x.yaml", "docs/contracts/missing.yaml", tmp_path, table)
+    assert not live
+
+
+def test_retired_marker_ignores_unparseable_frontmatter(tmp_path: Path) -> None:
+    _write(tmp_path, ".claude/skills/a/SKILL.md", "no frontmatter\n")
+    _write(tmp_path, ".claude/skills/b/SKILL.md", "---\nname: b\n")
+    _write(tmp_path, ".claude/skills/c/SKILL.md", "---\n: [bad\n---\nbody\n")
+    _write(tmp_path, ".claude/skills/d/SKILL.md", "---\nname: d\n---\nbody\n")
+    skill = tmp_path / ".claude" / "skills" / "e" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_bytes(b"\xff\xfe\x00bad")
+    assert cov.retired_marker_errors(tmp_path, cov.LiveTable()) == []
+
+
+def test_coverage_loader_accepts_rows_and_rejects_malformed_tables(tmp_path: Path) -> None:
+    pop = "docs/contracts/contract-population.yaml"
+    assert isinstance(cov.load_coverage(tmp_path), str)
+    _write(tmp_path, pop, "other: 1\n")
+    assert cov.load_coverage(tmp_path) == {}
+    _write(tmp_path, pop, "evaluator_coverage:\n  a.yaml: {triggers: [t1]}\n  b.yaml: {asserts: [k]}\n")
+    rows = cov.load_coverage(tmp_path)
+    assert rows == {"a.yaml": cov.CoverageRow(triggers=("t1",)), "b.yaml": cov.CoverageRow(asserts=("k",))}
+    for text in (
+        "evaluator_coverage: nope\n",
+        "evaluator_coverage:\n  a.yaml: nope\n",
+        "evaluator_coverage:\n  a.yaml: {other: [x]}\n",
+        "evaluator_coverage:\n  a.yaml: {triggers: []}\n",
+        "evaluator_coverage:\n  a.yaml: {triggers: [x], asserts: [y]}\n",
+        "evaluator_coverage:\n  a.yaml: {}\n",
+    ):
+        _write(tmp_path, pop, text)
+        assert isinstance(cov.load_coverage(tmp_path), str), text
