@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.checks import registry
+from scripts.checks.structural import _byte_raises
 from scripts.checks.structural.budget_raises import (
     _BUDGET_SPEC,
     _LONG_LINE_SPEC,
@@ -454,7 +455,8 @@ class TestExaminedDeclaration:
 
         with patch("scripts.checks._common.ROOT", tmp_path), contextlib.redirect_stdout(io.StringIO()):
             validate_structural_size_budget_raises([], base_reader=_recording_reader)
-        assert calls == ["config/structural_size_budgets.yaml"]
+        assert calls.count("config/structural_size_budgets.yaml") == 1
+        assert set(calls) <= {"config/structural_size_budgets.yaml", "docs/DECISIONS.md", "docs/DECISIONS_ARCHIVE.md"}
 
     def test_live_registry_examines_every_entry(self) -> None:
         live = (Path(__file__).resolve().parents[3] / "config" / "structural_size_budgets.yaml").read_text(encoding="utf-8")
@@ -466,5 +468,7 @@ class TestExaminedDeclaration:
         assert failed == []
         assert decl is not None
         assert decl.kind == "examined"
-        assert decl.count == len(_BUDGET_SPEC.extractor(live)) + len(_LONG_LINE_SPEC.extractor(live))
+        assert decl.count == (
+            len(_BUDGET_SPEC.extractor(live)) + len(_LONG_LINE_SPEC.extractor(live)) + _byte_raises.entry_count(live)
+        )
         assert decl.count > 0
