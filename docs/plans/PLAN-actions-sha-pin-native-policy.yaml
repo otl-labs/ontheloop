@@ -61,7 +61,8 @@ scope:
   - file: tests/checks/misc/test_validate_ghas_probe.py
     action: Modify
     purpose: >-
-      _actions_body carries sha_pinning_required (default True, so the existing all-enabled cases stay all-enabled);
+      _actions_body gains a sha_pinning_required parameter (bool | None, default True; None omits the key) and
+      _make_urlopen passes it through, so the existing all-enabled cases stay all-enabled;
       TestValidateGhasProbe::test_check_fails_when_sha_pinning_not_required and
       TestValidateGhasProbe::test_check_fails_when_sha_pinning_field_absent (the check appends a failure naming
       sha_pinning_required) and TestValidateGhasProbe::test_runner_nonzero_when_sha_pinning_not_required.
@@ -99,7 +100,7 @@ acceptance_criteria:
   - The apply preview's row for github_actions_repository_permissions.this shows sha_pinning_required=true among its allowlisted values.
   - After the approved apply, a ghas-probe dispatch passes and reports sha_pinning_required=true; a dispatch before the apply failed naming it.
   - A branch-only CodeQL dispatch whose checkout uses a tag succeeds before the apply and fails after it with GitHub's pinning refusal.
-  - No other workflow run fails on the pinning policy after the apply.
+  - No other workflow run fails on the pinning policy from the apply until handoff.
   - rec-5290 is closed through the portal after the post-apply read-back, citing the probe run.
 verification_plan:
   - step: 1
@@ -141,7 +142,7 @@ verification_plan:
     graduation_check_id: ghas-probe-sha-pinning-required
   - step: 4
     phase: pre-deploy
-    action: Every test file this plan touches, whole.
+    action: Every test file this plan touches, whole, plus test_terraform_github_import_blocks.py, which parses repo.tf (a regression run).
     command: >-
       bin/venv-python -m pytest tests/checks/iam_tf/test_actions_sha_pinning_required.py
       tests/test_terraform_github_apply_gate.py tests/checks/misc/test_validate_ghas_probe.py
@@ -190,8 +191,8 @@ verification_plan:
     action: >-
       The build PR's PR-time plan (terraform-github-plan.yml report comment) lists exactly one change, an in-place
       update of github_actions_repository_permissions.this whose changed attributes are sha_pinning_required only.
-      An update, not a create, shows the provider read the field from the live API, the first evidence the setting
-      exists for this repository on this plan (Decision 89 precedent).
+      Plan shape only: the resource is already in state, so any change plans as an update, and the provider may read an
+      unserved field as false (inferred), so this step does not prove availability; VP 12's unknown branch and VP 15 do.
     command: >-
       bin/venv-python -c "print('MCP: mcp__github__issue_read(method=get_comments) on the build PR; the terraform-github-plan report comment lists one row: github_actions_repository_permissions.this, update, sha_pinning_required')"
     expected: One update row, changed attribute sha_pinning_required only; no other row.
@@ -257,12 +258,17 @@ verification_plan:
   - step: 13
     phase: post-deploy
     action: >-
-      Canary, before the apply: on the build's own branch with no pull request open (restarted from main after the
-      merge), commit the one-line codeql.yml change (analyze job checkout to actions/checkout@v7) and push it; dispatch
-      CodeQL with ref set to the branch. Its run succeeds (the policy is still off).
+      Canary, before the apply: restart the build's branch from main after the merge (git fetch origin main, git reset
+      --hard origin/main, then git push --force-with-lease -u origin HEAD as its own call; the branch then holds only
+      merged history and no pull request is open from it). Commit the one-line codeql.yml change (analyze job checkout
+      to actions/checkout@v7). The handoff evidence gate needs full-tier evidence for that tree: run the full tier in
+      the background (2 h limit) and validation_result --verify-head, expecting failed_run (validate_actions_sha_pinned
+      refuses the floating checkout; the gate passes failed_run with a warning). Push it; dispatch CodeQL with ref set
+      to the branch. Its run succeeds (the policy is still off). Start this right after the merge so the apply is not
+      delayed past Monday 2026-11-23 07:00 UTC.
     command: >-
-      bin/venv-python -c "print('commit the one-line codeql.yml change, then git push -u origin HEAD as its own call (the push hook refuses compound push forms); MCP: mcp__github__actions_run_trigger(method=run_workflow, workflow_id=codeql.yml, ref=<branch>); actions_get(get_workflow_run) conclusion success')"
-    expected: The branch CodeQL run concludes success.
+      bin/venv-python -m scripts.validate; bin/venv-python -m scripts.checks.validation_result --verify-head; bin/venv-python -c "print('expect failed_run only for validate_actions_sha_pinned; then git push -u origin HEAD as its own call; MCP: mcp__github__actions_run_trigger(method=run_workflow, workflow_id=codeql.yml, ref=<branch>); actions_get(get_workflow_run) conclusion success')"
+    expected: verify-head reports failed_run whose only failing check is validate_actions_sha_pinned; the branch CodeQL run concludes success.
     fix_if: It fails for any other reason; fix the cause on the branch, never touch the policy or main.
     hermetic: false
   - step: 14
@@ -295,11 +301,13 @@ verification_plan:
       commit the restore of codeql.yml (byte for byte equal to main's) and push it. The branch never opens a pull
       request carrying the change.
     command: >-
-      bin/venv-python -c "print('MCP: mcp__github__actions_run_trigger(method=run_workflow, workflow_id=codeql.yml, ref=<branch>); actions_get conclusion failure or startup_failure; get_job_logs or the run annotations naming full-length commit SHA pinning; then restore the file, commit, and git push -u origin HEAD as its own call; git diff origin/main -- .github/workflows/codeql.yml prints nothing')"
+      bin/venv-python -c "print('MCP: mcp__github__actions_run_trigger(method=run_workflow, workflow_id=codeql.yml, ref=<branch>); actions_get conclusion failure or startup_failure; get_job_logs or the run annotations naming full-length commit SHA pinning; then restore the file from a freshly fetched origin/main, commit, and git push -u origin HEAD as its own call')" && git fetch origin main --quiet && git diff --exit-code origin/main -- .github/workflows/codeql.yml
     expected: The run fails with the pinning refusal message; after the restore, git diff against origin/main for codeql.yml is empty.
     fix_if: >-
       It succeeds: the stored setting does not enforce; stop and report to the plan owner and the operator (the
-      native control is then a no-op; the presubmit check is the only control).
+      native control is then a no-op; the presubmit check is the only control). The dispatch call is refused or no run
+      appears: record the API response as the evidence, restore the file all the same, and report. The diff leg is
+      non-empty: restore from origin/main again before reporting.
     hermetic: false
   - step: 17
     phase: post-deploy
@@ -339,6 +347,13 @@ test_obligations:
     verification_step: 3
     test_selector: tests/checks/misc/test_validate_ghas_probe.py::TestValidateGhasProbe::test_check_fails_when_sha_pinning_field_absent
     red_green_expectation: red before (the node is absent; the probe ignores the field), green after
+  - source: .github/workflows/codeql.yml
+    behavior: the branch-only canary edit is restored byte for byte and never reaches main
+    verification_step: 16
+    command: git diff --exit-code origin/main -- .github/workflows/codeql.yml
+    waiver_reason: >-
+      Branch-only, post-merge canary that appears in no PR diff and is restored at VP 16; the file's behaviour on main
+      never changes, so no standing test applies; VP 16's empty diff is the evidence.
 constraints:
   - "One build PR: repo.tf, the gate extractor, the probe, their tests and the Decision 83 annotation. ghas-probe.yml and terraform-github-apply.yml are not edited. Named residual: ghas-probe.yml's header still says three confidential-data-boundary controls; its third, Actions permissions, now covers enablement and required pinning, so the header stays true; a comment-only edit would pull the workflow's run: bodies into scope for no behaviour."
   - "The canary is a branch-only edit of codeql.yml (operator's choice 2026-11-18 16:03 UTC over a new canary file, which would need a ci_rca_taxonomy row in a file at its cap that then goes stale on main): it exists only in post-merge commits on the build's harness branch while no pull request is open from it, is restored at VP 16, and appears in no PR diff."
@@ -353,11 +368,11 @@ context:
   - "Brief: /mnt/project-files/actions-sha-pinned/BRIEF-plans-2-4.md (Plan 4). Blind advisor (claude-fable-5-2, 2026-11-18): /mnt/project-files/actions-sha-pinned/plan4-advisor-brief/ADVICE.md: extend ghas-probe tri-state, add the canary, add the extractor, one PR. Settled by the consult."
   - "Probe 2026-11-18: integrations/github 6.12.1 (the locked version) schema for github_actions_repository_permissions has sha_pinning_required (bool, optional, computed), read with terraform providers schema -json in a scratch directory."
   - "Probe 2026-11-18 on main c39dcdeb: every remote uses: is 40-hex pinned. Third-party composites: anthropics/claude-code-action@6070f08d nests oven-sh/setup-bun@0c5077e5; pypa/gh-action-pypi-publish@7245906f nests actions/setup-python@a309ff8b and a generated local docker action. All others are node actions. No docker:// uses: exists. VP 6 re-checks at build time."
-  - "GitHub docs (read 2026-11-18): with the setting on, all actions must be pinned to a full-length commit SHA; reusable workflows may still be referenced by tag. UNPROVEN until VP 7, VP 15 and VP 16: availability on GitHub Free for a public organisation repository (Decision 89 precedent); whether nested composite refs or a docker action's image tag are checked (moot today: every nested ref is pinned); GitHub-managed dynamic runs (Dependabot updates) under the policy (VP 17 watches)."
+  - "GitHub docs (read 2026-11-18): with the setting on, all actions must be pinned to a full-length commit SHA; reusable workflows may still be referenced by tag. UNPROVEN until VP 7, VP 15 and VP 16: availability on GitHub Free for a public organisation repository (Decision 89 precedent); whether nested composite refs or a docker action's image tag are checked (nested uses: refs are all pinned today; OPEN RESIDUAL: gh-action-pypi-publish's generated local docker action references its image by tag, so publish-ontheloop.yml's first run after the apply is the evidence, named pending in VP 17 when it has not run); GitHub-managed dynamic runs (Dependabot updates) under the policy (VP 17 watches)."
   - "ghas-probe: weekly Monday 07:00 UTC plus dispatch; ci_rca_taxonomy marks it not_a_gate, ci_rca excluded, so a red blocks nothing. Between merge and apply the scheduled run fails naming sha_pinning_required, a true alarm: apply before Monday 2026-11-23 07:00 UTC or expect it. Its if: skips only otl-workflow-dispatcher[bot]; MCP dispatches run as the operator's account."
   - "Overlap: no open PR edits a scope file (checked 2026-11-18 15:30 UTC; #2221 and #2198 touch neither the gate script nor the probe). Unbuilt plans on main that scope the same files are named by plan_obligations; whichever builds second rebases."
-  - "rec-5289, rec-5341 and rec-5342 still read open on 2026-11-18 15:50 UTC although #2218 (c39dcdeb) carries their Resolves trailer (closure job lag or failure; not this plan's repair, the H1 series' closure owner reads it). The physical premise is met: config/actions_sha_pin_baseline.yaml is gone on main and VP 6 passed (336 references, both composites pinned) when the critic re-ran it."
-  - "Decision 83 annotation (choice, stated): it points to rec-5290's closure for the first live read-back run id rather than carrying the run id itself, because the run happens after the merge that carries the annotation; Decision 83's reversal stanza is satisfied at its next re-verification. VP 4 waives on whole-file re-runs; git push legs stay MCP-print prose because the repo's push hook allows only the standalone canonical push call."
+  - "rec-5288, rec-5289, rec-5341 and rec-5342 read closed (critique round 2, 2026-11-18). The physical premise is met: config/actions_sha_pin_baseline.yaml is gone on main and VP 6 passed (336 references, both composites pinned) when the critic re-ran it."
+  - "Decision 83 annotation (choice, stated): it points to rec-5290's closure for the first live read-back run id rather than carrying the run id itself, because the run happens after the merge that carries the annotation; Decision 83's reversal stanza is satisfied at its next re-verification. VP 4 waives on whole-file re-runs; Pushes run as their own canonical call: the handoff evidence gate (git-ops.yaml handoff_evidence_gate, Decision 203) admits only canonical forms, and a non-exempt tree needs full-tier evidence for that exact tree, so the canary commit gets its own full-tier run (VP 13); the restore push changes no path against main and passes as exempt."
   - "Graduated shards kept, not edited: ghas-probe-401-raises-auth-error (names test_validate_ghas_probe.py), terraform-github-apply-non-push-fails-closed and terraform-github-apply-push-neutral (name test_terraform_github_apply_gate.py); their nodes are unchanged."
   - "Related-work check (scripts.ci_rca.red_overlap, 2026-11-18 15:20 UTC): blocked by rec-5355 (plan-corpus walker budget xdist crash, Critical, 15 h old) and rec-5364 (vp-replay base-collapse, Critical, 13 h old), both past SLO, owner named: CI Reform; shared files none. Deferral rationale: neither is this plan's repair and neither overlaps a scope source, so Decision 226 does not halt this work beyond the SLO rule; the gate is the handoff_policy's own: validation_result --verify-head ok on the PR head."
   - "Cross-project files: scripts/ci/terraform_github_apply_gate.py and its test (Decision 248 apply fence, CODEOWNERS) and scripts/checks/misc/validate_ghas_probe.py and its test. Operator OK to edit them and their tests: given 2026-11-18 15:41 UTC in the plan thread."
@@ -368,6 +383,7 @@ gate_rounds:
   - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: "v1:a922ae8de64a4acd18578b8eeaaa609f7edca0eb2e776cc89f442045c755c29d"}
   - {gate: decision-scout, round: 3, verdict: NO_FLAGS, scout_input_fingerprint: "v1:fc640583af6bbe68bd3119e0bd93957bd4032107cbd6306071fcd7af592af65c"}
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 3, nits: 12, escalated: true, escalation_choice: re-scope}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 9}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -379,9 +395,9 @@ execution_steps:
   - "repo.tf: add sha_pinning_required = true and rewrite the block comment as the scope row says; create the static test; VP 1 red on the base, green on the branch; VP 5."
   - "Gate: add the extractor and the two test nodes; VP 2 red on the base, green on the branch."
   - "Probe: add _pin_label, the state key, the disabled-control leg, the summary field and examined 4; update _actions_body and add the three nodes; VP 3 red on the base, green on the branch."
-  - "DECISIONS.md: append after Decision 83's last Update line exactly: '> **Update (<merge date>, PLAN-actions-sha-pin-native-policy):** the ghas-probe also checks Actions permissions' sha_pinning_required (rec-5290, Decision 100), so from this date its reversal conditions' \"the three controls\" read \"the four controls\". The first live read-back run is cited in rec-5290's closure.' Regenerate docs/decisions-index.json with its generator."
+  - "DECISIONS.md: append after Decision 83's last Update line exactly: '> **Update (<the build commit's UTC date, YYYY-MM-DD>, PLAN-actions-sha-pin-native-policy):** the ghas-probe also checks Actions permissions' sha_pinning_required (rec-5290, Decision 100), so from this date its reversal conditions' \"the three controls\" read \"the four controls\". The first live read-back run is cited in rec-5290's closure.' Regenerate docs/decisions-index.json with its generator."
   - "VP 4, VP 8, VP 9; commit and push; VP 10 (full tier in the background, 2 h limit, then verify-head ok; a timeout blocks the handoff and reruns from the start); open the PR with the attribution header; VP 7 from its PR-time plan comment; merge (squash) on green checks."
-  - "After merge: VP 11; restart the branch from main; VP 12; VP 13; ask the operator for VP 14 in the words it gives and wait; on his words VP 14; VP 15; VP 16; VP 17."
+  - "After merge: VP 11; VP 12; VP 13 (branch restart, canary commit, its full tier, push, dispatch); ask the operator for VP 14 in the words it gives and wait; on his words VP 14; VP 15; VP 16; VP 17."
   - "Close rec-5290: bin/venv-python -m scripts.ops_data_portal --update-rec rec-5290 --status closed --execution_result success --closure-artifact <VP 15 run URL> --closure-fix-sha <merge SHA> --resolution 'native SHA pinning applied (VP 14 run), read back by ghas-probe (VP 15), enforced (VP 16 canary run)'; VP 18."
   - "Report: what was implemented, verification results with every run id, and any pending VP 17 workflow."
 rollback: >-
