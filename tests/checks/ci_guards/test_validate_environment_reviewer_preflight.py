@@ -83,7 +83,7 @@ def test_real_tree_gates_every_reviewer_job(tree, declared) -> None:
     gated = [(f, j) for f, w in wfs.items() for j, job in v._jobs(w).items() if v._env_name(job) in envs]
     assert len(gated) == len(set(gated)) and set(_GATED_FLOOR) <= set(gated)
     for fname, jname in gated:
-        name = v._env_name(wfs[fname]["jobs"][jname])
+        name = v._env_name(wfs[fname]["jobs"][jname]) or ""
         steps = [s for s in v._steps(wfs[fname]["jobs"][jname]) if not v._is_checkout(s)]
         assert steps[0]["run"].strip() == v._approvals_cmd(name), (fname, jname)
 
@@ -259,7 +259,7 @@ def test_registered_check_reports_each_violation(monkeypatch) -> None:
 
 def test_check_is_registered_in_the_fast_tier_manifest() -> None:
     entry = next(e for e in _manifest.ENTRIES if e.name == "validate_environment_reviewer_preflight")
-    assert entry.pre is True and ".github/workflows/**" in entry.pre_globs
+    assert entry.pre is True and ".github/workflows/**" in (entry.pre_globs or ())
 
 
 def test_a_resource_without_an_environment_argument_is_ignored() -> None:
@@ -303,3 +303,13 @@ def test_override_render_without_the_reviewers_check_is_refused(wfs, declared) -
     job = _gated(wfs, "persona-verdict-override.yml", "render")
     job["steps"] = [s for s in job["steps"] if "environment_reviewer_preflight.py environment" not in str(s.get("run", ""))]
     assert any("render must run" in x for x in v.check_upstream(wfs, declared))
+
+
+def test_content_deploy_build_job_without_the_environment_preflight_is_refused(wfs, declared) -> None:
+    assert v.UPSTREAM["deploy-telemetry-content.yml"] == ("build", "deploy")
+    assert v.check_upstream(wfs, declared) == []
+    build = _gated(wfs, "deploy-telemetry-content.yml", "build")
+    build["steps"] = [
+        s for s in build["steps"] if "environment_reviewer_preflight.py environment" not in str(s.get("run", ""))
+    ]
+    assert any("deploy-telemetry-content.yml:build must run" in x for x in v.check_upstream(wfs, declared))

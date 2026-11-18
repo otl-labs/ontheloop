@@ -39,7 +39,7 @@ def test_prompt_one_byte_off_is_refused(tmp_path):
         load(_copy(tmp_path, prompt_suffix="x"))
 
 
-@pytest.mark.parametrize("capability", ["read_repo", "run_tests", "edit_repo", "warehouse_read:x"])
+@pytest.mark.parametrize("capability", ["read_repo", "run_tests", "edit_repo"])
 def test_unbuilt_capability_is_refused_by_name(tmp_path, capability):
     contract = _copy(tmp_path, lambda d: d["capabilities"].append(capability))
     with pytest.raises(RunRefused, match=capability):
@@ -56,7 +56,7 @@ def test_capability_gate_matches_index():
     owned = {
         row["id"]
         for row in index["capability_vocabulary"]["capabilities"]
-        if row["binding"]["litellm"]["kind"] == "backend_tool" and row["binding"]["litellm"]["owning_item"] == "T4.32:c1"
+        if row["binding"]["litellm"]["owning_item"] == "T4.32:c1"
     }
     assert set(BUILT) == owned
 
@@ -102,3 +102,18 @@ def test_malformed_verdict_rule_is_refused(tmp_path, name):
 def test_non_mapping_verdict_rule_is_refused(tmp_path):
     with pytest.raises(RunRefused, match="verdict_consistency is malformed"):
         load(_copy(tmp_path, lambda d: d.__setitem__("verdict_consistency", ["REVISE"])))
+
+
+def test_warehouse_read_loads_verbs(tmp_path):
+    def mutate(d):
+        d["capabilities"].extend(["warehouse_read:b", "warehouse_read:a", "warehouse_read:b"])
+
+    loaded = load(_copy(tmp_path, mutate))
+    assert loaded.warehouse_verbs == ("b", "a") and loaded.blob_names == ("notes",)
+    assert load(FIXTURE).warehouse_verbs == ()
+
+
+@pytest.mark.parametrize("capability", ["warehouse_read", "warehouse_read:", "warehouse_read:read_input"])
+def test_warehouse_read_naming_read_input_is_refused(tmp_path, capability):
+    with pytest.raises(RunRefused, match="warehouse_read"):
+        load(_copy(tmp_path, lambda d: d["capabilities"].append(capability)))

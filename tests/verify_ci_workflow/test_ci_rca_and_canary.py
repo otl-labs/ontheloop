@@ -27,6 +27,7 @@ _COMPILED_CACHE_KEY = (
     "pip-${{ hashFiles('requirements.in', 'requirements-dev.in', 'requirements.txt', 'requirements-dev.txt') }}"
 )
 
+_RCA_YML = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci-rca.yml"
 _REQUIRED_WORKFLOWS = ["CI", "Main Canary", "terraform-apply-sandbox", "rec-autoclose", "deploy-ducklake-lambdas"]
 
 _REAL_RCA_DATA = {
@@ -524,3 +525,23 @@ class TestCiRcaBoundedRetrievalCounterfactuals:
             mock_load.return_value = rca_data
             with pytest.raises(AssertionError, match="not found in job"):
                 _check_ci_rca_fetch_classification()
+
+
+def test_rejected_deployment_is_classified_before_the_log_fetch_and_fails_closed() -> None:
+    doc = yaml.safe_load(_RCA_YML.read_text(encoding="utf-8"))
+    steps = doc["jobs"]["rca"]["steps"]
+    names = [s.get("name") for s in steps]
+    fetch, jobs, rej, refusal = (
+        names.index(n)
+        for n in (
+            "Fetch failed run logs",
+            "Fetch jobs JSON",
+            "Rejected-deployment check",
+            "Designed-refusal check (fail-closed skip predicate)",
+        )
+    )
+    assert jobs < rej < fetch < refusal
+    assert steps[fetch]["if"] == "steps.rejected_deployment.outputs.skip != 'true'"
+    assert '|| OUTPUT="skip=false"' in steps[rej]["run"] and "--rejected-deployment-only" in steps[rej]["run"]
+    assert "continue-on-error" not in steps[rej] and "--rejected-deployment-only" not in steps[refusal]["run"]
+    assert "deploy-telemetry-content" in doc.get("on", doc.get(True))["workflow_run"]["workflows"]

@@ -503,3 +503,26 @@ def test_an_unreadable_head_date_counts_as_old() -> None:
     from scripts.convergence_health import code_drift
 
     assert code_drift._head_is_old(lambda argv: "not-a-timestamp", "SHA_H") is True
+
+
+def test_telemetry_content_pathspecs_are_the_protective_set_and_the_manifest_bundles_every_py_match() -> None:
+    from pathlib import Path
+
+    import yaml
+
+    from scripts.convergence_health.code_drift import TELEMETRY_CONTENT_SOURCE_PATHSPECS as specs
+
+    root = Path(__file__).resolve().parents[3]
+    pkg = "src/lambdas/ducklake_telemetry_content_reader"
+    assert specs == (pkg, "src/common/ducklake_content_read_verbs.py", "src/sensitive_values")
+    manifest = yaml.safe_load((root / pkg / "manifest.yaml").read_text(encoding="utf-8"))
+    bundled = set(manifest["includes"]) | set(manifest["assets"])
+    matched = []
+    for spec in specs:
+        target = root / spec
+        found = (
+            [target] if target.is_file() else [p for p in target.rglob("*") if p.is_file() and "__pycache__" not in p.parts]
+        )
+        matched += [p.relative_to(root).as_posix() for p in found]
+    unbundled = {m for m in matched if m not in bundled}
+    assert unbundled == {f"{pkg}/manifest.yaml", f"{pkg}/deploy_config.json"}

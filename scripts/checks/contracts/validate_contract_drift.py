@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from scripts.checks import _common, registry
-from scripts.checks.contracts import _population, _shared
+from scripts.checks.contracts import _evaluator_coverage, _population, _shared
 
 if TYPE_CHECKING:
     from scripts.contracts_schema import ContractDocument, ContractMeta
@@ -145,6 +145,27 @@ def validate_contract_drift(
         subtrees = _population.load_declared_subtrees(target_dir / _CONTRACT_POPULATION)
         failed.extend(_population.subtree_member_failures(target_dir, subtrees))
 
+        # ---- coverage tables (rec-5263): read once from the scanned directory, fail closed when malformed ----
+        arch_path = target_dir / "instruction-architecture.yaml"
+        live_table: _evaluator_coverage.LiveTable = _evaluator_coverage.LiveTable()
+        live_table_ok = False
+        if arch_path.is_file():
+            loaded_table = _evaluator_coverage.load_live_table_from(arch_path)
+            if isinstance(loaded_table, str):
+                failed.append(f"Contract drift (coverage): {loaded_table}")
+            else:
+                live_table, live_table_ok = loaded_table, True
+        coverage_rows: dict[str, _evaluator_coverage.CoverageRow] = {}
+        if (target_dir / _CONTRACT_POPULATION).is_file():
+            loaded_rows = _evaluator_coverage.load_coverage_from(target_dir / _CONTRACT_POPULATION)
+            if isinstance(loaded_rows, str):
+                failed.append(f"Contract drift (coverage): {loaded_rows}")
+            else:
+                coverage_rows = loaded_rows
+        class_d_shaped: set[str] = set()
+        class_d_kinds: dict[str, str] = {}
+        class_d_bodies: dict[str, list[str]] = {}
+
         # ---- extension/depth conformance over the WHOLE tree (not just *.yaml/*.yml) ----
         if baseline_available:
             baseline_rel = {p[len(_DOCS_CONTRACTS_PREFIX) :] for p in baseline_paths if p.startswith(_DOCS_CONTRACTS_PREFIX)}
@@ -228,6 +249,7 @@ def validate_contract_drift(
                 continue
 
             # the remaining branch handles shape "class_d"
+            class_d_shaped.add(name)
             smuggled = _population.detect_smuggled_shape(data)
             if smuggled:
                 failed.append(f"Contract drift (smuggling): {name}: {smuggled}")
@@ -243,6 +265,7 @@ def validate_contract_drift(
             # Guaranteed by ContractMeta's Class D validator (contracts_schema.py) -- a Class D
             # envelope cannot pass schema validation without a non-None evaluator.
             assert meta.evaluator is not None
+            class_d_kinds[name] = "check" if meta.evaluator.check is not None else "agent_surface"
 
             if is_new and meta.status.value == "active":
                 failed.append(
@@ -252,7 +275,10 @@ def validate_contract_drift(
                 census.skipped += 1
                 continue
 
-            resolves, detail = _population.resolve_evaluator(name, meta.evaluator, root=_common.ROOT)
+            body = _evaluator_coverage.body_keys(data)
+            resolves, detail = _population.resolve_evaluator(
+                name, meta.evaluator, root=_common.ROOT, live_table=live_table, coverage=coverage_rows, body=body
+            )
             if not resolves:
                 failed.append(f"Contract drift (evaluator): {name}: evaluator does not resolve -- {detail}")
                 census.skipped += 1
@@ -267,6 +293,27 @@ def validate_contract_drift(
                 census.status_active += 1
 
             class_d_metas[name] = meta
+            class_d_bodies[name] = body
+
+        # ---- evaluator coverage: table cross-check, retired-marker guard, per-contract print ----
+        visible_rows = {n: r for n, r in coverage_rows.items() if n in class_d_kinds or n not in class_d_shaped}
+        for err in _evaluator_coverage.coverage_table_errors(visible_rows, class_d_kinds):
+            failed.append(f"Contract drift (coverage): {err}")
+        if not arch_path.is_file():
+            print(f"  advisory-SKIP: retired-marker guard -- no instruction-architecture.yaml in {target_dir}")
+        elif live_table_ok:
+            for err in _evaluator_coverage.retired_marker_errors(_common.ROOT, live_table):
+                failed.append(f"Contract drift (coverage): {err}")
+        totals = [0, 0, 0, 0]
+        for name in sorted(class_d_metas):
+            body = class_d_bodies[name]
+            row = coverage_rows.get(name)
+            asserted = set(row.asserts) if row else set()
+            instructed = _evaluator_coverage.instructed_keys(name, row.triggers, body)[0] if row and row.triggers else set()
+            print(f"  {_evaluator_coverage.coverage_line(name, body, asserted, instructed)}")
+            a, i = len(asserted & set(body)), len(instructed & set(body))
+            totals = [totals[0] + 1, totals[1] + a, totals[2] + i, totals[3] + len(set(body) - asserted - instructed)]
+        print(f"  Coverage totals: contracts={totals[0]} asserted={totals[1]} instructed={totals[2]} neither={totals[3]}")
 
         # ---- subject uniqueness + topic-equals-subject ----
         class_d_subjects = {name: meta.subject for name, meta in class_d_metas.items() if meta.subject}

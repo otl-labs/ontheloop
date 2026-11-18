@@ -1,0 +1,230 @@
+name: deploy-telemetry-content
+
+# Operator-gated code-deploy channel for the telemetry content reader (Decisions 239 cl.5, 249, 254, 270 and the
+# content deploy channel Decision). Woken by each completed CI push run on main (workflow_run) and by workflow_dispatch,
+# like the sibling channels, but it deploys only when the reader's protective set changed since its deployed commit
+# (scripts.convergence_health.code_drift.TELEMETRY_CONTENT_SOURCE_PATHSPECS), or on a dispatch.
+#
+# gate:   deploy-gate.yml resolves the last-green main commit and decides against deploy-records/telemetry-content/.
+# build:  no credential and no Environment. Builds the reader zip, proves the recorded baseline (the recorded commit builds
+#         the recorded digest) unless rebaseline, and writes the approval summary: what ships and its evidence first.
+# deploy: waits in the reviewer-gated telemetry-content-deploy Environment, then as telemetry-content-deploy deploys exactly
+#         the built digest with the handler, layers and environment pinned in deploy_config.json and reads back the live
+#         CodeSha256 and configuration (Decision 154). No python or pip runs while it holds the role.
+# record: writes the channel's deploy record under agent-platform-github-ci-deploy, from the deploy job's read-back.
+#
+# A BASELINE_UNPROVEN or baseline failure means the reader or its record changed outside this channel: dispatch with
+# rebaseline after reading docs/contracts/deploy-paths.yaml's code-deploy recovery.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Redeploy the newest green commit even when already deployed or unchanged'
+        type: boolean
+        default: false
+      rebaseline:
+        description: 'Recovery for BASELINE_UNPROVEN: skip both baseline checks for this run; the summary lists every bundled commit since ddb28a40'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-telemetry-content
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    if: (github.event_name != 'workflow_dispatch' || github.actor != 'otl-workflow-dispatcher[bot]') && ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository))
+    uses: ./.github/workflows/deploy-gate.yml
+    with:
+      channel: telemetry-content
+      force: ${{ inputs.force || inputs.rebaseline || false }}
+    secrets: inherit  # pragma: allowlist secret
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+
+  build:
+    needs: gate
+    if: needs.gate.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      held: ${{ steps.hold.outputs.held }}
+      sha256: ${{ steps.build.outputs.sha256 }}
+      aws_region: ${{ steps.region.outputs.aws_region }}
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: region
+        uses: ./.github/actions/aws-region
+
+      - name: Check the telemetry-content-deploy Environment has reviewers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEWER_LOGINS: ${{ vars.TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS }}
+        run: python3 -I scripts/ci/environment_reviewer_preflight.py environment --environment telemetry-content-deploy --require-no-admin-bypass
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - run: pip install -c requirements.txt pyyaml pydantic
+
+      - name: Telemetry production hold
+        id: hold
+        run: |
+          set -euo pipefail
+          python -m scripts.checks.ops_governance.validate_reconcile_pending_gate --telemetry-hold | tee -a "$GITHUB_OUTPUT"
+          if grep -qx 'held=true' "$GITHUB_OUTPUT"; then
+            echo "::notice::TELEMETRY_PRODUCTION_HOLD - the content reader is not redeployed until the pending column is added (docs/contracts/deploy-paths.yaml, code-deploy recovery)."
+          fi
+
+      - name: Build the content reader zip
+        id: build
+        run: |
+          set -euo pipefail
+          python -m scripts.build_lambda --content-reader-only | tee build.out
+          echo "sha256=$(sed -n 's/^CONTENT_READER_SHA256 //p' build.out)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the content reader zip
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: telemetry-content-${{ steps.build.outputs.sha256 }}
+          path: lambda-packages/ducklake-telemetry-content-reader.zip
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: List the watched and bundled paths
+        run: |
+          set -euo pipefail
+          python -m scripts.ci.deploy_gate pathspecs --channel telemetry-content > protective-paths.txt
+          python -m scripts.build_lambda --list-bundle ducklake_telemetry_content_reader > bundle-paths.txt
+
+      - name: Prove the recorded baseline
+        if: needs.gate.outputs.record_sha != '' && !inputs.rebaseline
+        env:
+          RECORD_SHA: ${{ needs.gate.outputs.record_sha }}
+          RECORD_CODE_SHA256: ${{ needs.gate.outputs.record_code_sha256 }}
+        run: |
+          set -euo pipefail
+          git worktree add ../recorded "$RECORD_SHA"
+          cd ../recorded
+          python -m scripts.build_lambda --content-reader-only | tee ../recorded.out
+          hex=$(sed -n 's/^CONTENT_READER_SHA256 //p' ../recorded.out)
+          got=$(printf "$(printf '%s' "$hex" | sed 's/\(..\)/\\x\1/g')" | base64)
+          [ "$got" = "$RECORD_CODE_SHA256" ] || { echo "::error::BASELINE_UNPROVEN the recorded commit does not build the recorded digest"; exit 1; }
+
+      - name: Write the approval summary
+        env:
+          GATE_SHA: ${{ needs.gate.outputs.sha }}
+          HEAD_SHA: ${{ github.sha }}
+          RECORD_SHA: ${{ inputs.rebaseline && 'rebaseline' || needs.gate.outputs.record_sha }}
+          RUN_URL: ${{ github.event.workflow_run.html_url || format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}
+          CONTENT_SHA256: ${{ steps.build.outputs.sha256 }}
+          HELD: ${{ steps.hold.outputs.held }}
+          PROTECTIVE_PATHS_FILE: protective-paths.txt
+          BUNDLE_PATHS_FILE: bundle-paths.txt
+        run: bash scripts/ci/telemetry_content_deploy.sh summary
+
+  deploy:
+    needs: [gate, build]
+    if: needs.build.outputs.held == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: telemetry-content-deploy
+    outputs:
+      code_sha256: ${{ steps.deploy.outputs.code_sha256 }}
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: .dispatch-tooling
+          persist-credentials: false
+
+      - name: Check the reviewer approval for telemetry-content-deploy
+        working-directory: .dispatch-tooling
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEWER_LOGINS: ${{ vars.TF_GITHUB_GATED_APPLY_REVIEWER_LOGINS }}
+        run: python3 -I scripts/ci/environment_reviewer_preflight.py approvals --environment telemetry-content-deploy
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: telemetry-content-${{ needs.build.outputs.sha256 }}
+          path: content-zip
+
+      - name: Configure AWS credentials (OIDC -- telemetry-content-deploy, Environment sub, main only)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+        env:
+          MASK_AWS_ROLE_ID_ACCOUNT_PART: ${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/telemetry-content-deploy
+          aws-region: ${{ needs.build.outputs.aws_region }}
+
+      - name: Deploy, then read back the live code and configuration
+        id: deploy
+        env:
+          ZIP: content-zip/ducklake-telemetry-content-reader.zip
+          CONTENT_SHA256: ${{ needs.build.outputs.sha256 }}
+          RECORD_CODE_SHA256: ${{ needs.gate.outputs.record_code_sha256 }}
+          REBASELINE: ${{ inputs.rebaseline && 'true' || 'false' }}
+          ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+        run: bash scripts/ci/telemetry_content_deploy.sh deploy
+
+  record:
+    needs: [gate, build, deploy]
+    if: needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - run: pip install -c requirements.txt pyyaml pydantic
+
+      - name: Configure AWS credentials (OIDC -- agent-platform-github-ci-deploy)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+        env:
+          MASK_AWS_ROLE_ID_ACCOUNT_PART: ${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-deploy
+          aws-region: ${{ needs.build.outputs.aws_region }}
+
+      - name: Write the deploy record
+        env:
+          CODE_SHA256: ${{ needs.deploy.outputs.code_sha256 }}
+          LAMBDA_ARTIFACT_SHA: ${{ needs.gate.outputs.sha }}
+        run: python -m scripts.ci.telemetry_content_record

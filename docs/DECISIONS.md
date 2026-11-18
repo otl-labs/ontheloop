@@ -58,6 +58,86 @@ conditions:
 
 **Related:** Decisions 83, 143, 181, 203, 205, 212, 224, 229, 237, 245, 263, 264, 267; T4.2, T4.32; rec-4624, rec-5241, rec-5271.
 
+> **Update (2026-11-17):** PLAN-persona-verdict-egress re-cut T4.32's egress hint into five plans, and the operator ruled on 2026-11-17 that the verdict App's key gets its own Environment and role. So "PLAN-persona-verdict-egress" in clause 4 and the Coverage line reads as two plans: PLAN-persona-verdict-app-grant holds the App, its key home and the role that reads the key (a separate role, used only by the post job, under its own Decision in the Decision 267 clause 5 form, so Decision 263 clause 2's grant list does not widen), and PLAN-persona-verdict-app-post holds the post job's token mint; the app-key-exposed reversal's "the egress plan's declared readers" reads as PLAN-persona-verdict-app-grant's declared readers, and the gates.verdict_app.app_id row's note in docs/contracts/project-configuration.yaml reads the same way (rec-5351).
+
+---
+
+## Decision 272: The telemetry content reader's deploy channel asks the operator only when the reader's protective code changes (amends Decision 249 clause 2) (Decided)
+
+```yaml
+number: 272
+status: Decided
+decided_date: "2026-11-17"
+kind:
+  value: direction
+  justification: >-
+    Yes: clause 1 sets which changes reach the content reader only through an operator approval and which wait for the
+    next one, a standing rule on what production runs; undone, every bundled change asks the operator again.
+amends: [249]
+serves: [NS.9]
+significance:
+  value: numbered_decision
+  justification: >-
+    It narrows Decision 249 cl.2 for one channel, and 249's own envelope says an annotation cannot change a ratified
+    clause's meaning; build-lambda.yaml's deploy_channels row (considered) records the channel's mechanism, not which
+    changes may wait for the operator.
+```
+
+**Status:** Decided
+**Date:** 2026-11-17
+**Warehouse ID:** dec-272 (per Decision 84 backfill)
+
+**Problem:** Decision 239 cl.5 lets only an operator-approved job change the content reader, and Decision 249 cl.2
+ships every queued change with the next green commit. The reader bundles about 45 files, most of them shared DuckLake
+modules that 29 commits touched in the month to 2026-11-17, so the operator would approve a deploy about once a day;
+an approval given near-always stops telling anything apart (NS.9).
+
+**Intent:** The operator approves a content reader deploy only when the code that protects transcript text changes,
+and every approval names everything that ships.
+
+**Decision:**
+1. **Watched set (amends 249 cl.2 for this channel).** deploy-telemetry-content.yml deploys the last-green commit
+   (Decision 254 cl.5) only when the reader's protective set changed since its deployed commit: the reader's package,
+   its deploy_config.json included, src/common/ducklake_content_read_verbs.py and src/sensitive_values. Its other
+   bundled files ship with the next deploy the operator approves, and a workflow_dispatch redeploys on demand (249
+   cl.4). The approval screen leads with what ships and its evidence (the green run, the built digest, the hold state,
+   the layer pins), then lists every bundled or build-tooling commit going out, counted from the deployed commit only
+   once that commit is shown to build the live code. A drift sensor built for this channel watches the same set; none
+   is wired yet.
+2. **Record and pins.** agent-platform-github-ci-deploy writes the channel's deploy record after the gated job, from
+   that job's read-back, so the locked role keeps Decision 270 cl.2's grant. deploy_config.json pins each layer's
+   version and CodeSha256, and the gated job re-verifies them before it deploys.
+
+**Rationale:** The approval is the one step an agent holding the operator's GitHub identity cannot take for itself
+(Decision 239), so it should fall where a refusal is plausible: masking, the access line, the served verbs and the
+reader's settings. Shared modules still reach production only inside an approved deploy that lists them. Rejected
+(operator, 2026-11-17): asking on every bundled change (daily approvals), dropping the approval (reverses 239 cl.5),
+and a record write by the locked role (amends 270 cl.2 and needs a CloudShell apply).
+
+**Coverage (Decision 181 cl.2):** cl.1 -- validate_content_reader_lock, tests/ci/test_deploy_gate.py and the
+summary tests in tests/ci/test_telemetry_content_deploy_script.py; cl.2 -- that script's deploy tests and
+tests/checks/iam_tf/test_ci_deploy_record_prefixes.py. Residuals: a shared module waits for the next approval and the
+reader runs older shared code meanwhile (accepted); a plan touching only the shared modules still owes Decision 79's
+deploy step until rec-5333 decides the operator-gated case; the layers are CI-published, so a pin proves which bytes
+run, not who built them (rec-4742), and a layer republish can delete a pinned version (rec-4738); the protected-path
+edit hook and the golden replay's masked read-back are owed by rec-5322 (239 cl.5); Decision 267's lock-available
+condition fires, and rec-5323 re-decides its clause 5.
+
+```yaml reversal-conditions
+decision: 272
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: stale-shared-code
+    kind: manual
+    description: "A content read fails because the reader runs older shared code than main: re-decide clause 1's watched set."
+  - id: codeowners-binds
+    kind: manual
+    description: "rec-2827 closes: re-decide whether the approval still needs a narrowed set."
+```
+
+**Related:** Decisions 79, 125, 126, 154, 238, 239, 249, 254, 267, 270.
+
 ---
 
 ## Decision 270: The telemetry content reader is reached through a fifth DuckLake API route, and its change lock lives in the CI apply boundary, paid for by prefix-named URL-only Denies (amends Decisions 144, 202, 213, 230, 239, 255, 256, 257 and 258) (Decided)
@@ -605,6 +685,8 @@ conditions:
 
 **Related:** Decisions 144, 172, 205, 212, 213, 223, 224, 237, 238, 248, 252; T4.32.
 
+> **Update (2026-11-17):** "The verdict-jobs plan" in clause 4 and the Coverage line reads as the PLAN-persona-verdict-* plans of T4.32's decomposition_hints. PLAN-persona-verdict-egress records clause 4's coupling as ports.yaml PC-12, and the telemetry writer principal registry (docs/contracts/telemetry-writer-principals.yaml, rec-4420) holds this role's principal row. PLAN-persona-verdict-first-key-read is to prove the live assume and decryption under the role, and that a job holding id-token: write without the Environment is refused; a pull_request job's refusal stays with the fixture run (T4.32 c3). The verdict App's key is to be read by a separate role in its own Environment under PLAN-persona-verdict-app-grant's own Decision (the operator's 2026-11-17 ruling), so this role's grant list does not change.
+
 ---
 
 ## Decision 262: A plan PR whose last decision-scout row is BLOCK fails its check, with no exemption and no agent override -- the operator's admin bypass merge is the release valve (amends Decision 83) (Decided)
@@ -840,6 +922,13 @@ conditions:
 > policies; other AWS-managed attachments, documents and trusts unknown until apply, IAM group policies, resource
 > policies (the API route, App key and trail policies) and policy blocks inside a role are not checked; a trust is
 > checked for public access only.
+
+> **Update (2026-11-17):** CheckNoPublicAccess rejects a trust statement whose principal is a federated OIDC
+> provider (the GitHub Actions roles), so the analyzer checks each federated statement other than SAML by its own
+> rule: one that allows access refuses the run unless it names only OIDC providers of the account and pins its sub
+> condition to exact repository subjects, with no wildcard or policy variable. The document's other statements
+> still go to Access Analyzer. Which repository a subject names is not checked; 'a trust is checked for public
+> access only' stands for every other trust statement.
 
 > **Amended by Decision 270 (2026-11-17):** Clause 3's protected set gains the telemetry-content-* roles and their policies: bootstrap-apply's DenyProtectedRoleWrite and the apply classifier name role/telemetry-content-*, and bootstrap-apply holds no Lambda write on the content function.
 
@@ -1512,6 +1601,8 @@ conditions:
 **Related:** Decisions 24, 55, 73, 77, 125, 126, 166, 181, 205, 226, 236, 239, 245; rec-4874, rec-4912.
 
 > **Amended by Decision 254 (2026-11-12):** Decision 254 fires canary-model-decided and re-scopes clause 2: the green signal becomes the last-green ref, the newest first-parent main commit whose own run passed the full tier, which under batching is a batch head, and clause 4's "newest green commit" reads the same. Clauses 3 and 5 hold (Decision 254 cl.2, cl.5).
+
+> **Amended by Decision 272 (2026-11-17):** For the telemetry content reader's channel only, clause 2's watched paths are the reader's protective set; its other bundled files ship with the next deploy the operator approves (Decision 272 cl.1).
 
 > **Update (2026-11-10):** Decision 252 fires the tier-stood-up condition ahead of the tier and replaces the green-streak train that clause 1 calls future state (see the note on Decision 73): the PROD promotion item re-decides clause 1. Until then clause 2 holds, and SIT deploys keep it (Decision 252 cl.6).
 
