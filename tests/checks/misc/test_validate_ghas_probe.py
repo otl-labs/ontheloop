@@ -50,14 +50,25 @@ class TestValidateGhasProbe:
         ).encode("utf-8")
 
     @staticmethod
-    def _actions_body(enabled: bool = True, allowed_actions: str = "all") -> bytes:
-        return json.dumps({"enabled": enabled, "allowed_actions": allowed_actions}).encode("utf-8")
+    def _actions_body(enabled: bool = True, allowed_actions: str = "all", sha_pinning_required: bool | None = True) -> bytes:
+        body: dict[str, object] = {"enabled": enabled, "allowed_actions": allowed_actions}
+        if sha_pinning_required is not None:
+            body["sha_pinning_required"] = sha_pinning_required
+        return json.dumps(body).encode("utf-8")
 
-    def _make_urlopen(self, secret_scanning: str = "enabled", push_protection: str = "enabled", actions_enabled: bool = True):
+    def _make_urlopen(
+        self,
+        secret_scanning: str = "enabled",
+        push_protection: str = "enabled",
+        actions_enabled: bool = True,
+        sha_pinning_required: bool | None = True,
+    ):
         def _urlopen(request: object, timeout: float = 15) -> "TestValidateGhasProbe._FakeResponse":
             url = request.full_url  # type: ignore[attr-defined]
             if url.endswith("/actions/permissions"):
-                return self._FakeResponse(200, self._actions_body(enabled=actions_enabled))
+                return self._FakeResponse(
+                    200, self._actions_body(enabled=actions_enabled, sha_pinning_required=sha_pinning_required)
+                )
             if url.endswith("/secret-scanning/alerts"):
                 if secret_scanning != "enabled":  # pragma: allowlist secret -- control-state enum, not a secret
                     # Real GitHub behavior: this endpoint 404s when secret scanning is disabled
@@ -157,6 +168,33 @@ class TestValidateGhasProbe:
             patch("scripts.checks.misc.validate_ghas_probe.urlopen", side_effect=self._make_urlopen()),
         ):
             assert _ghas_run_cli() == 0
+
+    def _run_check(self, **kw: object) -> list[str]:
+        with (
+            patch.dict("os.environ", {"GHAS_PROBE_TOKEN": "tok"}),
+            patch("scripts.checks.misc.validate_ghas_probe.urlopen", side_effect=self._make_urlopen(**kw)),
+        ):
+            failed: list[str] = []
+            validate_ghas_probe(failed)
+        return failed
+
+    def test_check_fails_when_sha_pinning_not_required(self) -> None:
+        failed = self._run_check(sha_pinning_required=False)
+        assert failed != [] and "sha_pinning_required=false" in failed[0]
+
+    def test_check_fails_when_sha_pinning_field_absent(self) -> None:
+        failed = self._run_check(sha_pinning_required=None)
+        assert failed != [] and "sha_pinning_required=unknown" in failed[0]
+
+    def test_runner_nonzero_when_sha_pinning_not_required(self) -> None:
+        with (
+            patch.dict("os.environ", {"GHAS_PROBE_TOKEN": "tok"}),
+            patch(
+                "scripts.checks.misc.validate_ghas_probe.urlopen",
+                side_effect=self._make_urlopen(sha_pinning_required=False),
+            ),
+        ):
+            assert _ghas_run_cli() != 0
 
     def test_runner_nonzero_on_disabled_control(self) -> None:
         with (
@@ -288,7 +326,12 @@ class TestProbeErrorBranches:
                 _probe("tok")
 
     def test_disabled_push_protection_is_reported(self) -> None:
-        state = {"scanning_status": "enabled", "push_protection": "disabled", "actions_enabled": True}
+        state = {
+            "scanning_status": "enabled",
+            "push_protection": "disabled",
+            "actions_enabled": True,
+            "sha_pinning_required": "true",
+        }
         assert _disabled_controls(state) == ["push_protection=disabled"]
 
 
