@@ -23,7 +23,11 @@ function calls, never at import time. A malformed stanza produces an explicit MA
 
 Surfacing, not gating: a passed review_by or a fired condition never blocks anything from this
 module. Only the separate ``scripts.checks.ops_governance.validate_reversal_stanzas`` check gates
-a merge, and only on stanza WELL-FORMEDNESS.
+a merge, and only on stanza WELL-FORMEDNESS and the per-date review ceiling.
+
+A repo_state condition may carry ``fires: at_review`` (default ``on_true``): it then fires only when
+its predicate holds and review_by has passed. A predicate registered ``gate=False`` (it reads git
+history) is skipped by ``evaluate(gate=True)`` (the PR gate) and must be named with ``fires: at_review``.
 
 Predicate registry: a module-level dict. Decision 133's two repo_state conditions both ship
 ``predicate: null`` (manual/context; no predicate to register there). ``roadmap_items_complete``
@@ -33,6 +37,7 @@ the second. ``register_predicate()`` remains the extension point for any future 
 
 from __future__ import annotations
 
+import inspect
 import re
 import sys
 from collections.abc import Callable
@@ -50,6 +55,7 @@ _FENCE_CLOSE_RE = re.compile(r"^```[ \t]*$", re.MULTILINE)
 
 _REQUIRED_CONDITION_KEYS = ("id", "kind", "description")
 _VALID_KINDS = ("manual", "repo_state")
+_VALID_FIRES = ("on_true", "at_review")
 _REQUIRED_TOP_KEYS = ("decision", "review_by", "on_trigger", "conditions")
 
 PredicateFn = Callable[..., bool]
@@ -59,13 +65,20 @@ PredicateFn = Callable[..., bool]
 # below for Decision 194, is the first entry). register_predicate() is the extension point for
 # any future predicate (e.g. an alpha-readiness or sustained-slip signal).
 _PREDICATE_REGISTRY: dict[str, PredicateFn] = {}
+# Names registered gate=False: evaluate(gate=True) checks their binding but never calls them.
+_GATE_EXEMPT: set[str] = set()
 
 
-def register_predicate(name: str) -> Callable[[PredicateFn], PredicateFn]:
-    """Decorator registering a repo-state predicate under `name` for kind: repo_state conditions."""
+def register_predicate(name: str, *, gate: bool = True) -> Callable[[PredicateFn], PredicateFn]:
+    """Decorator registering a repo-state predicate under `name` for kind: repo_state conditions.
+
+    gate=False marks a predicate that reads git history: the PR gate (evaluate(gate=True)) does not call it.
+    """
 
     def _decorate(fn: PredicateFn) -> PredicateFn:
         _PREDICATE_REGISTRY[name] = fn
+        if not gate:
+            _GATE_EXEMPT.add(name)
         return fn
 
     return _decorate
@@ -113,6 +126,26 @@ def ports_open_coupling_findings_exceed(threshold: int, contract_path: str | Pat
     return sum(1 for row in findings if isinstance(row, dict) and row.get("status") == "open") > threshold
 
 
+@register_predicate("decision_index_bytes_exceed")
+def decision_index_bytes_exceed(max_bytes: int, index_path: str | Path = "docs/decisions-index.json") -> bool:
+    """True iff the decision index file is strictly larger than `max_bytes` (Decision 179)."""
+    from scripts.preflight.corpus_measures import index_bytes  # function-local: AGENTS.md import-safety
+
+    return index_bytes(index_path) > max_bytes
+
+
+@register_predicate("decision_entries_per_plan_exceed", gate=False)
+def decision_entries_per_plan_exceed(window_days: int, max_entries_per_plan: float, as_of: date | None = None) -> bool:
+    """True iff new Decision entries per added plan over the `window_days` window ending at as_of exceed the cap.
+
+    Reads git history, so it is registered gate=False; raises on a shallow clone rather than guessing.
+    """
+    from scripts.preflight.corpus_measures import entries_per_plan  # function-local: AGENTS.md import-safety
+
+    entries, plans = entries_per_plan(window_days, as_of)
+    return entries / plans > max_entries_per_plan
+
+
 @dataclass
 class ConditionResult:
     id: str
@@ -120,6 +153,8 @@ class ConditionResult:
     description: str
     predicate: Optional[str] = None
     fired: bool = False
+    holds: Optional[bool] = None
+    fires: str = "on_true"
 
 
 @dataclass
@@ -130,6 +165,7 @@ class DecisionConditionState:
     conditions: list[ConditionResult] = field(default_factory=list)
     fired_condition_ids: list[str] = field(default_factory=list)
     error: Optional[str] = None
+    on_trigger: Optional[str] = None
 
 
 def _find_decision_blocks(content: str) -> list[tuple[int, str, str]]:
@@ -185,6 +221,7 @@ def _evaluate_stanza(
     stanza_text: str,
     predicates: dict[str, PredicateFn],
     today: date,
+    gate: bool = False,
 ) -> DecisionConditionState:
     try:
         data = yaml.safe_load(stanza_text)
@@ -221,7 +258,7 @@ def _evaluate_stanza(
     conditions: list[ConditionResult] = []
     fired_ids: list[str] = []
     for cond in conditions_raw:
-        result_or_error = _evaluate_condition(decision_id, cond, predicates)
+        result_or_error = _evaluate_condition(decision_id, cond, predicates, review_by, today, gate)
         if isinstance(result_or_error, DecisionConditionState):
             return result_or_error
         conditions.append(result_or_error)
@@ -241,13 +278,51 @@ def _evaluate_stanza(
         review_by=review_by.isoformat(),
         conditions=conditions,
         fired_condition_ids=fired_ids,
+        on_trigger=str(data.get("on_trigger")),
     )
+
+
+def _malformed(decision_id: int, error: str) -> DecisionConditionState:
+    return DecisionConditionState(decision_id=decision_id, state="MALFORMED", error=error)
+
+
+def _run_predicate(
+    cond_id: str,
+    name: str,
+    fn: PredicateFn,
+    params: dict[str, Any],
+    fires: str,
+    review_by: date,
+    today: date,
+    gate: bool,
+) -> str | tuple[Optional[bool]]:
+    """Run (or, for a gate=False predicate under the gate, only bind) one predicate.
+
+    Returns (holds,) on success -- holds None when the call was skipped -- or the MALFORMED error text.
+    """
+    exempt = name in _GATE_EXEMPT
+    if exempt and fires != "at_review":
+        return f"condition {cond_id!r} names gate=False predicate {name!r} without fires: at_review"
+    try:
+        sig = inspect.signature(fn)
+        if "as_of" in sig.parameters and "as_of" in params:
+            return f"condition {cond_id!r} params must not carry as_of"
+        if gate and exempt:
+            sig.bind(**params)
+            return (None,)
+        call = {**params, "as_of": min(today, review_by)} if "as_of" in sig.parameters else dict(params)
+        return (bool(fn(**call)),)
+    except Exception as exc:  # noqa: BLE001 -- fail loud at the call site, never at import
+        return f"condition {cond_id!r} predicate {name!r} raised: {exc}"
 
 
 def _evaluate_condition(
     decision_id: int,
     cond: Any,
     predicates: dict[str, PredicateFn],
+    review_by: date,
+    today: date,
+    gate: bool = False,
 ) -> ConditionResult | DecisionConditionState:
     """Validate + evaluate one condition entry. Returns a DecisionConditionState(MALFORMED, ...)
     on any structural error (the caller propagates it verbatim), else a ConditionResult."""
@@ -281,25 +356,31 @@ def _evaluate_condition(
                 error=f"condition {cond_id!r} references unregistered predicate {predicate_name!r}",
             )
 
-    fired = False
-    if kind == "repo_state" and predicate_name is not None:
-        fn = predicates[predicate_name]
-        try:
-            fired = bool(fn(**params))
-        except Exception as exc:  # noqa: BLE001 -- fail loud at the call site, never at import
-            return DecisionConditionState(
-                decision_id=decision_id,
-                state="MALFORMED",
-                error=f"condition {cond_id!r} predicate {predicate_name!r} raised: {exc}",
-            )
+    fires = cond.get("fires", "on_true")
+    if "fires" in cond and kind != "repo_state":
+        return _malformed(decision_id, f"condition {cond_id!r} carries 'fires' but is not kind: repo_state")
+    if fires not in _VALID_FIRES:
+        return _malformed(decision_id, f"condition {cond_id!r} has unknown fires value {fires!r}")
 
-    return ConditionResult(id=cond_id, kind=kind, description=description, predicate=predicate_name, fired=fired)
+    holds: Optional[bool] = None
+    if kind == "repo_state" and predicate_name is not None:
+        outcome = _run_predicate(cond_id, predicate_name, predicates[predicate_name], params, fires, review_by, today, gate)
+        if isinstance(outcome, str):
+            return _malformed(decision_id, outcome)
+        holds = outcome[0]
+
+    fired = bool(holds) and (fires == "on_true" or review_by <= today)
+
+    return ConditionResult(
+        id=cond_id, kind=kind, description=description, predicate=predicate_name, fired=fired, holds=holds, fires=fires
+    )
 
 
 def evaluate(
     paths: Optional[list[Path]] = None,
     predicates: Optional[dict[str, PredicateFn]] = None,
     today: Optional[date] = None,
+    gate: bool = False,
 ) -> list[DecisionConditionState]:
     """Parse + evaluate every reversal-conditions stanza across `paths`.
 
@@ -307,6 +388,8 @@ def evaluate(
     predicates: override the production _PREDICATE_REGISTRY (tests inject a fixture predicate --
         never mutates the production registry).
     today: override "today" (UTC) for deterministic date-compare tests.
+    gate: True is the PR gate's mode -- a gate=False predicate's registration and parameter binding are
+        checked but it is not called (its condition carries holds None); every other predicate runs.
     """
     resolved_paths = paths if paths is not None else _DECISIONS_MD_PATHS
     active_predicates = predicates if predicates is not None else _PREDICATE_REGISTRY
@@ -330,7 +413,7 @@ def evaluate(
                 results.append(DecisionConditionState(decision_id=decision_id, state="MALFORMED", error=fence_error))
                 continue
             assert stanza_text is not None  # found=True and no fence_error implies stanza_text is set
-            results.append(_evaluate_stanza(decision_id, stanza_text, active_predicates, today_date))
+            results.append(_evaluate_stanza(decision_id, stanza_text, active_predicates, today_date, gate))
 
     return results
 
@@ -388,8 +471,21 @@ def print_decision_conditions(bucket: dict) -> None:
     print()
 
 
+def _assert_not_surfaced(decision_id: int, paths: Optional[list[Path]]) -> int:
+    for r in evaluate(paths=paths, gate=True):
+        if r.decision_id == decision_id and r.state != "not-due":
+            print(f"Decision {decision_id}: {r.state}" + (f" -- {r.error}" if r.error else ""))
+            return 1
+    print(f"Decision {decision_id}: not surfaced")
+    return 0
+
+
 def _cli(argv: Optional[list[str]] = None) -> int:
     args = sys.argv[1:] if argv is None else argv
+    if "--assert-not-surfaced" in args:
+        i = args.index("--assert-not-surfaced")
+        rest = args[:i] + args[i + 2 :]
+        return _assert_not_surfaced(int(args[i + 1]), [Path(p) for p in rest] if rest else None)
     paths = [Path(p) for p in args] if args else None
     results = evaluate(paths=paths)
     exit_code = 0
