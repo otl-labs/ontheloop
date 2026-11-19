@@ -94,17 +94,47 @@ def baseline_decision_bodies(root: Path) -> Optional[BaselineBodies]:
     return bodies
 
 
+def file_text_at(root: Path, rev: str, rel: str) -> Optional[str]:
+    """The file's text at `rev` via `git show`, or None when git fails or the path is absent there. Unmemoized."""
+    result = _common.run(
+        ["git", "show", f"{rev}:{rel}"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=root,
+    )
+    return result.stdout if result.returncode == 0 else None
+
+
 def base_file_text(root: Path, rel: str) -> Optional[str]:
     """The file's text at origin/main, or None when git fails or the path is absent there. Memoized per (root, rel)."""
     key = (root, rel)
     if key not in _file_cache:
-        result = _common.run(
-            ["git", "show", f"origin/main:{rel}"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            cwd=root,
-        )
-        _file_cache[key] = result.stdout if result.returncode == 0 else None
+        _file_cache[key] = file_text_at(root, "origin/main", rel)
     return _file_cache[key]
+
+
+def _git_ok(root: Path, args: list[str]) -> bool:
+    return _common.run(["git", *args], capture_output=True, text=True, cwd=root).returncode == 0
+
+
+def decision_bodies_at(root: Path, rev: str) -> Optional[BaselineBodies]:
+    """Per-corpus-file {decision number -> heading-inclusive raw block} at an arbitrary revision.
+
+    Same grammar as baseline_decision_bodies (iter_decision_sections). A corpus file that
+    `git cat-file -e` reports absent at `rev` yields {} for that path. A rev that does not resolve to a
+    commit, or a present file whose read fails, returns None, so a failed read never becomes an empty baseline.
+    """
+    if not _git_ok(root, ["rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"]):
+        return None
+    bodies: BaselineBodies = {}
+    for rel in _DECISIONS_REL_PATHS:
+        if not _git_ok(root, ["cat-file", "-e", f"{rev}:{rel}"]):
+            bodies[rel] = {}
+            continue
+        text = file_text_at(root, rev, rel)
+        if text is None:
+            return None
+        bodies[rel] = {int(m.group(1)): block for m, block in iter_decision_sections(text)}
+    return bodies
