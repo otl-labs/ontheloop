@@ -2,6 +2,102 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 276: A Decision may delegate its values to a named contract key, and the per-entry cap stops charging the envelope, the reversal stanza and the options considered (amends Decision 167) (Decided)
+
+```yaml
+number: 276
+status: Decided
+decided_date: "2026-11-17"
+kind:
+  value: direction
+  justification: >-
+    Clause 1 moves a human gate: a change to a delegated value within its bounds no longer needs a numbered Decision,
+    only the key's change rule.
+amends: [167]
+significance:
+  value: numbered_decision
+  justification: >-
+    It moves what satisfies the Decision gate for specification and changes Decision 167 cl.3's instrument; a dated
+    amendment_forms note on 167 (considered) cannot add a routing row or re-measure a ratified clause, and
+    docs/contracts/decision-entry.yaml (considered) holds the values, not the authority to delegate them.
+delegates:
+  - key: docs/contracts/decision-entry.yaml#size_governance.measured_size_norm.cap_bytes
+    change_rule: contract_amendment
+    bounds: {min: 4096, max: 5120}
+  - key: docs/contracts/decision-entry.yaml#size_governance.options_considered.cap_bytes
+    change_rule: contract_amendment
+    bounds: {min: 512, max: 1024}
+```
+
+**Status:** Decided
+**Date:** 2026-11-17
+**Warehouse ID:** dec-276 (per Decision 84 backfill)
+
+**Problem:** The routing rule has no row for mechanism specification, so new entries still carry it (74 percent of
+the 12 newest by bytes) and each later change to it mints another entry (81 of the 97 since Decision 167 amend an
+earlier one). Decision 167's 6,144-byte cap measures the whole entry, so its growing fixed parts are paid for in
+rationale: 47 of 94 entries landed within 5 percent under it, and 11 of the 34 newest name no rejected option
+(audits/contract-first-retrospective-177c8f37.yaml, CFR-01 and CFR-02).
+
+**Intent:** A new entry states its ruling, its bounds and what it rejected; the values it governs live in a contract
+or config key that changes by that key's own rule.
+
+**Decision:**
+1. **Delegation.** A clause may state a ruling and its bounds and delegate the values to a named contract or config
+   key, declared in the entry's envelope with the key's change rule: contract amendment, or the operator's approval
+   for a key that sets direction (operator ruling, 2026-11-17). A change inside the bounds follows the change rule
+   and mints no entry; a change outside them is a new Decision amending the delegating one.
+2. **Routing.** Mechanism specification (sets, thresholds, schedules, procedures) routes to the owning contract or
+   config key, never to a numbered entry of its own; a kind-mechanism entry still chooses the means (tool, format,
+   check design, placement, vendor) and delegates the values it sets.
+3. **Enforcement.** Where a diff changes a key an earlier entry delegates, a new mechanism entry citing that key
+   fails, since the change is a contract amendment; a value outside numeric or listed bounds fails unless a new
+   direction entry in the same diff amends the delegating one.
+4. **Cap measure.** Decision 167 cl.3's cap measures the entry less its metadata envelope, its reversal-conditions
+   stanza and its options-considered block, at 5,120 bytes: about 240 bytes more body than 6,144 whole-span left at
+   the median fixed parts, a retune the operator chose and this clause states. Both caps are delegated above with
+   their current value as the upper bound, so a contract amendment may lower them and only a new Decision may raise
+   them (Decision 128).
+5. **Options considered.** A new entry names each option it rejected and why, or says none was considered and why;
+   an entry whose words were approved before this Decision merged is exempt, by a list fixed when it merges.
+6. **In-place growth.** A baseline entry whose measured body grows past the cap fails; dated annotations stay
+   WARN-only (Decision 151).
+7. **Forward only.** Except clause 6, these rules bind entries new in a diff; earlier entries still change by Decision.
+
+**Options considered:** counting only the Problem, Decision and Coverage text -- rejected: content moves to uncounted
+sections, and no recent entry reaches 6,144 under it; keeping 6,144 under the new measure -- rejected: about 1.3 KB
+more room that no recent entry uses, so the cap would stop binding; bounds that let a contract amendment raise either
+cap -- rejected: a raise would need no Decision (Decision 128); a marker on each delegated contract key -- rejected:
+a second copy that drifts; a dated note on Decision 167 -- rejected: a note cannot add a routing row or re-measure a
+ratified clause; rec-3682's citation lint -- superseded: no entry since Decision 231 cites a file line.
+
+**Coverage (Decision 181 cl.2):** cl.1 -- validate_decision_entry_conformance (the envelope field); cl.3 --
+validate_delegated_key_changes; cl.4-6 -- validate_decisions_size; cl.2 -- the routing-token check and plan-critique
+step 12p. Residuals: an entry that cites a delegated value without its key, or lands apart from the key change, is
+seen only by step 12p (rec-5261); an in-bounds change to an operator_approval key that lands without an approved-text
+sidecar is unchecked (rec-5277).
+
+```yaml reversal-conditions
+decision: 276
+review_by: 2027-01-29
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: specification-stays
+    kind: manual
+    description: "After 20 entries new under this Decision, their mean specification share (the audit's partition rule) is 55 percent or more: delegation did not move specification out; re-decide."
+  - id: excluded-blocks-absorb
+    kind: manual
+    description: "Within those 20 entries the median whole-entry span exceeds 7,000 bytes: the excluded blocks absorb specification; re-decide the measure."
+  - id: cap-still-a-target
+    kind: manual
+    description: "5 or more of those 20 entries land within 5 percent under the cap: it still works as a target; re-decide the value or the instrument."
+```
+
+**Related:** Decision 167 (amended: cl.3's measure), 145, 150, 151, 177, 181 cl.2, 246; rec-3023, rec-5260, rec-4744,
+rec-3179, rec-3682 (superseded).
+
+---
+
 ## Decision 275: Contracts are budgeted in bytes as well as lines, and a contract at its budget compacts its amendment_log or splits off a second subject before any raise (amends Decisions 166 and 240) (Decided)
 
 ```yaml
@@ -7910,6 +8006,8 @@ conditions:
 > same-pr-split-to-evade-cap. Condition (d) is discharged: the cap has failed builds since #895 (2026-08-13). The
 > stanza's mis-routed-past-both-gates did not fire and is re-armed with wording a review can check; review_by moves
 > from 2026-11-17 to 2027-02-17. No clause changes.
+
+> **Amended by Decision 276 (2026-11-17):** Clause 3's cap measures the entry less its envelope, its reversal-conditions stanza and its options-considered block, at docs/contracts/decision-entry.yaml size_governance.measured_size_norm; entries new before Decision 276 landed under the 6,144-byte whole-span norm, which their pin tests keep, and clause 6 of Decision 276 fails later growth of their measured body past the new cap. Clause 4's routing rule gains the mechanism_specification row (Decision 276 cl.2 and cl.4).
 
 ---
 

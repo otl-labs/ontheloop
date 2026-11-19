@@ -47,6 +47,7 @@ class TestDecisionsManifest:
 _REQUIRED_ENTRY_NAMES = frozenset(
     {
         "validate_decisions_size",
+        "validate_delegated_key_changes",
         "validate_decisions_index_freshness",
         "validate_decision_entry_conformance",
         "validate_supersession_annotations",
@@ -91,6 +92,24 @@ class TestGatedEntryInputClosures:
             "scripts/decisions_md.py",
             "scripts/checks/decisions/**",
         } <= self._globs("validate_decision_entry_conformance")
+
+    def test_new_measure_modules_and_the_compaction_contract_are_in_the_right_globs(self) -> None:
+        """Decision 276: the compaction contract moved to its own file, and plan_decision_drafts imports both measure
+        modules, so the gated checks that close over them glob them (red before: names and globs absent)."""
+        from scripts.checks.roadmap import _manifest as roadmap_manifest
+        from scripts.checks.verification import _manifest as verification_manifest
+
+        assert "docs/contracts/decision-compaction.yaml" in self._globs("validate_decision_entry_conformance")
+        measures = {"scripts/checks/decisions/entry_measure.py", "scripts/checks/decisions/decisions_size_measure.py"}
+        for manifest, name in (
+            (verification_manifest, "validate_admin_root_premerge_gate"),
+            (roadmap_manifest, "validate_plan_scope_closure"),
+        ):
+            assert measures <= set(next(e for e in manifest.ENTRIES if e.name == name).pre_globs)
+
+    def test_delegated_key_changes_is_ungated_in_pre_and_in_the_full_tier(self) -> None:
+        entry = next(e for e in _manifest.ENTRIES if e.name == "validate_delegated_key_changes")
+        assert entry.pre is True and not entry.pre_globs and entry.full_segment == "full_after_lint"
 
     def test_supersession_annotations_covers_its_waiver_file(self) -> None:
         """Promoted into --pre. The waiver roster is the third input alongside the two corpus

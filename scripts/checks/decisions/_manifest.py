@@ -26,6 +26,13 @@ ENTRIES: tuple[Entry, ...] = (
         full_segment="full_after_lint",
     ),
     Entry(
+        name="validate_delegated_key_changes",
+        module="scripts.checks.decisions.validate_delegated_key_changes",
+        attr="validate_delegated_key_changes",
+        pre=True,
+        full_segment="full_after_lint",
+    ),
+    Entry(
         name="validate_decisions_index_freshness",
         module="scripts.checks.decisions.validate_decisions_index_freshness",
         attr="validate_decisions_index_freshness",
@@ -41,6 +48,7 @@ ENTRIES: tuple[Entry, ...] = (
             "docs/DECISIONS.md",
             "docs/DECISIONS_ARCHIVE.md",
             "docs/contracts/decision-entry.yaml",
+            "docs/contracts/decision-compaction.yaml",
             "docs/contracts/decision-kind.yaml",
             "docs/contracts/north-star.yaml",
             "scripts/decisions_md.py",

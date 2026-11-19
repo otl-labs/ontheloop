@@ -238,6 +238,8 @@ ENTRIES: tuple[Entry, ...] = (
             "scripts/roadmap/approved_words.py",
             "scripts/roadmap/review_page.py",
             "scripts/checks/decisions/envelope_rules.py",
+            "scripts/checks/decisions/entry_measure.py",
+            "scripts/checks/decisions/decisions_size_measure.py",
             "scripts/north_star_models.py",
             "scripts/roadmap/plan_lint/**",
             "scripts/checks/_common.py",

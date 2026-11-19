@@ -35,6 +35,7 @@ BaselineBodies = dict[str, dict[int, str]]
 BaselineBodyReaderFn = Callable[[Path], Optional[BaselineBodies]]
 
 _cache: dict[Path, Optional[set[int]]] = {}
+_file_cache: dict[tuple[Path, str], Optional[str]] = {}
 _body_cache: dict[Path, Optional[BaselineBodies]] = {}
 
 
@@ -87,7 +88,16 @@ def baseline_decision_bodies(root: Path) -> Optional[BaselineBodies]:
         return None
     bodies: BaselineBodies = {}
     for rel in _DECISIONS_REL_PATHS:
-        per_file: dict[int, str] = {}
+        text = base_file_text(root, rel)
+        bodies[rel] = {int(m.group(1)): block for m, block in iter_decision_sections(text)} if text is not None else {}
+    _body_cache[root] = bodies
+    return bodies
+
+
+def base_file_text(root: Path, rel: str) -> Optional[str]:
+    """The file's text at origin/main, or None when git fails or the path is absent there. Memoized per (root, rel)."""
+    key = (root, rel)
+    if key not in _file_cache:
         result = _common.run(
             ["git", "show", f"origin/main:{rel}"],
             capture_output=True,
@@ -96,9 +106,5 @@ def baseline_decision_bodies(root: Path) -> Optional[BaselineBodies]:
             errors="replace",
             cwd=root,
         )
-        if result.returncode == 0:
-            for match, block in iter_decision_sections(result.stdout):
-                per_file[int(match.group(1))] = block
-        bodies[rel] = per_file
-    _body_cache[root] = bodies
-    return bodies
+        _file_cache[key] = result.stdout if result.returncode == 0 else None
+    return _file_cache[key]
