@@ -1,0 +1,538 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: cloudflare-company-assignment
+intent: >-
+  Assign the Cloudflare account that is registrar and authoritative DNS for the company's domains to On The Loop Labs
+  Limited in place (operator ruling 2026-11-19), with no domain or zone moved: the company's Google Workspace identity
+  joins as a Super Administrator, the company's billing details and card replace the founder's, the company becomes
+  the registrant of onthelooplabs.com and otl-labs.com, theseus.support (retired brand, Decision 198) is left to lapse
+  at its 2027-06-27 expiry, and otl-labs.com gains SPF and DMARC (rec-4541). The founder's personal card and login
+  leave only after the company login, billing and registrant changes are proven. Every Cloudflare change is an
+  operator console step; the repository change is the inventory flips of DNS-01..DNS-04 and BILL-05, bound to
+  operator-approved wording. Serves NS.2: the company owns every account On The Loop depends on.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-cloudflare-company-assignment.yaml
+phase: >-
+  user_explicit_out_of_scope (soft-warn exception category) -- the everything_else stage of the company ownership move
+  (Decision 195). No tier_item criterion claimed.
+cites: [dec:101, dec:195, dec:198, dec:201, dec:246, dec:275]
+closes_criteria: []
+scope:
+- file: docs/contracts/account-credential-inventory.yaml
+  action: Modify
+  purpose: >-
+    Closing PR only, after VP 3-12 pass: place the four blocks of docs/plans/approved/cloudflare-company-assignment.yaml
+    word for word (the DNS-01..DNS-04 rows, the BILL-05 row, five evidence_ledger entries after the last entry, one
+    terse amendment_log row at the top of the log), with {{DATE}} filled. No other line changes.
+bundled_recommendations: [rec-5424]
+followon_recs: [rec-5425]
+infrastructure_dependencies:
+- >-
+  None. No Terraform root, workflow or Lambda-packaged file is in scope (compute_affected_artifacts over the scope
+  returns {}). Cloudflare is not managed in IaC and this plan does not bring it there; the account stays operator
+  console only (Decision 126). Nothing in the repository or CI consumes a Cloudflare credential (grep of the tree,
+  2026-11-19).
+acceptance_criteria:
+- >-
+  The company's Google Workspace identity is a Super Administrator of the account, signed in with Google or through
+  VP 4's fallback, and the founder's personal login has left the account and its Cloudflare user is deleted (VP 4, 10).
+- >-
+  The billing profile carries the company's details, invoices go to the billing alias, and the company card is the
+  only payment method (VP 5, 10).
+- >-
+  The company is the registrant organisation of onthelooplabs.com and otl-labs.com, both changes approved, with no
+  hold status and unchanged nameservers and MX (VP 6, 7, 11).
+- theseus.support has auto-renew off and nothing uses it; it still runs to its 2027-06-27 expiry (VP 3, 8, 11).
+- >-
+  otl-labs.com publishes SPF and DMARC with its Google MX unchanged, onthelooplabs.com publishes send-nothing records,
+  and rec-4541 is closed (VP 9, 16).
+- >-
+  The closing PR places exactly the approved wording and the inventory validator passes; rec-5424 closes through the
+  merge's Resolves trailer; rec-3148 no longer depends on theseus.support (VP 12-16).
+verification_plan:
+- step: 1
+  phase: pre-deploy
+  action: >-
+    Start gate: this plan and its sidecar are on main, the five rows are still personal on main, rec-5424 is open, and
+    Decision 226's red-main overlap check is clear for this plan.
+  command: >-
+    git fetch -q origin main && git cat-file -e origin/main:docs/plans/PLAN-cloudflare-company-assignment.yaml &&
+    git cat-file -e origin/main:docs/plans/approved/cloudflare-company-assignment.yaml &&
+    git show origin/main:docs/contracts/account-credential-inventory.yaml | bin/venv-python -c "import sys,yaml;
+    d=yaml.safe_load(sys.stdin); r={x['id']:x['status'] for x in d['rows']+d['billing']};
+    bad=[k for k in ('DNS-01','DNS-02','DNS-03','DNS-04','BILL-05') if r[k]!='personal']; assert not bad, bad;
+    print('START_GATE_OK')" && bin/venv-python -c "from src.common import ducklake_reader_client as rc;
+    rows,_=rc.fetch_recs_by_ids(rc.make_reader(), ['rec-5424']); assert rows[0]['status']=='open'; print('REC_OPEN')" &&
+    bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-cloudflare-company-assignment.yaml
+  expected: Prints START_GATE_OK and REC_OPEN, then a JSON line whose verdict is clear (exit 0).
+  fix_if: >-
+    A row already moved: another thread acted; stop and ask the coordinator. A blocked or unavailable overlap verdict:
+    hold and tell the coordinator (Decision 226).
+  hermetic: false
+  graduation: not-applicable
+- step: 2
+  phase: pre-deploy
+  action: >-
+    Baseline, written once before any console step: build-state.json in the project folder gets t0 and the public
+    registration and DNS facts of the three domains (registrar RDAP status, last-changed event, expiry and nameservers;
+    the .com registry expiry and registrar id; otl-labs.com MX, TXT and DMARC; onthelooplabs.com TXT and DMARC), and
+    EVIDENCE.md gets its header. A re-run keeps the existing baseline.
+  command: |-
+    bin/venv-python - <<'PY'
+    import datetime as dt, json, os, time, urllib.request, urllib.error
+    F = '/mnt/project-files/cloudflare-company-assignment/'; S, E = F + 'build-state.json', F + 'EVIDENCE.md'
+    if os.path.exists(S):
+        print('BASELINE_KEPT', json.load(open(S))['t0']); raise SystemExit(0)
+    def get(u):
+        for i in range(2):
+            try:
+                q = urllib.request.Request(u, headers={'Accept': 'application/rdap+json, application/json', 'User-Agent': 'rdap-probe/1.0'})
+                with urllib.request.urlopen(q, timeout=30) as f: return json.loads(f.read())
+            except urllib.error.HTTPError as e:
+                if e.code != 429 or i: raise
+                time.sleep(30)
+    ev = lambda d, a: next((e['eventDate'] for e in d.get('events', []) if e['eventAction'] == a), None)
+    dns = lambda n, t: sorted(a['data'] for a in get(f'https://dns.google/resolve?name={n}&type={t}').get('Answer', []) if a.get('type') == {'MX': 15, 'TXT': 16, 'NS': 2}[t])
+    s = {'t0': dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'), 'domains': {}}
+    for d in ('onthelooplabs.com', 'otl-labs.com', 'theseus.support'):
+        c = get('https://rdap.cloudflare.com/rdap/v1/domain/' + d.upper())
+        s['domains'][d] = {'status': sorted(c.get('status', [])), 'changed': ev(c, 'last changed'), 'expiry': ev(c, 'expiration')[:10], 'ns': dns(d, 'NS')}
+        if d.endswith('.com'):
+            g = get('https://rdap.verisign.com/com/v1/domain/' + d)
+            iana = [p['identifier'] for e in g.get('entities', []) if 'registrar' in e.get('roles', []) for p in e.get('publicIds', [])]
+            s['domains'][d].update(registry_expiry=ev(g, 'expiration')[:10], registrar_iana=iana)
+    for n in ('otl-labs.com', 'onthelooplabs.com'):
+        s[n] = {'mx': dns(n, 'MX'), 'txt': dns(n, 'TXT'), 'dmarc': dns('_dmarc.' + n, 'TXT')}
+    x = s['domains']
+    assert all(v['registrar_iana'] == ['1910'] for k, v in x.items() if k.endswith('.com')), 'registrar is not Cloudflare'
+    assert [x[d]['expiry'] for d in ('onthelooplabs.com', 'otl-labs.com', 'theseus.support')] == ['2027-09-17', '2027-09-17', '2027-06-27'], 'expiry moved'
+    assert not any('hold' in st for v in x.values() for st in v['status']), 'a hold status is present'
+    assert s['otl-labs.com']['mx'] == ['1 smtp.google.com.'], s['otl-labs.com']['mx']
+    json.dump(s, open(S, 'w'), indent=1)
+    if not os.path.exists(E):
+        open(E, 'w', encoding='utf-8').write('# Cloudflare hand-over evidence (kinds and UTC times only)\n\n| step | what | UTC time | evidence kind | result |\n|---|---|---|---|---|\n')
+    print('BASELINE', s['t0'], {k: (v['expiry'], v['changed']) for k, v in x.items()})
+    PY
+  expected: >-
+    Prints BASELINE with t0 and each domain's expiry and last-changed time, or BASELINE_KEPT on a re-run. Probed
+    2026-11-19: expiries 2027-09-17, 2027-09-17 and 2027-06-27, registrar IANA id 1910, no hold, otl-labs.com MX the
+    single Google record, no SPF or DMARC.
+  fix_if: >-
+    A 403 or a second 429 from an RDAP server: wait an hour and run once more; never loop. Registrar not Cloudflare or
+    an expiry already moved: stop and tell the coordinator (another hand acted). A hold status: stop; the operator reads
+    the domain's page in the console before anything else. Never delete the state file once VP 3 has run.
+  hermetic: false
+  graduation: not-applicable
+- step: 3
+  phase: pre-deploy
+  action: >-
+    C0, the read-back (no change). The build asks the operator in these words, waits for the reply, and writes EVIDENCE
+    row C0 by kind only.
+  command: >-
+    echo 'ASK THE OPERATOR: "Please sign in to Cloudflare with your personal login and reply with counts and yes/no only,
+    no ids or addresses: (1) Manage Account > Members: how many members, their roles, any pending invitation, and is
+    Invite offered? (2) My Profile > API Tokens: how many user tokens, and the most recent Last used date; Manage
+    Account > Account API Tokens: how many. (3) Is two-factor authentication on for your login? (4) Notifications: how
+    many policies, and do they mail your personal mailbox? (5) For each of the three domains, are Email Routing,
+    Workers routes or a Pages project attached? Any Workers or Pages project in the account? (6) Is there a GitHub or
+    GitLab connection (Pages or Workers builds)? (7) Does the account name contain your personal address? (8) Manage
+    Account > Audit Log, last 90 days: any actor other than you? (9) Billing: how many payment methods, can you add a
+    second one, and does the billing profile have a company name field? Where do invoices go today? (10) Domain
+    Registration > Manage domains: for onthelooplabs.com and otl-labs.com, is the registrant e-mail shown as verified,
+    is auto-renew on, and is there one contact or several (registrant, admin, technical, billing)? (11) Does any
+    account anywhere (registry, bank, Companies House, a SaaS) use an address on theseus.support, or has it ever had
+    mail routing?"'
+  expected: >-
+    One member (you, Super Administrator), no pending invitation, Invite offered; user tokens either none or none used
+    in the last 30 days; nothing attached to any domain and no Workers, Pages or Git connection; no other actor in the
+    audit log; both registrant e-mails verified; nothing uses theseus.support.
+  fix_if: >-
+    Another member, a pending invitation or an unknown actor: stop and ask the operator; never proceed past an unknown
+    access. A token used in the last 30 days, anything attached to a zone, or a Git connection: stop and report to the
+    coordinator for a plan amendment (something depends on the account that this plan did not see). Invite not
+    offered: stop; the plan is amended to the in-place e-mail change (ADVICE.md section 1), never improvised. A
+    registrant e-mail not verified: the operator verifies it first. Something uses theseus.support: stop before VP 8;
+    the operator moves that account off the domain first or re-rules the lapse. 2FA off on the personal login: the
+    operator turns it on before VP 4. Several contacts: VP 6 and 7 set every contact to the same company values.
+  hermetic: false
+  graduation: not-applicable
+- step: 4
+  phase: pre-deploy
+  action: >-
+    C1, the company login, on the operator's word on this step: the personal login invites the company Google identity
+    as Super Administrator and the operator accepts it with Sign in with Google; then P1, the company user's view proves
+    it. Writes t_c1 and EVIDENCE rows C1 and P1.
+  command: >-
+    echo 'ASK THE OPERATOR: "Step C1. (a) Signed in with your personal login: Manage Account > Members > Invite, your
+    company Google address, role Super Administrator - All Privileges, send. (b) In a private window, open the invitation
+    mail in your company mailbox, follow the link and choose Sign in with Google with your company identity; accept.
+    If Cloudflare does not offer Google for the invitation: at the Cloudflare login page choose Sign in with Google with
+    the company identity (this creates a user with its own empty account, which is harmless), then accept the invitation
+    from that user'"'"'s dashboard. If neither works: accept with your company address and a new password, add two
+    second factors (a security key or passkey, and an authenticator app), print the backup codes and keep them with the
+    company records, not in a mailbox. (c) As the company user, screenshot Members (two Super Administrators, nothing
+    pending), Billing, and Domain Registration > Manage domains listing the three domains, cropped of ids, addresses
+    and card digits. Reply with the screenshots and which sign-in path you used."'
+  expected: >-
+    Screenshots show two Super Administrators and no pending invitation, and the company user sees Billing and the
+    three domains; the reply names the sign-in path (Google, or the password-and-two-factor fallback).
+  fix_if: >-
+    The invitation cannot be accepted by any of the three paths: stop and report; the personal login is untouched, so
+    nothing is lost. A role other than Super Administrator: the personal login edits the role. Billing or Registrar not
+    visible to the company user: stop; the role is wrong or the account plan restricts members.
+  hermetic: false
+  graduation: not-applicable
+- step: 5
+  phase: pre-deploy
+  action: >-
+    C2, the billing details and card, as the company user, on the operator's word on this step. No test charge (operator
+    ruling 2026-11-19): the billing page is BILL-05's evidence_wanted. Writes EVIDENCE row C2.
+  command: >-
+    echo 'ASK THE OPERATOR: "Step C2, as the company user. Billing > Billing profile: bill-to address = the registered
+    office, the company name wherever a field allows it, VAT left blank; Billing email preference = the billing alias.
+    Billing > Payment methods: add the company card and make it the default (primary). Do not delete the personal card
+    yet. If Cloudflare only lets you replace the card, replace it and tell me. Screenshot the billing profile and the
+    payment methods page, cropped of addresses and all but the card brand and last four digits."'
+  expected: >-
+    The billing profile shows the company's address (and name where offered) and the billing alias for invoices; the
+    company card is the default and Cloudflare accepted it; the personal card is still present unless Cloudflare allows
+    one card only.
+  fix_if: >-
+    One-card account (replace only): record C2 as a replacement; R1a then has nothing to delete. A declined card: stop;
+    the personal card is still the default, so nothing lapses.
+  hermetic: false
+  graduation: not-applicable
+- step: 6
+  phase: pre-deploy
+  action: >-
+    C4a, onthelooplabs.com's registrant (first, because it carries no mail), as the company user, on the operator's word
+    on this step: one contact edit, approved from both mailboxes the same day; then the registrar RDAP shows a newer
+    last-changed event, no hold and unchanged nameservers. Writes t_c4a and EVIDENCE row C4a.
+  command: |-
+    echo 'ASK THE OPERATOR: "Step C4a, as the company user: Manage domains > onthelooplabs.com > Contacts > Edit, in one
+    save: Organisation = the company'"'"'s exact Companies House name; first and last name = yours, as director; e-mail
+    = the admin alias; address = the registered office; phone = the company or director number. Every contact role the
+    page shows gets the same values. Approve the change from your personal mailbox (the current registrant) and from the
+    admin alias, the same day; leave the 60-day transfer lock on (do not tick the opt-out). Click any registrant e-mail
+    verification link too. Screenshot the contacts page showing the organisation and a verified e-mail, cropped of
+    addresses and phone."' && bin/venv-python - <<'PY'
+    import json, time, urllib.request, urllib.error
+    def get(u):
+        for i in range(2):
+            try:
+                q = urllib.request.Request(u, headers={'Accept': 'application/rdap+json, application/json', 'User-Agent': 'rdap-probe/1.0'})
+                with urllib.request.urlopen(q, timeout=30) as f: return json.loads(f.read())
+            except urllib.error.HTTPError as e:
+                if e.code != 429 or i: raise
+                time.sleep(30)
+    S = '/mnt/project-files/cloudflare-company-assignment/build-state.json'; s = json.load(open(S)); b = s['domains']['onthelooplabs.com']
+    c = get('https://rdap.cloudflare.com/rdap/v1/domain/ONTHELOOPLABS.COM')
+    changed = next(e['eventDate'] for e in c['events'] if e['eventAction'] == 'last changed')
+    ns = sorted(a['data'] for a in get('https://dns.google/resolve?name=onthelooplabs.com&type=NS').get('Answer', []) if a.get('type') == 2)
+    got = (changed > b['changed'], not any('hold' in x for x in c.get('status', [])), ns == b['ns'])
+    print('C4A', got); assert got == (True, True, True), got; print('C4A_OK')
+    PY
+  expected: >-
+    The contacts screenshot shows the company as organisation and a verified e-mail; then C4A (True, True, True) and
+    C4A_OK.
+  fix_if: >-
+    No approval mail at either mailbox within an hour: the operator checks spam, then cancels and re-submits once; the
+    request cancels itself after 7 days. Last-changed not newer: the change is still pending approval. A hold status:
+    stop everything and have the operator open the domain's page (an unverified registrant e-mail suspends a domain);
+    VP 7 does not start.
+  hermetic: false
+  graduation: not-applicable
+- step: 7
+  phase: pre-deploy
+  action: >-
+    C4b, otl-labs.com's registrant, the same edit and approvals on the operator's word on this step, only after VP 6
+    passed; then a newer last-changed event, no hold, unchanged nameservers and the unchanged Google MX. Writes t_c4b and
+    EVIDENCE row C4b.
+  command: |-
+    echo 'ASK THE OPERATOR: "Step C4b: the same edit as C4a on otl-labs.com, the same values, one save, both approvals the
+    same day, the lock left on, any verification link clicked. Screenshot the contacts page as before."' && bin/venv-python - <<'PY'
+    import json, time, urllib.request, urllib.error
+    def get(u):
+        for i in range(2):
+            try:
+                q = urllib.request.Request(u, headers={'Accept': 'application/rdap+json, application/json', 'User-Agent': 'rdap-probe/1.0'})
+                with urllib.request.urlopen(q, timeout=30) as f: return json.loads(f.read())
+            except urllib.error.HTTPError as e:
+                if e.code != 429 or i: raise
+                time.sleep(30)
+    S = '/mnt/project-files/cloudflare-company-assignment/build-state.json'; s = json.load(open(S)); b = s['domains']['otl-labs.com']
+    c = get('https://rdap.cloudflare.com/rdap/v1/domain/OTL-LABS.COM')
+    changed = next(e['eventDate'] for e in c['events'] if e['eventAction'] == 'last changed')
+    dns = lambda n, t: sorted(a['data'] for a in get(f'https://dns.google/resolve?name={n}&type={t}').get('Answer', []) if a.get('type') == {'MX': 15, 'NS': 2}[t])
+    got = (changed > b['changed'], not any('hold' in x for x in c.get('status', [])), dns('otl-labs.com', 'NS') == b['ns'], dns('otl-labs.com', 'MX') == s['otl-labs.com']['mx'])
+    print('C4B', got); assert got == (True, True, True, True), got; print('C4B_OK')
+    PY
+  expected: The contacts screenshot as in VP 6; then C4B (True, True, True, True) and C4B_OK.
+  fix_if: >-
+    As VP 6. An MX difference: stop at once and have the operator restore the Google MX record from the VP 2 baseline
+    before anything else; company mail and every reset path depend on it.
+  hermetic: false
+  graduation: not-applicable
+- step: 8
+  phase: pre-deploy
+  action: >-
+    C5 and C6, on the operator's word on each: theseus.support's auto-renew off (C0 found nothing using it), Cloudflare
+    notifications to the alerts alias, and the account renamed to the company. Writes EVIDENCE rows C5 and C6.
+  command: >-
+    echo 'ASK THE OPERATOR: "Step C5, as the company user: Manage domains > theseus.support > Configuration (or
+    Registration) > Auto-renew: off. Screenshot it. Step C6: Notifications > each policy and destination: replace your
+    personal mailbox with the alerts alias; Manage Account > Configurations > account name = the company name.
+    Screenshot both, cropped of ids and addresses."'
+  expected: >-
+    Auto-renew reads off for theseus.support only (on for the two company domains); no notification goes to the
+    personal mailbox; the account name is the company's.
+  fix_if: >-
+    Auto-renew cannot be turned off: stop and report (Cloudflare would charge the company card in 2027). A notification
+    that cannot be re-addressed: record it; R1b removes the personal user's own notifications.
+  hermetic: false
+  graduation: not-applicable
+- step: 9
+  phase: pre-deploy
+  action: >-
+    C7 (rec-4541), on the operator's word on this step, after VP 7: SPF and a monitor-only DMARC record on otl-labs.com,
+    send-nothing SPF and DMARC on onthelooplabs.com; then public DNS shows them with one SPF record and the Google MX
+    unchanged, which is rec-4541's own acceptance and more. The build then closes rec-4541 through
+    scripts.ops_data_portal --update-rec (get_rec_write_guidance first) and reads it back closed (VP 16). Writes EVIDENCE
+    row C7.
+  command: |-
+    echo 'ASK THE OPERATOR: "Step C7, as the company user: DNS > Records on otl-labs.com: add TXT at @ with content
+    v=spf1 include:_spf.google.com ~all; add TXT at _dmarc with content v=DMARC1; p=none; rua=mailto: followed by the
+    security alias. On onthelooplabs.com: add TXT at @ with content v=spf1 -all, and TXT at _dmarc with content
+    v=DMARC1; p=reject; Change nothing else, and screenshot the two record lists."' &&
+    curl -s 'https://dns.google/resolve?name=_dmarc.otl-labs.com&type=TXT' | grep -q 'v=DMARC1' &&
+    curl -s 'https://dns.google/resolve?name=otl-labs.com&type=TXT' | grep -q 'v=spf1' &&
+    curl -s 'https://dns.google/resolve?name=otl-labs.com&type=MX' | grep -q 'smtp.google.com' &&
+    curl -s 'https://dns.google/resolve?name=_dmarc.onthelooplabs.com&type=TXT' | grep -q 'p=reject' &&
+    test "$(curl -s 'https://dns.google/resolve?name=otl-labs.com&type=TXT' | grep -o 'v=spf1' | wc -l)" -eq 1 &&
+    echo C7_OK
+  expected: Prints C7_OK.
+  fix_if: >-
+    A record missing: DNS caches lag the TTL; run once more after five minutes. Two SPF records (invalid): the operator
+    deletes the extra one. MX missing: stop at once; the operator restores it from the VP 2 baseline. A rec-4541 write
+    refused: it fails loud (Decision 84 I-4); restore connectivity and write once more.
+  hermetic: false
+  graduation: not-applicable
+- step: 10
+  phase: pre-deploy
+  action: >-
+    R1, the predecessor removal, only after VP 4-9 pass, as three steps with the operator's word on each: R1a the
+    personal card deleted (no test charge first: operator ruling 2026-11-19); R1b the personal user leaves the account;
+    R1c the personal Cloudflare user deleted. Writes EVIDENCE rows R1a, R1b and R1c.
+  command: >-
+    echo 'ASK THE OPERATOR: "Step R1a, as the company user: Billing > Payment methods > delete the personal card;
+    screenshot the page showing only the company card. Step R1b: Manage Account > Members > remove your personal login
+    (or, signed in as it, leave the account); screenshot Members showing one Super Administrator, the company identity.
+    Step R1c: signed in with your personal login, My Profile > delete this user, after confirming it is a member of no
+    account you need; screenshot the confirmation."'
+  expected: >-
+    Payment methods lists only the company card; Members lists only the company identity; the personal Cloudflare user is
+    deleted.
+  fix_if: >-
+    The personal card cannot be deleted (a failing payment or balance): stop and report; never delete the company card.
+    The personal user cannot leave or be removed: stop and report (ADVICE.md section 1). The user deletion refused
+    because it owns another account: record what it owns and ask the operator; R1c is skipped only on the operator's
+    word.
+  hermetic: false
+  graduation: not-applicable
+- step: 11
+  phase: pre-deploy
+  action: >-
+    Continuity proof after the last console step: every domain has no hold status, unchanged nameservers and its
+    baseline expiry, otl-labs.com keeps the Google MX, and EVIDENCE.md carries rows C0-C2, P1, C4a, C4b, C5-C7 and
+    R1a-R1c as pass and passes the redaction pattern.
+  command: |-
+    bin/venv-python - <<'PY'
+    import json, re, time, urllib.request, urllib.error
+    def get(u):
+        for i in range(2):
+            try:
+                q = urllib.request.Request(u, headers={'Accept': 'application/rdap+json, application/json', 'User-Agent': 'rdap-probe/1.0'})
+                with urllib.request.urlopen(q, timeout=30) as f: return json.loads(f.read())
+            except urllib.error.HTTPError as e:
+                if e.code != 429 or i: raise
+                time.sleep(30)
+    F = '/mnt/project-files/cloudflare-company-assignment/'; s = json.load(open(F + 'build-state.json')); ev = open(F + 'EVIDENCE.md', encoding='utf-8').read()
+    dns = lambda n, t: sorted(a['data'] for a in get(f'https://dns.google/resolve?name={n}&type={t}').get('Answer', []) if a.get('type') == {'MX': 15, 'NS': 2}[t])
+    for d, b in s['domains'].items():
+        c = get('https://rdap.cloudflare.com/rdap/v1/domain/' + d.upper())
+        exp = next(e['eventDate'] for e in c['events'] if e['eventAction'] == 'expiration')[:10]
+        got = (exp == b['expiry'], not any('hold' in st for st in c.get('status', [])), dns(d, 'NS') == b['ns'])
+        print(d, got); assert got == (True, True, True), (d, got)
+    assert dns('otl-labs.com', 'MX') == s['otl-labs.com']['mx'], 'MX changed'
+    rows = ['C0', 'C1', 'P1', 'C2', 'C4a', 'C4b', 'C5', 'C6', 'C7', 'R1a', 'R1b', 'R1c']
+    miss = [r for r in rows if not re.search(rf'^\| {r} \|.*\| pass \|$', ev, re.M)]; assert not miss, miss
+    REDACT = r'@|(?<![0-9])[0-9]{12}(?![0-9])|\barn:|\b[0-9a-f]{32}\b|£|\$[0-9]|(?<![0-9])[0-9]{4}[ -]?[0-9]{4}[ -]?[0-9]{4}'
+    assert not re.search(REDACT, ev), 'EVIDENCE.md redaction hit'
+    print('CONTINUITY_OK')
+    PY
+  expected: Prints one True-triple line per domain and CONTINUITY_OK.
+  fix_if: >-
+    A hold status: stop; the operator opens the domain (most likely an unverified registrant e-mail) before the closing
+    PR. A changed nameserver or MX: stop and restore from the VP 2 baseline. A missing or failed evidence row: finish
+    that step first. A redaction hit: rewrite the row by kind.
+  hermetic: false
+  graduation: not-applicable
+- step: 12
+  phase: pre-deploy
+  action: >-
+    Live recommendation write: rec-3148 (commercial-licence contact "once theseus.support is live") is refined through
+    scripts.ops_data_portal --update-rec (get_rec_write_guidance first): its context records that theseus.support lapses
+    (operator ruling 2026-11-19) and that the contact address will be on the company's e-mail domain, and its
+    acceptance becomes the command ! grep -q 'Open an issue at' COMMERCIAL-LICENSE.md && grep -q '@otl-labs.com'
+    COMMERCIAL-LICENSE.md; the reader returns it.
+  command: >-
+    bin/venv-python -c "from src.common import ducklake_reader_client as rc;
+    rows,_=rc.fetch_recs_by_ids(rc.make_reader(), ['rec-3148']); r=rows[0]; assert r['status']=='open', r['status'];
+    assert 'theseus.support' not in r['acceptance'] and '@otl-labs.com' in r['acceptance'], r['acceptance'];
+    assert 'lapses' in r['context']; print('REC_3148_READBACK_OK')"
+  expected: Prints REC_3148_READBACK_OK.
+  fix_if: >-
+    The write failed loud (Decision 84 I-4): restore connectivity and write once more. Text absent: the write did not
+    land; read the writer's error before any retry.
+  hermetic: false
+  graduation: not-applicable
+- step: 13
+  phase: pre-deploy
+  action: >-
+    Closing PR: the tree holds exactly the sidecar's words with {{DATE}} filled, and the approval run the planning
+    session dispatched (Decision 246) is approved; a changed word needs a new run before merge.
+  command: bin/venv-python -m scripts.roadmap.approved_text verify --slug cloudflare-company-assignment --base origin/main
+  expected: Prints the approved-text ok line.
+  expected_literals: [APPROVED-TEXT OK]
+  fix_if: >-
+    A mismatch is fixed toward the sidecar. An anchor that no longer matches main exactly once (another plan edited the
+    inventory first), or a needed word change, is a STOP to the plan owner, never a hand-merge.
+  hermetic: true
+  graduation: waive
+  graduation_waiver_reason: >-
+    PR-relative to origin/main, so vacuous once merged; validate_merge_step's approved-text leg enforces the sidecar on
+    every PR declaring this plan.
+- step: 14
+  phase: pre-deploy
+  action: >-
+    Closing PR: the inventory validator passes (owning side, ledger, publication shape guard, append-only) and
+    rec-5424's own acceptance holds at the PR head.
+  command: >-
+    bin/venv-python -c "from scripts.checks.contracts.validate_account_credential_inventory import
+    validate_account_credential_inventory as v; f=[]; v(f); assert not f, f; print('INVENTORY_OK')" &&
+    ! grep -E "id: (DNS-0[1-4]|BILL-05), .*status: personal[,}]" docs/contracts/account-credential-inventory.yaml &&
+    test "$(grep -cE "id: DNS-0[1-3], .*owner_today: company, .*status: proven" docs/contracts/account-credential-inventory.yaml)" -eq 3 &&
+    echo REC_5424_ACCEPTANCE_HOLDS
+  expected: Prints INVENTORY_OK and REC_5424_ACCEPTANCE_HOLDS.
+  expected_literals: [INVENTORY_OK, REC_5424_ACCEPTANCE_HOLDS]
+  fix_if: >-
+    A validator failure on owning side: proven rows need owner company and BILL-05 payer company (stage_rule). The
+    acceptance fails: a block was not placed. A contract-drift retention failure in VP 15 (Decision 275 cl.4): the
+    amendment_log row is not terse; restore the sidecar's row exactly.
+  hermetic: true
+  graduation: waive
+  graduation_waiver_reason: >-
+    validate_account_credential_inventory already runs in every tier; the rec-5424 half is a moment claim about five
+    rows (Decision 244 cl.4) that a later legitimate flip of DNS-04 to retired keeps green but that guards nothing
+    standing.
+- step: 15
+  phase: pre-deploy
+  action: >-
+    Before the closing PR opens (handoff_policy): the full tier on the committed, rebased, clean tree, then attest HEAD
+    (Decision 163). Started backgrounded with a 2 h limit from the top-level session.
+  command: bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+  expected: Exit 0 on a completed full-tier run, then --verify-head attests HEAD's tree.
+  fix_if: >-
+    A failing check: fix it on the branch and re-run; a pre-existing red on main is reported, never fixed inline
+    (Decision 226). Never read the verdict from a pipe's exit status.
+  hermetic: false
+  graduation: not-applicable
+- step: 16
+  phase: post-deploy
+  action: >-
+    rec-5424 is closed after the closing PR's squash commit carried "Resolves: rec-5424" (ci.yml closure job), and
+    rec-4541 is closed by VP 9's write.
+  command: >-
+    bin/venv-python -c "from src.common import ducklake_reader_client as rc; rows,_=rc.fetch_recs_by_ids(rc.make_reader(),
+    ['rec-5424', 'rec-4541']); st={r['id']: r['status'] for r in rows}; assert st=={'rec-5424': 'closed', 'rec-4541':
+    'closed'}, st; print('RECS_CLOSED')"
+  expected: Prints RECS_CLOSED.
+  fix_if: >-
+    rec-5424 still open: read the closure job's outcome on the merge commit; if the trailer was missing, close it with
+    update_rec through scripts.ops_data_portal citing the merge SHA (get_rec_write_guidance first). rec-4541 open: VP 9's
+    write did not land; write it once more.
+  hermetic: false
+  graduation: not-applicable
+test_obligations:
+- source: docs/contracts/account-credential-inventory.yaml
+  behavior: exactly the approved DNS-01..DNS-04 and BILL-05 rows, five ledger entries and the amendment_log row are placed
+  verification_step: 13
+  command: bin/venv-python -m scripts.roadmap.approved_text verify --slug cloudflare-company-assignment --base origin/main
+  red_green_expectation: red before (blocks not placed), green after
+constraints:
+- >-
+  Every Cloudflare act is the operator's, in the Cloudflare console. The agent runs public RDAP and DNS reads, the
+  reader verbs, scripts.ops_data_portal writes (rec-4541 closure, rec-3148 refinement) and the closing PR. One operator
+  word per console step (C1, C2, C4a, C4b, C5, C6, C7, R1a, R1b, R1c), typed in the build thread; C0 is a read.
+- >-
+  Order is fixed: VP 1, 2, C0, C1 and P1, C2, C4a, C4b, C5, C6, C7, R1a, R1b, R1c, VP 11, 12, closing PR. The personal
+  card and login leave only after the company login, billing and registrant changes are proven (successor first, as
+  Decision 218 cl.3); C7 precedes R1 so the personal login is still a fallback during the only DNS edit.
+- >-
+  No DNS record changes except C7's four TXT additions; the MX record, nameservers and DNSSEC setting stay as they are.
+  An MX or nameserver difference at any step is a stop and a restore from the VP 2 baseline.
+- >-
+  Approved texts are verbatim; allowed variance: {{DATE}} only. Any other wording change, including one critique or
+  code review asks for, goes to the plan owner and the operator before merge (Decision 246 cl.2).
+- >-
+  No Cloudflare account or zone id, e-mail address, phone, postal address, card or invoice detail, or screenshot enters
+  the repository, a PR, memory, the coordinator log or the shared folder (Decision 101, the inventory's
+  publication_rule). Screenshots are cropped by the operator and checked in the thread; EVIDENCE.md records kind and
+  UTC time only.
+- >-
+  The closing PR is never reverted by deleting ledger entries (the validator's append-only invariant): a correction is
+  a forward ledger entry under its own approved wording.
+- >-
+  Size: the inventory is 275 of 500 effective lines and 41,098 of 49,152 bytes on main add02122; the four blocks add
+  about 2.4 kB. Seven other unbuilt plans scope the same file (plan_obligations); whichever builds second rebases, and
+  a sidecar anchor that no longer matches exactly once is a STOP to the plan owner (an anchor-only re-anchor keeps the
+  approved-words digest).
+- >-
+  A failed or drifted step halts this workstream until root-caused; never a silent retry; no rescue agents or
+  workaround loops (Decision 55). Never skip or loosen a test or check to get green (Decision 235).
+context:
+- "Decision-scout r1 FLAGS_FOUND; CITE 101, 195, 198, 201, 246, 275; CONTRADICT none. Decisions triaged: 226 of 226. Roadmap items intersected: 1; CONFLICT: 0; RELATED: 1. Serves: NS.2 2/5. Decision 242 SPIRIT note (the personal card goes before any company-card charge at Cloudflare): accepted by the operator's ruling below, as Decision 242's own 2026-11-03 Update accepted it for AWS; rec-5425 checks the first charge (the September 2027 renewals)."
+- "Operator 2026-11-19 12:42 UTC: switch the existing Cloudflare account to the company in place and let theseus.support lapse. 13:10 UTC, on step6b-presentation.md: no test charge ('that works fine'), everything else as recommended (company Google identity as the login; DNS-04 out-of-scope now; rec-4541 in the same sitting), 'write the plan'."
+- "fork: How should the company card be proven at Cloudflare? | chosen: billing page only, no test charge | class: asked | precedent: Decision 242 2026-11-03 Update (early card removal) | precedent_kind: operator ruling | reversible: yes | persisted: BILL-05 ledger entry and rec-5425"
+- "Blind Fable consult: /mnt/project-files/cloudflare-company-assignment/ADVICE.md. Adopted: add a company Super Administrator then remove the founder (not an in-place e-mail change); company Google identity as the login; registrant fields and order; read-back first; DNSSEC untouched; rec-4541 last. Rejected by the operator: a proving charge. Adapted: DNS-04 recorded out-of-scope now (terminal, as the scout read status_values) rather than personal until released; rec-5425 flips it to retired after release."
+- "Probes 2026-11-19 12:48-13:40 UTC (public RDAP and dns.google): registrar Cloudflare (IANA 1910) for all three; expiries 2027-09-17, 2027-09-17, 2027-06-27; status clientTransferProhibited only; no DNSSEC delegation; otl-labs.com MX one Google record, one site-verification TXT, no SPF or DMARC; onthelooplabs.com and theseus.support no A, MX or TXT. Identity Digital's RDAP (theseus.support's registry) answered 429 and refused Python's default agent, so every probe reads Cloudflare's registrar RDAP and, for .com, Verisign's, with a generic User-Agent."
+- "UNPROVEN (each with its stop or fallback in the VP): that a Cloudflare invitation can be accepted through Sign in with Google (VP 4 fallbacks); that the account holds two cards (VP 5 one-card path); a company-name field on the billing profile (VP 5); whether a separate registrant verification mail is sent (VP 6 clicks any); that the account's plan allows members (VP 3 stop)."
+- "rec-4541 is closed by update_rec after VP 9's live DNS read-back, not bundled: its acceptance is a network probe, and a Resolves trailer would close it from the PR, not from DNS. rec-3148's refinement (VP 12) is the programme's live recommendation write; no other runtime proof applies because nothing On The Loop runs depends on Cloudflare except otl-labs.com mail DNS, which VP 7, 9 and 11 prove."
+- "Residual accepted by the operator's lapse ruling: a third party may register theseus.support after release; VP 3 item 11 confirms nothing uses an address on it first."
+- "red_overlap (2026-11-19, main add02122): clear, no reds. The build re-runs it at start (VP 1)."
+- "Approvals at build start: none beyond each console step's own word in the build thread. The planning session dispatched the sidecar's approval run (Decision 246); VP 13 and validate_merge_step read it."
+gate_rounds:
+- {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:ef70527469ce42abf9d028a8803161f126c9bff5b6eaae7411f1462579c5a851"}
+pre_implementation_checklist:
+- Branch confirmed not on main
+- docs/PROJECT_CONTEXT.md read
+- Decisions 101, 195, 198, 242 (clause 4 and its 2026-11-03 Update) and 246 read (only these sections)
+- All files in scope located and readable; docs/plans/approved/cloudflare-company-assignment.yaml read
+- The approval run for the sidecar reads APPROVED for the sidecar at the plan's merge commit
+- /mnt/project-files/cloudflare-company-assignment/step6b-presentation.md and ADVICE.md read
+execution_steps:
+- "Pre: VP 1 and 2; re-run plan_obligations on this plan."
+- "Console sitting: VP 3 (C0) to VP 10 (R1c) in order, each console step only on the operator's own word naming it in the build thread; after each, write its EVIDENCE.md row (step, what, UTC time, evidence kind, pass or fail) and its time to build-state.json. VP 9 includes the rec-4541 closure write. Stop at any failed step and report; never improvise a path the VP does not name."
+- "VP 11 continuity, then VP 12 (rec-3148 refinement and read-back)."
+- "Closing PR: place the four sidecar blocks word for word with {{DATE}} filled; set implementation_declared true on this plan; VP 13 and 14, then VP 15 before opening the PR; the PR body cites the evidence rows by kind and the implementation commit carries Resolves: rec-5424."
+- "Run the fresh-context code review (implement skill) on the diff; a REVISE is fixed and reviewed again. Merge on code review PROCEED and green CI under the approve-once rule (the only always-ask content is sidecar-bound text)."
+- "Post-merge: VP 16. Report: each step's result by kind and time, the merge SHA, rec-5424 and rec-4541 closed, rec-3148 refined, DNS-01..DNS-03 and BILL-05 proven, DNS-04 out-of-scope, and rec-5425 waiting for September 2027."
+rollback: >-
+  Console steps before R1 are reversible by the operator: C1 remove the company member; C2 make the personal card the
+  default again and restore the billing fields; C4 another contact edit (a new approval cycle and lock); C5 auto-renew
+  on; C6 restore the destinations and name; C7 delete the TXT records. R1 is the irreversible tail (a deleted user
+  cannot be restored), which is why it runs last, after proof. The closing PR is corrected forward with a new ledger
+  entry, never by deleting entries.
