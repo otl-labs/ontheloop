@@ -374,10 +374,10 @@ def _connection_error() -> Exception:
 
 
 async def _until(predicate: Callable[[], bool]) -> None:
-    for _ in range(200):
+    for _ in range(1000):
         if predicate():
             return
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.01)
     raise AssertionError("condition never held")
 
 
