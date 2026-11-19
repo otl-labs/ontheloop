@@ -19,6 +19,7 @@ from scripts.checks.deps.affected_tests import derive_affected_tests
 from scripts.llm import litellm_cold_start, tier_selection
 from scripts.llm import litellm_transport as t
 from scripts.llm.litellm_wire import TransportError
+from src.persona_backends.events import Capture
 from tests.fixtures import litellm_capture as cap
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -364,6 +365,179 @@ class TestProbeRecord:
             with pytest.raises(TransportError) as exc:
                 go(is_async)
         assert exc.value.probe_record is None
+
+
+def _connection_error() -> Exception:
+    import litellm
+
+    return litellm.APIConnectionError(message="cancelled", llm_provider="p", model="m")
+
+
+async def _until(predicate: Callable[[], bool]) -> None:
+    for _ in range(200):
+        if predicate():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("condition never held")
+
+
+class TestCapture:
+    @BOTH
+    def test_capture_attempts_equal_returned_and_raised_attempts(self, is_async: bool) -> None:
+        with cap.capture([cap.error_body(503)] * 3 + [cap.anthropic_body()]):
+            seen = Capture()
+            result = go(is_async, fail_over=True, capture=seen)
+        assert seen.filled and seen.attempts == list(result.attempts) and seen.record is result.record
+        assert seen.in_flight is None
+        litellm_cold_start.clear_cache()
+        with cap.capture([cap.error_body(503)] * 3 + [cap.anthropic_body(), cap.error_body(401)]):
+            seen = Capture()
+            with pytest.raises(TransportError) as exc:
+                go(is_async, fail_over=True, capture=seen)
+        assert seen.attempts == list(exc.value.attempts) and seen.record is None
+        with cap.capture([cap.deepseek_body(content="")]):
+            seen = Capture()
+            with pytest.raises(TransportError):
+                go(is_async, capture=seen)
+        assert [a.outcome for a in seen.attempts] == ["empty_output"] and seen.record is None
+
+    @BOTH
+    def test_in_flight_set_during_call_and_cleared_after(self, is_async: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+        import litellm
+
+        seen = Capture()
+        during: list[Any] = []
+        real_sync, real_async = litellm.completion, litellm.acompletion
+
+        def sync_spy(**kwargs: Any) -> Any:
+            during.append(seen.in_flight)
+            return real_sync(**kwargs)
+
+        async def async_spy(**kwargs: Any) -> Any:
+            during.append(seen.in_flight)
+            return await real_async(**kwargs)
+
+        monkeypatch.setattr(litellm, "completion", sync_spy)
+        monkeypatch.setattr(litellm, "acompletion", async_spy)
+        with cap.capture([cap.deepseek_body()]):
+            go(is_async, capture=seen)
+        assert (during[0].role, during[0].attempt, during[0].outcome) == (PRIMARY, 1, "cancelled")
+        assert during[0].provider is not None and during[0].started_at_ms is not None and seen.in_flight is None
+
+    def test_cancel_leaves_in_flight_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import litellm
+
+        async def hang(**_kwargs: Any) -> Any:
+            await asyncio.sleep(3600)
+
+        monkeypatch.setattr(litellm, "acompletion", hang)
+
+        async def main() -> Capture:
+            seen = Capture()
+            task = asyncio.ensure_future(t.acomplete(cap.PERSONA, USER, max_tokens=100, capture=seen))
+            await _until(lambda: seen.in_flight is not None)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            return seen
+
+        seen = asyncio.run(main())
+        assert seen.in_flight.outcome == "cancelled" and seen.attempts == []
+
+    def test_cancel_in_backoff_leaves_no_in_flight(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def hang(_seconds: float) -> None:
+            await asyncio.sleep(3600)
+
+        monkeypatch.setattr(t, "_asleep", hang)
+
+        async def main() -> Capture:
+            seen = Capture()
+            with cap.capture([cap.error_body(503)]):
+                task = asyncio.ensure_future(t.acomplete(cap.PERSONA, USER, max_tokens=100, capture=seen))
+                await _until(lambda: bool(seen.attempts))
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            return seen
+
+        seen = asyncio.run(main())
+        assert seen.in_flight is None and [a.outcome for a in seen.attempts] == ["outage"]
+
+    def test_cancel_raised_as_error_is_not_retried(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import litellm
+
+        calls: list[int] = []
+        sleeps: list[float] = []
+
+        async def turns_cancel_into_error(**_kwargs: Any) -> Any:
+            calls.append(1)
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                raise _connection_error() from None
+
+        async def asleep(seconds: float) -> None:
+            sleeps.append(seconds)
+
+        monkeypatch.setattr(litellm, "acompletion", turns_cancel_into_error)
+        monkeypatch.setattr(t, "_asleep", asleep)
+
+        async def main() -> Capture:
+            seen = Capture()
+            task = asyncio.ensure_future(t.acomplete(cap.PERSONA, USER, max_tokens=100, capture=seen))
+            await _until(lambda: bool(calls))
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            return seen
+
+        seen = asyncio.run(main())
+        assert calls == [1] and sleeps == [] and seen.in_flight is not None and seen.attempts == []
+
+    @BOTH
+    def test_probe_record_on_capture(self, is_async: bool) -> None:
+        with cap.capture([cap.error_body(503)] * 3 + [cap.anthropic_body()]):
+            seen = Capture()
+            result = go(is_async, fail_over=True, capture=seen)
+        assert seen.probe_record is result.probe_record and seen.probe_record.role == FALLBACK
+        litellm_cold_start.clear_cache()
+        with cap.capture([cap.anthropic_body()]):
+            direct = Capture()
+            go(is_async, role=FALLBACK, capture=direct)
+        assert direct.probe_record is not None and direct.filled
+        with cap.capture([cap.deepseek_body()]):
+            plain = Capture()
+            go(is_async, capture=plain)
+        assert plain.probe_record is None
+
+    @BOTH
+    def test_fallback_unavailable_carries_primary_and_probe_attempts(self, is_async: bool) -> None:
+        with cap.capture([cap.error_body(503)] * 3 + [cap.error_body(401)]):
+            seen = Capture()
+            with pytest.raises(TransportError) as exc:
+                go(is_async, fail_over=True, capture=seen)
+        assert exc.value.kind == "fallback_unavailable"
+        assert [(a.role, a.attempt) for a in exc.value.attempts] == [(PRIMARY, 1), (PRIMARY, 2), (PRIMARY, 3), (FALLBACK, 0)]
+        assert seen.attempts == list(exc.value.attempts)
+
+    def test_outage_inside_task_group_is_still_classified(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import anyio
+
+        async def asleep(_seconds: float) -> None:
+            return None
+
+        monkeypatch.setattr(t, "_asleep", asleep)
+
+        async def main() -> TransportError:
+            async with anyio.create_task_group():
+                with anyio.move_on_after(0):
+                    await anyio.sleep(1)
+                with cap.capture([cap.error_body(503)]):
+                    with pytest.raises(TransportError) as exc:
+                        await t.acomplete(cap.PERSONA, USER, max_tokens=100, capture=Capture())
+            return exc.value
+
+        assert [a.outcome for a in asyncio.run(main()).attempts] == ["outage"] * 3
 
 
 class TestMaxAttempts:
