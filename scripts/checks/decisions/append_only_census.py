@@ -237,7 +237,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         print("CENSUS ERROR: self-test failed, the detector is blind")
         return 2
     if args.result:
-        Path(args.result).write_text(json.dumps(result_payload(result), indent=1) + "\n", encoding="utf-8")
+        try:
+            Path(args.result).write_text(json.dumps(result_payload(result), indent=1) + "\n", encoding="utf-8")
+        except OSError as exc:
+            print(f"CENSUS ERROR: cannot write result: {exc}")
+            return 2
     return 1 if (result.open or result.defects) else 0
 
 

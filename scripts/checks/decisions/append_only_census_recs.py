@@ -222,9 +222,8 @@ class _Writer:
             self.counts[past] += 1
             print(f"would-{verb} {label}{shown}")
             return
-        assert payload is not None
         try:
-            result = self._call("file" if verb == "file" else "update", payload)
+            result = self._call("file" if verb == "file" else "update", payload or {})
         except Exception as exc:  # noqa: BLE001 -- every write is attempted; the failure is named and exits 1
             self.failed.append(f"{verb} {label}: {type(exc).__name__}: {_clean(str(exc))}")
             return

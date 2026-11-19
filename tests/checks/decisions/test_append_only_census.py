@@ -375,3 +375,7 @@ class TestResult:
         out = tmp_path / "r.json"
         assert census_mod.main(["--head", "no-such-rev", "--result", str(out)]) == 2
         assert not out.exists()
+
+    def test_unwritable_result_path_exits_two(self, history: dict, tmp_path: Path, capsys) -> None:
+        assert census_mod.main(["--result", str(tmp_path / "no-such-dir" / "r.json")]) == 2
+        assert "cannot write result" in capsys.readouterr().out
