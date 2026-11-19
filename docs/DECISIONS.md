@@ -12729,6 +12729,8 @@ conditions:
 
 > **Update (2026-11-15, PLAN-plan-rescout-on-fingerprint):** Decision 262 narrows it again for plan pull requests whose last decision-scout row is BLOCK: the re-scout barrier fails them with no exemption, and the operator's admin bypass merge in the GitHub UI is the release valve. The ruleset configuration above is unchanged.
 
+> **Update (2026-11-19, PLAN-actions-sha-pin-native-policy):** the ghas-probe's Actions-permissions control also checks sha_pinning_required, GitHub's required SHA pinning (rec-5290, Decision 100), so the three controls named in the reversal conditions include it. The first live read-back run is cited in rec-5290's closure.
+
 ---
 
 ## Decision 82: EC8 churn gate measures production invocation fan-out, not in-container thread contention (Decided)
