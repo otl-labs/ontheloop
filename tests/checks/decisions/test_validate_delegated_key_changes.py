@@ -1,4 +1,4 @@
-"""Mirror test for validate_delegated_key_changes (Decision 273 clauses 1 and 3), on tmp roots with a fake baseline."""
+"""Mirror test for validate_delegated_key_changes (Decision 276 clauses 1 and 3), on tmp roots with a fake baseline."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Pure span and byte measures over one Decision entry block (Decision 273 clause 4, rec-4744).
+"""Pure span and byte measures over one Decision entry block (Decision 276 clause 4, rec-4744).
 
 Every function takes the heading-inclusive raw block scripts.decisions_md's iter_decision_sections yields and reads
 no file; none raises on text. `authored` is the one classifier the per-Decision pin fixture and the size check share.

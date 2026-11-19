@@ -94,7 +94,7 @@ class TestGatedEntryInputClosures:
         } <= self._globs("validate_decision_entry_conformance")
 
     def test_new_measure_modules_and_the_compaction_contract_are_in_the_right_globs(self) -> None:
-        """Decision 273: the compaction contract moved to its own file, and plan_decision_drafts imports both measure
+        """Decision 276: the compaction contract moved to its own file, and plan_decision_drafts imports both measure
         modules, so the gated checks that close over them glob them (red before: names and globs absent)."""
         from scripts.checks.roadmap import _manifest as roadmap_manifest
         from scripts.checks.verification import _manifest as verification_manifest

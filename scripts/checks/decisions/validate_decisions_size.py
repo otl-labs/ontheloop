@@ -174,7 +174,7 @@ def _measure_findings(
     baseline_bodies: BaselineBodies | None,
     base_text_reader: BaseTextReaderFn,
 ) -> tuple[list[str], list[str]]:
-    """Decision 273's size legs over the repository: (fails, warns), each line printed as is."""
+    """Decision 276's size legs over the repository: (fails, warns), each line printed as is."""
     fails: list[str] = []
     warns: list[str] = []
     head_rows = measure.exemption_rows(_read(root / _EXEMPT_REL))

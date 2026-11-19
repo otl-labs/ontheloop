@@ -1,4 +1,4 @@
-"""rec-4744's acceptance file: the per-Decision pin fixture and the contract's two cap keys (Decision 273 clause 4)."""
+"""rec-4744's acceptance file: the per-Decision pin fixture and the contract's two cap keys (Decision 276 clause 4)."""
 
 from __future__ import annotations
 

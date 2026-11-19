@@ -20,7 +20,7 @@ _REPO = Path(__file__).resolve().parents[2]
 
 
 def cap_bytes() -> int:
-    """per_entry_size_norm.cap_bytes, the norm the pinned entries landed under. An entry landed after Decision 273 is
+    """per_entry_size_norm.cap_bytes, the norm the pinned entries landed under. An entry landed after Decision 276 is
     pinned against measured_size_norm instead (a whole-span pin against this cap can false-fail such an entry)."""
     contract = yaml.safe_load((_REPO / "docs/contracts/decision-entry.yaml").read_text(encoding="utf-8"))
     return int(contract["size_governance"]["per_entry_size_norm"]["cap_bytes"])
@@ -32,7 +32,7 @@ def decision_entry(text: str, number: int) -> str:
     return blocks[0]
 
 
-# Tmp-root builders for the Decision 273 size-check wiring tests (shared so the mirror file stays under its budget).
+# Tmp-root builders for the Decision 276 size-check wiring tests (shared so the mirror file stays under its budget).
 ENTRY = "## Decision 5: Persona entry (Decided)\n\n**Status:** Decided\n\n{}**Related:** none\n\n---\n\n"
 OPTS = "**Options considered:** a -- rejected: b.\n\n"
 CONTRACT_REL = "docs/contracts/decision-entry.yaml"
