@@ -17,7 +17,7 @@ from typing import Any, Iterator
 
 import yaml
 
-from scripts.checks.decisions import decisions_size_measure, envelope_rules
+from scripts.checks.decisions import consolidation, decisions_size_measure, envelope_rules
 from scripts.decisions_md import (
     PLACEHOLDER_NUMBER,
     _extract_related_decisions,
@@ -199,6 +199,21 @@ def _info_lines(number: str, title: str, block: str) -> list[str]:
     return out
 
 
+def _nomination_lines(number: str, title: str, block: str) -> list[str]:
+    """Decision 278 cl.2: one NOMINATION line per amended root at the consolidation threshold; never a finding, total."""
+    env = extract_entry_envelope(block, placeholder=True) or {}
+    amends = sorted(set(extract_amends_edges(title)) | set(_int_list(env.get("amends"))))
+    threshold = consolidation.load_threshold(ROOT)
+    if not amends or threshold is None:
+        return []
+    return [
+        "  " + line
+        for line in consolidation.nomination_info(
+            number, amends, consolidation.load_rows(ROOT), threshold, consolidation.entry_sizes(ROOT)
+        )
+    ]
+
+
 def _drafted_blocks(content: str, root: Path, skip_quoted: bool) -> Iterator[tuple[str, str, str]]:
     """(number, title, block) of each drafted entry: the skip-and-count loop the report and drafted_titles share."""
     concrete = any(n != PLACEHOLDER_NUMBER for n, _, _ in _blocks(content))
@@ -218,7 +233,7 @@ def _draft_findings(
     for number, title, block in _drafted_blocks(content, root, skip_quoted):
         drafted += 1
         findings += _rule_findings(number, title, block, slug)
-        infos += _info_lines(number, title, block)
+        infos += _info_lines(number, title, block) + _nomination_lines(number, title, block)
     return drafted, findings, infos
 
 
@@ -277,7 +292,7 @@ def _scan_plan(path: str | Path, root: Path) -> tuple[int, list[Finding], list[s
         drafted += 1
         head = next(iter(_blocks(text)))
         findings += _rule_findings(*head, str(plan.get("slug")), bound)
-        infos += _info_lines(head[0], head[1], text)
+        infos += _info_lines(head[0], head[1], text) + _nomination_lines(head[0], head[1], text)
     return drafted, findings, infos
 
 
