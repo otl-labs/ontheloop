@@ -1,4 +1,6 @@
-"""GHAS live-probe: secret-scanning, push-protection, Actions-permissions, which also covers required SHA pinning (audit finding ULF-01).
+"""GHAS live-probe: secret-scanning, push-protection, Actions-permissions (audit finding ULF-01).
+
+The Actions-permissions surface also covers required SHA pinning (rec-5290).
 
 Decision 83 recorded the T2.12 confidential-data-boundary controls as verified by Terraform
 configuration only. This module closes the acknowledged live-probe gap with a single _probe()
@@ -124,7 +126,10 @@ def _pin_label(value: object) -> str:
 
 
 def _probe(token: str | None) -> dict:
-    """Query the three GHAS control surfaces (the Actions-permissions surface also covers required SHA pinning). Returns a control-state dict; never a raw body."""
+    """Query the three GHAS control surfaces (Actions permissions also covers required SHA pinning).
+
+    Returns a control-state dict; never a raw body.
+    """
     if not token:
         raise ProbeTokenMissing("probe token not set")
 
