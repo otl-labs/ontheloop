@@ -9,7 +9,7 @@ vocabulary (kind values, routing tokens, north-star ids) through the arguments.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -18,6 +18,8 @@ from scripts.decisions_md import PLACEHOLDER_DATE, PLACEHOLDER_NUMBER
 NEVER_NUMBERED_DECISION_TEXT = "Never a numbered Decision"
 _SERVES_ID_RE = re.compile(r"^NS\.\d+$")
 _FOLDED = "folded scalar: put the draft in a literal (|) block"
+_DELEGATE_KEY_RE = re.compile(r"^([^#\s]+\.(?:yaml|yml))#([A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)*)$")
+_PLAN_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
 def required_field_issues(envelope: dict, required_fields: list[str]) -> list[str]:
@@ -117,6 +119,96 @@ def carried_by_mechanism_warnings(carried_by: dict[str, list[int]], kinds: dict[
     ]
 
 
+def split_delegated_key(key: object) -> tuple[str, str] | None:
+    """A delegates key "<path>.(yaml|yml)#<dotted>" -> (path, dotted); None when it does not match."""
+    match = _DELEGATE_KEY_RE.match(key) if isinstance(key, str) else None
+    return (match.group(1), match.group(2)) if match else None
+
+
+def dotted_value(parsed: Any, dotted: str) -> tuple[bool, Any]:
+    """Walk a parsed YAML value down a dotted key: (found, value)."""
+    node = parsed
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return False, None
+        node = node[part]
+    return True, node
+
+
+def amended_numbers(envelope: dict) -> set[int]:
+    """The Decision numbers an envelope amends or supersedes; a malformed field contributes nothing."""
+    found: set[int] = set()
+    for field in ("amends", "supersedes"):
+        value = envelope.get(field)
+        if isinstance(value, list):
+            found |= {n for n in value if isinstance(n, int) and not isinstance(n, bool)}
+    return found
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _bounds_issue(bounds: object) -> str | None:
+    if not isinstance(bounds, dict):
+        return "bounds must be a mapping"
+    keys = set(bounds)
+    if keys == {"min", "max"}:
+        ok = _is_number(bounds["min"]) and _is_number(bounds["max"]) and bounds["min"] <= bounds["max"]
+        return None if ok else "bounds {min, max} needs numbers with min <= max"
+    if keys == {"one_of"}:
+        ok = isinstance(bounds["one_of"], list) and bool(bounds["one_of"])
+        return None if ok else "bounds {one_of} needs a non-empty list"
+    if keys == {"text"}:
+        text = bounds["text"]
+        ok = isinstance(text, str) and bool(text.strip()) and "\n" not in text.strip()
+        return None if ok else "bounds {text} needs a non-empty one-line string"
+    return "bounds must be exactly one of {min, max}, {one_of} or {text}"
+
+
+def delegates_issues(envelope: dict, change_rules: list[str], resolve: Callable[[str], bool]) -> list[str]:
+    """delegates is optional; when present: a non-empty list of {key, change_rule, bounds} items, the key resolving."""
+    if "delegates" not in envelope:
+        return []
+    delegates = envelope["delegates"]
+    if not isinstance(delegates, list) or not delegates:
+        return ["delegates must be a non-empty list of {key, change_rule, bounds}"]
+    issues: list[str] = []
+    for item in delegates:
+        if not isinstance(item, dict) or set(item) != {"key", "change_rule", "bounds"}:
+            issues.append(f"delegates item {item!r} must be a mapping with exactly key, change_rule and bounds")
+            continue
+        key = item["key"]
+        if split_delegated_key(key) is None:
+            issues.append(f"delegates key {key!r} does not match <path>.(yaml|yml)#<dotted key>")
+        elif not resolve(key):
+            issues.append(f"delegates key {key!r} does not resolve at head")
+        if item["change_rule"] not in change_rules:
+            issues.append(f"delegates change_rule {item['change_rule']!r} is not one of {change_rules}")
+        bounds_issue = _bounds_issue(item["bounds"])
+        if bounds_issue:
+            issues.append(f"delegates key {key!r}: {bounds_issue}")
+    return issues
+
+
+def plan_issues(envelope: dict) -> list[str]:
+    """plan is optional; when present it is a slug string (FAIL otherwise)."""
+    if "plan" not in envelope:
+        return []
+    slug = envelope["plan"]
+    if not isinstance(slug, str) or not _PLAN_SLUG_RE.match(slug):
+        return [f"plan {slug!r} must be a slug matching ^[a-z0-9][a-z0-9-]*$"]
+    return []
+
+
+def plan_warnings(envelope: dict, plan_exists: Callable[[str], bool]) -> list[str]:
+    """A well-formed plan slug whose docs/plans/PLAN-<slug>.yaml is absent at head is a WARN, never a FAIL."""
+    slug = envelope.get("plan")
+    if plan_issues(envelope) or slug is None or plan_exists(slug):
+        return []
+    return [f"plan {slug!r} has no docs/plans/PLAN-{slug}.yaml at head; name an existing plan"]
+
+
 def _opener_is_inline(block: str, pos: int) -> bool:
     line_end = block.find("\n", pos)
     rest = block[pos + len("```yaml") : line_end if line_end != -1 else len(block)]
@@ -137,6 +229,10 @@ def _shape_detail(data: dict) -> str:
         isinstance(data["serves"], list) and all(isinstance(s, str) for s in data["serves"])
     ):
         return "field serves must be a list of strings"
+    if data.get("delegates") is not None and not isinstance(data["delegates"], list):
+        return "field delegates must be a list of {key, change_rule, bounds}"
+    if data.get("plan") is not None and not isinstance(data["plan"], str):
+        return "field plan must be a plan slug string"
     return "the envelope shape is malformed"
 
 

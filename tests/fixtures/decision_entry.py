@@ -7,21 +7,21 @@ Growth of the entry's own text still counts.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import yaml
 
+from scripts.checks.decisions.entry_measure import authored, authored_bytes
 from scripts.decisions_md import iter_decision_sections
 
+__all__ = ["authored", "authored_bytes", "cap_bytes", "decision_entry"]
+
 _REPO = Path(__file__).resolve().parents[2]
-_DATE = r"\d{4}-\d{2}(?:-\d{2})?"
-_BRACKET_OPENER = re.compile(rf"\[Amendment {_DATE}\b")
-_BLOCKQUOTE = re.compile(rf"> \*\*[^*\n]*?{_DATE}[^*\n]*?:\*\*")
-_PARAGRAPH_BREAK = re.compile(r"\n[ \t]*\n")
 
 
 def cap_bytes() -> int:
+    """per_entry_size_norm.cap_bytes, the norm the pinned entries landed under. An entry landed after Decision 276 is
+    pinned against measured_size_norm instead (a whole-span pin against this cap can false-fail such an entry)."""
     contract = yaml.safe_load((_REPO / "docs/contracts/decision-entry.yaml").read_text(encoding="utf-8"))
     return int(contract["size_governance"]["per_entry_size_norm"]["cap_bytes"])
 
@@ -32,33 +32,30 @@ def decision_entry(text: str, number: int) -> str:
     return blocks[0]
 
 
-def _closes_at_end(paragraph: str) -> bool:
-    depth = 0
-    for index, char in enumerate(paragraph):
-        depth += {"[": 1, "]": -1}.get(char, 0)
-        if depth == 0:
-            return index == len(paragraph) - 1
-    return False
+# Tmp-root builders for the Decision 276 size-check wiring tests (shared so the mirror file stays under its budget).
+ENTRY = "## Decision 5: Persona entry (Decided)\n\n**Status:** Decided\n\n{}**Related:** none\n\n---\n\n"
+OPTS = "**Options considered:** a -- rejected: b.\n\n"
+CONTRACT_REL = "docs/contracts/decision-entry.yaml"
+EXEMPT_REL = "config/decision_options_exemptions.yaml"
 
 
-def _is_trailer(paragraph: str) -> bool:
-    if _BRACKET_OPENER.match(paragraph):
-        return _closes_at_end(paragraph)
-    return _BLOCKQUOTE.match(paragraph) is not None and all(line.startswith(">") for line in paragraph.splitlines())
+def gov(**keys: object) -> str:
+    return yaml.safe_dump({"size_governance": {"per_entry_size_norm": {"cap_bytes": 6 * 1024}, **keys}})
 
 
-def authored(entry: str) -> str:
-    """The entry without its trailing dated annotations, closing separator kept; an entry with none is unchanged."""
-    core = entry.rstrip()
-    if core.endswith("\n---"):
-        core = core.removesuffix("---").rstrip()
-    end = len(core)
-    for brk in reversed(list(_PARAGRAPH_BREAK.finditer(core))):
-        if not _is_trailer(core[brk.end() : end].strip()):
-            break
-        end = brk.start()
-    return entry if end == len(core) else core[:end] + entry[len(core) :]
+FULL = gov(measured_size_norm={"cap_bytes": 5120}, options_considered={"cap_bytes": 1024})
 
 
-def authored_bytes(entry: str) -> int:
-    return len(authored(entry).encode("utf-8"))
+def make_root(tmp_path: Path, body: str, contract: str | None = FULL, exempt: str | None = None) -> Path:
+    """A root holding one Decision 5 entry whose body is `body`, plus the optional contract and exemption list."""
+    docs = {
+        "docs/DECISIONS.md": ENTRY.format(body),
+        "docs/DECISIONS_ARCHIVE.md": "",
+        CONTRACT_REL: contract,
+        EXEMPT_REL: exempt,
+    }
+    for rel, text in docs.items():
+        if text is not None:
+            (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / rel).write_text(text, encoding="utf-8")
+    return tmp_path
