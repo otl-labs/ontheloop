@@ -95,6 +95,9 @@ conditions:
 
 **Related:** Decision 167 (amended: cl.3's measure), 145, 150, 151, 177, 181 cl.2, 246; rec-3023, rec-5260, rec-4744,
 rec-3179, rec-3682 (superseded).
+
+---
+
 ## Decision 275: Contracts are budgeted in bytes as well as lines, and a contract at its budget compacts its amendment_log or splits off a second subject before any raise (amends Decisions 166 and 240) (Decided)
 
 ```yaml
