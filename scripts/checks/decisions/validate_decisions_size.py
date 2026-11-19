@@ -25,16 +25,24 @@ existing hard-fail cap and cost gate.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable, Optional
 
 from scripts.checks import _common, registry
+from scripts.checks.decisions import decisions_size_measure as measure
 from scripts.checks.decisions._baseline import (
     BaselineBodies,
     BaselineBodyReaderFn,
     BaselineReaderFn,
+    base_file_text,
     baseline_decision_bodies,
     baseline_decision_numbers,
 )
 from scripts.decisions_md import iter_decision_sections
+
+BaseTextReaderFn = Callable[[Path, str], Optional[str]]
+_DECISION_FILES = ("docs/DECISIONS.md", "docs/DECISIONS_ARCHIVE.md")
+_EXEMPT_REL = "config/decision_options_exemptions.yaml"
+_COST_GATE_FILES = {*_DECISION_FILES, _EXEMPT_REL, measure.CONTRACT}
 
 _PER_ENTRY_CAP_BYTES = 6_144
 _STANDING_PRESSURE_MULTIPLIER = 1.2
@@ -155,12 +163,58 @@ def _standing_pressure_warning(root: Path) -> list[str]:
     ]
 
 
+def _read(path: Path) -> str | None:
+    return path.read_text(encoding="utf-8", errors="replace") if path.exists() else None
+
+
+def _measure_findings(
+    root: Path,
+    gov: measure.Governance,
+    baseline_numbers: set[int],
+    baseline_bodies: BaselineBodies | None,
+    base_text_reader: BaseTextReaderFn,
+) -> tuple[list[str], list[str]]:
+    """Decision 276's size legs over the repository: (fails, warns), each line printed as is."""
+    fails: list[str] = []
+    warns: list[str] = []
+    head_rows = measure.exemption_rows(_read(root / _EXEMPT_REL))
+    exempt_titles = {title for _, title in head_rows}
+    corpus = {rel: {int(m.group(1)): b for m, b in iter_decision_sections(_read(root / rel) or "")} for rel in _DECISION_FILES}
+    new_entries = {n: b for rel in _DECISION_FILES for n, b in corpus[rel].items() if n not in baseline_numbers}
+    for rel in _DECISION_FILES:
+        for n, block in corpus[rel].items():
+            if n not in baseline_numbers:
+                issues = measure.measured_cap_issues(block, gov) + measure.options_issues(block, gov, exempt_titles)
+                fails += [f"  FAIL: Decision {n} ({rel}) {issue}" for issue in issues]
+            elif baseline_bodies is not None:
+                grown, noted = measure.in_place_growth(n, rel, block, baseline_bodies.get(rel, {}).get(n), gov)
+                fails += [f"  FAIL: {m}" for m in grown]
+                warns += [f"  WARN: {m}" for m in noted]
+    base_contract = base_text_reader(root, measure.CONTRACT)
+    if base_contract is not None:
+        base_gov = measure.size_governance(base_contract)
+        base_rows = base_text_reader(root, _EXEMPT_REL)
+        approved = {p.stem for p in (root / "docs" / "plans" / "approved").glob("*.yaml")}
+        row_fails, row_warns = measure.exemption_findings(
+            head_rows,
+            None if base_rows is None else measure.exemption_rows(base_rows),
+            isinstance(base_gov, measure.Governance) and base_gov.options_cap is not None,
+            approved,
+        )
+        base_entries = {n: b for per_file in (baseline_bodies or {}).values() for n, b in per_file.items()}
+        row_fails += measure.fail_closed_issues(base_contract, _read(root / measure.CONTRACT) or "", base_entries, new_entries)
+        fails += [f"  FAIL: {m}" for m in row_fails]
+        warns += [f"  WARN: {m}" for m in row_warns]
+    return fails, warns
+
+
 @registry.register("validate_decisions_size", owner="platform")
 def validate_decisions_size(
     failed: list[str],
     root=None,
     baseline_reader: BaselineReaderFn | None = None,
     baseline_body_reader: BaselineBodyReaderFn | None = None,
+    base_text_reader: BaseTextReaderFn | None = None,
 ) -> None:
     """Enforce the per-NEW-entry authoring size cap (Decision 167 clause 3) on
     docs/DECISIONS.md and docs/DECISIONS_ARCHIVE.md. The stock ceilings this check formerly
@@ -190,6 +244,7 @@ def validate_decisions_size(
     root = root if root is not None else _common.ROOT
     baseline_reader = baseline_reader or baseline_decision_numbers
     baseline_body_reader = baseline_body_reader or baseline_decision_bodies
+    base_text_reader = base_text_reader or base_file_text
 
     live_path = root / "docs" / "DECISIONS.md"
     archive_path = root / "docs" / "DECISIONS_ARCHIVE.md"
@@ -205,7 +260,7 @@ def validate_decisions_size(
         registry.skipped("docs/DECISIONS_ARCHIVE.md not found")
         return
 
-    if using_default_root and not (set(_common.get_changed_files(root)) & {"docs/DECISIONS.md", "docs/DECISIONS_ARCHIVE.md"}):
+    if using_default_root and not (set(_common.get_changed_files(root)) & _COST_GATE_FILES):
         registry.examined(0, unit="new_decision_entries")
         return
 
@@ -214,13 +269,26 @@ def validate_decisions_size(
         print("  (per-entry cap: SKIP, origin/main unreachable.)")
         registry.skipped("origin/main unreachable")
         return
-    per_entry_failures = _per_entry_cap_failures(root, baseline_numbers)
+    contract_text = _read(root / measure.CONTRACT)
+    gov = measure.size_governance(contract_text) if contract_text is not None else None
+    if isinstance(gov, str):
+        print(f"  FAIL: {gov}")
+        failed.append("DECISIONS size governance")
+        gov = None
+    baseline_bodies = baseline_body_reader(root)
+    per_entry_failures = (
+        [] if gov is not None and gov.measured_cap is not None else _per_entry_cap_failures(root, baseline_numbers)
+    )
+    if gov is not None:
+        measured_fails, measured_warns = _measure_findings(root, gov, baseline_numbers, baseline_bodies, base_text_reader)
+        per_entry_failures += measured_fails
+        for warning in measured_warns:
+            print(warning)
     for failure in per_entry_failures:
         print(failure)
     if per_entry_failures:
         failed.append("DECISIONS size governance")
 
-    baseline_bodies = baseline_body_reader(root)
     if baseline_bodies is not None:
         for warning in _amendment_delta_warnings(root, baseline_bodies):
             print(warning)
