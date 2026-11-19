@@ -102,6 +102,8 @@ ENTRIES: tuple[Entry, ...] = (
             "scripts/decisions_md.py",
             "scripts/platform_roadmap*.py",
             "scripts/checks/decisions/envelope_rules.py",
+            "scripts/checks/decisions/entry_measure.py",
+            "scripts/checks/decisions/decisions_size_measure.py",
             "scripts/north_star_models.py",
             "docs/DECISIONS_ARCHIVE.md",
         ),
