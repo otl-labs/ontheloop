@@ -61,7 +61,7 @@ def load_rows(root: Path) -> list[dict]:
 
 
 def _compacted(row: dict | None) -> bool:
-    return bool(row) and row.get("currency") == "superseded_compacted"
+    return row is not None and row.get("currency") == "superseded_compacted"
 
 
 def _amenders(rows: list[dict]) -> dict[int, set[Any]]:
@@ -129,8 +129,10 @@ class _Parts:
     """Accumulates a body's units line by line (the state partition() threads through its paragraphs)."""
 
     def __init__(self, number: int) -> None:
-        self.number, self.units = number, {}
-        self.section, self.lists, self.notes, self.last = "intro", 0, 0, None
+        self.number = number
+        self.units: dict[str, str] = {}
+        self.section, self.lists, self.notes = "intro", 0, 0
+        self.last: str | None = None
         self.paras: dict[str, int] = {}
         self.para: list[str] = []
         self.meta = False
@@ -466,7 +468,12 @@ def _unlisted_stub_problems(
         scanned += 1
         top = entries.get(int(target))
         live = top is not None and not _superseded(rows, int(target), top)
-        if live and n in set((extract_entry_envelope(top) or {}).get("supersedes") or []) and n not in listed:
+        if (
+            top is not None
+            and live
+            and n in set((extract_entry_envelope(top) or {}).get("supersedes") or [])
+            and n not in listed
+        ):
             problems.append(
                 f"consolidation manifest: Decision {n}'s stub has a point map for Decision {target}; no manifest lists it"
             )
