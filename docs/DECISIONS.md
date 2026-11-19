@@ -4674,6 +4674,12 @@ new exemptions ratchet. Detail: data-modeling-standard.yaml.]
 
 > **Amended by Decision 268 (2026-11-16):** Clause 2(a) also admits one point lookup by merge key on the same table's current projection inside the write's own transaction; under it the ops writer enforces ops_recommendations.dependencies existence on an insert and on a change to the column, and the rec-4166 monitor (data-modeling-standard.yaml COVERAGE) is a backstop (Decision 268 cl.1-3).
 
+> **Update (2026-11-19, rec-5266):** Merge 660d5b54 (#1568, 2026-10-18) shortened this entry's 2026-10-04 and 2026-10-15
+> amendment paragraphs in place, which Decision 177's append-only dialect forbids; their ratified text is at 660d5b54^.
+> The shortened text stands, read with two restorations: the 2026-10-04 paragraph's "never a rule source" reads "never a
+> write-time rule source", and both paragraphs' Detail pointer is data-modeling-standard.yaml rule write-time-enforcement.
+> The append-only census acknowledges the merge (config/agent/decision_census.yaml). No clause changes.
+
 ---
 
 ## Decision 209: Open-core paywall on organisational scale, never capability -- a multi-tenant, metadata-only control plane over a customer-owned data plane, and three monorepos placed by platform-vs-product and visibility (amends Decision 184 clause 1, Decision 178 and Decision 101 point (f)) (Decided)
@@ -7414,6 +7420,14 @@ rec-3249 (resolved by this wave), rec-3264 / rec-3265 (drift flow-control, out o
 > and is re-armed; its remedy no longer names the guard Decision 178 retired, and review_by moves from 2026-11-25 to
 > 2027-05-25. t15-portal-cutover-retires-the-surface is retired from the stanza: Decision 196 clause 1 keeps
 > decisions in git, so the cutover it waited for will not occur. No clause changes.
+
+> **Update (2026-11-19, rec-5266):** The re-landing Decision 178 clause 3 sanctions is a report, not a guard. The append-only
+> census (scripts/checks/decisions/append_only_census.py, run by .github/workflows/decision-census.yml) applies clauses 1-4
+> to every main merge since the post-cleanse commit 7b67e21d, each against its parent, and a fast-tier WARN applies them
+> to a pull request's diff. Its ledger, config/agent/decision_census.yaml, records post-hoc acknowledgements of merges
+> already on main, each row keyed to one merge and Decision and pointing at the dated annotation that disposes of it. It is
+> not a waiver route: no row can name a merge before that merge exists, and clause 5 binds any merge-time guard unchanged.
+> No clause changes.
 
 ---
 
@@ -13800,6 +13814,11 @@ state authority.
 > flags are retired. The portal runs the DuckLake writer's own gate (schema_gate and check_write over the contract's projection)
 > as a derived pre-check, never authoritative: inserts evaluate every rule, updates and caller-keyed upserts the undated rules
 > only. ops.yaml keeps DQ backstops, never stricter than the contract (validate_ops_rule_source), until T1.6 c7 retires it.
+
+> **Update (2026-11-19, rec-5266):** Merge 660d5b54 (#1568, 2026-10-18) shortened this entry's 2026-10-04 Update in place
+> (the contract path lost its docs/contracts/ prefix), which Decision 177's append-only dialect forbids; its ratified text
+> is at 660d5b54^. The shortened text stands, and the append-only census acknowledges the merge
+> (config/agent/decision_census.yaml). No clause changes.
 
 ## Decision 64: Bootstrap Cohort Anchor for ops_recommendations is 2026-05-01 (Decided)
 
