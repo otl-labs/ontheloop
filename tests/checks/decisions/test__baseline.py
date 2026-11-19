@@ -259,3 +259,58 @@ class TestBaseFileText:
             assert _baseline.base_file_text(tmp_path, "a.yaml") is None
             assert _baseline.base_file_text(tmp_path, "a.yaml") is None
         assert run.call_count == 1
+
+
+class TestRevisionReaders:
+    """file_text_at and decision_bodies_at read any revision (rec-5266); baseline readers are unchanged."""
+
+    def _two_commits(self, tmp_path: Path) -> tuple[Path, str, str]:
+        repo = tmp_path / "repo"
+        _init_repo(repo)
+        _write_decisions(repo, "## Decision 1: Old (Decided)\n\n**Status:** Decided\nold line\n")
+        first = _commit_all(repo, "first")
+        _write_decisions(
+            repo,
+            "## Decision 1: Old (Decided)\n\n**Status:** Decided\nnew line\n",
+            archive="## Decision 2: Moved (Decided)\n\n**Status:** Decided\n",
+        )
+        second = _commit_all(repo, "second")
+        return repo, first, second
+
+    def test_bodies_at_an_older_commit_differ_from_head(self, tmp_path: Path) -> None:
+        repo, first, second = self._two_commits(tmp_path)
+        old = _baseline.decision_bodies_at(repo, first)
+        new = _baseline.decision_bodies_at(repo, second)
+        assert old is not None and new is not None
+        assert "old line" in old["docs/DECISIONS.md"][1] and "new line" in new["docs/DECISIONS.md"][1]
+        assert set(new["docs/DECISIONS_ARCHIVE.md"]) == {2}
+
+    def test_absent_archive_file_yields_an_empty_dict(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        _init_repo(repo)
+        docs = repo / "docs"
+        docs.mkdir()
+        (docs / "DECISIONS.md").write_text("## Decision 1: A (Decided)\n\n**Status:** Decided\n", encoding="utf-8")
+        sha = _commit_all(repo, "live only")
+        bodies = _baseline.decision_bodies_at(repo, sha)
+        assert bodies is not None and bodies["docs/DECISIONS_ARCHIVE.md"] == {}
+
+    def test_unknown_rev_returns_none(self, tmp_path: Path) -> None:
+        repo, _, _ = self._two_commits(tmp_path)
+        assert _baseline.decision_bodies_at(repo, "f" * 40) is None
+
+    def test_a_present_file_whose_read_fails_returns_none(self, tmp_path: Path) -> None:
+        repo, _, second = self._two_commits(tmp_path)
+        with patch.object(_baseline, "file_text_at", return_value=None):
+            assert _baseline.decision_bodies_at(repo, second) is None
+
+    def test_base_file_text_still_reads_once_per_root_and_path(self, tmp_path: Path) -> None:
+        repo, _, second = self._two_commits(tmp_path)
+        _git(repo, ["update-ref", "refs/remotes/origin/main", second])
+        _baseline._file_cache.clear()
+        real_run = _baseline._common.run
+        with patch("scripts.checks.decisions._baseline._common.run", wraps=real_run) as mock_run:
+            first = _baseline.base_file_text(repo, "docs/DECISIONS.md")
+            calls = mock_run.call_count
+            again = _baseline.base_file_text(repo, "docs/DECISIONS.md")
+        assert first == again and calls == 1 and mock_run.call_count == calls

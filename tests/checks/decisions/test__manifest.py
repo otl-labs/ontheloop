@@ -52,6 +52,7 @@ _REQUIRED_ENTRY_NAMES = frozenset(
         "validate_decision_entry_conformance",
         "validate_supersession_annotations",
         "validate_decision_currency",
+        "validate_decision_append_only",
     }
 )
 
@@ -60,6 +61,12 @@ class TestRequiredEntryMembership:
     def test_every_required_check_is_registered_in_this_manifest(self) -> None:
         present = {entry.name for entry in _manifest.ENTRIES}
         assert _REQUIRED_ENTRY_NAMES <= present, f"missing from ENTRIES: {sorted(_REQUIRED_ENTRY_NAMES - present)}"
+
+    def test_append_only_warn_is_pre_only_with_no_full_segment(self) -> None:
+        """A WARN has no post-merge reader: the census owns main."""
+        entry = next(e for e in _manifest.ENTRIES if e.name == "validate_decision_append_only")
+        assert entry.pre is True
+        assert entry.full_segment is None
 
     def test_entry_conformance_runs_in_both_tiers(self) -> None:
         """Corpus conformance is a both-tier gate: a --pre-only registration would let a
@@ -160,6 +167,16 @@ _CLOSURE_INPUTS: dict[str, tuple[str, ...]] = {
         "config/decision_supersession_waivers.yaml",
         "scripts/decisions_md.py",
         "scripts/checks/decisions/validate_supersession_annotations.py",
+        "scripts/checks/_common.py",
+        "scripts/checks/registry.py",
+    ),
+    "validate_decision_append_only": (
+        "docs/DECISIONS.md",
+        "docs/DECISIONS_ARCHIVE.md",
+        "scripts/decisions_md.py",
+        "scripts/preflight/decision_conditions.py",
+        "scripts/checks/decisions/append_only_rule.py",
+        "scripts/checks/decisions/_baseline.py",
         "scripts/checks/_common.py",
         "scripts/checks/registry.py",
     ),
