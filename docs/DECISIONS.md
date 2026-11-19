@@ -2,6 +2,112 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 278: A long amendment chain retires through one consolidating entry that states the subject's rulings, delegates its values and supersedes the chain's whole victims, and a chain at the threshold is nominated, never forced (amends Decision 149) (Decided)
+
+```yaml
+number: 278
+status: Decided
+decided_date: "2026-11-19"
+kind:
+  value: direction
+  justification: >-
+    Clause 1 changes what satisfies compaction: a victim clause held only by a numbered Decision may end up held by a
+    contract key, and it keeps any human gate a victim clause set at operator approval.
+amends: [149]
+significance:
+  value: numbered_decision
+  justification: >-
+    It widens Decision 149's eligibility test for every later consolidation, and compaction cannot be undone; a
+    decision-compaction.yaml key alone (considered) cannot widen a test Decisions 149 and 175 set, and per-subject
+    recs (considered) would decide the reading afresh each time.
+delegates:
+  - key: docs/contracts/decision-compaction.yaml#compaction.eligibility_criterion
+    change_rule: operator_approval
+    bounds: {text: "A victim compacts only when every clause of its body is restated, delegated under clause 1, held by another live entry or a key one delegates under clause 1's conditions, or rehomed (Decision 175), or, if it sets no live ruling, retired with a reason."}
+  - key: docs/contracts/decision-compaction.yaml#consolidation.threshold
+    change_rule: contract_amendment
+    bounds: {min: 3, max: 9}
+  - key: docs/contracts/decision-compaction.yaml#consolidation.manifest
+    change_rule: contract_amendment
+    bounds: {text: "Every unit of every victim body carries at least one disposition, and every target resolves at head."}
+  - key: docs/contracts/decision-compaction.yaml#consolidation.procedure
+    change_rule: contract_amendment
+    bounds: {text: "One subject per consolidation; nothing compacts in part; text is moved only under a key the consolidating entry delegates."}
+```
+
+**Status:** Decided
+**Date:** 2026-11-19
+**Warehouse ID:** dec-278 (per Decision 84 backfill)
+
+**Problem:** Six entries have five or more live amenders, so a reader opens six to ten entries to learn one subject's
+current rule. Decision 277 showed one consolidating entry can retire such a chain inside the cap, but its reading of
+delegation as subsumption is not in Decision 149's test, and nothing says when or how the next one happens (rec-5265).
+
+**Intent:** Make the pilot's method the standing one: what may compact, what nominates a chain, what proves a chain
+was fully carried, and what happens when it does not fit.
+
+**Decision:**
+1. **Delegation subsumes.** A victim clause is subsumed when the consolidating entry states its ruling and bounds
+   and a key the entry delegates (Decision 276) holds the values, on three conditions: the key holds values, not the
+   ruling; a clause that sets a human gate or a commitment is restated or delegated under operator_approval, never
+   only under contract_amendment; and a contract_amendment key carries a machine-checked bound or names the check
+   that holds it, Decision 175's check-backed bar. A clause another live entry states, or a key one delegates holds
+   under the same three conditions, is held there. Rehoming (Decision 175) is unchanged.
+2. **Nominated, never forced.** A root that is not itself compacted and whose live amenders (compacted stubs not
+   counted) reach the threshold is a candidate. Planning names it when a drafted entry amends it and the fast tier
+   prints one WARN line; neither fails nor files a rec: consolidating is optional, never a discretionary gate (Decision
+   163 cl.1), and a hard fail would reward citing a root instead of declaring amends. The operator names each subject;
+   each consolidation is its own rec and plan (Decision 247).
+3. **Whole victims only.** The consolidating entry supersedes the root and each amender whose whole body it carries.
+   An amender with live clauses elsewhere keeps amends; the entry names it and restates only the part it amended.
+4. **Accounted.** Each consolidation lands a manifest that gives every unit of every victim body at least one
+   disposition; a unit may be retired only if it sets no live ruling. The change that adds it proves the units match
+   the base text, and the fast tier fails any later run where a target no longer resolves. Each stub of a victim
+   with numbered points carries the point map the manifest renders. Decision 277's accounting stays in its own test module.
+5. **Abort by subject.** If the rulings, once the values are delegated, do not fit the measured cap, the chain holds
+   more than one subject: split it into one consolidation per subject or stop. Nothing compacts in part, and a rec
+   records why.
+6. **Moved, then judged.** Mechanism text a chain states moves word for word, in the same change and only from
+   entries it supersedes, into a key at or under one the entry delegates, so the move is a delegation under clause 1.
+   A unit moved alone is checked against its base text; any other moved unit, by its token, so review judges the
+   rulings. Rollback after merge is a newer superseding entry, never a revert (Decision 177).
+
+**Options considered:** obliging the next amending entry to consolidate (rejected: an entry amending eight roots
+would owe eight consolidations); the rule as contract text only (rejected: a key cannot widen Decision 149's test);
+restating values instead of delegating (rejected: it undoes Decision 276's split and does not fit the cap); moving
+mechanism text in an earlier change (rejected: it extracts from live entries, Decision 175 cl.3).
+
+**Coverage (Decision 181 cl.2):** cl.1's delegated keys and named checks, cl.3's carried-forward amenders, cl.4,
+and cl.6's source limit, delegating key and base-text check -- validate_delegated_key_changes on every run while a
+manifest exists, and tests/checks/decisions/test_consolidation.py; cl.2 -- the nomination tests in
+tests/test_plan_decision_drafts.py and tests/checks/decisions/test_validate_supersession_annotations.py; cl.5's cap --
+validate_decisions_size; cl.2's operator naming -- procedural, held by the consolidation procedure's first step and
+the coordinator's operator-chosen dispatch (Decision 229 cl.1-2); cl.5's rec -- procedural, held by
+consolidation.abort. Residual, judged by plan critique (12p) on each consolidation and owned by rec-5422: whether a
+unit sets a human gate or commitment, holds a ruling rather than values, or may be retired; whether a held target
+states the unit's ruling beyond its token; whether a unit moved beside other dispositions was copied faithfully; and
+whether an over-cap chain splits by subject.
+
+```yaml reversal-conditions
+decision: 278
+review_by: 2027-05-23
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: gate-moved-to-contract
+    kind: manual
+    description: "A consolidation is found to have left a human gate or commitment held only by a contract_amendment key: restore it to a restated clause and re-decide clause 1."
+  - id: nomination-unheard
+    kind: manual
+    description: "Six months pass with roots at the threshold and no consolidation named: re-decide whether nomination alone retires chains."
+  - id: consolidation-overruns
+    kind: manual
+    description: "Two consolidations in a row abort on the cap or need more than eight critique rounds: re-decide the threshold and the procedure."
+```
+
+**Related:** Decisions 149 (amended), 163, 167, 175, 177, 181, 229, 247, 276, 277; rec-5265, rec-5422.
+
+---
+
 ## Decision 277: The Terraform pipeline's standing rules in one entry -- native controls authorise, the guard judges content, the convergence record is the sole hard block and fails closed, and drift turns it red only when measured (supersedes Decisions 92, 94, 154 and 190) (Decided)
 
 ```yaml
@@ -9110,6 +9216,13 @@ CD.16/CD.24 -> dec-079 precedent the batch-wave form codifies forward).
 > a superseded entry whose superseder restates NONE of its live content is no longer permanently
 > stuck full-bodied. This body is otherwise unedited; see Decision 175 for the full derivation and
 > its first exercised instance (Decision 37).
+
+> **Amended by Decision 278 (2026-11-19):** `compaction.eligibility_criterion` now counts a clause as
+> subsumed when the superseder states its ruling and bounds and a key its envelope delegates holds
+> the values, on three conditions, and as held where another live entry or a key one delegates
+> states it; a chain at the consolidation threshold is nominated, never forced, for one
+> consolidating entry. This body is otherwise unedited; see Decision 278 and
+> docs/contracts/decision-compaction.yaml `consolidation`.
 
 **Problem:**
 Decision 145's stopgap ceiling raise (400,000 -> 500,000 bytes) bought headroom but explicitly named the un-built structural fix as audits/decision-consolidation-growth-f79d6b5.yaml's DCG-01/DCG-02/DCG-05: a number-preserving compact-to-stub lifecycle, so the live corpus can shed fully-superseded bodies without breaking the ~12,103 unguarded inbound "Decision N" citations or orphaning a warehouse current-projection row (DCG-03: if a header were ever removed from both files, its ops_decisions current row would be served forever in its last state with no signal it was retired). Decision 146 (the archival sibling, landed first) covers entries with no live citations outside the corpus; it explicitly carves out entries "still cited as a LIVE constraint" (its own worked example: Decision 44 -> 117) as staying in the corpus, with no compaction mechanism yet built for them.
