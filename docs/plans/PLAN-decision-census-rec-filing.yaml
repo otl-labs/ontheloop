@@ -36,14 +36,16 @@ scope:
       list of the census's kind words, line a str or null and each ledger_defects entry a str, both cut to 300 characters
       with control characters removed, and every open merge also in replayed; anything else exits 2 and writes nothing.
       (2) LOOKUP. One scoped current_state read of source decision_census through the reader, its rows passed as rows= to
-      scripts.rec_episode.find_recs once for open and once for in_progress (find_recs filters one status per call and
-      reads only when rows is absent, so this is one read); a read that fails exits 2 and writes nothing (Decision
-      215). scripts.rec_episode.run_episode is not reused: it keys one episode on one status, and the filer needs one key
-      per merge plus in_progress ownership. A rec belongs to merge M when its context carries the token `merge=<M>`
+      scripts.rec_episode.find_recs for status open (find_recs reads only when rows is absent, so this is one read); a
+      read that fails exits 2 and writes nothing (Decision 215). scripts.rec_episode.run_episode is not reused: it keys
+      one episode on one key, and the filer needs one key per merge plus the replayed-scoped close. There is no
+      ownership state: ops_recommendations status admits only open, closed, failed, declined and superseded
+      (ops_recommendations.yaml status, enforced by the writer), so a rec being worked is still open and is only updated
+      when its text changes, which is harmless. A rec belongs to merge M when its context carries the token `merge=<M>`
       (whole-token match, the scripts/telemetry_verify/alarms.py _matches pattern); the ledger rollup carries
-      `census_class=ledger_defect`. (3) EPISODES. For each open merge: an in_progress rec with its token owns it (no
-      file, no update); else an open rec is updated only when its context or acceptance differs; else one rec is filed.
-      An open or in_progress rec is closed only when its merge is in the result's replayed list and not in its open set
+      `census_class=ledger_defect`. (3) EPISODES. For each open merge: an open rec with its token is updated only when its
+      title, context or acceptance differs (the title follows the merge's still-open decision set); else one rec is
+      filed. An open rec is closed only when its merge is in the result's replayed list and not in its open set
       (status closed, a resolution naming the ledger and, when GITHUB_RUN_ID is set, the run URL); a rec whose merge the
       result never replayed is left alone, so a result built at an older head closes nothing it did not check. A rec a
       person closed or declined is not open, so a still-open finding files a new rec on the next run. The ledger rollup
@@ -68,10 +70,10 @@ scope:
       (it needs full history); its disposition sentence says the census alone closes it and a Resolves trailer naming it
       is refused by design (a probe FAIL or TIMEOUT is outside backlog-health's satisfied split, so nothing else acts on
       it). (5) CLI, two mutually exclusive modes. `--file PATH [--dry-run] [--profile P]` prints one line per action,
-      `<verb> merge=<full sha> rec=<id>` with verb filed, updated, unchanged, owned or closed (`<verb> ledger rec=<id>`
+      `<verb> merge=<full sha> rec=<id>` with verb filed, updated, unchanged or closed (`<verb> ledger rec=<id>`
       for the rollup; --dry-run prints `would-<verb> ...`, with no rec id on a would-file), then `[decision_census]
-      summary open_merges=<n> filed=<f> updated=<u> unchanged=<x> owned=<o> closed=<c>
-      ledger=<none|filed|updated|unchanged|owned|closed>`; --dry-run writes nothing. Every write is attempted; any failed
+      summary open_merges=<n> filed=<f> updated=<u> unchanged=<x> closed=<c>
+      ledger=<none|filed|updated|unchanged|closed>`; --dry-run writes nothing. Every write is attempted; any failed
       write exits 1 naming it (Decision 84 I-4, no outbox); a malformed result or a failed lookup exits 2 before any
       write; otherwise exit 0. `--assert-ledger-clean [--head REV]` runs the census in process and exits 0 when the
       ledger has no defect, 1 when it has one, 2 when the census cannot complete. Under 500 SLOC. Never opens the ledger
@@ -83,8 +85,8 @@ scope:
       rec-5410's acceptance file; covers append_only_census_recs.py to 100% on its own, through an injected portal_caller
       and rows (no network). TestFileOnFinding (the acceptance node): one open merge with two decisions files exactly
       one rec carrying the merge token, source decision_census, priority Medium, automatable False and
-      acceptance_for's acceptance; the same result again writes nothing; a changed digest updates the context only; an
-      in_progress rec with the token blocks file and update; a closed or declined rec with the token does not, so a new
+      acceptance_for's acceptance; the same result again writes nothing; a changed digest updates the context only; one of
+      two decisions acknowledged updates title, context and acceptance to the remaining one; a closed or declined rec with the token does not, so a new
       rec is filed; a rec whose merge is replayed and no longer open is closed; a rec whose merge the result did not
       replay is left open; ledger defects file one rollup, which closes when they clear; a token for one merge never
       matches a merge that shares its prefix; the title omits "(#<pr>)" when pr is null; a malformed result (extra key,
@@ -306,8 +308,9 @@ verification_plan:
       assert all(jobs.get(w)=='success' for w in ['gate / gate','build','deploy','record']),jobs; print('CONTENT_DEPLOY_OK')"
     expected: The gate / gate, build, deploy and record jobs concluded success, then CONTENT_DEPLOY_OK.
     fix_if: >-
-      If the operator declines or defers the approval, record it in the report with the run link: the content reader
-      never validates rec source, so the filer does not wait on it (Decision 272's accepted residual).
+      If the operator declines or defers the approval, or the run's log carries TELEMETRY_PRODUCTION_HOLD (as VP 6 allows),
+      record it in the report with the run link as a deferral: the content reader never validates rec source, so the
+      filer does not wait on it (Decision 272's accepted residual).
     hermetic: false
     graduation: not-applicable
   - step: 8
@@ -341,7 +344,7 @@ verification_plan:
       One dispatch of decision-census.yml on main from this session (mcp__github__actions_run_trigger, never the
       dispatcher bot), after VP 8; save the file-recs job log to $FILE_LOG and the run's jobs to $RUN_JOBS.
     command: >-
-      grep -E '\[decision_census\] summary open_merges=0 filed=0 updated=0 unchanged=0 owned=0 closed=0 ledger=none'
+      grep -E '\[decision_census\] summary open_merges=0 filed=0 updated=0 unchanged=0 closed=0 ledger=none'
       "$FILE_LOG" && bin/venv-python -c "import json,os;j=json.load(open(os.environ['RUN_JOBS']));
       jobs={x['name']:x.get('conclusion') for x in (j.get('jobs') if isinstance(j,dict) else j)};
       assert jobs.get('census')=='success' and jobs.get('file-recs')=='success',jobs;print('RUN_OK')"
@@ -362,7 +365,7 @@ verification_plan:
     graduation: not-applicable
 test_obligations:
   - source: scripts/checks/decisions/append_only_census_recs.py
-    behavior: One rec per open merge, update on change, in_progress owns, close on acknowledgement, re-file after an early close, ledger rollup, strict result load, write-failure exit.
+    behavior: One rec per open merge, update on change (title, context, acceptance), close on acknowledgement, re-file after an early close, ledger rollup, strict result load, write-failure exit.
     verification_step: 1
     test_selector: tests/checks/decisions/test_append_only_census_recs.py::TestFileOnFinding
     red_green_expectation: red before (absent), green after
@@ -453,9 +456,10 @@ context:
     (2026-11-19). Adopted: a credentialed second job consuming the census result; one rec per merge keyed by the full
     sha, digest in the context only; one auto-closing ledger rollup; no blind rec (exit 2 stays red plus loop
     liveness, 48 h for the daily cron); the census closes on acknowledgement and a Resolves trailer may close first;
-    re-file after an early close; in_progress owns; the CLI keeps exit 1 and the workflow is green once every finding
+    re-file after an early close; the CLI keeps exit 1 and the workflow is green once every finding
     has a rec; Medium; one PR; no Decision. Adapted (critique r1): the trailer route holds for per-merge recs only,
-    through a grep acceptance, since the census cannot replay in the probe's shallow sandbox. Rejected: none. Not here: reach to the operator (a rec is
+    through a grep acceptance, since the census cannot replay in the probe's shallow sandbox. Rejected (critique r3):
+    "in_progress owns", since the store has no in_progress status. Not here: reach to the operator (a rec is
     not a ping) is fleet-wide, for the coordinator.
   - >-
     Sequencing: the census build (PLAN-decision-append-only-census) merged in #2253 as 191d8a32 and #2198 merged as
@@ -483,13 +487,17 @@ context:
     #2253 cite; N3 closes scoped to replayed merges; N4 .venv/bin/python and exit 2 on a failed lookup; N5 line formats,
     null-pr title, automatable False; N6 why run_episode is not reused. Plan-critique r2: PROCEED, 5 nits, all fixed:
     quoted artifact value in the flow row; one reader read feeding find_recs twice; the header keeps the TestWiring
-    count at 1; the operator-confirmation read-back; VP 8's fix_if names the scheduled-run race.
+    count at 1; the operator-confirmation read-back; VP 8's fix_if names the scheduled-run race. Plan-critique r3
+    (confirming): REVISE, 1 blocking, 4 nits, all fixed: B1 "in_progress owns" dropped (no such rec status; the owned
+    verb and count go); N1 the title joins the compare-and-update set; N2 VP 2 and VP 3 run after the module commit;
+    N3 VP 7 treats a production hold as a reported deferral; N4 a checklist line enforces the Decision 235 record.
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:7618802ef4c005ab9d0b0545ba7bdb3258f42c02e5f0579baece7053fccae4f0"}  # pragma: allowlist secret
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:a5d4ecbd446f6424ea02fb6c0f5af273069f79bdaf38336431480f7784c6b43c"}  # pragma: allowlist secret
   - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:d2244f457b87ccd44ce9cbe40a2d9a2d90a807e30546e4459f97b1e8c9a5b9e6"}  # pragma: allowlist secret
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 4, nits: 6}
   - {gate: plan-critique, round: 2, verdict: PROCEED, blocking: 0, nits: 5}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 4}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -497,12 +505,14 @@ pre_implementation_checklist:
   - All files in scope located and readable
   - Acceptance criteria understood and verifiable
   - The census build (#2253) is merged; no open PR edits the scope files (list_pull_requests, files)
+  - Decision 235 cl.1 confirmation of the TestWiring change is recorded in context (date and the operator's answer); without it, stop
 execution_steps:
   - 1. Precondition, rebase onto main; read TestWiring's credential test and the census body-baseline rows as merged in #2253; VP 4's rec read.
   - 2. Tests red-first (including the TestWiring replacement); then --result in the census module; then the filer module; VP 1 until green.
   - >-
     3. Source registry row, regenerate field_semantics.yaml (bin/venv-python -m scripts.schema_to_field_semantics),
-    SCANNED_PATHS, workflow job, evidence-contract row, body-baseline rows, taxonomy rationale; VP 1, VP 2, VP 3.
+    SCANNED_PATHS, workflow job, evidence-contract row, body-baseline rows, taxonomy rationale; commit (VP 2 clones
+    and VP 3 checks out the committed HEAD, so both run only after the module changes are committed); VP 1, VP 2, VP 3.
   - >-
     4. Commit flow (implement skill; git-ops.yaml push_pr_ci_merge_flow): 'Resolves: rec-5410' in the squash body; VP 5
     before handoff; merge on green CI.
