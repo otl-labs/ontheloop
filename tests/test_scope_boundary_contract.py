@@ -397,7 +397,8 @@ class TestPlanDefectLoop:
         escalation = _load_contract()["deviation_trigger"]["escalation"]
         assert "standing direction" in escalation
         assert (
-            "an approved_text or contract fix, or any loosened assertion, still needs the human's own approval" in escalation
+            "a fix to gated text (docs/contracts/approval-routing.yaml) or any loosened assertion "
+            "still needs the human's own approval" in escalation
         )
         assert "nothing is loosened to obtain green" in escalation
 
