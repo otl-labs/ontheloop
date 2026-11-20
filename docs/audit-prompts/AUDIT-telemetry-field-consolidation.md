@@ -11,8 +11,8 @@ what, if anything, should be merged, retired, derived at read or declared -- and
 exactly as it is. Two concerns prompted this audit. (1) The operator considers the declared field
 count excessive. (2) Planning agents twice proposed a new telemetry column for a fact that was
 already stored (see the operator rulings of 2026-11-20 recorded on rec-4701 and rec-5079, and the
-context of rec-5440). Those incidents produced three open recommendations: rec-5440, rec-5438 and
-rec-5439 (the "data estate inventory", phases 1 and 2). This audit is the umbrella over them:
+context of rec-5440). Those incidents produced three open recommendations, the "data estate
+inventory": phase 1 is rec-5440; phase 2 is rec-5438 and rec-5439. This audit is the umbrella over them:
 reuse them, assess whether they are sufficient, and extend them where your findings warrant it.
 The contracts' primary readers are LLM agents, not humans. Judge size and findability by what an
 agent pays to use the field set correctly (NS8, Section 6), not by how it reads to a person.
@@ -44,9 +44,18 @@ This prompt hands you FACTS (Section 10) and CANDIDATE hypotheses (below), never
 NO CANDIDATE IS A REAL DEFECT UNTIL YOU TRACE IT. A run that merely confirms the candidates below
 has failed. "The field set is fine as it is" is a full-credit outcome if you argue it.
 
-Adjudicate each candidate, and each candidate you add, to exactly one row of this table. An
-"owner" is an open recommendation, an open roadmap item or criterion, an approved plan in
-`docs/plans/`, or the `held:feedback-loop-gate` label (see the note after the table).
+Adjudicate each candidate, and each candidate you add, to exactly one row of the table below.
+Terms used in the table and throughout this prompt:
+- An "owner" is an open recommendation, an open roadmap item or criterion, an approved plan, or
+  the `held:feedback-loop-gate` label.
+- A Decision is an owner only when its text orders the specific remedy at issue. A Decision that
+  merely governs the area (for example 199, 207, 210 or 216) is context: cite it in
+  `roadmap_crossref.note`, not in `item_ids`, and it does not stop a finding from being `novel`.
+- An "approved plan" is any `docs/plans/PLAN-*.yaml` file on main; plans merge only after
+  approval.
+- A "live owner" is an open recommendation, an open roadmap criterion, or an approved plan not
+  yet built, whose text names the field or fact at issue. The `held:feedback-loop-gate` label
+  alone is not a live owner.
 
 | Situation after you trace it | Goes to | `roadmap_crossref.classification` |
 |---|---|---|
@@ -61,8 +70,8 @@ Notes on the table:
   remedy. Classify a real defect on it `planned-insufficient`, with `item_ids` including
   `held:feedback-loop-gate` and rec-4606 (which owns the hold's in-repo record).
 - A finding that challenges a Decision-ratified design choice (Section 13) is a Decision revisit.
-  Classify it `novel` unless an owner already proposes the revisit; `item_ids` names the Decision
-  as `Decision NNN`.
+  Classify it `novel` unless an owner already proposes the revisit, in which case `item_ids`
+  lists that owner. Either way, name the Decision as `Decision NNN` in `roadmap_crossref.note`.
 
 Coverage rule: every id C1-C16 appears exactly once, either in one finding's `candidate_ids` or as
 one `rejected_candidates[].candidate`. One finding may cover several candidates. When parts of one
@@ -166,11 +175,18 @@ Candidates. Anchors were taken at compose time; re-derive them per Section 4.
   and `duration_seconds` appear on several contracts, for different entities or with different
   value lists. Conversely, one fact can sit under a generic column qualified by a discriminator
   value (`purpose`, `observation_type`, `event_kind`).
-- sessions `workflow` is a workflow LABEL, not a skill name. sessions.py `_workflow` uses the
-  root's first-prompt command tag when it is a known workflow; otherwise it uses the first Skill
-  call mapped through the closed `WORKFLOW_SKILLS` map (which renames, for example
-  planning -> plan); otherwise `claude_code` or `subagent`. agents `workflow_run_id` is a GitHub
-  Actions run id, unrelated to sessions `workflow`.
+- sessions `workflow` is a workflow LABEL, not a skill name. sessions.py `build_sessions` sets it
+  as follows:
+  - on a top-level CI root with a host-run sidecar: the agent's source_registry key;
+  - otherwise via `_workflow`: the root's first-prompt command tag when it is a known workflow;
+    else the first Skill call mapped through the closed `WORKFLOW_SKILLS` map (which renames, for
+    example planning -> plan); else `claude_code` or `subagent`.
+
+  agents `workflow_run_id` is a GitHub Actions run id, unrelated to sessions `workflow`.
+- Two different "R7"s appear in this prompt. The envelope's R7 is a producer's re-parse
+  obligation on a parser_version bump. The realization check's R7 is owner well-formedness.
+- "lean" is a value of three different enums (Q1, Q5 and maturity), with a different meaning in
+  each. Read it by its slot.
 - The `metadata` key `agent_id` (a harness agent id on a tool_call close row) is not agents
   `agent_run_id` (the run's identity key) and not agents `agent_name` (the spawn label).
 - `external_ref` and `entity_ref` are both record references. The envelope's `external_ref`
@@ -222,11 +238,17 @@ fields. It covers:
 - data-modeling-standard.yaml `design_time_walk`;
 - `_joins.yaml`;
 - telemetry-lexicon.yaml;
-- the reader's describe output;
-- the planning skill's "Data-Model Assessment" section (.claude/skills/planning/SKILL.md).
+- the reader's describe output: run `make_routed_reader().describe()` from
+  scripts.telemetry_capture.read_route; it is produced by src/common/ducklake_event_reads.py
+  `describe_all`;
+- the planning skill's "Data-Model Assessment" section (.claude/skills/planning/SKILL.md);
+- the plan-critique and decision-scout skills (.claude/skills/plan-critique/SKILL.md,
+  .claude/skills/decision-scout/SKILL.md);
+- the recommendation-write guidance (scripts/executor/rec_write_guidance.py).
 
 Findings that extend rec-5440, rec-5438 or rec-5439 normally land here. You may assess these files
-and propose changes to them; you edit none of them.
+and propose changes to them, even where their code is listed below as context only; you edit none
+of them.
 
 A finding whose subject spans several of the first seven surfaces uses `surface: shared` and lists
 them in `surfaces_affected`.
@@ -327,7 +349,8 @@ Run these first. NEVER abort on a failure -- take the named degraded path.
 
 0. Hook canary (repo rule, AGENTS.md). If your opening context has no `[hook_canary]` line from
    this repo's hooks: say "repo hooks not loaded" as your first status, write nothing, and end the
-   turn; the operator resolves it. This is the one sanctioned stop in this prompt.
+   turn; the operator resolves it. This is the only sanctioned stop before work begins; Section 16
+   names the end-of-turn exits after the deliverables exist.
 1. Derive the base:
    - Run `git fetch origin main`, then `git rev-parse --short origin/main`. This sha IS the
      audited tree; use it in both deliverable filenames, the branch name and
@@ -370,7 +393,7 @@ Run these first. NEVER abort on a failure -- take the named degraded path.
    `bin/venv-python -c "import yaml; d=yaml.safe_load(open('docs/ROADMAP-PLATFORM.yaml')); print(len(d['tier_items']))"`.
    IF it errors, record that in `meta.contract_notes` and read the YAML as text.
 5. Telemetry reader: the first call of the empirical pass (Section 11) is your reachability probe.
-   IF it raises:
+   IF the reader raises, or if no window in Section 11 returns a root session:
    - print only the exception class name (an AWS error message can contain an account id);
    - set `meta.degraded_empirical = true` and tag every finding `evidence_kind: static`;
    - open the `.md` report with that fact;
@@ -425,21 +448,23 @@ not absolute: argue them; do not pattern-match them.
 Where a verdict below has thresholds, apply them. Where it says "your judgment", choose the value
 and give its basis in `prose`.
 
-- Q1 Overlap among written fields. For every `stored_written` field: is it independently
-  necessary, a copy of another stored field, or computable from other stored fields (apply the
-  Section 11 counterfactual)? Verdict, by the number of stored_written fields you give `merge` or
-  `derive_at_read`: lean (0) | some_redundancy (1-4) | substantial_redundancy (5 or more).
+- Q1 Overlap among written fields. For every `stored_written` field, and every bookkeeping field
+  a candidate names (for example C4 and C12): is it independently necessary, a copy of another
+  stored field, or computable from other stored fields (apply the Section 11 counterfactual)?
+  Verdict, by the number of fields of any kind you give `merge` or `derive_at_read`: lean (0) |
+  some_redundancy (1-4) | substantial_redundancy (5 or more).
 - Q2 Unwritten fields. For every `declared_unwritten` field: should it be produced, kept reserved
-  under a live owner, or retired -- and by which mechanism (DD-C)? No field is exempt. Verdict, by
-  the share of declared_unwritten fields you give `retire`, or that have no live owner:
-  justified (none) | partly_justified (some, under half) | unjustified (half or more).
+  under a live owner (Section 2), or retired -- and by which mechanism (DD-C)? No field is exempt.
+  Verdict, by the share of declared_unwritten fields that you give `retire`, or that have no live
+  owner: justified (none) | partly_justified (some, under half) | unjustified (half or more).
 - Q3 Undeclared facts. Which keys does each registered producer write into `metadata` (DD-A)?
   Which carry a fact no contract field declares; which duplicate a declared column or a typed
   column's inputs; which does any code read? `metadata` is the only JSON-carrying column
-  (scripts/telemetry_verify/compare.py `JSON_COLUMNS`); confirm that, and name any other
-  free-form text column that carries structured facts. Verdict, by the share of hidden_key rows
-  you give `declare`: declared (none) | partly_declared (some, under half) | undeclared (half or
-  more).
+  (scripts/telemetry_verify/compare.py `JSON_COLUMNS`); confirm that. Name, in Q3's `prose`, any
+  other free-form text column that carries structured facts, and raise a finding if it warrants
+  one. Verdict (current state), by the share of fact-carrying hidden keys that no contract text
+  names -- not the `metadata` entry's semantics, not another contract: declared (none) |
+  partly_declared (some, under half) | undeclared (half or more).
 - Q4 Findability. Which stored facts would an agent fail to find, or find wrongly, from what it
   reads in this repository (contracts first, then code)? Consider:
   - a generic column qualified by a discriminator value;
@@ -448,10 +473,12 @@ and give its basis in `prose`.
   - a fact held only in `metadata` or only in transcript content;
   - a design step that never asks whether a fact exists.
 
-  Measure this with DD-B, and assess rec-5440, rec-5438 and rec-5439 for sufficiency. Verdict,
-  from DD-B's seven non-control items: findable (6-7 graded correct) | partly_findable (3-5) |
-  not_findable (0-2). If either control item is not graded correct, say so in `prose`, and treat
-  the probe as weak evidence.
+  Measure this with DD-B, and assess rec-5440, rec-5438 and rec-5439 for sufficiency. Verdict, by
+  the share of DD-B's valid non-control items (items 1-6 and 9, excluding any marked
+  `contaminated`) graded correct: findable (85% or more) | partly_findable (40-84%) |
+  not_findable (under 40%). If either control item is not graded correct, still apply these
+  thresholds, but say so in `prose`, add "probe controls failed" to every VD4 rating's `note`,
+  and mark findings that rest on the probe HYPOTHESIS.
 - Q5 Size against practice. Is this field set lean, proportionate or excessive for agent and
   LLM-call telemetry read by agents? Assess the EXTERNAL CHECKLIST property by property, rating
   each met | partial | missed with evidence, AND judging for each whether its rationale transfers
@@ -477,8 +504,9 @@ and give its basis in `prose`.
   - what the change costs here (Section 10, G7 and G8);
   - which stored history it affects;
   - whether it has ever held a value (`ever_non_null`, DD-C);
-  - for a declare verdict, the bytes it adds to the target contract, and whether they fit that
-    contract's byte headroom or need compaction or a Decision 275 raise.
+  - for any verdict that adds contract text (declare, or a merge that adds a note), the bytes and
+    effective lines it adds to the target contract, and whether they fit that contract's
+    headroom (Section 10, G7) or need compaction or a Decision 275 raise.
 
   Then set `timing` on each such row: do it alone now, batch it with the next column change on
   that table, or leave it. The Q6 verdict is the timing you recommend for the highest-leverage
@@ -496,8 +524,9 @@ and give its basis in `prose`.
     What is missing?
   - (g) Which practices in Q5 or Section 6 do NOT transfer to an agent reader, and what
     agent-specific practice, if any, replaces them?
-  - (h) Where do the contracts' bytes go (Section 10, G7), and is per-field prose -- amendment
-    logs, semantics, governance notes -- rather than field count the dominant cost an agent pays?
+  - (h) Where do the contracts' bytes go (Section 10, G7)? Which of these dominates what an agent
+    pays to find and read a fact, if any: the number of fields, the per-field prose (amendment
+    logs, semantics, governance notes), or something else?
 
 ## 8. RUBRIC
 
@@ -509,8 +538,9 @@ example VD5 on persona_findings). Never manufacture a rating or a finding to fil
 - VD2 Non-redundancy -- no fact is stored twice or beside its own inputs without a declared reason
   (Q1, Q6).
 - VD3 Declaredness -- every stored fact, including `metadata` keys, has a contract entry (Q3).
-- VD4 Agent findability -- an agent locates and correctly reads a fact by its meaning at low cost,
-  as measured by DD-B (Q4, Q5).
+- VD4 Agent findability -- an agent locates and correctly reads a fact by its meaning at low cost
+  (Q4, Q5). Rate it from the DD-B items mapped to the surface (DD-B gives the map). For a surface
+  with no mapped item, rate it from your own static reading and put "no probe item" in `note`.
 - VD5 Liveness -- declared fields are written, or owned by a live owner with a reason (Q2).
 - VD6 Consistency -- one concept has one name, type, value list and meaning across tables (Q1,
   Q5).
@@ -535,28 +565,47 @@ DD-A Metadata key census (feeds Q1, Q3, C5-C7, C13, C16).
    `field: metadata.<key>`, `kind: hidden_key`. The row types that carry the key go in `evidence`.
 
 DD-B Agent findability probe (feeds Q4, Q5, Q7, VD4; operationalises NS8).
+- Before dispatching, write your own answer key for all nine items from your field table, into
+  each item's `correct_location`. Write it as "all of: ..." or "any of: ..." so grading is
+  mechanical.
 - Dispatch exactly ONE fresh subagent with no shared context. Give it read access to the
   repository, which is what a planning agent has. Forbid it: the telemetry warehouse, the web,
-  this prompt file, the `audits/` directory, and `logs/`.
+  and the paths `docs/audit-prompts/`, `audits/` and `logs/`. This prompt is on main and states
+  the answers, so require every search it runs to exclude those paths (for example
+  `rg --glob '!docs/audit-prompts/**' --glob '!audits/**' --glob '!logs/**' ...`), and require it
+  to report every search command and every file it opened.
 - Give it the nine items below verbatim, in plain words. You may replace at most two of items 1-6
   with questions your own findings make more decisive, keeping them in plain words with no table,
-  column or key names. Items 7-9 are fixed. Never pass it the answer key.
+  column or key names. Items 7-9 are fixed. Never pass it your answer key or any candidate text.
 - Ask it, for items 1-8: where the fact is stored (table and column; or table, `metadata` key and
   discriminator value; or "derived at read by <verb>"; or "not stored"). For item 9, ask for the
   storage change it would make. For every item, ask for the searches it ran, the files it opened,
   approximate bytes read, whether the answer came from contracts, code or both, and its total
   tool calls. Cap its report at about 1,200 words.
+- Contamination: mark an item `contaminated: true` if its reported searches or files touched a
+  forbidden path, or if it reports no search log. A contaminated item keeps its grade but gets
+  `confidence: HYPOTHESIS`, and is excluded from Q4's share.
 - Grading:
-  - correct: names every stored location the verified key lists, with the discriminator value or
-    link where the key has one. For item 9: recognises that the fact is already stored and
-    proposes no new stored field.
-  - partly: names a location that holds the fact, but misses a qualifier, the link, or a second
-    location the key lists.
-  - wrong: names a location that does not hold the fact, or says "not stored" for a stored fact.
+  - correct: meets the key ("all of" means every listed location; "any of" means at least one),
+    with the discriminator value or link where the key has one. Naming an extra location that
+    also holds the fact does not lower the grade. For item 9: recognises that the fact is already
+    stored and proposes no new stored field.
+  - partly: names a location that holds the fact, but misses a qualifier, the link, or a location
+    an "all of" key requires; or adds an extra location that does not hold the fact.
+  - wrong: names only locations that do not hold the fact, or says "not stored" for a stored fact.
     For item 9: proposes a new column or key for a stored fact.
   - not_found: gives no location.
 
-  Record each grade and `answered_from` in `findability_probe`.
+  Record each grade, `answered_from` and `contaminated` in `findability_probe`.
+- Item-to-surface map, for VD4:
+  - item 1 and item 2 -> telemetry_transcripts;
+  - item 3 -> observations_metadata;
+  - items 4, 7 and 9 -> telemetry_observations;
+  - items 5 and 6 -> telemetry_agents;
+  - item 8 -> telemetry_sessions.
+
+  envelope and persona_findings have no item. A replacement item takes the surface its answer
+  lives on.
 - Bounds: one subagent, nine items, no re-dispatch. If its report is empty, truncated or over the
   cap, grade whatever it answered, grade the rest `not_found`, and note it in
   `findability_probe.summary`.
@@ -577,22 +626,8 @@ The nine items:
 9. (design) "You are planning a change that needs, for every tool call, a digest of the tool's
    output, so that identical repeated outputs can be counted. What storage change would you make?"
 
-Compose-time answer key, for grading only. Verify each item yourself before grading; Q7(c) asks
-you to test the premises of items 1 and 2.
-1. transcripts `content_sha256` on the `purpose` tool_input row, linked to the tool_call by the
-   `external_ref` prefix (C10).
-2. Only inside the tool_input transcript content, which the production reader does not serve.
-   sessions `workflow` holds a mapped workflow label for some skills (Section 3), not the skill
-   name.
-3. observations `metadata.exit_code` on hook process_event rows. The `exit_code` column is
-   unwritten.
-4. observations `model` and `requested_model` on model_call rows.
-5. agents `workflow_run_id`, also embedded in `host_run_ref`.
-6. agents `definition_sha256`.
-7. observations `tokens_output` on model_call rows.
-8. sessions `branch`.
-9. Already stored: observations `output_sha256` (with `output_bytes`) on tool_call close rows. No
-   new stored field is needed; rec-5250 counts re-fetches at read.
+No answer key is given here. Derive yours from your field table; Q7(c) asks you to test the
+premises behind items 1 and 2, so derive those two with particular care.
 
 DD-C Retire and merge evidence (feeds Q2, Q6). For each declared_unwritten field and each field
 you consider for merge or retire, determine `ever_non_null` from:
@@ -604,8 +639,14 @@ you consider for merge or retire, determine `ever_non_null` from:
   version, trigger, error, name), and whenever the clone is shallow, step (iii) is inconclusive
   unless a hit is in a telemetry row builder;
 - (iv) the realization check, which refuses an unproduced field that is non-null in any golden
-  row (rule R5);
+  row (rule R5). Run it with
+  `bin/venv-python -m pytest -q tests/checks/contracts/test_validate_telemetry_field_realization.py -k live_repository`,
+  and search the golden corpus with
+  `rg -l '"<name>"' tests/fixtures/turn_capture/golden/`;
 - (v) sampled rows across parser versions.
+
+For a hidden key (`metadata.<key>`), sources (i), (ii) and (iv) do not apply: use (iii), searching
+for the key name, and (v). A key observed non-null in sampled rows is `yes`.
 
 Set `ever_non_null`:
 - `yes` when any source shows a value;
@@ -736,6 +777,12 @@ ruling dated 2026-11-20 of "no new column", because the fact is already stored:
 rec-5440 states the root causes: the design walk never asks whether a fact exists, and the
 contracts point the tool_input join at the model_call.
 
+The trail of the proposals, as evidence of where they arose:
+- docs/plans/reports/REPORT-feedback-loop-regrounding.md, a REPORT-ONLY report, proposes
+  `input_key` as a producer field (proposal S3, rec-5079).
+- docs/plans/PLAN-telemetry-hook-block-markers.yaml records the input key and the skill name
+  "moved to their own typed-column plan (operator, 2026-11-18)".
+
 G6 Compose-time empirical seeds (one tree, a root session of 2026-11-19, counts only):
 - 2,111 observation rows and 1,352 transcript rows, all at parser_version 11;
 - 643 tool_call open rows, each matching exactly one tool_input transcript row by `external_ref`
@@ -769,21 +816,33 @@ G7 Size facts. In-scope contract bytes:
 
 That is about 276 KB in total.
 
-Compose-time line-attributed breakdown across the six contracts (recompute before relying on a
-figure):
-- Field entries hold about 192 KB. Within them: `amendment_log` 62 KB, `semantics` 47 KB,
-  `description` 21 KB, `governance_notes_local` 16 KB, `derivation` 12 KB, `populated_by` 11 KB,
-  `dq_intent` 8 KB, `$ref` 4 KB.
-- Top-level `governance_notes` hold about 36 KB (22 KB of it in the envelope).
+Compose-time line-attributed breakdown across the six contracts. Attribution methods differ by a
+few percent; recompute before relying on a figure.
+- Field entries hold about 192 KB. Within them: `amendment_log` about 61 KB, `semantics` about
+  47 KB, `description` about 21 KB, `governance_notes_local` about 16 KB, `derivation` about
+  12 KB, `populated_by` about 11 KB, `dq_intent` about 7 KB, `$ref` about 4 KB.
+- Top-level `governance_notes` hold about 36 KB (about 22 KB of it in the envelope).
 - Top-level `amendment_log` blocks hold about 28 KB.
+
+Effective lines (scripts/checks/structural/_classify.py `effective_lines`, limit 500):
+
+| Contract | Effective lines |
+|---|---|
+| sessions | 499 |
+| observations | 498 |
+| agents | 485 |
+| transcripts | 435 |
+| envelope | 439 |
+| persona_findings | 214 |
 
 Budgets: in config/structural_size_budgets.yaml, the contracts class has `limit: 500` effective
 lines and `max_bytes: 49152`, and its `actual_purpose` reads "the densest agent-consumed field
 semantics in the repository". `byte_budgets` grandfathers the envelope, observations and sessions
 at exactly the sizes above; per that file's comment, the roster "Ratchets DOWN only", and a raise
 needs a Decision (Decision 275). So the envelope, observations and sessions have zero byte
-headroom, and agents has 257 bytes below `max_bytes`. Adding a declaration costs bytes; removing
-one frees them.
+headroom, and agents has 257 bytes below `max_bytes`. Sessions and observations also sit within
+two effective lines of the 500 limit. Adding a declaration costs bytes and lines; removing one
+frees them.
 
 G8 Cost chain of a column change:
 - Wording of a Class A semantic change is approved by the operator on GitHub (workflow
@@ -813,7 +872,7 @@ G9 Governing Decisions (headers in docs/DECISIONS.md):
 | 222 | smoke column add |
 | 230 | production telemetry catalog |
 | 236 | production serves no transcript content |
-| 238 | withheld content policy (its cl.1) |
+| 238 | no agent-controlled identity reads Terraform state or saved plans; transcripts `content_omitted_reason` cites its cl.1 as the reason plan-review transcripts are withheld |
 | 239 | masked content reader |
 | 246 | wording approved on GitHub |
 | 275 | contract byte budget |
@@ -836,7 +895,7 @@ bin/venv-python - <<'EOF'
 from scripts.telemetry_capture.read_route import make_routed_reader
 from scripts.telemetry_verify.rows import read_tree, decode_rows
 r = make_routed_reader()
-roots = r.named("telemetry_root_sessions", day_from="2026-11-14", day_to="2026-11-20")
+roots = r.named("telemetry_root_sessions", day_from="2026-10-20", day_to="2026-10-26")
 rows = decode_rows(read_tree(r.named, roots[0]["session_id"]))   # {table_name: [row dicts]}
 print(len(roots), {t: len(v) for t, v in rows.items()})
 EOF
@@ -850,15 +909,20 @@ Bounds -- do NOT exceed:
 - at most 3 calls to `telemetry_root_sessions`, each window at most 7 UTC days;
 - at most 12 trees read in total.
 
-Sampling plan:
-- Windows: first call 2026-10-20..2026-10-26 (it returned rows at compose time). If it returns
-  none, make the second call 2026-10-27..2026-11-02. Use the remaining call or calls for a middle
-  window and the latest window.
-- Take trees from at least 3 distinct days and as many parser versions as the windows offer. If
-  fewer than 3 parser versions appear, record what you sampled in `meta.parser_versions_sampled`
-  and proceed.
-- Include a top-level CI run tree (a root whose `host_run_ref` is non-null) if any window returns
-  one, and a `litellm` or `ci_annotate` tree if those producers are registered.
+Sampling plan (the snippet above is the first call):
+- Windows:
+  - W1: 2026-10-20..2026-10-26. At compose time it returned 12 roots.
+  - W2: 2026-11-03..2026-11-09. At compose time it returned 87 roots, 2 of them with a non-null
+    `host_run_ref`.
+  - W3: the 7 UTC days ending yesterday.
+  - If W1 returns no roots, make W2 2026-10-27..2026-11-02 instead, and keep W3.
+- Trees: about 4 per window, from distinct days where the window allows, 12 in total.
+- The root listing returns, per root, `session_id`, `session_started_at`, `host_run_ref` and other
+  stamps. A non-null `host_run_ref` marks a top-level CI run: include up to 2 such roots. If a
+  producer other than claude_code is registered, check the `producer` values in the trees you
+  read; if none of them carries that producer, record "not sampled" in `meta.contract_notes`.
+- Sample as many parser versions as the windows offer. If fewer than 3 appear, record what you
+  sampled in `meta.parser_versions_sampled` and proceed.
 
 Privacy -- you may print only:
 - counts and null rates;
@@ -911,13 +975,17 @@ hit count on the finding:
 - a `yaml.safe_load` projection of `tier_items` and `candidate_decisions` in
   `docs/ROADMAP-PLATFORM.yaml` (T3.20, T3.22, T3.3, T3.4, T4.32 and T2.52 own nearby work);
 - `scripts.recs_related --terms`;
-- the approved plans in `docs/plans/` named in Section 4.
+- `rg` over `docs/plans/` (approved plans and REPORT-ONLY reports) for the finding's subject
+  terms.
 
-A hit is an owning item -- a Decision, a roadmap item or criterion, an open recommendation, or an
-approved plan -- whose stated scope covers the finding's subject. `dedup_hit_count` counts owning
-items, not raw search matches; record the raw terms in `dedup_search_terms`. A hit leads to the
-Section 2 table (planned-insufficient, planned-unbuilt or rejected_candidates), never to a fresh
-`novel` discovery. A finding with no recorded negative search is HYPOTHESIS.
+A hit is an owner in Section 2's sense whose stated scope covers the finding's subject: an open
+recommendation, an open roadmap item or criterion, an approved plan, the `held:feedback-loop-gate`
+label, or a Decision whose text orders the specific remedy. A Decision that merely governs the
+area is not a hit; cite it in `roadmap_crossref.note`. `dedup_hit_count` counts hits, not raw
+search matches; record the raw terms in `dedup_search_terms`. A hit leads to the Section 2 table
+(planned-insufficient, planned-unbuilt or rejected_candidates), never to a `novel` finding. A
+finding with no recorded negative search gets HYPOTHESIS in both its `confidence` and its
+`roadmap_crossref.confidence`.
 
 Owners already known (summaries as read 2026-11-20; re-read the bodies per Section 5 step 3):
 
@@ -956,8 +1024,9 @@ Each may also be weighed as a cost in Q5 and Q7.
 - `producer`, `event_id` and `parser_version` form the grain key (Decision 207).
 - The ordinary reader serves no transcript content (Decision 236); text is read masked
   (Decision 239).
-- A withheld row stores the empty-string digest (Decision 238 cl.1 sets the withheld policy;
-  telemetry_transcripts.yaml `content_sha256` write-enforces the digest).
+- A withheld row stores the empty-string digest. telemetry_transcripts.yaml `content_sha256`
+  write-enforces it, and `content_omitted_reason` cites Decision 238 cl.1 as the reason
+  plan-review transcripts are withheld.
 
 ## 14. OUTPUT
 
@@ -999,9 +1068,9 @@ audit:
   findability_probe:
     mode: subagent|static_estimate
     items:
-      - {n: 1, item: "", answer_given: "", grade: correct|partly|wrong|not_found,
-         answered_from: contracts|code|both|none, correct_location: "", files_opened: 0,
-         bytes_read_approx: 0, confidence: CONFIRMED|HYPOTHESIS, note: ""}
+      - {n: 1, item: "", surface: "", answer_given: "", grade: correct|partly|wrong|not_found,
+         answered_from: contracts|code|both|none, contaminated: true|false, correct_location: "",
+         files_opened: 0, bytes_read_approx: 0, confidence: CONFIRMED|HYPOTHESIS, note: ""}
     tool_calls_total: 0
     summary: ""
   per_surface_assessment:
@@ -1048,6 +1117,9 @@ Rules:
   - one row for EVERY stored_written field and EVERY declared_unwritten field (one per table and
     field name), and one per distinct hidden_key (DD-A step 4). Bookkeeping and read_derived
     fields get a row only when a finding concerns them, one per table and field.
+  - `table` is the contract's table name (telemetry_sessions, telemetry_observations,
+    telemetry_agents, telemetry_transcripts, telemetry_persona_findings), or `envelope` for a
+    row about the envelope contract's own entry.
   - Verdict meanings:
     - keep: needed as is;
     - merge: fold into `overlaps_with`;
@@ -1073,6 +1145,11 @@ Rules:
 - `surfaces_affected` lists the rubric surfaces a finding bears on. It is the finding's single
   surface for a single-surface finding, and may be empty for a `design_and_lookup_path` finding.
 - `surfaces_missed` is non-empty if and only if `rating` is missed.
+- `effort`, sized in this repository's units of work:
+  - XS: a wording-only contract or doc change, in one PR;
+  - S: one PR touching code or one contract, with its test;
+  - M: one plan of two or three PRs, or one that needs a parser_version bump;
+  - L: several plans, or a production column change (Section 10, G8).
 - Length caps: each `evidence`, `cost`, `note` and `why_dismissed` string is at most 300
   characters; each `prose` and Q7 `answer` is at most 250 words.
 - COUNTING INVARIANT:
