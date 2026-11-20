@@ -11,7 +11,7 @@ case "$PAYLOAD" in
 esac
 
 STATUS=2
-trap 'exit $STATUS' EXIT
+trap '[ "$STATUS" -eq 2 ] && echo "HOOK-BLOCK v1 hook=merge_gate" >&2; exit $STATUS' EXIT
 
 ROOT="${CLAUDE_PROJECT_DIR:-}"
 if [ -z "$ROOT" ]; then
