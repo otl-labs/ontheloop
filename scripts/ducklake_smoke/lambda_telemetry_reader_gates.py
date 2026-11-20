@@ -25,7 +25,13 @@ _LOGIN = "ducklake_telemetry_reader"
 _SERVED = frozenset(EVENT_READS) - {"transcript_content"}
 _TABLES = frozenset({"telemetry_sessions", "telemetry_observations", "telemetry_transcripts", "telemetry_agents"})
 _OPS_VERB = "open_recs_tally"
-_USAGE_VERBS = ("model_usage_rollup", "tool_use_rollup", "session_startup_baseline", "session_tree_rollup")
+_USAGE_VERBS = (
+    "model_usage_rollup",
+    "tool_use_rollup",
+    "session_startup_baseline",
+    "session_tree_rollup",
+    "friction_signature_counts",
+)
 _SUCCESS = (
     "LAMBDA_TELEMETRY_READER OK unsigned=403 describe=200 attach_check=ok query_ops=400 content=400 direct_invoke=denied"
 )

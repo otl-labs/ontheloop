@@ -1,0 +1,471 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "pypi-and-gated-apply-environments"
+intent: >-
+  Close the last two GitHub Environment gaps in terraform/github: bring the UI-managed pypi Environment (the PyPI
+  Trusted Publishing gate of publish-ontheloop.yml) under Terraform with its required reviewer, no admin bypass and
+  an explicit main-only branch policy (rec-4549), and replace tf-gated-apply's "protected branches only" setting,
+  which admits every branch under this repo's ruleset-only main, with the same explicit main-only policy (rec-4651).
+  Both land through the reviewed terraform-github-apply.yml channel (Decision 248) on one operator approval, so every
+  reviewer-gated Environment but the approval probe refuses a non-main run before it can ask for approval.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-pypi-and-gated-apply-environments.yaml
+phase: >-
+  ad_hoc_rec (rec-4549, rec-4651; no tier_item). Serves the CI Reform remit (all CI/CD). Closes no roadmap criterion.
+cites: [dec:126, dec:172, dec:248, dec:277]
+scope:
+  - file: terraform/github/environments.tf
+    action: Modify
+    purpose: >-
+      (1) tf_gated_apply: deployment_branch_policy becomes protected_branches = false, custom_branch_policies = true;
+      add github_repository_environment_deployment_policy.tf_gated_apply_main (environment =
+      github_repository_environment.tf_gated_apply.environment, branch_pattern = "main"). Nothing else in the block
+      changes (reviewers, prevent_self_review and prevent_destroy stay; can_admins_bypass stays unset, see context).
+      Its header's key-constraints bullet and the "may let any branch deploy" note are rewritten to say the policy is
+      main-only (rec-4651), and the authorization-boundary paragraph names Decision 172's immutable subject form beside
+      Decision 94's two subs, saying Decision 277 cl.1 now carries that ruling (Decision 277 supersedes Decision 94;
+      rec-3151's acceptance still greps 'Decision 94', so both numbers stay) (rec-3151). (2) New github_repository_environment.pypi: environment "pypi",
+      prevent_self_review = false, can_admins_bypass = false, reviewers { users = var.gated_apply_reviewer_user_ids },
+      deployment_branch_policy { protected_branches = false, custom_branch_policies = true }, lifecycle
+      prevent_destroy = true; plus github_repository_environment_deployment_policy.pypi_main (branch_pattern "main").
+      Its header says it is publish-ontheloop.yml's PyPI Trusted Publishing gate, imported from the UI-created object
+      (rec-4549), that the name is part of PyPI's trust triple (package-registry-reservation.yaml
+      pypi_trusted_publisher, never renamed), and that destroying it fails open like tf_gated_apply. (3) The
+      deployment_approval_probe comment drops "Inert probe target", names Decision 248 cl.8 as its user (the apply App
+      approval oracle, terraform-github-apply.yml approval_probe_run_id) and says it mirrors tf_gated_apply's reviewer
+      settings but keeps protected-branches-only (rec-5098). It keeps "never referenced by any OIDC trust and never by a
+      job holding id-token or secrets" as the standing rule (PLAN-github-environment-tidy's one-off claims job ran with
+      the operator's agreement and does not change it). No other block changes.
+  - file: terraform/github/imports.tf
+    action: Modify
+    purpose: >-
+      Append one block: to = github_repository_environment.pypi, id = "${var.repository_name}:pypi". The two new
+      deployment policies get no import block (no remote object exists; EXEMPT rows in the import-block test).
+  - file: scripts/checks/ci_guards/validate_environment_reviewer_preflight.py
+    action: Modify
+    purpose: >-
+      UI_MANAGED becomes an empty dict annotated dict[str, str] (predicate (b) itself is unchanged and still fails a name in both places); the
+      docstring's (b) line is unchanged. Without this the real tree fails (b) once pypi is declared in HCL.
+    new_imports: []
+  - file: tests/checks/ci_guards/test_validate_environment_reviewer_preflight.py
+    action: Modify
+    purpose: >-
+      test_b_ui_managed_name_also_declared_in_hcl_fails monkeypatches v.UI_MANAGED to {"pypi": "rec-4549"} before
+      calling check_environment_names, so predicate (b) keeps its red case on the same name; add
+      test_pypi_is_declared_in_hcl asserting "pypi" in v.declared_environments(tree[1]) with reviewers and no_bypass
+      true and "pypi" not in v.UI_MANAGED. No assertion is removed or weakened.
+  - file: tests/checks/iam_tf/test_terraform_github_import_blocks.py
+    action: Modify
+    purpose: >-
+      Add EXEMPT rows for github_repository_environment_deployment_policy.tf_gated_apply_main and .pypi_main with a
+      reason naming this plan (created by the approved terraform-github-apply.yml dispatch that names them in
+      gate_change; no remote object before it). github_repository_environment.pypi is NOT exempt: the existing test
+      then requires its import block.
+  - file: tests/checks/iam_tf/test_tf_gated_apply_branch_policy.py
+    action: Create
+    purpose: >-
+      rec-4651's acceptance test. Static over terraform/github/*.tf via tests/fixtures/terraform_hcl_blocks, with an
+      EXEMPT set {"deployment_approval_probe"}: (a) test_every_environment_but_the_probe_is_main_only -- at least two
+      environments are examined (fail closed on an empty parse), the examined set includes tf-gated-apply and pypi, and
+      every github_repository_environment not exempt sets protected_branches = false and
+      custom_branch_policies = true and has exactly one github_repository_environment_deployment_policy referencing it
+      (by github_repository_environment.X.environment or by a literal "<env name>" environment argument, as
+      test_persona_verdict_role.py does) with branch_pattern "main" and no tag_pattern; (b) test_gated_environments_keep_their_reviewer -- tf_gated_apply and pypi must both be declared (a missing block
+      fails, never skips) and each keeps a reviewers block bound to
+      var.gated_apply_reviewer_user_ids, prevent_self_review = false and prevent_destroy = true; (c)
+      test_pypi_has_no_admin_bypass -- pypi sets can_admins_bypass = false and environment "pypi". Red cases run the same predicates on synthetic HCL
+      (protected_branches = true, a "*" pattern, a missing policy, a policy bound to another Environment, a second policy bound by
+      the literal name, a missing reviewers block).
+  - file: .github/workflows/publish-ontheloop.yml
+    action: Modify
+    purpose: >-
+      Comment only: line 49's "the pypi Environment is UI-managed" becomes "the pypi Environment is terraform/github's
+      (main-only, required reviewer)". No step, input or permission changes.
+  - file: scripts/ci/environment_reviewer_preflight.py
+    action: Modify
+    purpose: >-
+      Docstring only: the residual "(Decision 94's premise ... holds only for main-defined jobs until
+      rec-4651/rec-4965)" is re-stated, citing Decision 277 cl.1 for the premise Decision 94 stated: every reviewer-gated Environment but deployment-approval-probe is main-only,
+      so a non-main-branch job cannot enter one; admins can still bypass tf-gated-apply; rec-4965 takes the
+      terraform/github apply job off it, after which its bypass (still used by the terraform/personal gated apply and
+      reconcile) needs its own change. No code change.
+  - file: terraform/github/CLAUDE.md
+    action: Modify
+    purpose: >-
+      Replace the whole "## tf-gated-apply Environment" section (heading through the deployment-approval-probe line,
+      about 836 B) with exactly this text (about 721 B as wrapped; the build measures both; the file shrinks about 115 B, and config/prose_budgets.yaml's entry is lowered to
+      the measured size in the same PR under implement-scope-boundary.yaml's prose_budgets_ratchet_down row):
+      "## Environments" / blank / "`tf-gated-apply` gates the post-merge apply of the guard fail-closed set
+      (IAM/trust/destroy diffs): the `gated-apply` job in `terraform-apply-sandbox.yml` waits for benjamin-blake's
+      approval. Until rec-4965 it also gates this root's CI apply job. `pypi` gates `publish-ontheloop.yml`; its name
+      is in PyPI's trust triple." / blank / "Key constraints:" / "- Every Environment but the probe is main-only by an
+      explicit branch policy, never \"protected branches only\", which admits every branch under a ruleset-only main."
+      / "- Reviewer IDs come from `gated_apply_reviewer_user_ids` at apply time, never a literal default." / blank /
+      "deployment-approval-probe: rec-4695 probe, created in the UI and imported; Decision 248 cl.8 uses it." (rec-4651,
+      rec-5098). Lines wrap at 110 columns as the file does. Also in the intro paragraph, "and the
+      `tf-gated-apply` GitHub Environment (CD.35 Wave 3 / T2.22 / Decision 92)" becomes "and its GitHub Environments
+      (CD.35 Wave 3 / T2.22 / Decision 277)" (shorter; Decision 277 supersedes Decision 92; the old phrase spans a line break, so the build reflows that
+      paragraph at 110 columns and measures the shrink and the prose-budget ratchet after the reflow). No other line
+      changes.
+  - file: docs/DECISIONS.md
+    action: Modify
+    purpose: >-
+      Place the sidecar block decision-248-update word for word (one dated Update line appended to Decision 248, after
+      the Decision 256 amendment note; {{DATE}} is the build merge's UTC date). Nothing else changes.
+  - file: docs/contracts/github-org-transfer.yaml
+    action: Modify
+    purpose: >-
+      Place the sidecar blocks transfer-binding, transfer-fix and transfer-amendment-log word for word:
+      breakage_map.environment_fail_open's binding covers every Environment terraform/github declares (pypi among
+      them) and its fix reads and recreates them all from terraform/github, and a new amendment_log entry (change_class correction, {{DATE}} the build merge's UTC date) records it. The new row is terse (summary 160 chars or fewer: Decision 275 cl.4, with 5 full rows already on main). The placed amendment_log row is indented two spaces (`  - {date: ...}`) to match its siblings; the sidecar holds it dedented and verify is whitespace-blind. contract_version unchanged.
+bundled_recommendations: [rec-4549, rec-4651, rec-3151, rec-5098]
+followon_recs: []
+closes_criteria: []
+infrastructure_dependencies:
+  - "terraform/github is CI-applied only by terraform-github-apply.yml (Decision 248): the merge push run's preview stops neutral on the four unnamed gate rows; a dispatch from main naming them in gate_change applies them after one operator approval in tf-gated-apply."
+  - "The apply job that changes tf-gated-apply runs inside tf-gated-apply at main, so the new main-only policy never refuses it."
+  - "github_repository_environment.pypi imports the live UI object (rec-4549). Its live settings are UNPROVEN (the session proxy refuses Environment reads); VP 4 reads them from the build PR's terraform-github-plan.yml report before merge."
+  - "PyPI's Trusted Publisher triple (repository, publish-ontheloop.yml, environment pypi) is unchanged, so no re-registration (package-registry-reservation.yaml restage_obligation)."
+acceptance_criteria:
+  - tf-gated-apply and pypi each have custom_branch_policies true and one deployment policy with branch_pattern main, in HCL and live.
+  - pypi is declared in terraform/github with a required reviewer from var.gated_apply_reviewer_user_ids, can_admins_bypass false and prevent_destroy, and is imported, not recreated.
+  - validate_environment_reviewer_preflight passes with UI_MANAGED empty and pypi gated by HCL.
+  - A publish-ontheloop.yml (proof_only) dispatch from a non-main branch fails at the pypi Environment with no pending deployment; a tf-gated-apply-prototype.yml dispatch from a non-main branch fails the same way or, if admin bypass admits it, is cancelled unapproved and filed as a rec depending on rec-4965; both workflows dispatched from main reach waiting and are cancelled.
+  - rec-4549, rec-4651, rec-3151 and rec-5098 are closed by the squash-merge Resolves trailer.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: Precondition at build start; no open PR other than the build's touches terraform/github, and red_overlap is re-run.
+    command: >-
+      git fetch origin main --quiet && git cat-file -e origin/main:docs/plans/PLAN-pypi-and-gated-apply-environments.yaml &&
+      echo PRECONDITION_OK; bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-pypi-and-gated-apply-environments.yaml; echo RED_OVERLAP_RC=$?
+    expected: >-
+      Prints the precondition marker; red_overlap exits 0, or 1 naming only reds the context's deferral names with no
+      shared file. The build also lists open PRs (mcp__github__list_pull_requests) and confirms none touches
+      terraform/github, and reads the latest terraform-github-apply.yml run on main (mcp__github__actions_list) to
+      confirm it owes no dispatch (no TF_GITHUB_APPLY_GATE_CHANGE_UNNAMED warning left unapplied, for example by
+      PLAN-actions-sha-pin-native-policy).
+    fix_if: A new red, a shared file, or exit 2 (reds unreadable; HARD BLOCK); or another open PR edits terraform/github, or main's latest apply run owes a dispatch; the build reports it to the coordinator and waits, since two pending gate changes would make either dispatch refuse (GATE_CHANGE_UNNAMED).
+    hermetic: false
+    graduation: not-applicable
+  - step: 2
+    phase: pre-deploy
+    action: >-
+      The new and changed static tests pass on the branch. On main's HCL the three test_tf_gated_apply_branch_policy.py
+      nodes and test_pypi_is_declared_in_hcl are red; test_real_tree_is_green passes on main and stays green. It
+      graduates as one command_exit_zero registry row over this exact command (five nodes in two files, so not a
+      single-node test_selector slot).
+    command: >-
+      bin/venv-python -m pytest
+      tests/checks/iam_tf/test_tf_gated_apply_branch_policy.py::test_every_environment_but_the_probe_is_main_only
+      tests/checks/iam_tf/test_tf_gated_apply_branch_policy.py::test_gated_environments_keep_their_reviewer
+      tests/checks/iam_tf/test_tf_gated_apply_branch_policy.py::test_pypi_has_no_admin_bypass
+      tests/checks/ci_guards/test_validate_environment_reviewer_preflight.py::test_real_tree_is_green
+      tests/checks/ci_guards/test_validate_environment_reviewer_preflight.py::test_pypi_is_declared_in_hcl -q
+    expected: All selected tests pass.
+    expected_literals: [passed]
+    fix_if: A failure; fix the HCL or the test on the branch, never loosen an assertion.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: tf-gated-apply-branch-policy
+  - step: 3
+    phase: pre-deploy
+    action: The registered guards over the tree pass, and terraform fmt is clean.
+    command: >-
+      bin/venv-python -m scripts.validate --pre && terraform -chdir=terraform/github fmt -check -diff
+    expected: validate --pre exits 0 and fmt prints no diff.
+    fix_if: Any failing check; fix on the branch.
+    hermetic: false
+    graduation: not-applicable
+  - step: 4
+    phase: pre-deploy
+    action: >-
+      Read the build PR's terraform-github-plan.yml report (the PR-time plan comment; it prints actions and changed
+      attribute names, never values) and confirm it lists exactly four rows: tf_gated_apply update (changed names
+      include deployment_branch_policy), tf_gated_apply_main create, pypi import with an update whose changed names
+      include deployment_branch_policy (live is not already custom) and not wait_timer, and pypi_main create. Main's
+      standing baseline is also expected and allowed: the "github_repository_ruleset.main_protection (visibility-gated)
+      | update | bypass_actors" row (the plan App cannot read bypass_actors; the apply's admin plan is authoritative and
+      refuses any ruleset change) and the "Drift detected outside Terraform" line (PR #2214's report shows both).
+      Nothing else. The build lists pypi's changed names in the PR body (expected also: can_admins_bypass if live allowed
+      bypass, prevent_self_review if live had it on, reviewers if the live set differs).
+    command: >-
+      bin/venv-python -c "print('MCP: mcp__github__pull_request_read(method=get_comments) on the build PR; read the terraform-github-plan report')"
+    expected: >-
+      Exactly the four rows above plus at most the one visibility-gated ruleset row, by changed names; the pypi row
+      is an import, not a create. The report's Action column shows the import+update row as update, so
+      import-not-create is decided by the marker line: import=1 add=2 destroy=0 replace=0, and change equals 1 plus
+      its gated count (with the baseline row it starts "TF_GITHUB_PLAN_REPORT verdict=CHANGES import=1 add=2 change=2
+      destroy=0 replace=0 gated=1"). The build re-measures the baseline from the latest terraform/github PR-time
+      comment on main before reading it.
+    fix_if: >-
+      pypi shows as a create (the import id is wrong or the Environment is gone: STOP, report to the plan owner); its
+      deployment_branch_policy is unchanged (live already uses custom policies, so a live policy object may exist and
+      needs its own import: STOP, plan defect to the plan owner); the pypi row's changed names include wait_timer (a
+      UI-set wait timer would be dropped: STOP, report to the plan owner); its changed names include reviewers (the
+      live reviewer set differs from var.gated_apply_reviewer_user_ids: the build asks the operator on the PR to
+      confirm the live set holds no reviewer he wants kept before merge); any other row besides the visibility-gated
+      ruleset baseline (drift: report to the coordinator). The apply gate already refuses a delete or replace.
+    hermetic: false
+    graduation: not-applicable
+  - step: 5
+    phase: post-deploy
+    action: >-
+      The merge's push run of terraform-github-apply.yml ends neutral naming the dispatch owed for exactly the four
+      addresses, and its preview table (allowlisted values) shows: pypi reviewer_count 1, can_admins_bypass false,
+      prevent_self_review false, protected_branches false, custom_branch_policies true; tf_gated_apply reviewer_count 1,
+      protected_branches false, custom_branch_policies true; tf_gated_apply_main and pypi_main with branch_pattern main
+      and their own environment names. The preview plans with the plan App, so its table may also carry the
+      visibility-gated github_repository_ruleset.main_protection bypass_actors row: expected baseline, not a gate row
+      (NON_GATE_TYPES), and absent from the unnamed marker.
+    command: >-
+      bin/venv-python -c "print('MCP: mcp__github__actions_list(list_workflow_runs, terraform-github-apply.yml, event=push), then mcp__github__get_job_logs on its preview job, asserting TF_GITHUB_APPLY_GATE_CHANGE_UNNAMED with exactly the four addresses')"
+    expected: The preview log names exactly the four addresses with the values above, and the run concluded success with no apply.
+    fix_if: The TF_GITHUB_APPLY_GATE_CHANGE_UNNAMED marker names other addresses, the table shows any row besides the four and the visibility-gated ruleset baseline, or any value differs; stop before VP 6 and report to the coordinator (values) or the plan owner (a value the HCL does not set).
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: post-deploy
+    action: >-
+      CI APPLY. The build dispatches terraform-github-apply.yml from main with gate_change
+      "github_repository_environment.tf_gated_apply,github_repository_environment_deployment_policy.tf_gated_apply_main,github_repository_environment.pypi,github_repository_environment_deployment_policy.pypi_main";
+      the operator reads the preview (the same four rows, plus possibly the visibility-gated ruleset bypass_actors
+      row, which is expected baseline and not grounds to reject: the apply's admin plan refuses any ruleset change)
+      and approves in tf-gated-apply; the build reads the run.
+    command: >-
+      bin/venv-python -c "print('MCP: mcp__github__actions_run_trigger(method=run_workflow, workflow_id=terraform-github-apply.yml, ref=main, inputs={gate_change}), then mcp__github__actions_get(get_workflow_run) asserting conclusion == success and mcp__github__get_job_logs on its apply job asserting the four addresses applied and a clean re-plan')"
+    expected: The run concluded success; its log lists exactly the four addresses, the gate prints the literal "TF_GITHUB_APPLY_CHECKED add=2 change=1 import=1 other=0", and the re-plan is clean.
+    fix_if: >-
+      The preview lists any other change besides the visibility-gated ruleset baseline (the operator rejects it);
+      an apply failure is reported with its error class and finished by a plan amendment, never -target or a
+      CloudShell apply without the operator's word; the same amendment corrects the Decision 248 Update if the
+      branch policy cannot be applied. A partial apply (tf_gated_apply already custom but tf_gated_apply_main not
+      created) leaves tf-gated-apply admitting no branch, which also stops this channel's own apply job: the
+      operator adds the main pattern in Settings, or runs a CloudShell break-glass on his word, and the amendment
+      imports that policy rather than creating it. A preview refusal at dispatch (GATE_CHANGE_UNNAMED or STALE) is
+      re-dispatched only when it names one of this plan's four addresses spelled wrong; any other address goes to
+      the coordinator, as in VP 4 and VP 5.
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: post-deploy
+    action: >-
+      Branch refusal, live. From a non-main branch that holds both workflows (the build's harness-assigned session branch;
+      if the squash-merge deleted it, re-push that same branch from the session, never a new branch (git-ops.yaml
+      branch_rule), or ask the operator), dispatch
+      tf-gated-apply-prototype.yml and publish-ontheloop.yml with proof_only true. The dispatching identity is the
+      operator's (a repo admin; MCP dispatches run as the operator's login): read each run's actor first, and a run
+      whose actor is a bot (so the jobs' if: skip them) is not a policy proof. pypi (no admin bypass) must fail at the Environment (not allowed to deploy
+      due to environment protection rules) and never enter waiting: that leg is the proof. tf-gated-apply should fail
+      the same way; because it keeps admin bypass until rec-4965, a waiting state there is cancelled unapproved and
+      filed (get_rec_write_guidance, then file_rec through scripts.ops_data_portal) as a rec depending on rec-4965 that
+      names the run id; the build continues. A re-pushed branch is left to branch_cleanup (sessions cannot
+      delete remote refs), said in the report.
+    command: >-
+      bin/venv-python -c "print('MCP: mcp__github__actions_run_trigger(run_workflow, ref=<build branch>) for both workflows (publish with inputs proof_only=true); mcp__github__actions_get(get_workflow_run) each: conclusion failure, never status waiting; mcp__github__actions_list(list_workflow_jobs) shows no step ran')"
+    expected: The publish run concluded failure with no step executed and no pending deployment; the prototype run the same, or a recorded rec-4965 finding.
+    fix_if: >-
+      The publish run enters waiting (the pypi policy is not live), or the prototype run enters waiting while VP 6's
+      re-plan did not show tf_gated_apply with custom_branch_policies true (policy not live; otherwise the rec-4965
+      path in the action applies); cancel the run at once (mcp__github__actions_run_trigger cancel_workflow_run), never approve it, and report that the policy is not live.
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: post-deploy
+    action: >-
+      Main still admitted. Dispatch the same two workflows from main (publish with proof_only true); each must reach
+      status waiting (a pending deployment on its Environment); the build then cancels both. Nobody approves.
+    command: >-
+      bin/venv-python -c "print('MCP: mcp__github__actions_run_trigger(run_workflow, ref=main) for both; mcp__github__actions_get(get_workflow_run) shows status waiting; then mcp__github__actions_run_trigger(cancel_workflow_run) for both and confirm conclusion cancelled')"
+    expected: Both runs reached waiting and ended cancelled.
+    fix_if: "A run fails at the Environment from main (the policy pattern is wrong): report and fix forward by a plan amendment."
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: post-deploy
+    action: The four bundled recs are closed by the squash-merge's Resolves trailer.
+    command: >-
+      bin/venv-python -c "from src.common import ducklake_reader_client as c; rows,_=c.fetch_recs_by_ids(c.make_reader(),['rec-4549','rec-4651','rec-3151','rec-5098']); print(sorted((r['id'],r['status']) for r in rows))"
+    expected: All four show status closed.
+    fix_if: A rec stays open; the build follows git-ops.yaml's late-closure route.
+    hermetic: false
+    graduation: not-applicable
+  - step: 10
+    phase: pre-deploy
+    action: The bundled comment recs' acceptance holds (rec-3151, rec-5098) and rec-4549's grep acceptance holds.
+    command: >-
+      ! grep -q 'the sub is still refs/heads/main' terraform/github/environments.tf &&
+      grep -q 'Decision 94' terraform/github/environments.tf && grep -q 'Decision 172' terraform/github/environments.tf &&
+      grep -q 'Decision 277' terraform/github/environments.tf &&
+      ! grep -q 'Inert probe target' terraform/github/environments.tf &&
+      awk '/^# GitHub Environment: deployment-approval-probe/{f=1} /^resource "github_repository_environment" "deployment_approval_probe"/{exit} f' terraform/github/environments.tf | grep -q 'Decision 248 cl.8' &&
+      ! grep -qi 'deployment-approval-probe: inert' terraform/github/CLAUDE.md &&
+      grep -q 'github_repository_environment" "pypi"' terraform/github/environments.tf &&
+      grep -q 'to = github_repository_environment.pypi' terraform/github/imports.tf && echo COMMENT_ACCEPTANCE_OK
+    expected: Prints the acceptance marker.
+    expected_literals: []
+    fix_if: A grep fails; fix the comment or block on the branch.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: One-time comment and grep acceptance of four recs; the branch-policy test graduates the behaviour.
+  - step: 11
+    phase: pre-deploy
+    action: The approved words are placed exactly (Decision 248's dated Update and the three github-org-transfer blocks).
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug pypi-and-gated-apply-environments --base origin/main
+    expected: verify exits 0.
+    fix_if: A block's before-text no longer matches main exactly once; STOP to the plan owner, never hand-merge.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      Moment claim, PR-relative to origin/main and vacuous once merged; validate_merge_step's approved-text leg repeats
+      it on the PR.
+  - step: 12
+    phase: pre-deploy
+    action: >-
+      Fast tier on the PR head (advisory locally; PR CI is authoritative, Decision 73), then the full tier before the
+      hand-off (handoff_policy), started in the background from the top-level session with a 2 h limit.
+    command: >-
+      bin/venv-python -m scripts.validate --pre && echo "MANUAL STEP: start bin/venv-python -m scripts.validate in
+      the background with a 2 h limit, wait for it to complete, then run bin/venv-python -m
+      scripts.checks.validation_result --verify-head"
+    expected: The fast tier passes; after the backgrounded full tier completes, validation_result --verify-head verifies the head sha (never a pipe's exit status).
+    fix_if: >-
+      A failure caused by this diff is fixed on the branch. Any other failure, including one that reproduces on
+      origin/main, is never fixed inline and leaves the hand-off BLOCKED (handoff_policy timeout_disposition blocked;
+      Decision 226 and red-main-recovery.yaml slo_clock: the build waits for the repair) until validation_result
+      --verify-head prints ok; its existing rec is cited in the PR body as extra information, never in place of a
+      green run.
+    hermetic: false
+    graduation: not-applicable
+  - step: 13
+    phase: pre-deploy
+    action: The import-block guard passes with pypi imported and the two new policies exempt.
+    command: bin/venv-python -m pytest tests/checks/iam_tf/test_terraform_github_import_blocks.py::TestTerraformGithubImportBlocks -q
+    expected: The class passes.
+    expected_literals: [passed]
+    fix_if: pypi lacks its import block or a policy lacks its EXEMPT row; fix on the branch.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: Already graduated as shard terraform-github-import-blocks (kept, node id unchanged); this step only re-runs it.
+test_obligations:
+  - source: terraform/github/environments.tf
+    behavior: every Environment but the probe is main-only by an explicit policy, and tf-gated-apply and pypi are both declared (VP 2's other two nodes assert pypi's reviewer, no bypass and prevent_destroy)
+    verification_step: 2
+    test_selector: tests/checks/iam_tf/test_tf_gated_apply_branch_policy.py::test_every_environment_but_the_probe_is_main_only
+    red_green_expectation: red before (tf_gated_apply has protected_branches true and no main policy; pypi is not in the examined set), green after
+  - source: terraform/github/imports.tf
+    behavior: pypi is imported, the two new policies are exempt creates
+    verification_step: 13
+    test_selector: tests/checks/iam_tf/test_terraform_github_import_blocks.py::TestTerraformGithubImportBlocks
+    red_green_expectation: >-
+      Passes on main; red on the mid-build tree once pypi is declared without its import block or the policies without
+      EXEMPT rows; green after
+  - source: scripts/checks/ci_guards/validate_environment_reviewer_preflight.py
+    behavior: pypi is gated by its HCL declaration, not the UI_MANAGED list; (b) still refuses a name in both
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test_validate_environment_reviewer_preflight.py::test_pypi_is_declared_in_hcl
+    red_green_expectation: red before (test_pypi_is_declared_in_hcl fails on UI_MANAGED), green after
+  - source: .github/workflows/publish-ontheloop.yml
+    behavior: comment only
+    verification_step: 3
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: A one-line comment edit changes no step, input or permission; the reviewer preflight guard already covers the job.
+  - source: scripts/ci/environment_reviewer_preflight.py
+    behavior: docstring only
+    verification_step: 3
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: A docstring residual re-statement; no code path changes, and tests/test_environment_reviewer_preflight.py is unchanged.
+  - source: docs/DECISIONS.md
+    behavior: exactly the approved Decision 248 Update line is placed
+    verification_step: 11
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug pypi-and-gated-apply-environments --base origin/main
+    red_green_expectation: red before (block not placed), green after
+  - source: docs/contracts/github-org-transfer.yaml
+    behavior: exactly the three approved blocks are placed
+    verification_step: 11
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug pypi-and-gated-apply-environments --base origin/main
+    red_green_expectation: red before (blocks not placed), green after
+  - source: terraform/github/CLAUDE.md
+    behavior: prose only
+    verification_step: 3
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Ambient prose with no code path; VP 10 greps the probe line and validate_prose_limits pins its shrunk size.
+constraints:
+  - "One PR. Merge only with no other terraform/github change pending on main (VP 1, VP 5)."
+  - "Never apply terraform/github outside terraform-github-apply.yml; a CloudShell break-glass apply needs the operator's own words naming it."
+  - "The build never approves a deployment; VP 7 and VP 8 runs are cancelled, never approved."
+  - "terraform/github, publish-ontheloop.yml, the reviewer preflight script and its guard are CODEOWNERS paths and CLAUDE.md is a public surface: the operator's word on the final diff is required before merge."
+  - "Place every sidecar block word for word; change no other line of docs/DECISIONS.md or github-org-transfer.yaml."
+  - No rescue agents or workaround loops (Decision 55); never skip or loosen a test or check to get green (Decision 235).
+context:
+  - "Decision-scout r1 FLAGS_FOUND; CITE 248, 94, 172, 126; CONTRADICT none; RELATED 92, 238, 263, 257, 246, 158/183/265, 24, 235, 218, 189, 177, 233. Decisions triaged: 221 of 221. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2. Serves: NS.9 4/5. 181 SPIRIT NOTE adopted (dated Update on Decision 248 clause 9's residual, sidecar); 218 NOTE adopted (github-org-transfer environment_fail_open blocks); 189 NOTE adopted (VP 2 uses node selectors, so it stays hermetic). Report: /mnt/project-files/pypi-gated-apply-envs/SCOUT-r1.md."
+  - "Decision-scout r2 FLAGS_FOUND; CITE 248, 94, 172, 126; CONTRADICT 218 NOTE (environment_fail_open named three Environments while terraform/github declares eleven) adopted in the sidecar now (binding and fix cover every declared Environment), not a follow-on rec, since no approval run had been dispatched; SPIRIT none. Decisions triaged: 221 of 221. Roadmap items intersected: 5; CONFLICT: 0; RELATED: 5. Serves: NS.9 4/5. Report: /mnt/project-files/pypi-gated-apply-envs/SCOUT-r2.md."
+  - "Operator 2026-11-18 15:50 UTC: 'write the plan', taking the recommended pypi can_admins_bypass = false. The approval run for the sidecar is dispatched after plan-critique PROCEED (2026-11-09 ruling); the build needs his word on the final diff and his approval of the VP 6 apply, which is the Actions approval in tf-gated-apply on the run page after he reads the preview (the step the presentation named); the dispatch itself applies nothing until that approval, so it needs no separate chat word."
+  - "Plan owner: this planning session (thread Plan the pypi and gated-apply environment rules)."
+  - "Decision-scout r3 NO_FLAGS; CITE 248, 94, 172, 126; CONTRADICT none; SPIRIT none. Decisions triaged: 222 of 222. Roadmap items intersected: 5; CONFLICT: 0; RELATED: 5. Serves: NS.9 4/5. New since r2: Decision 273 (persona-verdict-app, already main-only), bound by the generic test with no conflict."
+  - "Decision-scout r4 NO_FLAGS; CITE 248, 94, 172, 126; CONTRADICT none; SPIRIT none. Decisions triaged: 222 of 222. Roadmap items intersected: 5; CONFLICT: 0; RELATED: 5. Serves: NS.9 4/5."
+  - "Decision-scout r5 FLAGS_FOUND (re-scout after the 2026-11-20 rebase); CITE 248, 277, 172, 126; CONTRADICT Decision 275 WARN (cl.4: github-org-transfer.yaml already holds 5 full amendment_log rows, so the sidecar's new row must be terse) adopted: the new row's summary is cut to 158 chars (terse, under summary_max_chars 160), checked with _amendment_retention.retention_violation on the placed tree; SPIRIT none. Decisions triaged: 227 of 227. Roadmap items intersected: 5; CONFLICT: 0; RELATED: 5. Serves: NS.9 4/5. Report: /mnt/project-files/pypi-gated-apply-envs/SCOUT-r5.md."
+  - "Blind Fable consult: /mnt/project-files/pypi-gated-apply-envs/ADVICE.md (all six points adopted or adapted, reasons there)."
+  - "fork: Should pypi allow admin bypass? | chosen: can_admins_bypass = false | class: asked | precedent: Decision 248 cl.7 (tf-github-apply is main-only with no admin bypass) | precedent_kind: decision | reversible: yes | persisted: terraform/github/environments.tf"
+  - "fork: One generic branch-policy test or one per Environment? | chosen: generic with an exemption set | class: consistency-only | precedent: Decision 181 (an invariant publishes its mechanical check per surface; the reviewer preflight's EXEMPT set is the pattern) | precedent_kind: decision | reversible: yes | persisted: tests/checks/iam_tf/test_tf_gated_apply_branch_policy.py"
+  - "fork: Bundle rec-3151 and rec-5098? | chosen: bundle | class: consistency-only | precedent: recommendation-relevance.yaml (bundled recs are re-checked at plan and implement time) | precedent_kind: contract | reversible: yes | persisted: bundled_recommendations"
+  - "After apply, a workflow_dispatch of terraform-apply-sandbox.yml, reconcile.yml or tf-gated-apply-prototype.yml from a non-main ref can no longer enter tf-gated-apply; every documented dispatch of them is from main (deploy-paths.yaml reconcile row), so this is the intended narrowing (Decisions 158/183/265 route nothing differently)."
+  - "Recs: rec-4549 (pypi; dependency rec-4355 closed), rec-4651 (tf-gated-apply; dependency rec-4636 closed); bundled rec-3151 and rec-5098 are comment fixes in the same blocks."
+  - "Precedents: tf_trusted_plan (main-only, PLAN-trusted-plan-identity) and every Environment since rec-4769 (approved_text, tf_github_apply, tf_bootstrap_apply, telemetry_content_deploy, persona_verdict*, all main-only by explicit policy); PLAN-persona-verdict-app-grant VP 10 (dispatch naming gate_change)."
+  - "Not here: can_admins_bypass = false on tf-gated-apply. Setting it makes validate_environment_reviewer_preflight (d) require terraform-github-apply.yml's preview to run the environment check with --require-no-admin-bypass, which fails against the live Environment before the apply that would fix it; rec-4965 moves that job to tf-github-apply (already no bypass), which ends the residual."
+  - "deployment-approval-probe keeps protected-branches-only: it is exempt from the reviewer preflight, dispatched from main only, and what it proves (who can approve a pending deployment) does not depend on the branch policy."
+  - "Live: terraform-github-apply.yml run 44324679250 (dispatch from main, 2026-11-18 14:34Z) concluded success; the latest, dispatch 44539848138 (main, created 2026-11-19 14:04Z, success), followed PLAN-actions-sha-pin-native-policy's push run 44532224310, so that plan's owed dispatch appears discharged (VP 1 re-checks at build time)."
+  - "UNPROVEN: pypi's live settings (VP 4 reads them pre-merge); GitHub's refusal shape for a non-main dispatch (VP 7); a push-triggered gated job (VP 8's main dispatch proves main is admitted, and a push presents the same refs/heads/main, so no push is forced; recorded until the next routed push, ADVICE.md point 5)."
+  - "red_overlap (2026-11-18 ~15:40 UTC, main 58566acf): blocked by rec-5364 (vp-replay _is_pr_relative, slo_breached at 12.8 h, no shared file). Deferral: this plan touches neither scripts/checks/verification/validate_vp_replay.py nor its tests; the main-reds fix thread owns rec-5364. The build re-runs red_overlap at start (VP 1)."
+  - "github-org-transfer.yaml is NEAR_CAP (plan_obligations 2026-11-20: 475 of 500 effective lines, 47444 of 49152 B): the three blocks are line-neutral (fix -1, amendment_log +1, about +170 B). PLAN-trusted-plan-identity (unbuilt) also scopes it; whichever builds second rebases, and a block whose before-text moved is a STOP to the plan owner."
+  - "Critique r5 PROCEED; nits N1-N4 applied (docstring residual, follow-on rec widened to tf-gated-apply's bypass, VP 4 and VP 6 marker literals, VP 12 command split). N5 not taken: folding validate_github_settings_apply (k)'s Environment-shape leg into the generic test is a possible later tidy, not this plan's scope. The approved Decision 248 Update keeps clause 9's own 'until rec-4965' framing."
+  - "Critique r6 REVISE: B1 (main's standing visibility-gated ruleset row in plan-App reports, PR #2214) fixed in VP 4, 5 and 6; N2 to N4 applied (read-back ids in the report, the CLAUDE.md repo name in the follow-on rec, VP 7 actor check). N1 noted: this is Decision 248's third trailer, so a fourth should prompt a superseding entry or a compaction."
+  - "Critique r7 PROCEED; nits N1-N5 applied (VP 6 partial-apply and preview-refusal routes, push path UNPROVEN, VP 2 graduation slot, probe test name in the follow-on rec)."
+  - "Critique r8 (confirming round) PROCEED; its nits applied, not re-read (planning skill Step 9): PLAN-actions-sha-pin-native-policy (merged after this branch's base; it also needs a terraform-github-apply.yml gate_change dispatch and edits terraform_github_apply_gate.py's ALLOWLIST and Decision 83) is named and VP 1 checks main's latest apply run owes no dispatch; the CLAUDE.md intro reflow; the VP 6 approval is the Actions approval. rec-5098's prose acceptance and rec-4651's acceptance (both UNDECIDABLE in plan_obligations) may be tightened by update_rec at closing; rec-4651's points at VP 2's graduated selector."
+  - "2026-11-20 rebase onto main after the wording approval: Decision 277 (2026-11-19) supersedes Decision 94 and carries its environment-subject ruling as cl.1, so cites swap dec:94 for dec:277 and the rec-3151 comment and the preflight docstring cite Decision 277 cl.1 beside Decision 94. The four sidecar before-texts still occur once each on main (Decision 275's contract byte budget landed in #2241), but Decision 275 cl.4's retention rule made the new amendment_log row too long (scout r5), so that row's words changed and the wording is approved again on a new run; run 44356366596 covered the earlier words."
+  - "Critique r9 PROCEED (first round on the rebased plan); nits N1-N3 applied (fresh NEAR_CAP figures, the CLAUDE.md intro cites Decision 277 instead of superseded Decision 92, both UNDECIDABLE acceptances named). N4 (rename the generic test file) not taken: its path is in the approved Decision 248 Update, and the fork entry records the name."
+  - "Critique r10 (confirming round) PROCEED; its nits applied, not re-read: the test's policy binding counts literal-name references, the live apply-run line refreshed, the validator docstring's Decision 92 added to the follow-on rec. N4 noted (Decision 248's third trailer). Wording approved again in run 44734987279 (2026-11-20 12:24Z)."
+  - "followon_recs is empty because the one follow-on rec is conditional: execution step 8 files it only if no open rec already covers environment_fail_open.locations and the two policies' import blocks, and the report names its id (critique r4)."
+  - "Accepted, not changed: github-org-transfer.yaml transfer_window_checklist step 3 still says pypi's reviewer is rec-4549's; it stays true as a pointer once rec-4549 closes (scout r3). rec-3151's first grep is already true on main; its new acceptance is the Decision 172 citation."
+  - "Known residuals, not changed here: environment_fail_open.locations still lists the original six paths (the approved words fix only binding and fix); the two new deployment policies have no import blocks, the same rename re-key gap as the other EXEMPT policy rows (rec-4911's line). The build files one follow-on rec covering both if none exists."
+  - "Graduated shard terraform-github-import-blocks is kept: its node id TestTerraformGithubImportBlocks is unchanged; only EXEMPT grows."
+  - "terraform/github/CLAUDE.md is at its prose budget (4364 of 4364 B); the replacement section shrinks it about 115 B, so the budget entry is lowered in the same PR (sanctioned ratchet-down row)."
+  - "plan_obligations names PLAN-bootstrap-ci-gated-apply, PLAN-environment-gates-fail-closed, PLAN-persona-verdict-app-grant, PLAN-scheduled-workflow-dispatch and PLAN-trusted-plan-identity as unbuilt plans on the same files; their edits to these files are on main (tf_trusted_plan, tf_bootstrap_apply, the reviewer preflight, the dispatcher-bot if: in publish-ontheloop.yml, persona_verdict_app at #2214), so the build rebases on main and re-reads each file."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:61405465cdbdf4c485c5e9647d96083ab9025ad5064005aa91e66fdc268c638b"}
+  - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:f3c3b346448bfdfdd6449b9ee41cee6c0be448f7853b12bb7cb82cfc7dfcdf73"}
+  - {gate: wording-check, round: 1, verdict: PASS, digest: ddd707f48652d3e27045a47a39092beea914248d350181f5df9c75114cf7248c, base: 93fb52150de4a6e97ece87f1baa8d047e4dbf190, selection: complete}  # pragma: allowlist secret
+  - {gate: wording-check, round: 2, verdict: PASS, digest: 37f20242518df854ea162bbbac20dea30e853bc77a41e1cf81221fe9a292af3c, base: 93fb52150de4a6e97ece87f1baa8d047e4dbf190, selection: complete}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 3, verdict: NO_FLAGS, scout_input_fingerprint: "v1:4e4f6b140cbffc4f298e14f40394ff9722e0bb7b6b6c53fdd796f31d42b651fc"}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 6}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 9}
+  - {gate: decision-scout, round: 4, verdict: NO_FLAGS, scout_input_fingerprint: "v1:48e90c7192d1864b6d9b1f430d8044c41b443704a5270115401fb6d5ff0cb448"}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 6}
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 7}
+  - {gate: plan-critique, round: 5, verdict: PROCEED, blocking: 0, nits: 5}
+  - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 1, nits: 4}
+  - {gate: plan-critique, round: 7, verdict: PROCEED, blocking: 0, nits: 5}
+  - {gate: plan-critique, round: 8, verdict: PROCEED, blocking: 0, nits: 4}
+  - {gate: decision-scout, round: 5, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:f7a725263a0ef3659413cb5047a9dc17116d6bb47609bc474bdc4cfed966eb6c"}
+  - {gate: wording-check, round: 3, verdict: PASS, digest: 05c3132557dd1cb4e93f789e237057d41f7280b3664216af0e73656318fdc001, base: ead429237e24abf7435d52807f3a15aad965a749, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 9, verdict: PROCEED, blocking: 0, nits: 4}
+  - {gate: plan-critique, round: 10, verdict: PROCEED, blocking: 0, nits: 4}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "Pre: VP 1."
+  - "Edit terraform/github/environments.tf and imports.tf per scope; terraform fmt."
+  - "Edit the guard, its test, the import-block test; create test_tf_gated_apply_branch_policy.py; VP 2 and VP 13 (run each new test red on main's HCL first)."
+  - "Comment and docstring edits in publish-ontheloop.yml, environment_reviewer_preflight.py and terraform/github/CLAUDE.md."
+  - "VP 3; full tier per the handoff policy; open the PR; VP 4 from its plan report; ask the operator for his word on the final diff."
+  - "Merge on code review PROCEED, green CI and his word, with Resolves: rec-4549, rec-4651, rec-3151, rec-5098."
+  - "VP 5 to VP 9."
+  - "Follow-on: if no open rec already covers them, file one rec (get_rec_write_guidance, then file_rec) for environment_fail_open.locations listing every Environment workflow, import blocks for the two new deployment policies, setting tf-gated-apply can_admins_bypass = false once rec-4965 lands (terraform/personal's gated apply and reconcile still use it), terraform/github/CLAUDE.md's intro still naming benjamin-blake/theseus, superseded Decision 92 citations left in terraform/github (environments.tf line 1) and in validate_environment_reviewer_preflight.py's docstring, and renaming tests/test_deployment_approval_probe_workflow.py's test_resource_mirrors_gate_with_no_literal_id (the probe no longer mirrors the gate's branch policy); name its id in the report and to the plan owner."
+  - "Report: what was implemented, verification results, naming the run id or comment id read back for each of VP 4 to VP 8."

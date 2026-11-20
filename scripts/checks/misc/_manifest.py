@@ -50,6 +50,20 @@ ENTRIES: tuple[Entry, ...] = (
         full_segment="full_after_lint",
     ),
     Entry(
+        name="validate_persona_verdict_egress",
+        module="scripts.checks.misc.validate_persona_verdict_egress",
+        attr="validate_persona_verdict_egress",
+        pre=True,
+        pre_globs=(
+            ".github/workflows/persona-verdict*.yml",
+            "config/persona_verdict_egress.yaml",
+            "scripts/checks/misc/validate_persona_verdict_egress.py",
+            "scripts/checks/_common.py",
+            "scripts/checks/registry.py",
+        ),
+        full_segment="full_after_lint",
+    ),
+    Entry(
         name="validate_ducklake_version_lockstep",
         module="scripts.checks.misc.validate_ducklake_version_lockstep",
         attr="validate_ducklake_version_lockstep",

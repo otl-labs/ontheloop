@@ -30,13 +30,7 @@ _BOUNDARY_FILE = _BOOTSTRAP_DIR / "github_ci_apply_boundary.tf"
 _ROLE_ARN = f"arn:aws:iam::${{var.account_id}}:role/{_ROLE_NAME}"
 _DENY_SID = "DenyVerdictAppKeyRead"
 _KEY = "arn:aws:ssm:${var.aws_region}:*:parameter/secret/agent-platform-persona-verdict-app-key"
-_DENY_RESOURCES = {
-    _KEY,
-    "arn:aws:ssm:${var.aws_region}:*:parameter",
-    "arn:aws:ssm:${var.aws_region}:*:parameter?",
-    "arn:aws:ssm:${var.aws_region}:*:parameter/secret",
-    "arn:aws:ssm:${var.aws_region}:*:parameter/secret/",
-}
+_BYPATH_SID = "DenyParameterByPathRead"
 _SECRET_TYPES = ("github_actions_environment_secret", "github_actions_environment_variable", "github_actions_secret")
 
 
@@ -206,15 +200,31 @@ def boundary_deny_problems(text: str) -> list[str]:
         problems.append("Effect must be Deny")
     if _attr_raw(block, "Action") != '"ssm:GetParameter*"':
         problems.append('Action must be exactly the scalar "ssm:GetParameter*"')
-    resources = set(re.findall(r'"([^"]+)"', _attr_raw(block, "Resource") or ""))
-    if resources != _DENY_RESOURCES:
-        problems.append(f"Resource set differs: {sorted(resources ^ _DENY_RESOURCES)}")
+    if _attr_raw(block, "Resource") != f'"{_KEY}"':
+        problems.append("Resource must be exactly the scalar key ARN")
     cond = re.search(r"Condition\s*=\s*\{(.*)\}", _strip_comments(block), re.DOTALL)
     condition = cond.group(1) if cond else ""
     if not re.search(r"\bArnNotLike\b", condition) or "StringNotLike" in condition:
         problems.append("Condition must be ArnNotLike")
     if re.findall(r'"([^"]+)"', condition) != ["aws:PrincipalArn", f"arn:aws:iam::*:role/{_ROLE_NAME}"]:
         problems.append("Condition must name exactly the role")
+    return problems
+
+
+def bypath_deny_problems(text: str) -> list[str]:
+    blocks = [b for b in _jsonencode_statement_blocks(text) if f'"{_BYPATH_SID}"' in b]
+    if len(blocks) != 1:
+        return [f"expected exactly one {_BYPATH_SID}, found {len(blocks)}"]
+    block = blocks[0]
+    problems: list[str] = []
+    if _attr_raw(block, "Effect") != '"Deny"':
+        problems.append("Effect must be Deny")
+    if _attr_raw(block, "Action") != '"ssm:GetParametersByPath"':
+        problems.append('Action must be exactly the scalar "ssm:GetParametersByPath"')
+    if _attr_raw(block, "Resource") != '"*"':
+        problems.append('Resource must be exactly the scalar "*"')
+    if re.search(r"\bCondition\b", _strip_comments(block)):
+        problems.append("no Condition allowed")
     return problems
 
 
@@ -231,28 +241,48 @@ def test_red_pre_stage() -> None:
     assert reads_problems(text.replace(_ROLE_ARN, "arn:aws:iam::${var.account_id}:role/other"))
 
 
+def _sub(text: str, pattern: str, repl: str) -> str:
+    return re.sub(pattern, repl, text, count=1)
+
+
+def test_boundary_bypath_shape() -> None:
+    assert bypath_deny_problems(_BOUNDARY_FILE.read_text(encoding="utf-8")) == []
+
+
 def test_red_boundary_deny() -> None:
     text = _BOUNDARY_FILE.read_text(encoding="utf-8")
     broken = (
-        text.replace('"arn:aws:ssm:${var.aws_region}:*:parameter/secret/",', "", 1),
-        text.replace('parameter?"', 'parameter/"', 1),
-        text.replace(
-            f'ArnNotLike = {{ "aws:PrincipalArn" = "arn:aws:iam::*:role/{_ROLE_NAME}"',
-            f'StringNotLike = {{ "aws:PrincipalArn" = "arn:aws:iam::*:role/{_ROLE_NAME}"',
-            1,
+        _sub(
+            text, r'(Resource\s*=\s*)"arn:aws:ssm:[^"]*persona-verdict-app-key"', r'\1["arn:aws:ssm:x:*:parameter/secret/y"]'
         ),
-        text.replace(f'role/{_ROLE_NAME}"', 'role/x"', 1),
-        text.replace('Action = "ssm:GetParameter*"', 'Action = ["ssm:GetParameter*"]', 1),
+        _sub(text, r'(Resource\s*=\s*)"arn:aws:ssm:[^"]*persona-verdict-app-key"', r'\1"arn:aws:ssm:x:*:parameter/secret/y"'),
+        _sub(text, rf"ArnNotLike(?=[^\n]*role/{_ROLE_NAME})", "StringNotLike"),
+        _sub(text, rf'role/{_ROLE_NAME}"', 'role/x"'),
+        _sub(text, r'(Action\s*=\s*)"ssm:GetParameter\*"', r'\1["ssm:GetParameter*"]'),
         text.replace(f'"{_DENY_SID}"', '"Other"', 1),
-        text.replace(
-            'Effect = "Deny"\n        Action = "ssm:GetParameter*"',
-            'Effect = "Allow"\n        Action = "ssm:GetParameter*"',
-            1,
-        ),
+        _sub(text, r'(Effect\s*=\s*)"Deny"(\s*Action\s*=\s*"ssm:GetParameter\*")', r'\1"Allow"\2'),
     )
     for variant in broken:
         assert variant != text
         assert boundary_deny_problems(variant), variant
+
+
+def test_red_boundary_bypath() -> None:
+    text = _BOUNDARY_FILE.read_text(encoding="utf-8")
+    broken = (
+        text.replace(f'"{_BYPATH_SID}"', '"Other"', 1),
+        _sub(text, rf'("{_BYPATH_SID}"\s*Effect\s*=\s*)"Deny"', r'\1"Allow"'),
+        _sub(text, r'(Action\s*=\s*)"ssm:GetParametersByPath"', r'\1"ssm:GetParameter*"'),
+        _sub(text, r'(Action\s*=\s*"ssm:GetParametersByPath"\s*Resource\s*=\s*)"\*"', r'\1"arn:aws:ssm:x:*:parameter/"'),
+        _sub(
+            text,
+            r'(Action\s*=\s*"ssm:GetParametersByPath"\s*Resource\s*=\s*"\*")',
+            r'\1\n        Condition = { StringEquals = { "aws:PrincipalTag/x" = "y" } }',
+        ),
+    )
+    for variant in broken:
+        assert variant != text
+        assert bypath_deny_problems(variant), variant
 
 
 _PERSONAL_DIR = _REPO_ROOT / "terraform" / "personal"

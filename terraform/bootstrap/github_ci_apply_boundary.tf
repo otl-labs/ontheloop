@@ -361,21 +361,22 @@ locals {
       {
         # parameter? (not parameter/): IAM missed the root by-path request with parameter/; ? matches only the slash here.
         # Decision 273: the verdict App's private key is read by one role only. Refuses every other carrier the value
-        # read and the by-path reads of the key's ancestors; the account is * (the byte-saving form). Outside the agent
-        # merge loop: the boundary is in the protected set (Decision 257 cl.3).
-        Sid    = "DenyVerdictAppKeyRead"
-        Effect = "Deny"
-        Action = "ssm:GetParameter*"
-        Resource = [
-          "arn:aws:ssm:${var.aws_region}:*:parameter/secret/agent-platform-persona-verdict-app-key",
-          "arn:aws:ssm:${var.aws_region}:*:parameter",
-          "arn:aws:ssm:${var.aws_region}:*:parameter?",
-          "arn:aws:ssm:${var.aws_region}:*:parameter/secret",
-          "arn:aws:ssm:${var.aws_region}:*:parameter/secret/",
-        ]
+        # read; the account is * (the byte-saving form). Outside the agent merge loop: the boundary is in the protected
+        # set (Decision 257 cl.3).
+        Sid      = "DenyVerdictAppKeyRead"
+        Effect   = "Deny"
+        Action   = "ssm:GetParameter*"
+        Resource = "arn:aws:ssm:${var.aws_region}:*:parameter/secret/agent-platform-persona-verdict-app-key"
         Condition = {
           ArnNotLike = { "aws:PrincipalArn" = "arn:aws:iam::*:role/agent-platform-github-ci-persona-verdict-app" }
         }
+      },
+      {
+        # Decision 273 Update: by-path reads are refused on every resource to every carrier; no narrower ARN covers the root.
+        Sid      = "DenyParameterByPathRead"
+        Effect   = "Deny"
+        Action   = "ssm:GetParametersByPath"
+        Resource = "*"
       }
     ]
   })

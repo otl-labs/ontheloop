@@ -10,6 +10,7 @@ _BY_VERB = {
     "tool_use_rollup": fields.TOOL_USE_FIELDS,
     "session_startup_baseline": fields.STARTUP_BASELINE_FIELDS,
     "session_tree_rollup": fields.TREE_ROLLUP_FIELDS,
+    "friction_signature_counts": fields.FRICTION_SIGNATURE_FIELDS,
 }
 
 

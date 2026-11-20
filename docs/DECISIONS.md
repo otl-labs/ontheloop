@@ -537,6 +537,8 @@ conditions:
 
 **Related:** Decisions 92, 143, 144, 202, 223, 224, 230, 237, 239, 248, 252, 257, 258, 263, 267, 270, 271; T4.2, T4.32; rec-2827, rec-4624, rec-5271, rec-5363.
 
+> **Update (2026-11-20, PLAN-persona-verdict-app-grant, rec-5394):** Clause 4's by-path half moves to a sibling boundary statement, DenyParameterByPathRead, which refuses ssm:GetParametersByPath on every resource to every carrier, that role included; DenyVerdictAppKeyRead keeps the key's value reads. The IAM simulator matched no policy resource, "*" included, to the by-path request for "/", so no ancestor ARN could be shown to cover it. Clause 6's size becomes the boundary's minified PROD rendering with this split, as the build landing it measures it; SIT's fires on the same growth. The secret-scp condition moves DenyVerdictAppKeyRead only; the sibling stays in the boundary.
+
 ---
 
 ## Decision 271: A persona verdict check counts only when the dedicated verdict GitHub App posted it -- the merge gate pins persona checks to the App id read from origin/main and ignores same-named runs from any other source (amends Decisions 264 and 205) (Decided)
@@ -2248,6 +2250,8 @@ conditions:
 > grant is provisioned.
 
 > **Amended by Decision 256 (2026-11-13):** Clause 6's "an ADMIN-session agent runs" reads "the operator runs, from an agent-prepared CloudShell block (Decision 256 cl.3)", still after the pre-merge admin plan, which the operator's block also runs.
+
+> **Update (2026-11-20, PLAN-pypi-and-gated-apply-environments, rec-4651):** Clause 9's residual "tf-gated-apply admits any branch" is closed: tf-gated-apply and pypi admit main only, by an explicit deployment branch policy that tests/checks/iam_tf/test_tf_gated_apply_branch_policy.py enforces. Admins can still bypass tf-gated-apply until rec-4965. No clause changes.
 
 ---
 
