@@ -359,7 +359,6 @@ locals {
         Resource = "arn:aws:lambda:${var.aws_region}:*:function:agent-platform-ducklake-telemetry-content*"
       },
       {
-        # parameter? (not parameter/): IAM missed the root by-path request with parameter/; ? matches only the slash here.
         # Decision 273: the verdict App's private key is read by one role only. Refuses every other carrier the value
         # read; the account is * (the byte-saving form). Outside the agent merge loop: the boundary is in the protected
         # set (Decision 257 cl.3).
