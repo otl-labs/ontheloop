@@ -2249,6 +2249,8 @@ conditions:
 
 > **Amended by Decision 256 (2026-11-13):** Clause 6's "an ADMIN-session agent runs" reads "the operator runs, from an agent-prepared CloudShell block (Decision 256 cl.3)", still after the pre-merge admin plan, which the operator's block also runs.
 
+> **Update (2026-11-20, PLAN-pypi-and-gated-apply-environments, rec-4651):** Clause 9's residual "tf-gated-apply admits any branch" is closed: tf-gated-apply and pypi admit main only, by an explicit deployment branch policy that tests/checks/iam_tf/test_tf_gated_apply_branch_policy.py enforces. Admins can still bypass tf-gated-apply until rec-4965. No clause changes.
+
 ---
 
 ## Decision 247: The legacy Python executor is retired and the STRATEGIC plan type is shelved, both for good -- an item too large for one plan is decomposed by its planner into child work items, which ride the parent's approval only through a deterministic check (supersedes Decision 67; amends Decisions 73, 90, 182, 203 and 229) (Decided)

@@ -9,18 +9,19 @@
 # Key constraints:
 #   - prevent_self_review = false: sole-developer repo; the only reviewer must be able to
 #     approve (prevent_self_review=true would wedge the pipeline permanently).
-#   - deployment_branch_policy: protected_branches = true; custom_branch_policies = false. With a
-#     ruleset-only main (no classic protection rule) this may let any branch deploy (see the
-#     tf_trusted_plan note below and rec-4651).
+#   - deployment_branch_policy: protected_branches = false; custom_branch_policies = true, with the
+#     explicit main-only policy below (rec-4651). "Protected branches only" admits every branch under
+#     this repo's ruleset-only main (no classic protection rule).
 #   - Reviewer user IDs are supplied at apply time via var.gated_apply_reviewer_user_ids
 #     (mirrors the admin_bypass_actor_id convention); they are NOT committed with a literal
 #     default. Resolve before applying: `gh api /user --jq .id` or GitHub MCP get_me.
 #
 # Authorization boundary: the Environment gates the post-merge apply JOB -- it is NOT a PR
 # required status check (that would wedge autonomous fix-merges, Decision 83). The gated
-# job assumes the existing agent-platform-github-ci-apply role. Decision 94 made that trust list
-# both ref:refs/heads/main and environment:tf-gated-apply, so the Environment gates the job but
-# is not the role boundary: any ungated main job can also assume the role.
+# job assumes the existing agent-platform-github-ci-apply role. Decision 94's two subs (ref:refs/heads/main and
+# environment:tf-gated-apply) and Decision 172's immutable subject form made that trust list, so the Environment
+# gates the job but is not the role boundary: any ungated main job can also assume the role. Decision 277 cl.1 now
+# carries that ruling (Decision 277 supersedes Decision 94).
 #
 # Broader IAM changes beyond github_ci_apply's current scope remain admin-gated until T2.23.
 #
@@ -42,8 +43,8 @@ resource "github_repository_environment" "tf_gated_apply" {
   }
 
   deployment_branch_policy {
-    protected_branches     = true
-    custom_branch_policies = false
+    protected_branches     = false
+    custom_branch_policies = true
   }
 
   # A destroy of this Environment FAILS OPEN, which is why it is blocked outright: GitHub
@@ -57,6 +58,44 @@ resource "github_repository_environment" "tf_gated_apply" {
   lifecycle {
     prevent_destroy = true
   }
+}
+
+resource "github_repository_environment_deployment_policy" "tf_gated_apply_main" {
+  repository     = github_repository.this.name
+  environment    = github_repository_environment.tf_gated_apply.environment
+  branch_pattern = "main"
+}
+
+# GitHub Environment: pypi (rec-4549).
+#
+# publish-ontheloop.yml's PyPI Trusted Publishing gate, imported from the UI-created object. The name is part
+# of PyPI's trust triple (package-registry-reservation.yaml pypi_trusted_publisher) and is never renamed.
+# Required reviewer from var.gated_apply_reviewer_user_ids, no admin bypass, main-only by explicit policy.
+# Destroying it fails open for the same reason as tf_gated_apply.
+resource "github_repository_environment" "pypi" {
+  repository          = github_repository.this.name
+  environment         = "pypi"
+  prevent_self_review = false
+  can_admins_bypass   = false
+
+  reviewers {
+    users = var.gated_apply_reviewer_user_ids
+  }
+
+  deployment_branch_policy {
+    protected_branches     = false
+    custom_branch_policies = true
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "github_repository_environment_deployment_policy" "pypi_main" {
+  repository     = github_repository.this.name
+  environment    = github_repository_environment.pypi.environment
+  branch_pattern = "main"
 }
 
 # GitHub Environment: tf-trusted-plan (Decision for PLAN-trusted-plan-identity, rec-4636).
@@ -90,11 +129,10 @@ resource "github_repository_environment_deployment_policy" "tf_trusted_plan_main
 
 # GitHub Environment: deployment-approval-probe (rec-4695).
 #
-# Inert probe target, created in the GitHub UI and imported (later terraform/github PR plans show it
-# as an import until the operator next applies the root). Mirrors tf_gated_apply so the probe result
-# transfers to the control in use; the one difference is can_admins_bypass = false (the operator's
-# UI setting). It is never referenced by any OIDC trust and never by a job holding id-token or
-# secrets. No prevent_destroy: it is not a control.
+# The apply App's approval oracle (Decision 248 cl.8; terraform-github-apply.yml approval_probe_run_id), created
+# in the GitHub UI and imported. Mirrors tf_gated_apply's reviewer settings but keeps protected-branches-only; the
+# one other difference is can_admins_bypass = false (the operator's UI setting). It is never referenced by any
+# OIDC trust and never by a job holding id-token or secrets. No prevent_destroy: it is not a control.
 resource "github_repository_environment" "deployment_approval_probe" {
   repository          = github_repository.this.name
   environment         = "deployment-approval-probe"

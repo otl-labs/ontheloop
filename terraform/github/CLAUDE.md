@@ -5,8 +5,8 @@ repo-root `CLAUDE.md` and `terraform/CLAUDE.md` still apply.
 
 This module manages GitHub repository settings for `benjamin-blake/theseus` via the
 `integrations/github` Terraform provider: GitHub Advanced Security (secret scanning + push
-protection), the `main` branch-protection ruleset, Actions permissions, and the
-`tf-gated-apply` GitHub Environment (CD.35 Wave 3 / T2.22 / Decision 92).
+protection), the `main` branch-protection ruleset, Actions permissions, and its GitHub
+Environments (CD.35 Wave 3 / T2.22 / Decision 277).
 
 ## CI apply (Decision 248)
 
@@ -32,19 +32,18 @@ ruleset's required status checks.
 
 Every PR touching this root runs `.github/workflows/terraform-github-plan.yml`; its header holds the rules.
 
-## tf-gated-apply Environment
+## Environments
 
-The `tf-gated-apply` GitHub Environment (defined in `environments.tf`) gates the post-merge
-Terraform apply job for the guard fail-closed set (IAM/trust/destroy diffs). After a change
-in that set is merged to main, the `gated-apply` job in `terraform-apply-sandbox.yml` blocks
-on Environment reviewer approval -- the job does not start until benjamin-blake approves via
-the GitHub Actions UI. Until rec-4965 it also gates this root's CI apply job.
+`tf-gated-apply` gates the post-merge apply of the guard fail-closed set (IAM/trust/destroy diffs): the
+`gated-apply` job in `terraform-apply-sandbox.yml` waits for benjamin-blake's approval. Until rec-4965 it also
+gates this root's CI apply job. `pypi` gates `publish-ontheloop.yml`; its name is in PyPI's trust triple.
 
 Key constraints:
-- `protected_branches = true` may not restrict to main under the ruleset-only main.
-- The reviewer ID comes from `gated_apply_reviewer_user_ids` at apply time, never a literal default.
+- Every Environment but the probe is main-only by an explicit branch policy, never "protected branches only",
+  which admits every branch under a ruleset-only main.
+- Reviewer IDs come from `gated_apply_reviewer_user_ids` at apply time, never a literal default.
 
-deployment-approval-probe: inert rec-4695 probe Environment, created in the UI and imported; see its block in `environments.tf` and the workflow header.
+deployment-approval-probe: rec-4695 probe, created in the UI and imported; Decision 248 cl.8 uses it.
 
 ## Lockout recovery
 
