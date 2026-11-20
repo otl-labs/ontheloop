@@ -278,6 +278,7 @@ def _litellm_digests() -> tuple[str, str]:
     for name in names:
         files = LITELLM_BUILDERS[name]()
         mapped = litellm_producer.map_run(json.loads(files["events.json"]), files["host-run.json"].encode())
+        assert isinstance(mapped, litellm_producer.Mapped)
         recomputed[name] = normalise(mapped.batches)
         committed[name] = load_litellm_case(name)[1]
     return golden_digest(recomputed, names), golden_digest(committed, names)

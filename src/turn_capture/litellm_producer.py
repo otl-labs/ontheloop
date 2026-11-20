@@ -179,7 +179,7 @@ class _Builder:
         entity = litellm_call_ref(self.session, turn["turn"], self._position)
         latency = entry.get("latency_ms")
         started = entry.get("started_at_ms")
-        ms = started + latency if _is_int(started) and _is_int(latency) else turn["started_at_ms"]
+        ms = started + latency if isinstance(started, int) and isinstance(latency, int) else turn["started_at_ms"]
         number = entry.get("attempt")
         meta = {"loss": "cancelled"} if cancelled else {"error": entry.get("outcome"), "loss": "usage_not_recorded"}
         return self.obs(
@@ -194,7 +194,7 @@ class _Builder:
             provider=entry.get("provider"),
             billing_shape=entry.get("billing_shape"),
             **dict.fromkeys(_CLASSES, 0),
-            attempt=number if _is_int(number) and number >= 1 else None,
+            attempt=number if isinstance(number, int) and number >= 1 else None,
             usage_final=False,
             reasoning_visibility="none",
             metadata=canonical_json(meta),

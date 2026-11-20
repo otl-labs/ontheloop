@@ -159,7 +159,7 @@ def _single_call() -> dict[str, str]:
 
 
 def _two_turn() -> tuple[Any, Any]:
-    anthropic = {
+    anthropic: dict[str, Any] = {
         "provider": "anthropic",
         "requested_model": "anthropic/claude-opus-5-5",
         "model": "claude-opus-5-5",

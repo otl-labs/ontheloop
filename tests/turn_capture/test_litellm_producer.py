@@ -32,6 +32,12 @@ PIN = T0 * 1000
 HOST = HOST_RUN.encode()
 
 
+def _map(events, host=HOST) -> lp.Mapped:
+    mapped = lp.map_run(events, host)
+    assert isinstance(mapped, lp.Mapped)
+    return mapped
+
+
 def _record(**over):
     import dataclasses
 
@@ -78,7 +84,7 @@ def _calls(mapped):
 def test_failed_attempt_emits_row():
     for outcome in ("outage", "credit_exhausted", "provider_error", "malformed_output", "empty_output"):
         turn = _turn(attempts=[_attempt(outcome=outcome), _attempt(attempt=2)])
-        rows = _calls(lp.map_run(_events([turn]), HOST))
+        rows = _calls(_map(_events([turn]), HOST))
         loss, good = rows
         assert loss["outcome"] == "error" and loss["usage_final"] is False and "usage_source" not in loss
         assert json.loads(loss["metadata"]) == {"error": outcome, "loss": "usage_not_recorded"}
@@ -103,31 +109,33 @@ def test_failed_attempt_emits_row():
 )
 def test_reasoning_visibility_matrix(message, tokens, expected):
     assert lp.reasoning_visibility(message, tokens) == expected
-    row = _calls(lp.map_run(_events([_turn(record=_record(reasoning_tokens=tokens), message=message)]), HOST))[0]
+    row = _calls(_map(_events([_turn(record=_record(reasoning_tokens=tokens), message=message)]), HOST))[0]
     assert row["reasoning_visibility"] == expected
     assert ("reasoning_tokens" in row) == (tokens is not None)
 
 
 def test_probe_record_reasoning_visibility_ignores_the_message():
     turn = _turn(attempts=[_attempt(role=FB)], message={"reasoning_content": "raw"}, probe=_record(role=FB, response_id=None))
-    probe = _calls(lp.map_run(_events([turn]), HOST))[0]
+    probe = _calls(_map(_events([turn]), HOST))[0]
     assert probe["name"] == "cold_start_probe" and probe["reasoning_visibility"] == "omitted" and "attempt" not in probe
 
 
 def test_rows_pass_kernel():
     specs = load_specs()
-    threshold = specs["telemetry_transcripts"].rules.content.threshold
+    content_rule = specs["telemetry_transcripts"].rules.content
+    assert content_rule is not None
+    threshold = content_rule.threshold
     for name in litellm_case_names():
         files, _ = load_litellm_case(name)
-        mapped = lp.map_run(json.loads(files["events.json"]), files["host-run.json"].encode())
+        mapped = _map(json.loads(files["events.json"]), files["host-run.json"].encode())
         assert isinstance(mapped, lp.Mapped), name
         for table, rows in mapped.batches:
             prepare_batch(specs[table], as_written(rows, threshold), tenant_id=TENANT, project_id=PROJECT)
 
 
 def test_usage_final_follows_usage_absent():
-    absent = _calls(lp.map_run(_events([_turn(record=_record(usage_absent=("tokens_output",)))]), HOST))[0]
-    full = _calls(lp.map_run(_events([_turn()]), HOST))[0]
+    absent = _calls(_map(_events([_turn(record=_record(usage_absent=("tokens_output",)))]), HOST))[0]
+    full = _calls(_map(_events([_turn()]), HOST))[0]
     assert absent["usage_final"] is False and full["usage_final"] is True
     assert absent["usage_source"] == full["usage_source"] == "record"
 
@@ -164,7 +172,7 @@ def _sessions(mapped):
     ],
 )
 def test_lm2_lm3_outcome_tables(end, session, run, reason):
-    mapped = lp.map_run(_events([_turn()], end), HOST)
+    mapped = _map(_events([_turn()], end), HOST)
     open_row, close = _sessions(mapped)
     assert open_row["external_ref"].endswith("#0/open") and open_row["source_ordinal"] == 0
     assert open_row["workflow"] == "ci_rca" and open_row["execution_attempt"] == 1 and "outcome" not in open_row
@@ -182,8 +190,8 @@ def test_lm2_lm3_outcome_tables(end, session, run, reason):
 
 def test_run_close_model_falls_back_to_requested_model_and_none():
     record = _record(model=None)
-    assert _agents(lp.map_run(_events([_turn(record=record)]), HOST))[1]["model"] == "deepseek/deepseek-flash"
-    assert "model" not in _agents(lp.map_run(_events([_turn(record=None, attempts=[])]), HOST))[1]
+    assert _agents(_map(_events([_turn(record=record)]), HOST))[1]["model"] == "deepseek/deepseek-flash"
+    assert "model" not in _agents(_map(_events([_turn(record=None, attempts=[])]), HOST))[1]
 
 
 def test_lm4_probe_placement_and_attempts_unknown():
@@ -192,19 +200,19 @@ def test_lm4_probe_placement_and_attempts_unknown():
         _attempt(outcome="outage"),
         _attempt(role=FB, attempt=1),
     ]
-    rows = _calls(lp.map_run(_events([_turn(attempts=before, probe=probe, record=_record(role=FB))]), HOST))
+    rows = _calls(_map(_events([_turn(attempts=before, probe=probe, record=_record(role=FB))]), HOST))
     assert [r["name"] for r in rows] == ["primary", "cold_start_probe", FB]
     after = [_attempt(outcome="outage")]
-    rows = _calls(lp.map_run(_events([_turn(attempts=after, record=None, probe=probe)]), HOST))
+    rows = _calls(_map(_events([_turn(attempts=after, record=None, probe=probe)]), HOST))
     assert [r["name"] for r in rows] == ["primary", "cold_start_probe"]
-    mapped = lp.map_run(_events([_turn(known=False, attempts=[]), _turn(2, record=None)]), HOST)
+    mapped = _map(_events([_turn(known=False, attempts=[]), _turn(2, record=None)]), HOST)
     assert _calls(mapped) == [] and mapped.diagnostics == {"attempts_unknown": 1, "ok_without_record": 1}
 
 
 def test_lm5_both_ref_forms():
-    with_id = _calls(lp.map_run(_events([_turn(record=_record(response_id="resp_1"))]), HOST))[0]
+    with_id = _calls(_map(_events([_turn(record=_record(response_id="resp_1"))]), HOST))[0]
     assert with_id["entity_ref"] == "resp_1" and with_id["external_ref"] == "resp_1/model_call"
-    without = _calls(lp.map_run(_events([_turn(2, record=_record(response_id=None))]), HOST))[0]
+    without = _calls(_map(_events([_turn(2, record=_record(response_id=None))]), HOST))[0]
     assert without["entity_ref"] == "litellm:gha:123456789/1/rca/1/call/2/1"
     assert without["external_ref"] == without["entity_ref"] + "/model_call"
     assert without["session_ref"] == "litellm:gha:123456789/1/rca/1" and "parent_observation_ref" not in without
@@ -212,20 +220,20 @@ def test_lm5_both_ref_forms():
 
 def test_lm7_cancelled_row():
     flight = _attempt(outcome="cancelled", latency_ms=0)
-    row = _calls(lp.map_run(_events([_turn(attempts=[flight], record=None)]), HOST))[0]
+    row = _calls(_map(_events([_turn(attempts=[flight], record=None)]), HOST))[0]
     assert row["outcome"] == "interrupted" and json.loads(row["metadata"]) == {"loss": "cancelled"}
     assert row["usage_final"] is False and row["tokens_output"] == 0 and row["provider"] == "deepseek"
     probe = _attempt(outcome="cancelled", role=FB, attempt=0)
-    assert "attempt" not in _calls(lp.map_run(_events([_turn(attempts=[probe], record=None)]), HOST))[0]
+    assert "attempt" not in _calls(_map(_events([_turn(attempts=[probe], record=None)]), HOST))[0]
     no_clock = _attempt(outcome="outage", latency_ms=None, started_at_ms=None)
-    stamp = _calls(lp.map_run(_events([_turn(attempts=[no_clock], record=None, started=PIN + 77)]), HOST))[0]
+    stamp = _calls(_map(_events([_turn(attempts=[no_clock], record=None, started=PIN + 77)]), HOST))[0]
     assert stamp["event_timestamp"] == lp._at(PIN + 77)
 
 
 def test_lm8_prefix_rule_and_halt():
     turns = [_turn(1), _turn(2, record=_record(at=300, response_id="resp_b"))]
-    final = lp.map_run(_events(turns), HOST)
-    prefix = lp.map_run(_events(turns[:1], None), HOST)
+    final = _map(_events(turns), HOST)
+    prefix = _map(_events(turns[:1], None), HOST)
     assert [r["external_ref"] for r in _calls(prefix)] == [r["external_ref"] for r in _calls(final)][:1]
     assert _calls(prefix)[0] == _calls(final)[0]
     assert len(_sessions(prefix)) == len(_agents(prefix)) == 1
@@ -234,7 +242,7 @@ def test_lm8_prefix_rule_and_halt():
     assert [t for t, _ in final.batches] == ["telemetry_observations", "telemetry_agents", "telemetry_sessions"]
     early = _record(started_at_ms=PIN - 5, responded_at_ms=PIN - 1)
     with pytest.raises(lp.ProducerHalt):
-        lp.map_run(_events([_turn(record=early)]), HOST)
+        _map(_events([_turn(record=early)]), HOST)
 
 
 def test_cases_match_builders():
@@ -246,7 +254,7 @@ def test_golden_rows():
     rows_by = {}
     for name in litellm_case_names():
         files, expected = load_litellm_case(name)
-        mapped = lp.map_run(json.loads(files["events.json"]), files["host-run.json"].encode())
+        mapped = _map(json.loads(files["events.json"]), files["host-run.json"].encode())
         rows_by[name] = normalise(mapped.batches)
         assert rows_by[name] == expected, name
     assert len(golden_digest(rows_by, list(rows_by))) == 64

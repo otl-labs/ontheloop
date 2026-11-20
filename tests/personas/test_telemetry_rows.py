@@ -33,6 +33,7 @@ def test_exit_0_writes_the_rows_file_equal_to_map_run(tmp_path):
     assert code == 0 and not Path(f"{out}.tmp").exists()
     document = json.loads(out.read_text(encoding="utf-8"))
     mapped = lp.map_run(_events("fail_over_probe.json"), HOST_RUN.encode())
+    assert isinstance(mapped, lp.Mapped)
     assert document == entry.rows_document(mapped) | {"batches": document["batches"]}
     assert [b["table"] for b in document["batches"]] == ["telemetry_observations", "telemetry_agents", "telemetry_sessions"]
     assert document["batches"] == entry.rows_document(mapped)["batches"]
