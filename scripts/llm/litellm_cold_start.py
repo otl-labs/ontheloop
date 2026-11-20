@@ -19,6 +19,7 @@ from typing import Any
 
 from scripts.llm import tier_selection
 from scripts.llm.litellm_wire import (
+    Attempt,
     CallRecord,
     TransportError,
     classify,
@@ -42,6 +43,7 @@ class ColdStartResult:
     record: CallRecord | None
     detail: str
     fresh: bool = False
+    attempt: Attempt | None = None
 
 
 _asserted: dict[tuple[str, str], ColdStartResult] = {}
@@ -90,17 +92,45 @@ def _result(
     return ColdStartResult(selection.role, selection.cold_start_assertion, outcome, record, detail)
 
 
-def _failed(selection: tier_selection.Selection, exc: BaseException) -> ColdStartResult:
+def _probe_attempt(selection: tier_selection.Selection, outcome: str, latency: int, started_ms: int) -> Attempt:
+    return Attempt(
+        selection.role, selection.model, 0, outcome, latency, selection.provider, selection.billing_shape, started_ms
+    )
+
+
+def reraise_if_cancelling(exc: BaseException) -> None:
+    task = asyncio.current_task()
+    if task is not None and task.cancelling() > 0:
+        raise asyncio.CancelledError from exc
+
+
+def _begin(capture: Any, selection: tier_selection.Selection, started_ms: int) -> None:
+    if capture is not None:
+        capture.in_flight = _probe_attempt(selection, "cancelled", 0, started_ms)
+
+
+def _failed(
+    selection: tier_selection.Selection, exc: BaseException, started: float, started_ms: int, capture: Any = None
+) -> ColdStartResult:
     kind = classify(exc)
     status = getattr(exc, "status_code", None)
-    return _fresh(_result(selection, "spent" if kind == "credit_exhausted" else "not_asserted", f"{kind} (status {status})"))
+    result = _result(selection, "spent" if kind == "credit_exhausted" else "not_asserted", f"{kind} (status {status})")
+    attempt = _probe_attempt(selection, kind, int((time.monotonic() - started) * 1000), started_ms)
+    if capture is not None:
+        capture.in_flight = None
+        capture.attempts.append(attempt)
+    return _fresh(dataclasses.replace(result, attempt=attempt))
 
 
 def _fresh(result: ColdStartResult) -> ColdStartResult:
     return dataclasses.replace(result, fresh=True)
 
 
-def _interpreted(selection: tier_selection.Selection, response: Any, started: float, started_ms: int) -> ColdStartResult:
+def _interpreted(
+    selection: tier_selection.Selection, response: Any, started: float, started_ms: int, capture: Any = None
+) -> ColdStartResult:
+    if capture is not None:
+        capture.in_flight = None
     if not getattr(response, "choices", None):
         return _fresh(_result(selection, "not_asserted", "the response carried no choices"))
     latency = int((time.monotonic() - started) * 1000)
@@ -121,7 +151,9 @@ def _not_applicable(selection: tier_selection.Selection) -> ColdStartResult:
     return _result(selection, "not_applicable", "the role declares no assertion")
 
 
-def cold_start_check(role: str, *, credential_holder: str = "on_the_loop", root: Path | None = None) -> ColdStartResult:
+def cold_start_check(
+    role: str, *, credential_holder: str = "on_the_loop", root: Path | None = None, capture: Any = None
+) -> ColdStartResult:
     selection = _resolve(role, credential_holder, root)
     if selection.cold_start_assertion == "not_applicable":
         return _not_applicable(selection)
@@ -129,30 +161,35 @@ def cold_start_check(role: str, *, credential_holder: str = "on_the_loop", root:
     if isinstance(prepared, ColdStartResult):
         return prepared
     started, started_ms = time.monotonic(), int(_wall() * 1000)
+    _begin(capture, selection, started_ms)
     try:
         response = load_litellm().completion(**prepared)
     except Exception as exc:  # intentionally broad: a probe failure is an outcome, never a raise
-        return _failed(selection, exc)
-    return _interpreted(selection, response, started, started_ms)
+        return _failed(selection, exc, started, started_ms, capture)
+    return _interpreted(selection, response, started, started_ms, capture)
 
 
-async def _acold_start_probe(selection: tier_selection.Selection) -> ColdStartResult:
+async def _acold_start_probe(selection: tier_selection.Selection, capture: Any = None) -> ColdStartResult:
     prepared = _prepare(selection)
     if isinstance(prepared, ColdStartResult):
         return prepared
     started, started_ms = time.monotonic(), int(_wall() * 1000)
+    _begin(capture, selection, started_ms)
     try:
         response = await load_litellm().acompletion(**prepared)
     except Exception as exc:  # intentionally broad, as in cold_start_check
-        return _failed(selection, exc)
-    return _interpreted(selection, response, started, started_ms)
+        reraise_if_cancelling(exc)
+        return _failed(selection, exc, started, started_ms, capture)
+    return _interpreted(selection, response, started, started_ms, capture)
 
 
-async def acold_start_check(role: str, *, credential_holder: str = "on_the_loop", root: Path | None = None) -> ColdStartResult:
+async def acold_start_check(
+    role: str, *, credential_holder: str = "on_the_loop", root: Path | None = None, capture: Any = None
+) -> ColdStartResult:
     selection = _resolve(role, credential_holder, root)
     if selection.cold_start_assertion == "not_applicable":
         return _not_applicable(selection)
-    return await _acold_start_probe(selection)
+    return await _acold_start_probe(selection, capture)
 
 
 def _cache_key(selection: tier_selection.Selection, root: Path | None) -> tuple[str, str]:
@@ -164,11 +201,18 @@ def _unavailable(result: ColdStartResult) -> TransportError:
         "fallback_unavailable",
         f"{result.role} cold start was {result.outcome}: {result.detail}",
         role=result.role,
+        attempts=() if result.attempt is None else (result.attempt,),
         result=result,
     )
 
 
-def ensure_asserted(role: str, *, credential_holder: str = "on_the_loop", root: Path | None = None) -> ColdStartResult:
+def _forward(capture: Any) -> dict[str, Any]:
+    return {} if capture is None else {"capture": capture}
+
+
+def ensure_asserted(
+    role: str, *, credential_holder: str = "on_the_loop", root: Path | None = None, capture: Any = None
+) -> ColdStartResult:
     selection = _resolve(role, credential_holder, root)
     key = _cache_key(selection, root)
     with _sync_guard:
@@ -177,14 +221,16 @@ def ensure_asserted(role: str, *, credential_holder: str = "on_the_loop", root: 
         cached = _asserted.get(key)
         if cached is not None:
             return dataclasses.replace(cached, fresh=False)
-        result = cold_start_check(role, credential_holder=credential_holder, root=root)
+        result = cold_start_check(role, credential_holder=credential_holder, root=root, **_forward(capture))
         if result.outcome != "asserted":
             raise _unavailable(result)
         _asserted[key] = result
         return result
 
 
-async def aensure_asserted(role: str, *, credential_holder: str = "on_the_loop", root: Path | None = None) -> ColdStartResult:
+async def aensure_asserted(
+    role: str, *, credential_holder: str = "on_the_loop", root: Path | None = None, capture: Any = None
+) -> ColdStartResult:
     selection = _resolve(role, credential_holder, root)
     key = _cache_key(selection, root)
     loop = asyncio.get_running_loop()
@@ -193,7 +239,7 @@ async def aensure_asserted(role: str, *, credential_holder: str = "on_the_loop",
         cached = _asserted.get(key)
         if cached is not None:
             return dataclasses.replace(cached, fresh=False)
-        result = await acold_start_check(role, credential_holder=credential_holder, root=root)
+        result = await acold_start_check(role, credential_holder=credential_holder, root=root, **_forward(capture))
         if result.outcome != "asserted":
             raise _unavailable(result)
         _asserted[key] = result
@@ -228,13 +274,15 @@ def fallback_gate(
     *,
     credential_holder: str = "on_the_loop",
     root: Path | None = None,
+    capture: Any = None,
 ) -> ColdStartResult:
     mid_run = _mid_run(messages, primary_error)
     if mid_run is not None:
         raise mid_run
     try:
-        return ensure_asserted(_FALLBACK_ROLE, credential_holder=credential_holder, root=root)
+        return ensure_asserted(_FALLBACK_ROLE, credential_holder=credential_holder, root=root, **_forward(capture))
     except TransportError as exc:
+        exc.attempts = primary_error.attempts + exc.attempts
         raise exc from primary_error
 
 
@@ -244,13 +292,15 @@ async def afallback_gate(
     *,
     credential_holder: str = "on_the_loop",
     root: Path | None = None,
+    capture: Any = None,
 ) -> ColdStartResult:
     mid_run = _mid_run(messages, primary_error)
     if mid_run is not None:
         raise mid_run
     try:
-        return await aensure_asserted(_FALLBACK_ROLE, credential_holder=credential_holder, root=root)
+        return await aensure_asserted(_FALLBACK_ROLE, credential_holder=credential_holder, root=root, **_forward(capture))
     except TransportError as exc:
+        exc.attempts = primary_error.attempts + exc.attempts
         raise exc from primary_error
 
 

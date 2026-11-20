@@ -165,3 +165,67 @@ class TestReversalStanzasAccountingDeclaration:
     def test_no_stanzas_is_recorded_vacuous(self) -> None:
         outcome = self._outcome([])
         assert (outcome.status, outcome.examined_count, outcome.examined_unit) == ("vacuous", 0, "reversal_stanzas")
+
+
+class TestGateModeAndCeiling:
+    @staticmethod
+    def _md(tmp_path, stanzas: list[tuple[int, str, str]]):
+        blocks = "".join(
+            f"## Decision {n}: F\n\n```yaml reversal-conditions\ndecision: {n}\nreview_by: {d}\non_trigger: x\n"
+            f"conditions:\n{cond}```\n\n"
+            for n, d, cond in stanzas
+        )
+        path = tmp_path / "DECISIONS.md"
+        path.write_text(blocks, encoding="utf-8")
+        return path
+
+    def test_gate_skips_history_predicates_and_runs_the_rest(self, tmp_path, monkeypatch) -> None:
+        from scripts.preflight import decision_conditions as dc
+
+        calls: list[str] = []
+
+        def hist(window_days: int, max_entries_per_plan: float, as_of=None) -> bool:
+            calls.append("hist")
+            raise RuntimeError("shallow clone")
+
+        def safe(n: int) -> bool:
+            calls.append("safe")
+            raise RuntimeError("gate-safe predicate raised")
+
+        monkeypatch.setitem(dc._PREDICATE_REGISTRY, "decision_entries_per_plan_exceed", hist)
+        monkeypatch.setitem(dc._PREDICATE_REGISTRY, "gate_safe_fixture", safe)
+        hist_cond = (
+            "  - id: h\n    kind: repo_state\n    description: d\n    predicate: decision_entries_per_plan_exceed\n"
+            "    params: {window_days: 90, max_entries_per_plan: 0.3}\n    fires: at_review\n"
+        )
+        path = self._md(tmp_path, [(901, "2020-01-01", hist_cond)])
+        monkeypatch.setattr(dc, "_DECISIONS_MD_PATHS", [path])
+        failed: list[str] = []
+        validate_reversal_stanzas(failed)
+        assert failed == [] and calls == []
+
+        safe_cond = (
+            "  - id: s\n    kind: repo_state\n    description: d\n    predicate: gate_safe_fixture\n    params: {n: 1}\n"
+        )
+        path = self._md(tmp_path, [(902, "2999-01-01", safe_cond)])
+        monkeypatch.setattr(dc, "_DECISIONS_MD_PATHS", [path])
+        failed = []
+        validate_reversal_stanzas(failed)
+        assert calls == ["safe"] and len(failed) == 1 and "902" in failed[0] and "MALFORMED" in failed[0]
+
+    def test_date_over_the_ceiling_fails_and_names_the_command(self, tmp_path, monkeypatch) -> None:
+        from scripts.preflight import decision_conditions as dc
+
+        manual = "  - id: c\n    kind: manual\n    description: d\n"
+        ok = self._md(tmp_path, [(n, "2027-01-01", manual) for n in range(1, 11)])
+        monkeypatch.setattr(dc, "_DECISIONS_MD_PATHS", [ok])
+        failed: list[str] = []
+        validate_reversal_stanzas(failed)
+        assert failed == []
+
+        over = self._md(tmp_path, [(n, "2027-01-01", manual) for n in range(1, 12)])
+        monkeypatch.setattr(dc, "_DECISIONS_MD_PATHS", [over])
+        failed = []
+        validate_reversal_stanzas(failed)
+        assert len(failed) == 1 and "2027-01-01" in failed[0] and "11 stanzas" in failed[0]
+        assert "scripts.preflight.review_dates --next" in failed[0]

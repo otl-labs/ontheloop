@@ -24,6 +24,7 @@ crashed on (Decision 55 -- a crash inside a presubmit check obscures which gate 
 from __future__ import annotations
 
 from scripts.checks import _common, _marker_guard, registry
+from scripts.checks.structural import _byte_budget
 from scripts.checks.structural._classify import effective_lines, iter_measured_files, load_registry, longest_line
 
 _RESIDUAL_SLUG = "residual"
@@ -193,6 +194,8 @@ def escape_violations(reg: dict) -> list[str]:
         + _e2_class_ceilings(rows)
         + _e3_deferral_accountability(rows)
         + _e4_frozen_note_integrity(reg, rows)
+        + _byte_budget.e2_violations(rows)
+        + _byte_budget.roster_violations(reg, _common.ROOT)
     )
 
 
@@ -212,6 +215,8 @@ def validate_structural_size_limits(failed: list[str]) -> None:
         text = (_common.ROOT / rel).read_text(encoding="utf-8", errors="replace")
         class_row = classes_by_slug[slug]
         relief_valves = class_row.get("relief_valve", "")
+
+        errors.extend(_byte_budget.file_violations(rel, (_common.ROOT / rel).stat().st_size, class_row, reg))
 
         eff = effective_lines(text)
         limit = budgets.get(rel, class_row["limit"])

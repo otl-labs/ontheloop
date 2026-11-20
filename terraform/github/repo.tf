@@ -127,12 +127,17 @@ resource "github_repository_ruleset" "main_protection" {
   }
 }
 
-# Actions settings: all actions allowed (filtered by the ruleset gate), but Actions
-# are explicitly enabled. Restricts which action types may run (a future addition).
+# Actions settings: all actions allowed (filtered by the ruleset gate), Actions explicitly enabled, and
+# the forge refuses any action not pinned to a full commit SHA (Decision 100; reusable workflows may still
+# use a tag, per GitHub). validate_actions_sha_pinned stays for what the forge does not do: the PR-time
+# signal, the exact version comment and the docker @sha256 digest leg. Rollback is a revert PR applied by a
+# gate_change dispatch; the operator's own untick in the repository's Actions settings is break-glass that a
+# revert PR or re-apply must follow (Decision 126).
 resource "github_actions_repository_permissions" "this" {
-  repository      = github_repository.this.name
-  allowed_actions = "all"
-  enabled         = true
+  repository           = github_repository.this.name
+  allowed_actions      = "all"
+  enabled              = true
+  sha_pinning_required = true
 }
 
 # Workflow permissions: default token = read-only; GitHub Actions cannot approve PRs.

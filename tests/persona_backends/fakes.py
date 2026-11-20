@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import json
 import shutil
 from pathlib import Path
@@ -123,6 +125,34 @@ class ScriptedTransport:
         if isinstance(item, BaseException):
             raise item
         return item
+
+
+@dataclasses.dataclass
+class Fill:
+    """One scripted call that fills its capture, then returns result or, with none, waits forever."""
+
+    attempts: tuple[Attempt, ...] = ()
+    in_flight: Attempt | None = None
+    record: CallRecord | None = None
+    probe_record: CallRecord | None = None
+    result: Any = None
+
+
+class CapturingTransport(ScriptedTransport):
+    async def __call__(self, persona: str, messages: list[dict[str, Any]], **kwargs: Any) -> Any:
+        item = self.script[0]
+        if not isinstance(item, Fill):
+            return await super().__call__(persona, messages, **kwargs)
+        self.script.pop(0)
+        self.calls.append({"persona": persona, "messages": messages, **kwargs})
+        capture = kwargs["capture"]
+        capture.filled = True
+        capture.attempts.extend(item.attempts)
+        capture.in_flight, capture.record, capture.probe_record = item.in_flight, item.record, item.probe_record
+        if item.result is not None:
+            return item.result
+        await asyncio.Event().wait()
+        return None
 
 
 class FakeClock:

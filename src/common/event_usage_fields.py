@@ -1,4 +1,5 @@
-"""Derived output columns of the usage verbs (model_usage_rollup, tool_use_rollup, session_startup_baseline), in SQL order.
+"""Derived output columns of the usage verbs (model_usage_rollup, tool_use_rollup, session_startup_baseline,
+session_tree_rollup), in SQL order.
 
 Pure data, no imports; the response stamps are appended by src.common.ducklake_reader_client.VERB_FIELDS.
 """
@@ -40,6 +41,21 @@ TOOL_USE_FIELDS = (
     "blocked_count",
     "interrupted_count",
     "session_count",
+)
+
+TREE_ROLLUP_FIELDS = (
+    "root_session_id",
+    "harness_session_key",
+    "branch",
+    "workflow",
+    "session_started_at",
+    "last_event_timestamp",
+    "roots_in_tree",
+    "session_count",
+    "workflows",
+    "compact_count",
+    "compacted_session_count",
+    "merge_links",
 )
 
 STARTUP_BASELINE_FIELDS = (

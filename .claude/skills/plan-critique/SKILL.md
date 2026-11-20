@@ -35,7 +35,7 @@ Reject a plan that invents a third validation tier, treats mapped coverage or re
 
 7. **North Star alignment is the decision scout's (Decision 243 clause 8):** quote its Serves line from the plan's `context`; never re-score it. Absent: a nit.
 
-8. **Evaluate Scope breadth (IMPLEMENTATION plans; a split means child recs or atomic plans, Decision 247):**
+8. **Evaluate Scope breadth (IMPLEMENTATION; one verifiable, revertible outcome, `/plan` Step 4):**
    - For IMPLEMENTATION: Are all scope entries necessary? Too large (suggest split)? Does the Scope extend beyond the stated phase?
 
 9. **Check phase dependencies:** Does this plan depend on work from a prior phase that is not yet complete? Cite specific ROADMAP phase entries.
@@ -132,7 +132,7 @@ Ask the following five questions against the plan's chosen approach. For each, w
 **North Star Alignment:** [the scout's Serves line, quoted] / absent (nit)
 
 **Scope Evaluation:**
-- [Area or file 1]: appropriately scoped / too large (suggest split into: X, Y; deferred half filed as a follow-on rec) / too small (merge with: Z)
+- [Area or file 1]: appropriately scoped / too large (more PRs, or child recs X, Y; not a deferred half filed as a follow-on rec) / too small (merge with: Z)
 - [Area or file 2]: ...
 
 **Phase Dependencies:** Aligned / [describe issue and which phase must complete first]
