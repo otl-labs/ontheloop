@@ -15,13 +15,18 @@ BUNDLED = ["rec-1"]
 SHARD_ID = "chk-a"
 SHARD = f"config/agent/verification_registry/entries/{SHARD_ID}.yaml"
 SRC = "src/impl.py"
+DOC = "doc.md"
+DOC_BASE = "alpha beta gamma delta\n"
+DOC_APPROVED = "alpha BETA GAMMA delta\n"
 
 
-def plan_doc(declared: bool | None, bundled: list[str] | None = None, extra: dict | None = None) -> dict:
+def plan_doc(
+    declared: bool | None, bundled: list[str] | None = None, extra: dict | None = None, doc_scope: bool = False
+) -> dict:
     doc = {
         "slug": SLUG,
         "bundled_recommendations": BUNDLED if bundled is None else bundled,
-        "scope": [{"file": SRC}, {"file": PLAN}],
+        "scope": [{"file": SRC}, {"file": PLAN}] + ([{"file": DOC}] if doc_scope else []),
         "verification_plan": [{"step": 1, "graduation": "graduate", "graduation_check_id": SHARD_ID}],
     }
     if declared is not None:
@@ -63,21 +68,33 @@ def build_main(
     impl_file: str = SRC,
     impl_declared: bool | None = None,
     sidecar: bool = False,
+    sidecar_landed: bool = False,
+    later_edit: bool = False,
 ) -> tuple[Path, str | None]:
-    """Main = seed, plan commit (undeclared), implementation commit X. Returns (repo, X sha or None)."""
+    """Main = seed, plan commit (undeclared), implementation commit X. Returns (repo, X sha or None).
+
+    sidecar_landed: the plan scopes doc.md, the plan commit writes its base words and the sidecar, and X applies the
+    approved words (the realistic shape); later_edit adds a commit editing doc.md after X."""
     fx.clear_ci_env(monkeypatch)
     repo = fx.make_repo(tmp_path)
-    write_plan_doc(repo, plan_doc(False, bundled))
+    write_plan_doc(repo, plan_doc(False, bundled, doc_scope=sidecar_landed))
+    if sidecar_landed:
+        fx.write(repo, DOC, DOC_BASE)
     fx.write(repo, "config/agent/verification_registry/entries/chk-seed.yaml", shard_text("chk-seed", "README.md"))
-    if sidecar:
+    if sidecar or sidecar_landed:
         fx.write_sidecar(repo, SLUG, [{"id": "b1", "file": "doc.md", "before": "beta gamma", "after": "BETA GAMMA"}])
     commit_all(repo, "plan")
     sha = None
     if impl_message is not None:
         fx.write(repo, impl_file, "x = 1\n")
+        if sidecar_landed:
+            fx.write(repo, DOC, DOC_APPROVED)
         if impl_declared is not None:
-            write_plan_doc(repo, plan_doc(impl_declared, bundled))
+            write_plan_doc(repo, plan_doc(impl_declared, bundled, doc_scope=sidecar_landed))
         sha = commit_all(repo, impl_message)
+        if later_edit:
+            fx.write(repo, DOC, DOC_APPROVED + "later edit\n")
+            commit_all(repo, "later edit")
     fx.push_main(repo)
     return repo, sha
 
@@ -91,9 +108,10 @@ def closure_branch(
     message: str = "closure\n",
     bundled: list[str] | None = None,
     commit: bool = True,
+    doc_scope: bool = False,
 ) -> str | None:
     fx.branch(repo, "closure")
-    write_plan_doc(repo, plan_doc(True, bundled, plan_extra))
+    write_plan_doc(repo, plan_doc(True, bundled, plan_extra, doc_scope))
     fx.write(repo, f"config/agent/verification_registry/entries/{shard}.yaml", shard_text(shard))
     for rel, text in (extra_files or {}).items():
         fx.write(repo, rel, text)

@@ -21,6 +21,7 @@ from unittest import mock
 import pytest
 
 from scripts import verification_graduation as vg
+from scripts.checks.verification import _graduation_git as _gg
 from scripts.verification_checks import CheckStatus
 
 from .conftest import _commit_all, _git, _init_repo, _seed_graduation_deps
@@ -53,6 +54,17 @@ class TestKernelDifferential:
         }
         outcome = vg.run_differential(row, repo_root=repo)
         assert outcome.admitted, outcome.reason
+
+    def test_verdicts_unchanged_with_worktree_for(self, tmp_path: Path) -> None:
+        repo = self._build_repo(tmp_path, base_has_sentinel=False)
+        taut = self._build_repo(tmp_path / "t", base_has_sentinel=True)
+        spec = {"path": "target.txt", "pattern": "sentinel", "operator": "eq", "count": 1}
+        row = {"check_id": "genuine", "primitive_slot": "grep_count", "check_spec": spec}
+        for root, admitted in ((repo, True), (taut, False)):
+            with _gg.shared_worktrees(root) as wt:
+                given = vg.run_differential(row, repo_root=root, worktree_for=wt.get)
+            assert given.admitted is admitted
+            assert vg.run_differential(row, repo_root=root).admitted is admitted
 
     def test_tautological_entry_is_rejected(self, tmp_path: Path) -> None:
         """origin/main ALSO has the sentinel -- passes on both trees -> rejected, not admitted."""
@@ -405,7 +417,7 @@ class TestInjectedRevertRunnerAndFailLoud:
         (repo / "f.txt").write_text("x\n", encoding="utf-8")
         _commit_all(repo, "base")
 
-        real_run_git = vg._run_git
+        real_run_git = _gg.run_git
         calls: list[list[str]] = []
 
         def fake_run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
@@ -414,7 +426,7 @@ class TestInjectedRevertRunnerAndFailLoud:
                 return subprocess.CompletedProcess(args=["git", *args], returncode=1, stdout="", stderr="simulated failure")
             return real_run_git(args, cwd)
 
-        monkeypatch.setattr(vg, "_run_git", fake_run_git)
+        monkeypatch.setattr(_gg, "run_git", fake_run_git)
         with vg.git_worktree("HEAD", repo_root=repo):
             pass
         assert any(a[:2] == ["worktree", "prune"] for a in calls), calls

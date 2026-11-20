@@ -157,6 +157,7 @@ class TestRunTerraformChecks:
             "-chdir=terraform/personal",
             "-chdir=terraform/github",
             "-chdir=terraform/bootstrap",
+            "-chdir=terraform/organization",
         }
         assert any("-backend=false" in cmd for cmd in calls)  # creds-free init
         assert all("plan" not in cmd for cmd in calls)  # no creds-needing plan here

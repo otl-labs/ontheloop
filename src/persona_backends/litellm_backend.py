@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import os
+import sys
 import time
 from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path
@@ -154,7 +155,11 @@ class _Run:
                 self.tools = [*self.tools, *bridge.tool_specs()]
                 self.head["tools_sha256"] = ev.tools_sha256(self.tools)
                 self.emit_head()
-                return await self.go()
+                result = await self.go()
+            return result  # noqa: RET504 -- bound inside the bridge so the teardown handler can return it
+        except mcp_bridge.BridgeTeardownFailed as exc:
+            print(f"bridge teardown failed after the run ended: {exc}", file=sys.stderr)
+            return result
         except mcp_bridge.BridgeTimeout:
             return self.budget_failure("max_wall_clock_seconds reached while the MCP server started")
         except mcp_bridge.BridgeUnavailable as exc:

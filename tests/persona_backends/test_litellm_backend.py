@@ -4,13 +4,15 @@ import json
 import os
 import shutil
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
 import yaml
+from mcp.client import stdio as mcp_stdio
 from mcp.client.stdio import StdioServerParameters
 
-from src.persona_backends import RunAborted, RunRefused
+from src.persona_backends import RunAborted, RunRefused, mcp_bridge
 from tests.persona_backends import fakes
 from tests.persona_backends.fakes import ScriptedTransport as T
 from tests.persona_backends.fakes import attempt, drive, error, final, tool
@@ -562,3 +564,65 @@ def test_fallback_unavailable_lands_primary_and_probe_attempts():
     assert [a["attempt"] for a in turn["attempts"]] == [1, 2, 0] and turn["attempts_known"] is True
     assert turn["role"] == "primary" and turn["failed_over"] is False and turn["probe_turn"] == 0
     assert info.value.events[-1]["turns_used"] == 3
+
+
+SENTINEL = "sentinel-secret-text"
+
+
+def _inject(monkeypatch, make):
+    fired = []
+
+    @asynccontextmanager
+    async def wrapped(*args, **kwargs):
+        try:
+            async with mcp_stdio.stdio_client(*args, **kwargs) as streams:
+                yield streams
+        finally:
+            fired.append(True)
+            raise make()
+
+    monkeypatch.setattr(mcp_bridge, "stdio_client", wrapped)
+    return fired
+
+
+@pytest.mark.parametrize("make", [lambda: OSError(SENTINEL), lambda: ExceptionGroup(SENTINEL, [OSError(SENTINEL)])])
+@pytest.mark.parametrize(("script", "outcome"), [([final()], "success"), ([final("nope"), final("nope")], "failure")])
+def test_bridge_teardown_error_after_end_keeps_one_end_record(tmp_path, monkeypatch, capsys, make, script, outcome):
+    fired = _inject(monkeypatch, make)
+    seen = []
+    result, events = _warehouse(tmp_path, script, on_event=seen.append)
+    ends = [e for e in events if "outcome" in e and "turns_used" in e]
+    assert fired and result["outcome"] == outcome
+    assert len(ends) == 1 and ends[0]["outcome"] == outcome
+    assert len([e for e in seen if "turns_used" in e]) == 1
+    err = capsys.readouterr().err
+    assert err.count("bridge teardown failed after the run ended: the server failed during shutdown") == 1
+    assert SENTINEL not in err
+
+
+@pytest.mark.parametrize("make", [lambda: RuntimeError(SENTINEL), lambda: ExceptionGroup("g", [RuntimeError(SENTINEL)])])
+def test_bridge_teardown_unexpected_error_after_end_propagates(tmp_path, monkeypatch, make):
+    fired = _inject(monkeypatch, make)
+    seen = []
+    with pytest.raises((RuntimeError, ExceptionGroup)) as info:
+        _warehouse(tmp_path, [final()], on_event=seen.append)
+    assert fired and not isinstance(info.value, RunAborted)
+    ends = [e for e in seen if "turns_used" in e]
+    assert len(ends) == 1 and ends[0]["outcome"] == "success"
+
+
+def test_bridge_teardown_error_after_abort_keeps_one_aborted_end(tmp_path, monkeypatch):
+    fired = _inject(monkeypatch, lambda: OSError(SENTINEL))
+    t = T([error("outage", (attempt(outcome="outage"),))])
+    with pytest.raises(RunAborted) as info:
+        _warehouse(tmp_path, t)
+    ends = [e for e in info.value.events if "turns_used" in e]
+    assert fired and info.value.kind == "outage" and len(ends) == 1 and ends[0]["outcome"] == "aborted"
+
+
+def test_bridge_teardown_cancellation_after_end_propagates(tmp_path, monkeypatch):
+    fired = _inject(monkeypatch, asyncio.CancelledError)
+    seen = []
+    with pytest.raises(asyncio.CancelledError):
+        _warehouse(tmp_path, [final()], on_event=seen.append)
+    assert fired and len([e for e in seen if "turns_used" in e]) == 1

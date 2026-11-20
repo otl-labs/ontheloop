@@ -207,5 +207,6 @@ class TestTrackedLockDiscovery:
         assert tracked_lock_files(_common.ROOT) == [
             "terraform/bootstrap/.terraform.lock.hcl",
             "terraform/github/.terraform.lock.hcl",
+            "terraform/organization/.terraform.lock.hcl",
             "terraform/personal/.terraform.lock.hcl",
         ]

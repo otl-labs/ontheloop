@@ -40,6 +40,8 @@ _GRADUATION_DEPS = (
         "scripts/checks/registry.py",
         "scripts/checks/validation_result.py",
         "scripts/checks/verification/validate_verifier_hermeticity.py",
+        "scripts/checks/verification/_graduation_git.py",
+        "scripts/contract_rules.py",
         "scripts/checks/iam_tf/validate_terraform_try.py",
     )
     # registry.py imports every domain's _manifest.py (Decision 169) -- a synthetic tree missing

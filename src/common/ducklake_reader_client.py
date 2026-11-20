@@ -25,7 +25,13 @@ import re
 import time
 from typing import Any, Protocol
 
-from src.common.event_usage_fields import MODEL_USAGE_FIELDS, STARTUP_BASELINE_FIELDS, TOOL_USE_FIELDS, TREE_ROLLUP_FIELDS
+from src.common.event_usage_fields import (
+    FRICTION_SIGNATURE_FIELDS,
+    MODEL_USAGE_FIELDS,
+    STARTUP_BASELINE_FIELDS,
+    TOOL_USE_FIELDS,
+    TREE_ROLLUP_FIELDS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -303,6 +309,7 @@ VERB_FIELDS: dict[str, tuple[str, ...] | object] = {
     "tool_use_rollup": (*TOOL_USE_FIELDS, *_STAMP_FIELDS),
     "session_tree_rollup": (*TREE_ROLLUP_FIELDS, *_STAMP_FIELDS),
     "session_startup_baseline": (*STARTUP_BASELINE_FIELDS, *_STAMP_FIELDS),
+    "friction_signature_counts": (*FRICTION_SIGNATURE_FIELDS, *_STAMP_FIELDS),
     "telemetry_health_count": ("table_name", "record_count", "meta_schema"),
     "session_tree_rows": ("table_name", "row_json", "total_rows", "roots_in_tree"),
     "telemetry_orphan_counts": (

@@ -237,3 +237,147 @@ def test_committed_sidecars_are_wellformed() -> None:
         sidecar = at.parse_sidecar(path.read_text(encoding="utf-8"))
         assert sidecar.slug == path.stem
         assert (root / "docs" / "plans" / f"PLAN-{sidecar.slug}.yaml").is_file()
+
+
+PLAN_REL = fx.plan_rel(SLUG)
+LANDED_BLOCK = {"id": "b1", "file": "doc.md", "before": "beta gamma", "after": "BETA GAMMA"}
+LANDED_BASE = "alpha beta gamma delta\n"
+LANDED_DONE = "alpha BETA GAMMA delta\n"
+
+
+def _plan_text(scope: list[str], declared: bool = False) -> str:
+    import yaml
+
+    doc = {"slug": SLUG, "scope": [{"file": f} for f in scope] + [{"note": "no file"}], "implementation_declared": declared}
+    return yaml.safe_dump(doc, sort_keys=False)
+
+
+def _commit(repo: Path, files: dict[str, str], message: str = "c") -> str:
+    for rel, text in files.items():
+        fx.write(repo, rel, text)
+    fx.git(repo, "add", "-A")
+    fx.git(repo, "commit", "-m", message)
+    return fx.git(repo, "rev-parse", "HEAD")
+
+
+def _landed_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blocks: list[dict[str, str]] | None = None) -> Path:
+    """main: seed, plan commit (doc.md base words, sidecar, src.py), then no landing yet."""
+    fx.clear_ci_env(monkeypatch)
+    repo = fx.make_repo(tmp_path)
+    fx.write_sidecar(repo, SLUG, blocks or [LANDED_BLOCK])
+    _commit(repo, {"doc.md": LANDED_BASE, "src.py": "0\n", PLAN_REL: _plan_text(["doc.md", "src.py", PLAN_REL])}, "plan")
+    return repo
+
+
+def _landed(repo: Path, base: str = "HEAD") -> tuple[list[str], dict[str, str]]:
+    sidecar = at.load_sidecar(SLUG, repo)
+    return at.verify_landed(sidecar, SLUG, repo, base)
+
+
+def _apply(repo: Path, src: str = "1\n") -> str:
+    return _commit(repo, {"doc.md": LANDED_DONE, "src.py": src}, "apply")
+
+
+def test_landed_words_resolve_the_landing_commit_and_verify_stays_strict(tmp_path, monkeypatch) -> None:
+    repo = _landed_repo(tmp_path, monkeypatch)
+    sha = _apply(repo)
+    _commit(repo, {"doc.md": LANDED_DONE + "later edit\n"}, "later")
+    messages, landed = _landed(repo)
+    assert messages == [] and landed == {"doc.md": sha}
+    assert at.verify(at.load_sidecar(SLUG, repo), repo, "HEAD")
+
+
+def test_words_that_never_landed_have_no_landing_commit(tmp_path, monkeypatch) -> None:
+    repo = _landed_repo(tmp_path, monkeypatch)
+    _commit(repo, {"src.py": "1\n"}, "unrelated")
+    messages, landed = _landed(repo)
+    assert landed == {} and any("no landing commit" in m for m in messages)
+
+
+def test_two_qualifying_commits_compete(tmp_path, monkeypatch) -> None:
+    repo = _landed_repo(tmp_path, monkeypatch)
+    first = _apply(repo)
+    _commit(repo, {"doc.md": LANDED_BASE, "src.py": "2\n"}, "revert")
+    second = _apply(repo, "3\n")
+    messages, landed = _landed(repo)
+    assert landed == {} and any("competing landing commits" in m and first in m and second in m for m in messages)
+
+
+def test_a_commit_that_edits_the_words_differently_does_not_qualify(tmp_path, monkeypatch) -> None:
+    repo = _landed_repo(tmp_path, monkeypatch)
+    _commit(repo, {"doc.md": "alpha OTHER delta\n", "src.py": "1\n"}, "other")
+    _, landed = _landed(repo)
+    assert landed == {}
+
+
+def test_files_landed_in_different_commits_do_not_qualify(tmp_path, monkeypatch) -> None:
+    blocks = [LANDED_BLOCK, {"id": "b2", "file": "two.md", "before": "uno dos", "after": "UNO DOS"}]
+    repo = _landed_repo(tmp_path, monkeypatch, blocks)
+    _commit(repo, {"two.md": "uno dos\n"}, "second file base")
+    _commit(repo, {"doc.md": LANDED_DONE, "src.py": "1\n"}, "one")
+    _commit(repo, {"two.md": "UNO DOS\n", "src.py": "2\n"}, "two")
+    messages, landed = _landed(repo)
+    assert landed == {} and any("no landing commit" in m for m in messages)
+
+
+def test_a_sidecar_whose_approved_words_changed_after_c_gives_no_landing(tmp_path, monkeypatch) -> None:
+    repo = _landed_repo(tmp_path, monkeypatch)
+    _apply(repo)
+    fx.write_sidecar(repo, SLUG, [{**LANDED_BLOCK, "after": "BETA GAMMA changed"}])
+    _commit(repo, {}, "residecar")
+    assert _landed(repo)[1] == {}
+
+
+def test_a_corrupt_sidecar_at_c_gives_no_landing(tmp_path, monkeypatch) -> None:
+    repo = _landed_repo(tmp_path, monkeypatch)
+    _commit(repo, {"doc.md": LANDED_DONE, "src.py": "1\n", at.sidecar_rel(SLUG): "not: [valid"}, "apply with corrupt sidecar")
+    fx.write_sidecar(repo, SLUG, [LANDED_BLOCK])
+    _commit(repo, {}, "restore sidecar")
+    assert _landed(repo)[1] == {}
+
+
+def test_a_plan_declared_at_c_gives_no_landing(tmp_path, monkeypatch) -> None:
+    repo = _landed_repo(tmp_path, monkeypatch)
+    _commit(repo, {"doc.md": LANDED_DONE, "src.py": "1\n", PLAN_REL: _plan_text(["doc.md", "src.py", PLAN_REL], True)})
+    _commit(repo, {PLAN_REL: _plan_text(["doc.md", "src.py", PLAN_REL])}, "undeclare")
+    assert _landed(repo)[1] == {}
+
+
+def test_c_changing_only_bound_files_gives_no_landing(tmp_path, monkeypatch) -> None:
+    repo = _landed_repo(tmp_path, monkeypatch)
+    _commit(repo, {"doc.md": LANDED_DONE}, "bound file only")
+    assert _landed(repo)[1] == {}
+
+
+def test_a_working_tree_edit_to_a_bound_file_gets_only_the_strict_check(tmp_path, monkeypatch) -> None:
+    repo = _landed_repo(tmp_path, monkeypatch)
+    _apply(repo)
+    fx.write(repo, "doc.md", LANDED_DONE + "edited by the declaring PR\n")
+    messages, landed = _landed(repo)
+    assert landed == {} and messages and not any("landing commit" in m for m in messages)
+
+
+def test_a_failing_file_that_is_not_a_candidate_keeps_its_message(tmp_path, monkeypatch) -> None:
+    blocks = [LANDED_BLOCK, {"id": "b2", "file": "two.md", "before": "uno dos", "after": "UNO DOS"}]
+    repo = _landed_repo(tmp_path, monkeypatch, blocks)
+    _commit(repo, {"two.md": "uno dos\n"}, "second file base")
+    _commit(repo, {"doc.md": LANDED_DONE, "two.md": "UNO DOS\n", "src.py": "1\n"}, "both")
+    fx.write(repo, "two.md", "UNO DOS plus an edit\n")
+    messages, landed = _landed(repo)
+    assert landed == {"doc.md": fx.git(repo, "rev-parse", "HEAD")} and len(messages) == 1 and "two.md" in messages[0]
+
+
+def test_a_sidecar_absent_from_the_base_history_has_no_landing(tmp_path, monkeypatch) -> None:
+    repo = _landed_repo(tmp_path, monkeypatch)
+    seed = fx.git(repo, "rev-list", "--max-parents=0", "HEAD")
+    (repo / "doc.md").unlink()
+    messages, landed = _landed(repo, seed)
+    assert landed == {} and any("no landing commit" in m for m in messages)
+
+
+def test_plan_doc_at_tolerates_unreadable_plans(tmp_path, monkeypatch) -> None:
+    repo = _landed_repo(tmp_path, monkeypatch)
+    _commit(repo, {PLAN_REL: "a: [unclosed"}, "bad yaml")
+    assert at._plan_doc_at(PLAN_REL, repo, "HEAD") == {}
+    _commit(repo, {PLAN_REL: "- a list\n"}, "list plan")
+    assert at._plan_doc_at(PLAN_REL, repo, "HEAD") == {}

@@ -33,7 +33,7 @@ from scripts.verify_ci_workflow import _load
 
 SCRIPT = "scripts/ci/environment_reviewer_preflight.py"
 GUARD = "scripts/checks/ci_guards/validate_environment_reviewer_preflight.py"
-UI_MANAGED = {"pypi": "rec-4549"}
+UI_MANAGED: dict[str, str] = {}
 EXEMPT = frozenset({"deployment-approval-probe"})
 UPSTREAM = {
     "approved-text-approval.yml": ("render", "approve"),

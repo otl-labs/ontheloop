@@ -1,7 +1,8 @@
 """Independent re-derivation of the telemetry derivation reader verbs from deduped stored rows (Decision 84 I-3: pure functions
 over passed-in rows, no catalog, no SQL).
 
-Written from the Class A contract formulas, never from src/common/ducklake_event_read_sql.py:
+Written from the Class A contract formulas, never from src/common/ducklake_event_read_sql.py or the SQL text in
+ducklake_event_read_verbs.py:
   state (SE-1, SE-2), duration_seconds (SE-3, truncated toward zero), process_event_total, rework_total, exception_total
       docs/contracts/telemetry_sessions.yaml (state; duration_seconds; steps_completed_total; the friction totals)
   run state, duration and the token totals     docs/contracts/telemetry_agents.yaml
@@ -16,7 +17,8 @@ four for the state and window verbs, sessions and observations for the roll-ups;
 is its rule source). The compared-column set behind the conflict report is dedupe.py's default.
 
 Declared conventions with no contract text: model_call_count, usage_missing_count,
-label_counts (sorted by label), unmapped_count (facts labelled unmapped_block) and cost_source follow the verb's EVENT_READS
+label_counts (sorted by label), unmapped_count (process_event facts a generic rule labelled) and cost_source follow the verb's
+EVENT_READS
 description, FRICTION_RULES and the committed derivation_cases.yaml (c15, and c15b: a local row is NULL
 with cost_source local whatever it reports) and friction_vectors.yaml expectations. Five further output conventions
 that no contract or committed vector pins were aligned to the verbs' observable behaviour once this module
@@ -334,16 +336,19 @@ def _absorbed_closes(rows: list[Row]) -> list[Row]:
     ]
 
 
-def friction_facts(observations: Iterable[Row]) -> list[tuple[str, str, str]]:
-    """(ref, label, class) of every friction fact of one session's deduped observations."""
+Fact = tuple[str, str, str, str, bool, str, Any, str]
+
+
+def labelled_facts(observations: Iterable[Row]) -> list[Fact]:
+    """(ref, label, class, rule_id, generic, observation_type, name, disposition) of every friction fact of one session."""
     rows = list(observations)
-    facts: list[tuple[str, str, str]] = []
+    facts: list[Fact] = []
     for row in rows:
         if row.get("observation_type") != "process_event" or row.get("severity") not in _FACT_SEVERITIES:
             continue
         rule = _matching_rule("process_event", row.get("name"), row["severity"])
         if rule is not None:
-            facts.append((row["observation_id"], rule[5], rule[6]))
+            facts.append(_fact(row["observation_id"], rule, "process_event", row.get("name"), row["severity"]))
     blocking_hooks = _absorbing_parents(rows)
     closes = sorted(
         (r for r in rows if r.get("observation_type") == "tool_call" and r["event_kind"] == "close"),
@@ -355,7 +360,7 @@ def friction_facts(observations: Iterable[Row]) -> list[tuple[str, str, str]]:
             continue
         rule = _matching_rule("tool_call", None, outcome)
         if rule is not None:
-            facts.append((row["observation_id"], rule[5], rule[6]))
+            facts.append(_fact(row["observation_id"], rule, "tool_call", row.get("name"), outcome))
     runs: dict[tuple[Any, Any], list[list[Row]]] = {}
     for row in closes:
         if row.get("name") is None:
@@ -368,8 +373,18 @@ def friction_facts(observations: Iterable[Row]) -> list[tuple[str, str, str]]:
     for stream in runs.values():
         for run in stream:
             if len(run) >= FRICTION_RULES["repeat_threshold"]:
-                facts.append((run[0]["observation_id"], FRICTION_RULES["run_label"], FRICTION_RULES["run_class"]))
+                label, klass = FRICTION_RULES["run_label"], FRICTION_RULES["run_class"]
+                facts.append((run[0]["observation_id"], label, klass, "run", False, "tool_call", run[0]["name"], "error"))
     return facts
+
+
+def _fact(ref: str, rule: tuple[Any, ...], observation_type: str, name: Any, disposition: str) -> Fact:
+    return (ref, rule[5], rule[6], rule[0], rule[2] is None and rule[3] is None, observation_type, name, disposition)
+
+
+def friction_facts(observations: Iterable[Row]) -> list[tuple[str, str, str]]:
+    """(ref, label, class) of every friction fact of one session's deduped observations."""
+    return [(f[0], f[1], f[2]) for f in labelled_facts(observations)]
 
 
 def session_friction_rollup(tables: Tables, session_id: str) -> list[dict[str, Any]]:
@@ -377,10 +392,10 @@ def session_friction_rollup(tables: Tables, session_id: str) -> list[dict[str, A
     if not scope.known(session_id):
         return []
     rows = scope.rows(OBSERVATIONS, session_id)
-    facts = friction_facts(rows)
+    facts = labelled_facts(rows)
     counts: dict[str, int] = {}
-    for _, label, _ in facts:
-        counts[label] = counts.get(label, 0) + 1
+    for fact in facts:
+        counts[fact[1]] = counts.get(fact[1], 0) + 1
     return [
         scope.output(
             {
@@ -388,7 +403,7 @@ def session_friction_rollup(tables: Tables, session_id: str) -> list[dict[str, A
                 "rework_total": sum(1 for f in facts if f[2] == "rework"),
                 "exception_total": sum(1 for f in facts if f[2] == "exception"),
                 "label_counts": [{"label": label, "n": n} for label, n in sorted(counts.items())],
-                "unmapped_count": counts.get("unmapped_block", 0),
+                "unmapped_count": sum(1 for f in facts if f[5] == "process_event" and f[4]),
                 "absorbed_count": len(_absorbed_closes(list(rows))),
                 "classifier_version": FRICTION_RULES["classifier_version"],
             }
