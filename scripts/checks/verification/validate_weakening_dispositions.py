@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import functools
 import re
 import sys
 from pathlib import Path
@@ -274,8 +275,8 @@ def _judge_range(failed: list[str], root: Path, range_base: str) -> int:
             root=root,
             base=parent,
             status_changed=_name_status_between(root, parent, commit),
-            read_base=lambda rel, parent=parent: _read_file_at_ref(root, parent, rel),
-            read_head=lambda rel, commit=commit: _read_file_at_ref(root, commit, rel),
+            read_base=functools.partial(_read_file_at_ref, root, parent),
+            read_head=functools.partial(_read_file_at_ref, root, commit),
             head=commit,
         )
     return len(commits)
