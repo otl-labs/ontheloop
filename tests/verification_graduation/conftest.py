@@ -29,6 +29,8 @@ _GRADUATION_DEPS = (
     (
         "scripts/verification_graduation.py",
         "scripts/verification_checks.py",
+        "scripts/contract_rules.py",
+        "scripts/checks/verification/_graduation_git.py",
         "scripts/checks/__init__.py",
         "scripts/checks/_common.py",
         "scripts/checks/_scaffolding.py",

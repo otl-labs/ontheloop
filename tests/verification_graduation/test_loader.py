@@ -18,6 +18,31 @@ from scripts import verification_graduation as vg
 from .conftest import _commit_all, _git, _init_repo
 
 
+class TestFastLoader:
+    """Both registry loaders parse through scripts.contract_rules.parse_yaml."""
+
+    def test_load_entries_uses_parse_yaml(self, tmp_path: Path) -> None:
+        entries_dir = tmp_path / "config" / "agent" / "verification_registry" / "entries"
+        entries_dir.mkdir(parents=True)
+        (entries_dir / "a-check.yaml").write_text("check_id: a-check\n", encoding="utf-8")
+        with mock.patch.object(vg._contract_rules, "parse_yaml", wraps=vg._contract_rules.parse_yaml) as spy:
+            rows = vg.load_entries(repo_root=tmp_path)
+        assert rows == [{"check_id": "a-check"}]
+        assert spy.call_count == 1
+
+    def test_entries_at_ref_uses_parse_yaml(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        _init_repo(repo)
+        entries_dir = repo / "config" / "agent" / "verification_registry" / "entries"
+        entries_dir.mkdir(parents=True)
+        (entries_dir / "a-check.yaml").write_text("check_id: a-check\n", encoding="utf-8")
+        sha = _commit_all(repo, "shard")
+        with mock.patch.object(vg._contract_rules, "parse_yaml", wraps=vg._contract_rules.parse_yaml) as spy:
+            rows = vg.entries_at_ref(sha, repo_root=repo)
+        assert rows == [{"check_id": "a-check"}]
+        assert spy.call_count == 1
+
+
 class TestBaselineReaderSpansLayouts:
     """VP step 4: entries_at_ref spans both the sharded and legacy-flat layouts, and never
     silently returns an empty baseline when a resolving ref carries neither (Decision 55) --
@@ -283,14 +308,15 @@ class TestLoaderEdgeCases:
         (entries_dir / "b-check.yaml").write_text("check_id: b-check\n", encoding="utf-8")
         sha = _commit_all(repo, "two shards")
 
-        real_run_git = vg._run_git
+        from scripts.checks.verification import _graduation_git
 
-        def fake_run_git(args, cwd):
-            if args[:1] == ["show"] and "a-check.yaml" in args[1]:
-                return subprocess.CompletedProcess(args=["git", *args], returncode=1, stdout="", stderr="simulated failure")
-            return real_run_git(args, cwd)
+        real_read = _graduation_git.read_blobs_at_ref
 
-        with mock.patch.object(vg, "_run_git", fake_run_git):
+        def fake_read(ref, paths, root):
+            blobs = real_read(ref, paths, root)
+            return {p: t for p, t in blobs.items() if "a-check.yaml" not in p}
+
+        with mock.patch.object(_graduation_git, "read_blobs_at_ref", fake_read):
             rows = vg.entries_at_ref(sha, repo_root=repo)
         assert rows is not None
         assert [r["check_id"] for r in rows] == ["b-check"]

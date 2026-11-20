@@ -88,6 +88,16 @@ class TestBaselineClassDEnvelopes:
             result = _shared.baseline_class_d_envelopes(tmp_path, "BASE0000", {"docs/contracts/x.yaml"})
         assert result == {"foo": content}
 
+    def test_envelope_parse_goes_through_parse_yaml(self, tmp_path: Path) -> None:
+        content = "contract:\n  id: foo\n  class: D\n"
+        header = f"{'0' * 40} blob {len(content)}\n"
+        with (
+            patch.object(_shared._common, "run", _fake_run(0, header + content + "\n")),
+            patch.object(_shared, "parse_yaml", wraps=_shared.parse_yaml) as spy,
+        ):
+            _shared.baseline_class_d_envelopes(tmp_path, "BASE0000", {"docs/contracts/x.yaml"})
+        assert spy.call_count == 1
+
     def test_non_class_d_and_unparseable_blobs_are_skipped(self, tmp_path: Path) -> None:
         a = "contract:\n  id: a\n  class: A\n"
         b = "{bad: [unclosed"
