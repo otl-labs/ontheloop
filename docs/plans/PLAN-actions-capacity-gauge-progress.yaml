@@ -27,7 +27,8 @@ scope:
       an evaluated hour). A completed run whose cache entry has the same run_attempt and updated_at reuses the cached
       jobs with no call. Every completed run whose jobs are read is cached as it is read, so a budget stop mid-hour keeps
       the work done. Both new arguments default to None (existing positional callers keep working). Fetched gains a
-      defaulted last field cache: entries for runs created at or after since (carried ones included), each {created_at,
+      defaulted last field cache, a JSON-safe dict keyed by str(run id) (the artifact round-trips it through JSON):
+      entries for runs created at or after since (carried ones included), each {created_at,
       run_attempt, updated_at, jobs}, jobs keeping only the job API keys normalize reads plus runner_id and runner_name;
       a reused job gets `_run` re-attached from the fresh run listing, as a read one does. Fetched.cache is returned on
       every path, the _Stop and the generic-Exception paths included, so an HTTP error mid-hour keeps the work too.
@@ -54,7 +55,8 @@ scope:
       Notice-class wording (not in approval-routing gated set). contract_version 1 -> 2; one terse amendment_log row
       (semantic_break true, change_class correction, PLAN-actions-capacity-gauge-progress (rec-5473)).
       trigger.slot_demand.definition: a job counts only while a runner held it (runner_id above 0); a job waiting on an
-      Environment approval or cancelled before a runner took it counts nothing. window.chaining: a tick starts no
+      Environment approval or cancelled before a runner took it counts nothing (runner_name is read only when the
+      runner_id field is absent; a null runner_id is the API's no-runner marker, as on a job skipped by a cancel). window.chaining: a tick starts no
       earlier than the current hour minus (bootstrap_hours plus overlap_hours), 26 h, and a hole older than the current
       hour minus bootstrap_hours is given up; lead-in runs completed
       before the first evaluated hour (5 min margin) are not expanded; completed runs' jobs carry in the reading's
@@ -70,13 +72,18 @@ scope:
       updated_at before evaluate_from minus 5 min gets no jobs call; one inside the margin, an in_progress one and a
       re-run with a later updated_at do), test_jobs_cache_resumes_mid_hour_without_rereading (tick 1 stops on the
       request budget inside an hour; tick 2 with tick 1's cache finishes that hour and issues no jobs call for any cached
-      run; a changed run_attempt or updated_at is re-read), test_chain_survives_artifactless_runs (rec-5093: 5 main runs
+      run; a changed run_attempt or updated_at is re-read; tick 1's cache passes through json.loads(json.dumps(...))
+      before tick 2, and hour_table over tick 2's normalize output equals an uncached single-tick read of the same
+      fixtures in slot_demand, job_minutes keys, peak_concurrency and queue_waits_s, with at least one cached job
+      carrying runner_id above 0 and one ci.yml main-validate push job), test_chain_survives_artifactless_runs (name
+      kept, since rec-5093's acceptance names it; rec-5093: 5 main runs
       whose first 4 each carry an artifact that downloads but does not parse and whose 5th is readable are chained, red
       at today's cap 8 (it stops at the 4th run's download: 1 list + 4 listings + 3 downloads) and green at 11; a
       second case with 4 artifact-less runs also chains); test_http_error_stops_without_retry gains an assertion that
       Fetched.cache holds the runs read before the error (adds an assertion, loosens none). The shared run() helper and
       FakeCaller runs gain status completed, updated_at and run_attempt so read runs are cacheable; existing callers pass
-      no evaluate_from or cache, so their behaviour is unchanged. Existing nodes unchanged; graduated shard
+      no evaluate_from or cache, so their behaviour is unchanged. Existing nodes keep every assertion
+      (test_http_error_stops_without_retry gains one); graduated shard
       actions-capacity-budgets-and-episodes is kept unchanged.
   - file: tests/ci/test_actions_capacity_gauge.py
     action: Modify
@@ -97,7 +104,9 @@ scope:
       overlap_hours, and the written reading's jobs_cache equals the sentinel cache the fake fetch returned). The cli
       fixture's fake fetch gains evaluate_from=None and cache=None keyword parameters it records and can return a
       Fetched with a given cache (adds parameters, loosens no assertion). Existing nodes and their assertions unchanged; graduated shard
-      actions-capacity-trigger-and-validity is kept unchanged.
+      actions-capacity-trigger-and-validity is kept unchanged. Headroom is 181 SLOC: keep the new nodes compact (shared
+      local helpers); a crossing of 500 is a plan defect for the planner (a sibling module needs a scope row), never a
+      budget raise (Decision 128).
 bundled_recommendations: [rec-5473, rec-5091, rec-5093]
 followon_recs: [rec-5478]
 infrastructure_dependencies: []
@@ -187,7 +196,10 @@ verification_plan:
       p=json.load(open(os.path.join(os.environ['ACR_DIR'],'actions-capacity-reading.json'))); print(p['coverage'], p['generated_at']);
       assert p['coverage']==p['generated_at'][:14]+'00:00Z'"
     expected: "assert-clear gauge_blind: clear (at least 12 evaluated hours in the trailing 24), then coverage equal to the last closed hour; exit 0"
-    fix_if: not clear after 24 h means a tick still loses progress; read calls, elapsed_s, fetch_error and coverage across ticks
+    fix_if: >-
+      not clear after 24 h: if coverage and evaluated_hours still rise tick over tick, the bootstrap is still catching up
+      (wait and re-check); if they stall, a tick still loses progress: read calls, elapsed_s, fetch_error and coverage
+      across ticks
     hermetic: false
     graduation: not-applicable
   - step: 7
@@ -204,7 +216,7 @@ verification_plan:
     graduation: not-applicable
 test_obligations:
   - source: scripts/ci/actions_capacity_github.py
-    behavior: Cached completed runs are not re-read, and a tick stopped mid-hour keeps the work it did.
+    behavior: Cached completed runs are not re-read, survive the artifact's JSON round trip, and yield the same hour rows as a fresh read; a tick stopped mid-hour keeps the work it did.
     verification_step: 2
     test_selector: tests/ci/test_actions_capacity_github.py::test_jobs_cache_resumes_mid_hour_without_rereading
     red_green_expectation: red before (node absent; fetch_runs_and_jobs has no cache argument), green after.
@@ -290,6 +302,7 @@ gate_rounds:
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 6}  # B1 red_overlap start step + CLOSURE + closure-evidence steps; B2 one test_obligations row per behaviour; N1 floored bound wording; N2 VP 6 coverage assert; N3 cache on every return path; N4 rollback rec-5091; N5 cache size estimate + VP 5 size report; N6 VP 5 first tick after merge
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 3}  # B1 main plumbing node test_main_passes_evaluate_from_and_writes_jobs_cache + obligation row; N1 runner_name fallback, null completed_at, cache on HTTPError cases; N2 evaluated_hour pointer + late-start sentence kept; N3 cap-8 stop wording
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 2}  # B1 stale-table no-hole case (start = floor(now) - 26 h, red at -73 h); N1 run()/FakeCaller fields declared; N2 chaining bound parenthesised
+  - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 5}  # B1 cache JSON round trip + reused-equals-fresh hour rows, str keys; N1 wording; N2 rename disputed (rec-5093 acceptance names the node); N3 compact nodes, crossing is a plan defect; N4 VP 6 catch-up fix_if; N5 runner_name only when runner_id absent, stated
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
