@@ -34,7 +34,7 @@ class Api:
                 "app": {"slug": "github-actions"},
                 "name": f"persona-verdict/{ROUTE}",
                 "head_sha": HEAD,
-                "check_suite": {"id": 5},
+                "check_suite": {"id": 120013128966},
                 "output": {"text": _text()},
             },
             f"/repos/o/r/commits/{HEAD}/check-runs": {"check_runs": [{"id": 55}, {"id": 40}]},
@@ -42,7 +42,7 @@ class Api:
                 "path": override.VERDICT_WORKFLOW,
                 "event": "workflow_run",
                 "head_branch": "main",
-                "check_suite_id": 5,
+                "check_suite_id": 120013228652,
                 "display_title": PRODUCER,
             },
             "/repos/o/r/actions/runs/70": {
@@ -140,8 +140,6 @@ def test_overridable_follows_persona_class(monkeypatch: pytest.MonkeyPatch) -> N
         ("/repos/o/r/actions/runs/900", {"event": "push"}),
         ("/repos/o/r/actions/runs/900", {"head_branch": "feat"}),
         ("/repos/o/r/actions/runs/900", {"display_title": "x"}),
-        ("/repos/o/r/actions/runs/900", {"check_suite_id": 6}),
-        ("/repos/o/r/check-runs/55", {"check_suite": {}}),
         (f"/repos/o/r/commits/{HEAD}/check-runs", {"check_runs": [{"id": 55}, {"id": 56}]}),
         (f"/repos/o/r/commits/{HEAD}/check-runs", {"check_runs": []}),
     ],
@@ -149,6 +147,20 @@ def test_overridable_follows_persona_class(monkeypatch: pytest.MonkeyPatch) -> N
 def test_origin_refuses(api: Api, path: str, patch: dict[str, Any]) -> None:
     api.routes[path] = {**api.routes[path], **patch}
     with pytest.raises(override.Refused):
+        override.origin(REPO, "t", HEAD, ROUTE, 55)
+
+
+def test_origin_admits_a_check_in_a_different_suite_from_its_producing_run(api: Api) -> None:
+    # Live shape (run 44335420386): a workflow_run verdict run on main posts into the head's own check suite.
+    check = api.routes["/repos/o/r/check-runs/55"]["check_suite"]["id"]
+    assert api.routes["/repos/o/r/actions/runs/900"]["check_suite_id"] != check
+    rec, _ = override.origin(REPO, "t", HEAD, ROUTE, 55)
+    assert rec["run_id"] == "900"
+
+
+def test_origin_refuses_an_unreadable_producing_run(api: Api) -> None:
+    api.routes["/repos/o/r/actions/runs/900"] = ["not", "a", "run"]
+    with pytest.raises(override.Refused, match="not a verdict run"):
         override.origin(REPO, "t", HEAD, ROUTE, 55)
 
 

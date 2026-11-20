@@ -164,3 +164,64 @@ def test_kind_blind_rows() -> None:
         GateRound.model_validate(_row("kind-blind", 1, "mechanism", blocking=1))
     with pytest.raises(ValidationError, match="never escalated"):
         GateRound.model_validate(_row("kind-blind", 1, "mechanism", escalated=True))
+
+
+def _draft(title: str) -> str:
+    env = "significance:\n  value: numbered_decision\n  justification: r.\nkind:\n  value: direction\n  justification: j.\n"
+    return f"## Decision {{{{N}}}}: {title}\n\n```yaml\nnumber: {{{{N}}}}\n{env}```\n\n**Status:** Decided\n"
+
+
+_TITLES = ("First, with a comma", 'Second "quoted"')
+
+
+def _critique(*items: tuple[str, str], verdict: str = "PROCEED", blocking: int = 0, **extra) -> dict:
+    entries = [{"entry": title, "verdict": v} for title, v in items]
+    return _row(verdict=verdict, blocking=blocking, category_consistency=entries, **extra)
+
+
+def _category_plan(tmp_path, named: list[str] | None, blocking_row: bool = False):
+    from types import SimpleNamespace
+
+    import yaml
+
+    from scripts.checks.roadmap import _plan_category_verdicts as cat
+
+    text = "\n".join(_draft(title=t) for t in _TITLES)
+    path = tmp_path / "PLAN-demo.yaml"
+    path.write_text(yaml.safe_dump({"slug": "demo", "intent": "x", "context": [text]}), encoding="utf-8")
+    row = _row() if named is None else _critique(*[(t, "PASS") for t in named])
+    doc = SimpleNamespace(slug="demo", schema_version=5, gate_rounds=[GateRound.model_validate(row)])
+    return cat.category_gaps(path, doc, tmp_path)[0]
+
+
+def test_step_12p_verdict_recorded_per_drafted_entry(tmp_path) -> None:
+    assert _category_plan(tmp_path, list(_TITLES)) == []
+    dropped = _category_plan(tmp_path, [_TITLES[0]])
+    assert len(dropped) == 1 and _TITLES[1] in dropped[0]
+    misspelt = _category_plan(tmp_path, [_TITLES[0], "Secnod"])
+    assert len(misspelt) == 2 and any("Secnod" in g for g in misspelt) and any(_TITLES[1] in g for g in misspelt)
+    absent = _category_plan(tmp_path, None)
+    assert len(absent) == 1 and "category_consistency" in absent[0] and _TITLES[0] in absent[0]
+    assert GateRound.model_validate(_critique(("a", "PASS"), ("b", "PASS"))).category_consistency is not None
+    assert GateRound.model_validate(_critique()).category_consistency == []
+
+
+def test_category_consistency_only_on_a_plan_critique_row() -> None:
+    with pytest.raises(ValidationError, match="only on a plan-critique row"):
+        GateRound.model_validate(_row("decision-scout", 1, "NO_FLAGS", category_consistency=[]))
+
+
+def test_category_consistency_refuses_a_duplicate_or_blank_entry() -> None:
+    with pytest.raises(ValidationError, match="more than once"):
+        GateRound.model_validate(_critique(("a", "PASS"), ("a ", "PASS")))
+    with pytest.raises(ValidationError, match="empty after strip"):
+        GateRound.model_validate(_critique(("  ", "PASS")))
+
+
+def test_a_revise_entry_needs_a_revise_row_with_enough_blocking() -> None:
+    with pytest.raises(ValidationError, match="12p is blocking"):
+        GateRound.model_validate(_critique(("a", "REVISE")))
+    with pytest.raises(ValidationError, match="12p is blocking"):
+        GateRound.model_validate(_critique(("a", "REVISE"), ("b", "REVISE"), verdict="REVISE", blocking=1))
+    ok = GateRound.model_validate(_critique(("a", "REVISE"), ("b", "REVISE"), verdict="REVISE", blocking=2))
+    assert ok.blocking == 2

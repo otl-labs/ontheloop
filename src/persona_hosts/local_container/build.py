@@ -27,10 +27,13 @@ class BuildOptions:
     ca_bundle: str | None = field(default_factory=_default_ca)
     http_proxy: str | None = field(default_factory=_default_proxy)
     docker: str = "docker"
+    labels: dict[str, str] = field(default_factory=dict)
 
 
 def build_argv(dockerfile: str, iidfile: str, options: BuildOptions) -> list[str]:
-    argv = [options.docker, "build", "-f", dockerfile, "--iidfile", iidfile]
+    argv = [options.docker, "build", "-f", dockerfile, "--iidfile", iidfile, "--provenance=false", "--sbom=false"]
+    for key, value in sorted(options.labels.items()):
+        argv += ["--label", f"{key}={value}"]
     if options.ca_bundle:
         argv += ["--secret", f"id=build_ca,src={options.ca_bundle}"]
     if options.http_proxy:

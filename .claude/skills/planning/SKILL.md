@@ -95,13 +95,7 @@ discipline rule. Do not re-author it here.
 
 ## Suggest Aligned Recommendations
 No local recs cache exists. Run `bin/venv-python -m scripts.recs_related <scope files>` (ranked hits with why and a completeness envelope; `--terms` for keyword search; bodies via `recs_by_ids`), plus `recs_by_title_prefix`:
-1. Extract keywords and scope file paths from the task description
-2. Match the returned open recs against the task's `title`, `file`, and `context`
-3. Present top 3-5 matches (if any):
-> "These open recommendations may align with your task:
-> - **rec-XXX**: [title] (effort: [effort], priority: [priority])
->
-> Want to bundle any into this session? Say 'include rec-XXX' or 'skip'."
+Match the open recs it returns against the task's keywords and scope, present the top 3-5 (id, title, effort, priority) and ask which to bundle or skip. Bundle at most two beside the primary rec, each one this change closes whole; the merge's Resolves trailer closes it only when its own acceptance holds (Decision 201).
 
 ## Recommendation Relevance Gate (Workflow Step 3, fires before bundling any rec)
 
@@ -138,9 +132,9 @@ When a plan creates or modifies documentation artefacts, apply these rules:
 
 
 ## Complexity Assessment (Workflow Step 4)
-- **Scope files > 5** OR **estimated steps > 8** suggests the item may be too large for one plan (a heuristic). Plan types are IMPLEMENTATION and REPORT-ONLY only (Decision 247; the schema refuses STRATEGIC): author one larger IMPLEMENTATION plan, or decompose -- file child recs or split into atomic IMPLEMENTATION plans now, each planned on its own.
+- **One plan delivers one outcome that can be verified and reverted on its own, under one primary rec.** Never split on a file count. `/plan` Step 4 item 5 holds the split test and Step 8 the filing: child recs, never nested plan names (no `3b-2a`); a second split of one lineage goes to the human (Decision 247 cl.5).
 - If IMPLEMENTATION (and complex), execution steps must have explicit pre/post-conditions.
-- **Presentation Rule:** The classification MUST be presented to the human and confirmed, not assumed.
+- **Presentation Rule:** present the verdict to the human to confirm; never assume it.
 - **Size headroom (Decisions 128, 166):** `plan_obligations --plan` reports each scope file's headroom (SLOC, structural lines, prose bytes) and the unbuilt plans editing the same file. Plan a crossing as a decomposition (facade package, Decision 80/104/124) or the class relief valve, never a default raise: a raise is a Decision-cited exception (`# raise-approved: dec-NNN`), never a bare `--update-sloc-budgets` re-seed. A NEAR_CAP row carries a relief step measured against main at build time, never a fixed line count.
 
 
@@ -287,7 +281,7 @@ not -- forks and confirmation ride a post-verdict `GATE_REQUEST` (`gate: project
 overseer relays.
 
 ## Create Branch (Workflow Step 7)
-See `docs/contracts/git-ops.yaml` as the canonical git-ops authority for branching topology (DEV vs ADMIN containers, AWS profiles, harness branch vs never agent/).
+See `docs/contracts/git-ops.yaml#branching_topology` as the canonical git-ops authority (DEV vs ADMIN containers, AWS profiles, harness branch vs never agent/).
 
 Verify you are on the harness branch and not on `main`:
 ```bash
@@ -345,7 +339,7 @@ context: # <= 40 rendered lines; link evidence (ids/paths), never restate it
   - Relevant decisions, phase dependencies, known gotchas
   - "Decision-scout verdict + CITE list (verbatim decision ids)" # REQUIRED ITEM (WF-04a)
 gate_rounds: # REQUIRED on new plans; one row per gate round (+gate_run_id if dispatched)
-  - {gate: decision-scout, round: 1, verdict: NO_FLAGS} # critique rows add blocking, nits; escalated: true + escalation_choice when asked
+  - {gate: decision-scout, round: 1, verdict: NO_FLAGS} # critique rows add blocking, nits, category_consistency (12p per drafted entry); escalated + escalation_choice when asked
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -420,8 +414,6 @@ Every round is a full fresh read and no count caps them. The critic tags each fi
 **Escalate** only on: a finding recurring at a tag+anchor you recorded fixed (oscillation interrupts, not the count); a disputed blocking finding; or a fix that would change approved scope, tier or a cited Decision. Present, per finding, the finding verbatim with tags and anchor; why it did not converge; your recommendation; and, when re-escalating, a clause that starts a new series naming the predecessor rounds -- plus the five choices: accept-with-deferral / re-scope / split / abandon / one more round. Carrier: AskUserQuestion if held, else chat; dispatched, GATE_REQUEST `open_questions`. An open escalation is a stop: no round, no plan edit, until the human answers; record the answer as the row's `escalation_choice` (accept-with-deferral is human-authored only). Revisit when 20 plans carry `gate_rounds`: did a confirming round ever find a blocking finding, and were findings after round 5 real?
 
 **Contested-residue consult:** On a disputed blocking finding only, consult `model: "fable"` per the overseer skill's Fable Advice-Consult Protocol (dispatched: an `open_questions` item of the same GATE_REQUEST) -- a third fresh reading of THIS plan against the repo's own Decisions, not industry practice. It recommends a disposition and decides nothing. Revisit after 10 contested escalations; demote if it changed nothing in 8 or more.
-
-This gate reviews the PLAN artefact, not the report deliverable. For REPORT-ONLY plans, the deliverable gets its own critique in Step 10.
 
 ## Report Critique Gate (Workflow Step 10, REPORT-ONLY only)
 

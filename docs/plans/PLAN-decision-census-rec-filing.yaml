@@ -1,0 +1,507 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: decision-census-rec-filing
+intent: >-
+  Make the append-only census (PLAN-decision-append-only-census, rec-5266) raise its own work item: on the run that finds
+  an unacknowledged in-place rewrite of a ratified Decision line, it files one deduplicated recommendation per offending
+  merge, updates it while the finding changes, and closes it once the merge is acknowledged, so a finding reaches the
+  backlog within minutes of the merge instead of as a red run that loop liveness relabels as an unhealthy loop
+  (rec-5410, contract-first retrospective step 9).
+plan_type: IMPLEMENTATION
+implementation_declared: true
+verification_tier: V3
+plan_path: docs/plans/PLAN-decision-census-rec-filing.yaml
+phase: >-
+  ad_hoc_rec (soft-warn exception category; no tier_item claimed, so the Tier Item Freshness Gate is skipped): rec-5410
+  (Low, M), the planning-time split of PLAN-decision-append-only-census, contract-first retrospective
+  improvement_sequence step 9. Closes no roadmap criterion.
+closes_criteria: []
+cites: [dec:55, dec:61, dec:62, dec:79, dec:84, dec:103, dec:125, dec:126, dec:162, dec:177, dec:189, dec:201, dec:215, dec:235, dec:249, dec:272]
+scope:
+  - file: scripts/checks/decisions/append_only_census.py
+    action: Modify
+    purpose: >-
+      As built in #2253 (191d8a32: census() -> Result with Finding(merge, decision, digest, line, pr, kinds) and defects
+      as strings; 220 lines). Add `--result PATH`: when the census completes with self_test ok (exit 0 or 1) it writes one
+      JSON object {schema: 1, head (head resolved to its full sha), merges, replayed (the full sha of every corpus merge
+      the run replayed, in replay order), acknowledged (count), open: [{merge, pr, decisions: [{decision, digest, kinds,
+      line}]}], ledger_defects: [str]}, open grouped by merge in replay order; a run that exits 2 writes no file. Exit
+      codes, stdout, --summary and every existing behaviour are unchanged.
+  - file: scripts/checks/decisions/append_only_census_recs.py
+    action: Create
+    purpose: >-
+      The census's filer. (1) LOAD. Reads a --result file as untrusted input: exactly the schema-1 keys, merge, head and
+      each replayed entry 40 lowercase hex, decision a positive int, digest 16 hex, pr an int or null, kinds a non-empty
+      list of the census's kind words, line a str or null and each ledger_defects entry a str, both cut to 300 characters
+      with control characters removed, and every open merge also in replayed; anything else exits 2 and writes nothing.
+      (2) LOOKUP. One scoped current_state read of source decision_census through the reader, its rows passed as rows= to
+      scripts.rec_episode.find_recs for status open (find_recs reads only when rows is absent, so this is one read); a
+      read that fails exits 2 and writes nothing (Decision 215). scripts.rec_episode.run_episode is not reused: it keys
+      one episode on one key, and the filer needs one key per merge plus the replayed-scoped close. There is no
+      ownership state: ops_recommendations status admits only open, closed, failed, declined and superseded
+      (ops_recommendations.yaml status, enforced by the writer), so a rec being worked is still open and is only updated
+      when its text changes, which is harmless. The context's first line is its tokens, space-separated. A rec belongs to merge M when its context carries the
+      token `merge=<M>`
+      (whole-token match, the scripts/telemetry_verify/alarms.py _matches pattern); the ledger rollup carries
+      `census_class=ledger_defect`. (3) EPISODES. For each open merge: an open rec with its token is updated only when its
+      title, context or acceptance differs (the title follows the merge's still-open decision set); else one rec is
+      filed. An open rec is closed only when its merge is in the result's replayed list and not in its open set
+      (status closed, a resolution naming the ledger and, when GITHUB_RUN_ID is set, the run URL); a rec whose merge the
+      result never replayed is left alone, so a result built at an older head closes nothing it did not check. A rec a
+      person closed or declined is not open, so a still-open finding files a new rec on the next run. The ledger rollup
+      is filed, updated or closed the same way from ledger_defects. Fields: title "Append-only census: merge <sha8>
+      (#<pr>) rewrote ratified lines in Decision <n>[, <n>]" (the "(#<pr>) " part omitted when pr is null), file
+      docs/DECISIONS.md, source decision_census, priority Medium, effort S, risk low, verification_tier V1, automatable
+      False (as the reversal_reviews peer; the field dict spells `"source": "decision_census"` so check_source_registry's
+      literal scan sees it), context the tokens, one line per decision (number, digest, kinds, first
+      unmatched line) and a fixed disposition sentence.
+      (4) ACCEPTANCE. Decision 201 cl.5: it must hold where the trailer verdict is computed, a shallow, offline checkout
+      under scripts.backlog_health.probe with a 10 s limit, where the census itself cannot run (no ANCHOR in history).
+      A per-merge rec's acceptance comes from acceptance_for(merge, decisions): `test "$(grep -cE '^  - \{merge: <sha>,
+      decision: (<n1>|<n2>), ' config/agent/decision_census.yaml)" -eq <count> && grep -qE '^> \*\*Update \(.*<sha8>'
+      docs/DECISIONS.md docs/DECISIONS_ARCHIVE.md` (one ledger row per listed decision in the ledger's flow-style row
+      form, plus a dated Update line naming the merge in the corpus). It reads two tracked files and needs no history, network or venv;
+      measured at planning on a --depth 1 clone for merge 660d5b54 (Decisions 65, 210): probe PASS, a wrong count FAIL,
+      classify_command probeable at 222 characters, lint decidable (lint prints an advisory multi-word-grep warning that
+      does not gate; tests assert the returned verdict, not stdout). It is the trailer-closure proxy, not the oracle: a
+      row whose annotation landed on the wrong Decision is a ledger defect the rollup carries, and a rec a trailer closed
+      while the census still reports the merge is re-filed on the next run. Per-merge disposition sentence: land a dated
+      Update on each listed Decision naming the merge plus one ledger row per decision, in one PR; a Resolves trailer
+      may close the rec, otherwise the census closes it on its next run; never restore the old text (Decision 177). The
+      rollup's acceptance is `bin/venv-python -m scripts.checks.decisions.append_only_census_recs --assert-ledger-clean`
+      (it needs full history); its disposition sentence says the census alone closes it and a Resolves trailer naming it
+      is refused by design (a probe FAIL or TIMEOUT is outside backlog-health's satisfied split, so nothing else acts on
+      it). (5) CLI, two mutually exclusive modes. `--file PATH [--dry-run] [--profile P]` prints one line per action,
+      `<verb> merge=<full sha> rec=<id>` with verb filed, updated, unchanged or closed (`<verb> ledger rec=<id>`
+      for the rollup; --dry-run prints `would-<verb> ...`, with no rec id on a would-file), then `[decision_census]
+      summary open_merges=<n> filed=<f> updated=<u> unchanged=<x> closed=<c>
+      ledger=<none|filed|updated|unchanged|closed>`; --dry-run writes nothing. Every write is attempted; any failed
+      write exits 1 naming it (Decision 84 I-4, no outbox); a malformed result or a failed lookup exits 2 before any
+      write; otherwise exit 0. `--assert-ledger-clean [--head REV]` runs the census in process and exits 0 when the
+      ledger has no defect, 1 when it has one, 2 when the census cannot complete. Under 500 SLOC. Never opens the ledger
+      file itself.
+    new_imports: [scripts.rec_episode, scripts.ops_data_portal, scripts.checks.decisions.append_only_census]
+  - file: tests/checks/decisions/test_append_only_census_recs.py
+    action: Create
+    purpose: >-
+      rec-5410's acceptance file; covers append_only_census_recs.py to 100% on its own, through an injected portal_caller
+      and rows (no network). TestFileOnFinding (the acceptance node): one open merge with two decisions files exactly
+      one rec carrying the merge token, source decision_census, priority Medium, automatable False and
+      acceptance_for's acceptance; the same result again writes nothing; a changed digest updates the context only; one of
+      two decisions acknowledged updates title, context and acceptance to the remaining one; a closed or declined rec with the token does not, so a new
+      rec is filed; a rec whose merge is replayed and no longer open is closed; a rec whose merge the result did not
+      replay is left open; ledger defects file one rollup, which closes when they clear; a token for one merge never
+      matches a merge that shares its prefix; the title omits "(#<pr>)" when pr is null; a malformed result (extra key,
+      short sha, non-int decision, an open merge missing from replayed) or a failed lookup exits 2 with no write; one
+      failing write still lets the others run, then exits 1; --dry-run writes nothing and prints would-file
+      merge=<sha>. Acceptance shape: acceptance_for's command (and the rollup's) is decidable under
+      lint_acceptance_command(require_decidable=True), classify_command returns probeable for a merge listing 20
+      decisions (the 500-character shape cap), and run with bash in a tmp tree holding only the two corpus files and the
+      ledger it exits 0 with every row and the annotation present, and non-zero with one row missing or with no
+      annotation. TestAssert: --assert-ledger-clean exits 0, 1 and 2 on throwaway histories built by a copy of the census
+      tests' _Repo helper inside this file (no cross-test import, no conftest edit; ANCHOR and SELF_TEST_FIXTURE
+      monkeypatched). TestWorkflowJob reads
+      .github/workflows/decision-census.yml for the handoff only (the credential, needs and main-only assertions live in
+      TestWiring alone, one surface): file-recs assumes agent-platform-github-ci-branch through the pinned
+      configure-aws-credentials step, downloads the census job's artifact by the name it uploads and runs
+      `.venv/bin/python -m scripts.checks.decisions.append_only_census_recs --file` on it; the census step is one line
+      that passes --result and ends `|| test $? -le 1`. TestRegistration: decision_census is a source_registry
+      canonical_id and the decision-census ci_rca_taxonomy row's rationale names its own recs. If the file nears 500
+      SLOC, TestWorkflowJob and TestRegistration move beside TestWiring in test_append_only_census.py (in scope).
+  - file: tests/checks/decisions/test_append_only_census.py
+    action: Modify
+    purpose: >-
+      TestResult cases for --result (keeps the census module at 100% from its own mirror): the file's keys and grouping
+      by merge on a throwaway history, an acknowledged merge absent from open, a ledger defect listed, no file on exit 2.
+      TestWiring (merged in #2253, 191d8a32) changes, a Decision 235 cl.1 item the operator confirms on this plan: its
+      test_workflow_holds_no_credential_and_never_gates asserts `"id-token" not in text.replace("no id-token", "")` over
+      the whole workflow file (test_append_only_census.py:272-273), which the file-recs job must break. It becomes
+      test_only_file_recs_holds_a_credential_and_nothing_gates, at least as strong: workflow permissions stay exactly
+      {contents: read} and no pull_request trigger; the census job has no permissions key and no configure-aws-credentials
+      step; every job other than file-recs has no permissions key; file-recs' permissions are exactly {id-token: write,
+      contents: read}, its if is exactly github.ref == 'refs/heads/main' and it needs census; and the text check is kept
+      but counted, `text.replace("no id-token", "").count("id-token") == 1`, so any second id-token anywhere still fails.
+      Every other TestWiring assertion is unchanged; the push-paths floor gains append_only_census_recs.py.
+  - file: .github/workflows/decision-census.yml
+    action: Modify
+    purpose: >-
+      As built in #2253 (one census job; steps install-the-census-dependency and run-census, 1 line each). The census
+      job's run step stays one line, `python -m scripts.checks.decisions.append_only_census --summary "$GITHUB_STEP_SUMMARY"
+      --result "$RUNNER_TEMP/census-result.json" || test $? -le 1`, then a step "Upload census result" uploads the file
+      as decision-census-result-${{ github.run_id }} (actions/upload-artifact pinned as in backlog-health.yml,
+      retention-days 1). A new file-recs job: needs census; if github.ref == 'refs/heads/main'; permissions id-token:
+      write and contents: read; checkout pinned, persist-credentials false; ./.github/actions/aws-region; setup-python
+      3.12; venv install of requirements.txt; configure-aws-credentials on agent-platform-github-ci-branch with the
+      account-id masking env its peers carry; download the artifact; run `.venv/bin/python -m
+      scripts.checks.decisions.append_only_census_recs --file <path>` (the backlog-health escalate peer's form). The census job keeps no id-token;
+      push paths gain scripts/checks/decisions/append_only_census_recs.py (TestWiring checks a superset); schedule,
+      dispatch, concurrency and the workflow-level contents: read are unchanged. Header comment (its "holds no
+      credential" and "until it lands a finding reds this run" lines are rewritten): rec-5410's filing,
+      the exit contract (exit 1 is a finding the filer turns into a rec; exit 2 or a failed write reds the run and
+      loop liveness backstops it) and that the credential sits only in file-recs. The header never spells the
+      permission name except in the phrase "no id-token", since TestWiring counts it.
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: >-
+      r3_workflows: the existing decision-census.yml::census::run-census row stays at 1 (the step stays one module
+      invocation, nothing to extract; the header forbids an unmarked raise); new rows only for file-recs' venv-install
+      and run steps (validate_composite_action_shell_bodies fails an unregistered or grown body); keys measured at build.
+  - file: docs/contracts/github-actions-evidence.yaml
+    action: Modify
+    purpose: >-
+      artifact_uploads gains {workflow: .github/workflows/decision-census.yml, job: census, step: Upload census result,
+      artifact: 'decision-census-result-${{ github.run_id }}', retention_class: ephemeral_handoff} (the artifact value
+      quoted, as the telemetry-content row, since a flow mapping cannot carry a bare `${{`), mirroring
+      backlog-health's census upload, plus one one-line amendment_log row (validate_actions_evidence fails an
+      unclassified upload). The file is NEAR_CAP (496 of 500 effective lines on 191d8a32, plan_obligations): the new
+      upload row is one flow-style line, so the edit adds 2 lines (498); if a rebase leaves less headroom, compact an
+      existing multi-line amendment_log row to one line (the first relief valve), never a raise.
+  - file: config/ci_rca_taxonomy.yaml
+    action: Modify
+    purpose: >-
+      The decision-census row keeps tier not_a_gate and ci_rca excluded; its rationale becomes the telemetry-verification
+      form: it files its own decision_census recs and loop_liveness_stale backstops a run that cannot complete, so a
+      ci-rca watch would double-record. Same line count; NEAR_CAP relief is flow-style compaction of existing rows in
+      this file only, never a raise.
+  - file: config/agent/data_quality/source_registry.yaml
+    action: Modify
+    purpose: >-
+      Register canonical_id decision_census (description: the census's filer and its two rec kinds;
+      signal_interpretation: alarm-not-gate, one rec per merge plus one ledger rollup, closed by the census once
+      acknowledged, re-filed if closed early, Medium, not source=ci_rca; added_date).
+  - file: config/lambda/ducklake/field_semantics.yaml
+    action: Modify
+    purpose: >-
+      Regenerated by bin/venv-python -m scripts.schema_to_field_semantics, never hand-edited: decision_census joins the
+      two registry-sourced accepted_values lists, so the deployed writer accepts the filer's recs. Redeploys the DuckLake
+      functions through the governed channel on merge (PLAN-computed-reversal-conditions precedent).
+  - file: scripts/checks/ops_governance/check_source_registry.py
+    action: Modify
+    purpose: Add scripts/checks/decisions/append_only_census_recs.py to SCANNED_PATHS.
+  - file: tests/checks/ops_governance/test_check_source_registry.py
+    action: Modify
+    purpose: test_scanned_paths_includes_portal_and_producer_modules also expects the new module.
+bundled_recommendations: [rec-5410]
+followon_recs: []
+infrastructure_dependencies:
+  - >-
+    LAMBDA-DEPLOY (Decisions 79, 125, 126): field_semantics.yaml ships in seven active artifacts (compute_affected_artifacts,
+    2026-11-19). Six redeploy on the governed deploy-ducklake-lambdas run after main's full tier (Decision 249): VP 6.
+    The seventh, ducklake_telemetry_content_reader, deploys only through the operator-approved deploy-telemetry-content
+    channel (Decision 272, residual rec-5333): VP 7 asks the operator. No Terraform; no IAM change: the CI branch role
+    already trusts refs/heads/main and invokes the reader and ops-writer URLs (terraform/personal/oidc_ci_roles.tf:8-40).
+acceptance_criteria:
+  - >-
+    A census run whose result names an unacknowledged merge files exactly one decision_census rec for that merge, a
+    repeat run writes nothing, an acknowledged merge's rec is closed, and an early-closed rec is re-filed (VP 1, and live
+    through the deployed writer in VP 8).
+  - >-
+    rec-5410's acceptance node passes (VP 1 and VP 4) and rec-5410 closes through the Resolves trailer (VP 10).
+  - >-
+    The credential sits only in decision-census.yml's file-recs job, which runs on main only; the census job and the
+    fast-tier WARN stay credential-free (VP 1 TestWorkflowJob).
+  - >-
+    The governed DuckLake deploy of the merge commit is green and the content reader's approved deploy ran or its
+    deferral is reported (VP 6, VP 7); a decision-census run on main is green with the filer's summary line (VP 9).
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: Filer episodes, result output, asserts, workflow wiring, registration and the generated projection.
+    command: >-
+      bin/venv-python -m pytest tests/checks/decisions/test_append_only_census_recs.py
+      tests/checks/decisions/test_append_only_census.py tests/checks/ops_governance/test_check_source_registry.py -q &&
+      bin/venv-python -m scripts.schema_to_field_semantics --check
+    expected: Exit 0, every node passes and the generator reports no drift. Red before (target_absent on the plan-only tree, Decision 189).
+    expected_literals:
+      - ' passed'
+    fix_if: Fix the module, workflow or config; never weaken an assertion (Decision 235).
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      Standing guards in the suite both tiers run; a registry shard would only duplicate them and add a fresh-worktree
+      replay to the fast tier's non-test budget (the PR #2198 budget breach, rec-5372).
+  - step: 2
+    phase: pre-deploy
+    action: Live census on real history, then the filer in dry-run against the live store.
+    command: >-
+      R="$(mktemp -d)/r.json" && bin/venv-python -m scripts.checks.decisions.append_only_census --head HEAD --result "$R"
+      && out="$(bin/venv-python -m scripts.checks.decisions.append_only_census_recs --file "$R" --dry-run
+      --profile agent_platform)" && printf '%s\n' "$out" && printf '%s' "$out" | grep -q '\[decision_census\] summary
+      open_merges=0 ' && ! printf '%s' "$out" | grep -q would-file && C="$(mktemp -d)/c" && git clone -q --depth 1
+      "file://$PWD" "$C" && bin/venv-python -c "import sys;from pathlib import Path;from scripts.backlog_health import
+      probe;from scripts.checks.decisions.append_only_census_recs import acceptance_for;v=probe.run_one(acceptance_for('660d5b54cb841110a1ae375a66f26cd3bf67a50d',[65,210]),repo_root=Path(sys.argv[1]));print('SANDBOX',v);assert
+      v==probe.PASS" "$C"
+    expected: >-
+      The census exits 0 and writes the result; the filer prints its summary with open_merges=0 and no would-file line;
+      the per-merge acceptance for the acknowledged merge 660d5b54 passes under the trailer probe on a --depth 1 clone
+      (SANDBOX pass), the Decision 201 cl.5 verify boundary.
+    fix_if: 'A reader refused by the proxy: stop and tell the coordinator; never work around it. An open merge: a rewrite landed after planning; stop and tell the coordinator.'
+    hermetic: false
+    graduation: not-applicable
+  - step: 3
+    phase: pre-deploy
+    action: Red polarity on real history, ledger emptied in a scratch worktree, filer in dry-run.
+    command: >-
+      R="$PWD"; D="$(mktemp -d)" && O="$(mktemp -d)/r.json" && git worktree add -q --detach "$D" HEAD && printf
+      'acknowledged: []\n' > "$D/config/agent/decision_census.yaml" && (cd "$D" && "$R/bin/venv-python" -m
+      scripts.checks.decisions.append_only_census --head HEAD --result "$O"); rc=$?; out="$("$R/bin/venv-python" -m
+      scripts.checks.decisions.append_only_census_recs --file "$O" --dry-run --profile agent_platform)"; git
+      worktree remove --force "$D"; printf '%s\n' "$out"; test "$rc" = 1 && test "$(printf '%s\n' "$out" | grep -c
+      'would-file merge=660d5b54cb841110a1ae375a66f26cd3bf67a50d')" = 1
+    expected: The census exits 1 with the result written, and the dry-run filer would file exactly one rec, for merge 660d5b54 (Decisions 65 and 210 in one rec).
+    fix_if: Zero or two would-file lines mean the grouping by merge or the result output is wrong; fix the code.
+    hermetic: false
+    graduation: not-applicable
+  - step: 4
+    phase: pre-deploy
+    action: rec-5410's acceptance is the node this plan creates, and passes.
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import make_reader,
+      fetch_recs_by_ids;rows,missing=fetch_recs_by_ids(make_reader(),['rec-5410']);assert not missing and rows,
+      missing;a=rows[0];want='bin/venv-python -m pytest
+      tests/checks/decisions/test_append_only_census_recs.py::TestFileOnFinding -q';assert a['status']=='open' and
+      a['acceptance'].strip()==want, a['acceptance'];print('REC_OK')" && bin/venv-python -m pytest
+      tests/checks/decisions/test_append_only_census_recs.py::TestFileOnFinding -q
+    expected: REC_OK, then exit 0.
+    fix_if: 'A reader refused by the proxy: stop and tell the coordinator; never work around it.'
+    hermetic: false
+    graduation: not-applicable
+  - step: 5
+    phase: pre-deploy
+    action: Fast tier, then the full tier on the committed, rebased tree, backgrounded with a 2 h limit.
+    command: >-
+      bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.validate && bin/venv-python -m
+      scripts.checks.validation_result --verify-head
+    expected: Exit 0 on a completed full run with the head verified; a timeout is not a pass.
+    fix_if: Fix the named check at root cause; never raise a budget or skip a check.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Invokes scripts.validate (recursion refusal); it is the handoff gate itself.
+  - step: 6
+    phase: post-deploy
+    action: >-
+      The governed deploy of the merge commit succeeded, every job included. Read with mcp__github__actions_list
+      (list_workflow_runs, workflow deploy-ducklake-lambdas.yml) the run whose deploy gate resolved $MERGE_SHA (or the
+      newest green commit after it), then list_workflow_jobs for that run, writing the jobs JSON to $DEPLOY_JOBS_JSON and
+      the deploy-telemetry job's log to $DEPLOY_LOG (mcp__github__get_job_logs).
+    command: >-
+      test -s "$DEPLOY_JOBS_JSON" && bin/venv-python -c "import json,os;j=json.load(open(os.environ['DEPLOY_JOBS_JSON']));
+      jobs={x['name']:x.get('conclusion') for x in (j.get('jobs') if isinstance(j,dict) else j)};print(jobs);
+      want=['deploy-maintenance','maintenance-smoke','reconcile-gate','deploy-serving','smoke','deploy-telemetry-twin','telemetry-twin-smoke','deploy-telemetry'];
+      ok=lambda w:jobs.get(w)=='success'; assert all(ok(w) for w in want),jobs;
+      hold='TELEMETRY_PRODUCTION_HOLD' in open(os.environ['DEPLOY_LOG']).read(); assert hold or ok('telemetry-smoke'),jobs;
+      print('DEPLOY_OK hold=%d'%hold)"
+    expected: >-
+      Every named job concluded success and telemetry-smoke succeeded unless the log carries TELEMETRY_PRODUCTION_HOLD;
+      then DEPLOY_OK. The filer writes only through the ops writer (deploy-serving), so a hold does not block it.
+    fix_if: >-
+      A failed deploy or smoke is this plan's to root-cause and fix forward, never a re-run to green (Decision 55). If
+      PROD has become promote-only (Decision 252 cl.6), read the promotion run that carries $MERGE_SHA's artifact.
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: post-deploy
+    action: >-
+      The content reader's leg (Decision 79, Decision 272 residual, rec-5333). After VP 6, dispatch
+      deploy-telemetry-content.yml from main with force true (mcp__github__actions_run_trigger), tell the operator in the
+      thread that its deploy job waits on the telemetry-content-deploy Environment, and once it completes write the run's
+      jobs (list_workflow_jobs) to $CONTENT_JOBS_JSON.
+    command: >-
+      test -s "$CONTENT_JOBS_JSON" && bin/venv-python -c "import json,os;j=json.load(open(os.environ['CONTENT_JOBS_JSON']));
+      jobs={x['name']:x.get('conclusion') for x in (j.get('jobs') if isinstance(j,dict) else j)};print(jobs);
+      assert all(jobs.get(w)=='success' for w in ['gate / gate','build','deploy','record']),jobs; print('CONTENT_DEPLOY_OK')"
+    expected: The gate / gate, build, deploy and record jobs concluded success, then CONTENT_DEPLOY_OK.
+    fix_if: >-
+      If the operator declines or defers the approval, or the run's log carries TELEMETRY_PRODUCTION_HOLD (as VP 6 allows),
+      record it in the report with the run link as a deferral: the content reader never validates rec source, so the
+      filer does not wait on it (Decision 272's accepted residual).
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: post-deploy
+    action: >-
+      Live lifecycle through the deployed writer, after VP 6: build the emptied-ledger result as in VP 3 into $OPEN_R and
+      the real result as in VP 2 into $CLEAN_R; then file, repeat, and clear against the live store from this session.
+    command: >-
+      P="--profile agent_platform"; M=merge=660d5b54cb841110a1ae375a66f26cd3bf67a50d; a="$(bin/venv-python -m
+      scripts.checks.decisions.append_only_census_recs --file "$OPEN_R" $P)" && b="$(bin/venv-python -m
+      scripts.checks.decisions.append_only_census_recs --file "$OPEN_R" $P)" && c="$(bin/venv-python -m
+      scripts.checks.decisions.append_only_census_recs --file "$CLEAN_R" $P)" && printf '%s\n' "$a" "$b" "$c" &&
+      printf '%s' "$a" | grep -q 'filed=1 ' && printf '%s' "$b" | grep -q 'unchanged=1 ' && printf '%s' "$c" | grep -q
+      'closed=1 ' && bin/venv-python -c "import re,sys;from src.common.ducklake_reader_client import make_reader;
+      rows=make_reader(profile='agent_platform').current_state('ops_recommendations',row_filter=\"source = 'decision_census'\");
+      mine=[r for r in rows if re.search(r'(^|\\s)$M(\\s|$)',r.get('context') or '')];
+      assert mine and all(r['status']=='closed' for r in mine),mine;print('LIFECYCLE_OK',[r['id'] for r in mine])"
+    expected: >-
+      The first run files one rec, the second leaves it unchanged, the third closes it, and the read-back shows that rec
+      closed with source decision_census; then LIFECYCLE_OK naming its id. Report the id.
+    fix_if: >-
+      A writer refusal on the source means the deploy did not land the projection: back to VP 6. A second filed rec on
+      the repeat run is a dedup defect (fix the lookup) unless a decision-census file-recs run on main completed between
+      the first and second runs and closed the fixture; then close every fixture rec and re-run the triple. Never leave the fixture rec open: close it through the portal
+      with the run's output if a later leg fails.
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: post-deploy
+    action: >-
+      One dispatch of decision-census.yml on main from this session (mcp__github__actions_run_trigger, never the
+      dispatcher bot), after VP 8; save the file-recs job log to $FILE_LOG and the run's jobs to $RUN_JOBS.
+    command: >-
+      grep -E '\[decision_census\] summary open_merges=0 filed=0 updated=0 unchanged=0 closed=0 ledger=none'
+      "$FILE_LOG" && bin/venv-python -c "import json,os;j=json.load(open(os.environ['RUN_JOBS']));
+      jobs={x['name']:x.get('conclusion') for x in (j.get('jobs') if isinstance(j,dict) else j)};
+      assert jobs.get('census')=='success' and jobs.get('file-recs')=='success',jobs;print('RUN_OK')"
+    expected: The summary line with every count zero, then RUN_OK.
+    fix_if: 'Red file-recs after a clean VP 8: check the role assumption and the artifact name first; never add continue-on-error.'
+    hermetic: false
+    graduation: not-applicable
+  - step: 10
+    phase: post-deploy
+    action: 'After the squash merge carries "Resolves: rec-5410", the closure job closed it.'
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import make_reader,
+      fetch_recs_by_ids;rows,missing=fetch_recs_by_ids(make_reader(),['rec-5410']);assert not missing and
+      rows[0]['status']=='closed';print('REC_CLOSED')"
+    expected: REC_CLOSED
+    fix_if: Open after the closure job, so check the ci.yml closure job on the squash commit.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: scripts/checks/decisions/append_only_census_recs.py
+    behavior: One rec per open merge, update on change (title, context, acceptance), close on acknowledgement, re-file after an early close, ledger rollup, strict result load, write-failure exit.
+    verification_step: 1
+    test_selector: tests/checks/decisions/test_append_only_census_recs.py::TestFileOnFinding
+    red_green_expectation: red before (absent), green after
+  - source: scripts/checks/decisions/append_only_census.py
+    behavior: --result writes the grouped JSON on a completed run and nothing on exit 2; exit codes unchanged.
+    verification_step: 1
+    test_selector: tests/checks/decisions/test_append_only_census.py::TestResult
+    red_green_expectation: red before (option absent), green after
+  - source: .github/workflows/decision-census.yml
+    behavior: file-recs assumes the branch role and runs --file on the census artifact; the census step is one line, passes --result and fails only above exit 1.
+    verification_step: 1
+    test_selector: tests/checks/decisions/test_append_only_census_recs.py::TestWorkflowJob
+    red_green_expectation: red before (job absent), green after
+  - source: .github/workflows/decision-census.yml
+    behavior: >-
+      TestWiring's whole-file no-id-token assertion is replaced by per-job assertions at least as strong (Decision 235
+      cl.1, operator-confirmed on this plan): census job and every job but file-recs hold no permissions, file-recs holds
+      exactly id-token write and contents read on main only, and the id-token count in the file is exactly 1.
+    verification_step: 1
+    test_selector: tests/checks/decisions/test_append_only_census.py::TestWiring::test_only_file_recs_holds_a_credential_and_nothing_gates
+    red_green_expectation: red before (node absent; the old node would fail once file-recs lands), green after
+  - source: docs/contracts/github-actions-evidence.yaml
+    behavior: the census job's new upload is classified ephemeral_handoff.
+    verification_step: 5
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: A contract row; validate_actions_evidence (--pre via the .github/workflows/** glob) fails an unclassified upload.
+  - source: config/ci_rca_taxonomy.yaml
+    behavior: decision-census stays not_a_gate and excluded, rationale names its own recs.
+    verification_step: 1
+    test_selector: tests/checks/decisions/test_append_only_census_recs.py::TestRegistration
+    red_green_expectation: red before (old rationale), green after
+  - source: config/agent/data_quality/source_registry.yaml
+    behavior: decision_census is a registered source, so the portal accepts the filer's recs.
+    verification_step: 1
+    test_selector: tests/checks/decisions/test_append_only_census_recs.py::TestRegistration
+    red_green_expectation: red before (unregistered), green after
+  - source: scripts/checks/ops_governance/check_source_registry.py
+    behavior: the source guard scans the new filer module.
+    verification_step: 1
+    test_selector: tests/checks/ops_governance/test_check_source_registry.py::TestScannedPaths::test_scanned_paths_includes_portal_and_producer_modules
+    red_green_expectation: red before (path not scanned), green after
+  - source: config/lambda/ducklake/field_semantics.yaml
+    behavior: the generated projection carries decision_census in both registry-sourced lists.
+    verification_step: 1
+    command: bin/venv-python -m scripts.schema_to_field_semantics --check
+    waiver_reason: A generated file; its byte equality with the generator is the existing --check guard, and VP 6 and VP 8 prove the writer loads it.
+  - source: config/composite_action_body_baseline.yaml
+    behavior: the new file-recs inline bodies are registered at their measured sizes; run-census stays at 1.
+    verification_step: 5
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: Baseline rows; validate_composite_action_shell_bodies fails --pre for an unregistered or grown inline body.
+constraints:
+  - 'Alarm, not gate (Decisions 55, 62, 83): nothing here blocks a merge; the workflow stays off required checks and pull_request.'
+  - The credential lives only in the file-recs job; the census job and the merge-time WARN module stay credential-free and config-free.
+  - A rec is never an acknowledgement; only a ledger row plus its annotation clears a finding (Decision 177). Closing a rec early re-files it.
+  - No Decision text changes; no edit to docs/DECISIONS.md or the ledger.
+  - 'The one loosened-looking edit is TestWiring''s whole-file id-token check becoming per-job checks plus an exact count (Decision 235 cl.1): the build makes it only as scoped above, never weaker.'
+  - The census-run step stays one line; no baseline raise.
+  - 'Public repository (Decision 101): rec text names commits, PR numbers, Decision numbers and line text already public; no account id or URL host beyond github.com.'
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - >-
+    Decision-scout r1-r3: FLAGS_FOUND each. 210 cl.4 WARN deferred (note below; the build report and its #1963 line
+    restate it); 250 NOTE resolved (operator chose "Medium rec only", 2026-11-19); r2's 201 cl.5 WARN resolved by the
+    sandbox-safe acceptance; 235 cl.1 needs the operator's recorded TestWiring confirmation. r3: Decisions triaged: 225
+    of 225. Roadmap items intersected: 9; CONFLICT: 0; RELATED: 9. Serves: mission 3/5.
+  - >-
+    Decision 235 cl.1 confirmation of the TestWiring change: CONFIRMED by the operator 2026-11-19 10:37Z on the planning
+    thread's card ("Approve per-job checks": replace the whole-file no-id-token assertion with the per-job checks and
+    exact id-token count named in scope). It covers only that change, as scoped.
+  - 'Related-work check (red_overlap, 2026-11-19): verdict clear, no reds.'
+  - >-
+    Closing proof (Decisions 103, 201, 215): the census closes a rec only when its replay shows the merge acknowledged,
+    among merges it replayed, naming the ledger and run URL; a Resolves trailer may close a per-merge rec first (its
+    grep acceptance holds in the probe sandbox, VP 2); only the census closes the rollup; a failed lookup files nothing.
+  - >-
+    Design source: blind Fable consult, /mnt/project-files/decision-growth/census-rec-filing/advisor-brief/ADVICE.md.
+    Adopted as advised except: trailer route for per-merge recs only (critique r1); "in_progress owns" rejected, the
+    store has no such status (critique r3). Reach to the operator is fleet-wide, for the coordinator, not here.
+  - >-
+    Sequencing: waits on nothing (#2253 191d8a32 and #2198 619c7e99 merged); rec-5372 only bounds VP 1's waiver.
+  - >-
+    Decision 210 cl.4 deferral (one PR, PLAN-computed-reversal-conditions precedent): main has zero open findings, so the
+    filer emits nothing before the governed deploy; a write in that window is refused loudly and re-filed (Decision 84 I-4).
+  - >-
+    Graduated shards kept, node ids unchanged: actions-capacity-evaluator-and-steps, backlog-health-package-suite,
+    source-registry-guard-producer-scan, and decision-append-only-census (whole-file over test_append_only_census.py, so
+    TestResult adds to its runtime, the rec-5372 budget).
+  - >-
+    Overlap and NEAR_CAP: see plan_obligations (2026-11-19). On rebase regenerate field_semantics.yaml, never hand-merge;
+    baseline and taxonomy rows rebase additively; ci_rca_taxonomy.yaml (491/500) gains no line; github-actions-evidence.yaml
+    (496/500) gains 2, and whichever co-scoping plan builds later applies its relief valve.
+  - 'LAMBDA-DEPLOY: see infrastructure_dependencies.'
+  - >-
+    Critique dispositions: every finding of rounds 1-5 was fixed in place (gate_rounds holds the counts) except r5 N4,
+    kept: VP 7 still dispatches the content-reader deploy because Decision 79 owes it for an active artifact, and its
+    fix_if already allows a reported deferral (Decision 272 residual rec-5333).
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:7618802ef4c005ab9d0b0545ba7bdb3258f42c02e5f0579baece7053fccae4f0"}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:a5d4ecbd446f6424ea02fb6c0f5af273069f79bdaf38336431480f7784c6b43c"}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:d2244f457b87ccd44ce9cbe40a2d9a2d90a807e30546e4459f97b1e8c9a5b9e6"}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 4, nits: 6}
+  - {gate: plan-critique, round: 2, verdict: PROCEED, blocking: 0, nits: 5}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 4}
+  - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 6}
+  - {gate: plan-critique, round: 5, verdict: PROCEED, blocking: 0, nits: 6}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Only the plan-cited decision sections read
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+  - The census build (#2253) is merged; no open PR edits the scope files (list_pull_requests, files)
+  - Decision 235 cl.1 confirmation of the TestWiring change is recorded in context (date and the operator's answer); without it, stop
+execution_steps:
+  - 1. Precondition, rebase onto main; read TestWiring's credential test and the census body-baseline rows as merged in #2253; VP 4's rec read.
+  - 2. Tests red-first (including the TestWiring replacement); then --result in the census module; then the filer module; VP 1 until green.
+  - >-
+    3. Source registry row, regenerate field_semantics.yaml (bin/venv-python -m scripts.schema_to_field_semantics),
+    SCANNED_PATHS, workflow job, evidence-contract row, body-baseline rows, taxonomy rationale; commit (VP 2 clones
+    and VP 3 checks out the committed HEAD, so both run only after the module changes are committed); VP 1, VP 2, VP 3.
+  - >-
+    4. Commit flow (implement skill; git-ops.yaml push_pr_ci_merge_flow): 'Resolves: rec-5410' in the squash body; VP 5
+    before handoff; merge on green CI.
+  - 5. After merge, VP 6 to VP 10 in order. Report what was implemented, VP results, merge SHA, the VP 8 fixture rec id and rec-5410's status.
+rollback: >-
+  A forward PR deleting the file-recs job, the --result option, the filer and its tests; the source_registry row and the
+  regenerated projection may stay (an unused accepted value is harmless). Removing the filer's tests is a Decision 235
+  cl.1 weakening, so that PR is carried by a human-confirmed plan. Recs the filer opened stay and are closed by hand.
+weakening_dispositions:
+  - candidate: "[test-removed] tests/checks/decisions/test_append_only_census.py::TestWiring::test_workflow_holds_no_credential_and_never_gates"
+    disposition: refactor
+    cite: "tests/checks/decisions/test_append_only_census.py::TestWiring::test_only_file_recs_holds_a_credential_and_nothing_gates"

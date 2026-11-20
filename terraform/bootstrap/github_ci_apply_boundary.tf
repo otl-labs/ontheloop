@@ -357,6 +357,24 @@ locals {
         Effect   = "Deny"
         Action   = ["lambda:C*", "lambda:D*", "lambda:P*", "lambda:T*", "lambda:U*"]
         Resource = "arn:aws:lambda:${var.aws_region}:*:function:agent-platform-ducklake-telemetry-content*"
+      },
+      {
+        # Decision 273: the verdict App's private key is read by one role only. Refuses every other carrier the value
+        # read and the by-path reads of the key's ancestors; the account is * (the byte-saving form). Outside the agent
+        # merge loop: the boundary is in the protected set (Decision 257 cl.3).
+        Sid    = "DenyVerdictAppKeyRead"
+        Effect = "Deny"
+        Action = "ssm:GetParameter*"
+        Resource = [
+          "arn:aws:ssm:${var.aws_region}:*:parameter/secret/agent-platform-persona-verdict-app-key",
+          "arn:aws:ssm:${var.aws_region}:*:parameter",
+          "arn:aws:ssm:${var.aws_region}:*:parameter/",
+          "arn:aws:ssm:${var.aws_region}:*:parameter/secret",
+          "arn:aws:ssm:${var.aws_region}:*:parameter/secret/",
+        ]
+        Condition = {
+          ArnNotLike = { "aws:PrincipalArn" = "arn:aws:iam::*:role/agent-platform-github-ci-persona-verdict-app" }
+        }
       }
     ]
   })

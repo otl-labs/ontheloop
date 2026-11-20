@@ -1,5 +1,7 @@
 """GHAS live-probe: secret-scanning, push-protection, Actions-permissions (audit finding ULF-01).
 
+The Actions-permissions surface also covers required SHA pinning (rec-5290).
+
 Decision 83 recorded the T2.12 confidential-data-boundary controls as verified by Terraform
 configuration only. This module closes the acknowledged live-probe gap with a single _probe()
 implementation (Decision 80) and two deliberately different callers:
@@ -114,8 +116,20 @@ def _actions_scope_label(value: object) -> str:
     return "unknown"
 
 
+def _pin_label(value: object) -> str:
+    """Coerce the actions/permissions `sha_pinning_required` field to a data-free tri-state label."""
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    return "unknown"
+
+
 def _probe(token: str | None) -> dict:
-    """Query the three GHAS control surfaces. Returns a control-state dict; never a raw body."""
+    """Query the three GHAS control surfaces (Actions permissions also covers required SHA pinning).
+
+    Returns a control-state dict; never a raw body.
+    """
     if not token:
         raise ProbeTokenMissing("probe token not set")
 
@@ -137,6 +151,7 @@ def _probe(token: str | None) -> dict:
         raise ProbeTransportError(f"non-JSON response from actions/permissions endpoint: {exc}") from exc
     actions_enabled = True if actions_data.get("enabled") else False
     allowed_actions = _actions_scope_label(actions_data.get("allowed_actions"))
+    sha_pinning_required = _pin_label(actions_data.get("sha_pinning_required"))
 
     alerts_status = _alerts_reachability(f"/repos/{repo}/secret-scanning/alerts", token)
 
@@ -145,6 +160,7 @@ def _probe(token: str | None) -> dict:
         "push_protection": push_protection,
         "actions_enabled": actions_enabled,
         "allowed_actions": allowed_actions,
+        "sha_pinning_required": sha_pinning_required,
         "repo_http_status": repo_status,
         "actions_http_status": actions_status,
         "alerts_http_status": alerts_status,
@@ -159,6 +175,8 @@ def _disabled_controls(state: dict) -> list[str]:
         disabled.append(f"push_protection={state['push_protection']}")
     if not state["actions_enabled"]:
         disabled.append("actions_enabled=False")
+    if state["sha_pinning_required"] != "true":
+        disabled.append(f"sha_pinning_required={state['sha_pinning_required']}")
     return disabled
 
 
@@ -166,6 +184,7 @@ def _state_summary(state: dict) -> str:
     return (
         f"scanning_status={state['scanning_status']} push_protection={state['push_protection']} "
         f"actions_enabled={state['actions_enabled']} allowed_actions={state['allowed_actions']} "
+        f"sha_pinning_required={state['sha_pinning_required']} "
         f"(repo_http_status={state['repo_http_status']} actions_http_status={state['actions_http_status']} "
         f"alerts_http_status={state['alerts_http_status']})"
     )

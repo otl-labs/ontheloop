@@ -153,9 +153,15 @@ class _ReplayBudget:
 # PR-relative authoring predicate (docs/contracts/vp-red-before.yaml's implement_leg_partition) --
 # ADVISORY, never refuses: a false negative only skips the exclusion/lint for an unrecognised
 # shape (76 merged steps use the origin/main diff idiom legitimately and must never be refused).
-# Recognises both live shapes: `git diff origin/main -- <path>` and `git show origin/main:<path>`
-# (PLAN-vp-red-before-gate.yaml step 16, the command behind rec-3845).
-_PR_RELATIVE_RE = re.compile(r"\bgit\b.*?\b(?:diff|show)\b.*?\borigin/main\b", re.DOTALL)
+# Recognises four shapes: `git diff origin/main -- <path>`, `git show origin/main:<path>`
+# (PLAN-vp-red-before-gate.yaml step 16, the command behind rec-3845), `git merge-base origin/main HEAD`
+# (shell or Python argv) and a `--base origin/main` flag (approved_text verify, rec-5364).
+_PR_RELATIVE_RE = re.compile(
+    r"\bgit\b.*?\b(?:diff|show)\b.*?\borigin/main\b"
+    r"|\bgit\b.*?\bmerge-base\b.*?\borigin/main\b"
+    r"|--base[ =]origin/main\b",
+    re.DOTALL,
+)
 
 
 def _is_pr_relative(command: str) -> bool:

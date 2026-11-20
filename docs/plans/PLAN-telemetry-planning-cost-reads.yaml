@@ -1,0 +1,338 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: telemetry-planning-cost-reads
+intent: >-
+  Make what a planning run costs readable from telemetry (rec-5257, contract-first retrospective finding CFR-07): a new
+  agent-facing window verb, session_tree_rollup, returns one row per session tree with its compaction count (root plus
+  sub-agents), the distinct workflows its sessions ran, and the merge links the ci_annotate producer writes (merge sha, merge
+  time, PR, recs, CI result), so a plan merge is a join key to the tree that produced it. The telemetry_usage CLI gains
+  "trees" (compactions per tree and per day) and "plans" (per plan merge: the linked trees' token totals by class, model
+  calls and compactions, and whether the workflow label finds every linked tree). Closes rec-5257.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-telemetry-planning-cost-reads.yaml
+phase: >-
+  Ad hoc rec (soft-warn ad_hoc_rec): rec-5257, CFR-07 of audits/contract-first-retrospective-177c8f37.yaml, handed to Feedback
+  Loop on 2026-11-18. Serves T3.3/T3.4 measurement (the loop's cost signal) but closes no exit criterion, so closes_criteria is
+  empty.
+closes_criteria: []
+cites: [dec:84, dec:199, dec:207, dec:236, dec:246, dec:249, dec:272]
+scope:
+  - file: src/common/ducklake_event_read_sql.py
+    action: Modify
+    purpose: >-
+      TREE_ROLLUP_SQL over the existing _USAGE_TREE block (tables telemetry_sessions, telemetry_observations): one row per
+      real-purpose tree with the tree columns (root_session_id, harness_session_key, branch, workflow, session_started_at,
+      last_event_timestamp, roots_in_tree), session_count (distinct sessions in st), workflows (sorted distinct non-null
+      workflow over the tree's sessions in ses, [] when none), compact_count and compacted_session_count (deduped
+      telemetry_sessions rows with event_kind compact over every tree session), merge_links (list of struct merge_sha,
+      merged_at, pr_url, rec_ids, ci_outcome from deduped telemetry_sessions annotate rows of producer ci_annotate in the tree,
+      merge_sha parsed from external_ref by the regex ':merge:([0-9a-f]+)#0/annotate$' (no brace quantifier inside the
+      rendered template), ordered by merged_at then merge_sha, [] when none) and the tree stamps (_TREE_STAMPS); rows ordered
+      by session_started_at, root_session_id, project_id like the sibling usage verbs, and the oracle sorts the same way. The
+      workflows list reads each session's own workflow as ses resolves it (its first non-null value), so the oracle takes one
+      value per session, never every row's. No token column. Reuses _USAGE_TREE unchanged. Written with f-strings over _TREE_KEY and _TREE_USING, not "+" chains (ruff
+      explodes those): a drafted, ruff-formatted TREE_ROLLUP_SQL of this shape measured 471 -> 486 SLOC on main 6696da07,
+      against 502 for the "+" form.
+    new_imports: []
+  - file: src/common/ducklake_event_read_verbs.py
+    action: Modify
+    purpose: >-
+      EVENT_READS gains session_tree_rollup: tables (SESSIONS, OBSERVATIONS), params day_from/day_to, binding window,
+      max_window_days MAX_WINDOW_DAYS, agent-facing, not paginable, description naming the columns and the tree note.
+    new_imports: []
+  - file: src/common/event_usage_fields.py
+    action: Modify
+    purpose: TREE_ROLLUP_FIELDS, the new verb's derived columns in SQL order (stamps appended by VERB_FIELDS).
+    new_imports: []
+  - file: src/common/ducklake_reader_client.py
+    action: Modify
+    purpose: VERB_FIELDS gains session_tree_rollup = (*TREE_ROLLUP_FIELDS, *_STAMP_FIELDS).
+    new_imports: []
+  - file: scripts/telemetry_verify/derive_usage.py
+    action: Modify
+    purpose: >-
+      Independent oracle session_tree_rollup(tables, projects, day_from, day_to) over _Trees: the same columns from raw rows
+      (compact rows, workflows, annotate rows of ci_annotate with the sha read by its own regex), never an import of the reader
+      SQL.
+    new_imports: []
+  - file: scripts/telemetry_usage.py
+    action: Modify
+    purpose: >-
+      Two commands. "trees --from --to [--by-root]": reads session_tree_rollup in the existing windows and prints per UTC day
+      trees, compact_count, compacted_trees and planning_trees (or one row per tree with --by-root). "plans [--last N] [--as-of
+      REF] [--lookback-days D]": the newest N (default 8, 1..20) first-parent commits on REF (default origin/main) whose subject starts "plan("
+      (session_presence.git_commits); session_tree_rollup read over every window from the oldest merge's UTC day minus
+      --lookback-days (default 56, the producer's root lookback, so no linked root is outside the read) to the newest merge's
+      day, and model_usage_rollup only over the windows that hold a linked tree; the floor day is printed. Per merge: the
+      trees whose merge_links carry its sha, their four token classes and model_call_count summed by class (never one summed
+      total), compact_count, workflows, planning (every linked tree's workflows contain plan, decision-scout or plan-critique:
+      a wide label on purpose, since the verdict measures whether the label finds every linked tree, and a gate run outside
+      planning only adds to the informational unlinked count) and mixed (a linked tree's workflows also contain implement,
+      audit or orient: tokens cannot be split at tree grain); summary linked, caught, planning_trees_unlinked and verdict PASS
+      when at least one merge is linked and every linked tree is planning, else FAIL (exit 1). The command takes its own
+      arguments (subcommand arguments; --from/--to stay required for the window commands only). --max-windows does not apply
+      to plans (its span is derived, not typed, and a 56-day lookback already needs 9 windows): plans prints its window
+      count, and each of its two reads is its own _Reads with its own MAX_CALLS cap of 32, which fails closed when reached.
+    new_imports: [scripts.telemetry_verify.session_presence]
+  - file: scripts/ducklake_smoke/lambda_telemetry_reader_gates.py
+    action: Modify
+    purpose: _USAGE_VERBS gains session_tree_rollup, so the reader smoke reads it and checks its rows carry exactly VERB_FIELDS.
+    new_imports: []
+  - file: docs/contracts/ducklake_telemetry_reader.yaml
+    action: Modify
+    purpose: >-
+      Sidecar-bound words (docs/plans/approved/telemetry-planning-cost-reads.yaml): a new tree-rollup invariant after the
+      usage-verbs invariant names session_tree_rollup and its columns, the merge_sha parse from telemetry_sessions' annotate external_ref, and that a merge
+      links to several trees so callers summing per merge dedupe on the sha; one field_add amendment_log row.
+    new_imports: []
+  - file: docs/contracts/read-engine.yaml
+    action: Modify
+    purpose: >-
+      Registration, not sidecar-bound (a meaning-free roster mirror that validate_read_engine_verbs holds equal to the
+      registry): session_tree_rollup joins read_surface.named_verbs under telemetry_sessions (its first table), and one
+      field_add amendment_log row at the top naming PLAN-telemetry-planning-cost-reads (rec-5257) and the new verb.
+    new_imports: []
+  - file: tests/common/test_ducklake_event_read_tree_rollup.py
+    action: Create
+    purpose: >-
+      Full tier (importorskip duckdb), over the golden chain: test_verb_matches_oracle_on_every_golden_tree;
+      test_tree_rollup_counts_compact_events (hooks_resume_and_compact tree: compact_count equals the producer's compact rows,
+      compacted_session_count 1; a re-parse at a newer parser_version does not double it); test_merge_links_carry_the_sha_and_link_columns
+      (two cloned ci_annotate annotate rows on a tree's root give two merge_links in merged_at order with the parsed sha,
+      and the verb still equals the oracle on that tree; a tree with none gives []); test_workflows_list_every_tree_session (a sub-agent gate workflow appears beside a
+      claude_code root).
+    new_imports: []
+  - file: tests/test_event_usage_fields.py
+    action: Modify
+    purpose: _BY_VERB gains session_tree_rollup, so the uniqueness, stamp-order and no-content-cost-summed-total checks cover it.
+    new_imports: []
+  - file: tests/ducklake_neon_smoke_test/test_lambda_telemetry_reader_gates.py
+    action: Modify
+    purpose: test_reader_gate_reads_the_usage_verbs covers the fourth verb (a missing or extra column fails the gate).
+    new_imports: []
+  - file: tests/test_telemetry_usage.py
+    action: Modify
+    purpose: >-
+      With a fake reader and a fake git_commits: test_trees_summarises_compactions_per_day,
+      test_trees_by_root_keeps_one_row_per_tree, test_plans_passes_when_every_linked_tree_is_planning,
+      test_plans_fails_on_an_uncaught_merge (FAIL names the merge), test_plans_fails_when_no_merge_is_linked,
+      test_plans_sums_token_classes_separately_and_flags_mixed (each class summed alone, a merge linked to two trees counts
+      each tree once, mixed flagged, the call cap fails closed); and
+      test_tree_rollup_is_registered_agent_facing_window_verb: EVENT_READS["session_tree_rollup"] has binding window,
+      max_window_days 7, agent_facing True, paginable False and params (day_from, day_to). The new verb goes in its own tuple,
+      never in this file's USAGE_VERBS (test_reader_contract_declares_the_usage_verbs reads the "Usage verbs" invariant,
+      which the sidecar leaves unchanged).
+    new_imports: []
+bundled_recommendations: [rec-5257]
+followon_recs: [rec-5378]
+infrastructure_dependencies:
+  - "None: no IAM, Terraform or DDL; the telemetry reader already reads both tables."
+  - "Content reader (active manifest; bundles ducklake_event_read_sql.py and ducklake_event_read_verbs.py, outside its protective set): Decision 79's step is VP 8, read on the content channel's next operator-approved deploy (Decision 272 cl.1), which lists this commit; the build never dispatches one itself. The new verb is not in its served set (CONTENT_READS), so the change is inert there. If rec-5333 first lands a carve-out for shared-module-only changes, VP 8 follows it."
+  - "data-pipeline (active manifest): affected only through src/common/event_usage_fields.py and src/common/ducklake_reader_client.py by its src/ wildcard (compute_affected_artifacts over this scope, 2026-11-18). No data-pipeline build, deploy or smoke step is owed: no data-pipeline handler reads VERB_FIELDS, and PROD_SOURCE_PATHSPECS (scripts/convergence_health/code_drift.py) watches neither file (precedent PLAN-telemetry-usage-reader-verbs)."
+  - "ducklake_telemetry_reader: VP 5-6 (deploy-ducklake-lambdas deploy-telemetry and telemetry-smoke)."
+acceptance_criteria:
+  - "session_tree_rollup returns one row per real-purpose tree with compact_count, compacted_session_count, workflows and merge_links, equal to the independent oracle on every golden tree."
+  - "A tree's compactions are counted once each after dedupe, root and sub-agents together."
+  - "A ci_annotate link row on a tree's root appears in merge_links with its parsed merge sha; a tree with none reads []."
+  - "telemetry_usage trees prints compactions per tree and per day; telemetry_usage plans prints per-plan-merge token totals by class and the workflow-label verdict."
+  - "The reader deploys through its governed channel once the telemetry hold allows it, and its smoke reads the new verb."
+  - "The content reader's next operator-approved deploy contains this commit and its deploy and record jobs succeed."
+  - "rec-5257 is closed."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The new verb against the oracle and its compaction, merge-link and workflow cases.
+    command: bin/venv-python -m pytest tests/common/test_ducklake_event_read_tree_rollup.py -q
+    expected: exit 0 with every test passing; red before (the verb is not registered).
+    fix_if: the verb and the oracle disagree, or a compaction is counted twice
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: telemetry-tree-rollup-verb
+  - step: 2
+    phase: pre-deploy
+    action: Column registration, the smoke gate and the read-engine roster.
+    command: >-
+      bin/venv-python -m pytest tests/test_event_usage_fields.py tests/ducklake_neon_smoke_test/test_lambda_telemetry_reader_gates.py
+      tests/checks/contracts/test_validate_read_engine_verbs.py tests/common/ducklake_event_reads/test_describe.py
+      tests/test_telemetry_usage.py::test_tree_rollup_is_registered_agent_facing_window_verb -q
+    expected: exit 0.
+    fix_if: VERB_FIELDS, the smoke list or read-engine.yaml misses the verb
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: telemetry-tree-rollup-registration
+  - step: 3
+    phase: pre-deploy
+    action: The trees and plans commands.
+    command: >-
+      bin/venv-python -m pytest tests/test_telemetry_usage.py::test_trees_summarises_compactions_per_day
+      tests/test_telemetry_usage.py::test_trees_by_root_keeps_one_row_per_tree
+      tests/test_telemetry_usage.py::test_plans_passes_when_every_linked_tree_is_planning
+      tests/test_telemetry_usage.py::test_plans_fails_on_an_uncaught_merge
+      tests/test_telemetry_usage.py::test_plans_fails_when_no_merge_is_linked
+      tests/test_telemetry_usage.py::test_plans_sums_token_classes_separately_and_flags_mixed -q
+    expected: exit 0; red before (the six tests and both commands are absent).
+    fix_if: a summary sums token classes together, or plans passes an uncaught merge
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: telemetry-usage-trees-plans
+  - step: 4
+    phase: pre-deploy
+    action: Full tier, then HEAD attestation, after the build commit and rebase and before the push; started from the top-level session, backgrounded with a 2 h limit.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: the full tier exits 0 and the validation result attests the current HEAD's tree
+    fix_if: any failure; fix and rerun the full tier from the start
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion), and steps 1-3 carry the durable regressions.
+  - step: 5
+    phase: post-deploy
+    action: The governed deploy ships the telemetry reader once the hold allows.
+    command: >-
+      git fetch -q origin main && build=$(git log -1 --format=%H -E --grep='^Resolves: .*rec-5257([^0-9]|$)' origin/main) &&
+      test -n "$build" && ok= && for id in $(gh api
+      'repos/otl-labs/ontheloop/actions/workflows/deploy-ducklake-lambdas.yml/runs?status=success&per_page=100' --jq '.workflow_runs[].id'); do jobs=$(gh api "repos/otl-labs/ontheloop/actions/runs/$id/jobs" --jq '.jobs[] |
+      select((.name=="deploy-telemetry" or .name=="telemetry-smoke") and .conclusion=="success") | .name + " " + (.id|tostring)');
+      echo "$jobs" | grep -q '^telemetry-smoke ' || continue; job=$(echo "$jobs" | sed -n 's/^deploy-telemetry //p'); deployed=$(gh
+      api "repos/otl-labs/ontheloop/actions/jobs/$job/logs" | grep -oE 'LAMBDA_ARTIFACT_SHA: [0-9a-f]{40}' | head -1 | cut -d' '
+      -f2); echo "run $id deployed $deployed"; if git merge-base --is-ancestor "$build" "$deployed"; then echo contains; ok=1;
+      fi; break; done; test -n "$ok"
+    expected: >-
+      "run <id> deployed <sha>" and contains, exit 0: the newest deploy-ducklake-lambdas run whose deploy-telemetry and
+      telemetry-smoke jobs both succeeded (the smoke reads session_tree_rollup; a gate-skipped run has
+      neither job succeeded and a held run's telemetry-smoke is skipped, so both are passed over), and the commit it deployed (the deploy-telemetry job's LAMBDA_ARTIFACT_SHA,
+      the gate's sha) contains the build commit (the one squash commit carrying "Resolves: rec-5257"; the plan's own commits
+      carry no such trailer). The report names the run id (the same read through mcp__github__actions_list and get_job_logs
+      where gh is unavailable).
+    fix_if: >-
+      no qualifying run contains the build: in a main worktree (git worktree add --detach <dir> origin/main) read
+      bin/venv-python -m scripts.checks.ops_governance.validate_reconcile_pending_gate --telemetry-hold (held=true: the hold is
+      still on; wait, never bypass it); held=false: either the gate has not shipped it yet (no main commit containing the
+      build has a green full tier, Decision 249 cl.1, or the run is still in progress; wait) or the run that shipped it ended
+      red, so status=success skipped it (read that run's deploy-telemetry and telemetry-smoke jobs and log)
+    hermetic: false
+  - step: 6
+    phase: post-deploy
+    action: Compactions read live on a busy day (the 2026-11-16 probe found 1 to 4 compact rows in each of its six busiest trees).
+    command: bin/venv-python -m scripts.telemetry_usage trees --from 2026-11-16 --to 2026-11-16
+    expected: exit 0; the one day row has trees > 0 and compact_count > 0.
+    fix_if: compact_count 0 on that day (the verb misses compact rows) or a read failure
+    hermetic: false
+  - step: 7
+    phase: post-deploy
+    action: rec-5257 closed by the merge's Resolves trailer.
+    command: >-
+      AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import
+      fetch_recs_by_ids,make_reader;r,m=fetch_recs_by_ids(make_reader(profile='agent_platform'),['rec-5257']);
+      print(r[0]['status'] if r else m)"
+    expected: closed
+    fix_if: >-
+      still open; check the closure job's run on the merge commit (once PLAN-trailer-range-closure is built, closure waits
+      for the covering full-tier run on main, so read that run first)
+    hermetic: false
+  - step: 8
+    phase: post-deploy
+    action: >-
+      Decision 79 for the content reader: its next deploy-telemetry-content run that the operator approves (Decision 272
+      cl.1; this build never dispatches one) is on a commit that contains this build. Waits on the operator; the build
+      reports it pending with this step named, and the coordinator keeps it on the waiting list.
+    command: >-
+      git fetch -q origin main && build=$(git log -1 --format=%H -E --grep='^Resolves: .*rec-5257([^0-9]|$)' origin/main) && test -n
+      "$build" && ok= && for id in $(gh api
+      'repos/otl-labs/ontheloop/actions/workflows/deploy-telemetry-content.yml/runs?status=success&per_page=100' --jq
+      '.workflow_runs[].id'); do job=$(gh api "repos/otl-labs/ontheloop/actions/runs/$id/jobs" --jq '.jobs[] |
+      select(.name=="record" and .conclusion=="success") | .id'); [ -n "$job" ] || continue; deployed=$(gh api
+      "repos/otl-labs/ontheloop/actions/jobs/$job/logs" | grep -oE 'LAMBDA_ARTIFACT_SHA: [0-9a-f]{40}' | head -1 | cut -d' '
+      -f2); echo "run $id deployed $deployed"; if git merge-base --is-ancestor "$build" "$deployed"; then echo contains; ok=1;
+      fi; break; done; test -n "$ok"
+    expected: >-
+      "run <id> deployed <sha>" then contains, exit 0: the newest deploy-telemetry-content run whose record job succeeded (a run the
+      gate skipped has no successful record job, so it is passed over), and the commit that run deployed (its record job's
+      LAMBDA_ARTIFACT_SHA, the gate's sha) contains the build commit (the one squash commit carrying "Resolves: rec-5257";
+      the plan's own commits carry no such trailer). The report names the run id (the same read through
+      mcp__github__actions_list and get_job_logs where gh is unavailable).
+    fix_if: no approved run since the merge yet (wait, never dispatch), or the run failed (the content channel's own recovery)
+    hermetic: false
+test_obligations:
+  - source: src/common/ducklake_event_read_sql.py
+    behavior: the tree rollup counts compactions, lists workflows and merge links, equal to the oracle
+    verification_step: 1
+    test_selector: tests/common/test_ducklake_event_read_tree_rollup.py
+    red_green_expectation: red before (verb absent), green after
+  - source: src/common/ducklake_event_read_verbs.py
+    behavior: session_tree_rollup is registered, agent-facing, seven-day window, not paginable
+    verification_step: 2
+    test_selector: tests/test_telemetry_usage.py::test_tree_rollup_is_registered_agent_facing_window_verb
+    red_green_expectation: red before (KeyError, the verb is not registered), green after
+  - source: scripts/telemetry_verify/derive_usage.py
+    behavior: the oracle derives the same rows from raw rows
+    verification_step: 1
+    test_selector: tests/common/test_ducklake_event_read_tree_rollup.py::test_verb_matches_oracle_on_every_golden_tree
+    red_green_expectation: red before (no oracle), green after
+  - source: src/common/event_usage_fields.py
+    behavior: the new columns are unique and carry no content, cost or summed total
+    verification_step: 2
+    test_selector: tests/test_event_usage_fields.py
+    red_green_expectation: red before (key missing), green after
+  - source: src/common/ducklake_reader_client.py
+    behavior: VERB_FIELDS carries the new verb's columns and stamps
+    verification_step: 2
+    test_selector: tests/test_event_usage_fields.py
+    red_green_expectation: red before, green after
+  - source: scripts/ducklake_smoke/lambda_telemetry_reader_gates.py
+    behavior: the reader smoke reads the new verb and checks its columns
+    verification_step: 2
+    test_selector: tests/ducklake_neon_smoke_test/test_lambda_telemetry_reader_gates.py::test_reader_gate_reads_the_usage_verbs
+    red_green_expectation: red before (verb not read), green after
+  - source: scripts/telemetry_usage.py
+    behavior: trees and plans summaries and the plans verdict
+    verification_step: 3
+    test_selector: tests/test_telemetry_usage.py::test_plans_fails_on_an_uncaught_merge
+    red_green_expectation: red before (unknown command), green after
+  - source: docs/contracts/read-engine.yaml
+    behavior: the named_verbs roster matches the registry
+    verification_step: 2
+    test_selector: tests/checks/contracts/test_validate_read_engine_verbs.py
+    red_green_expectation: red before (roster misses the verb), green after
+  - source: docs/contracts/ducklake_telemetry_reader.yaml
+    behavior: the usage-verbs invariant names the new verb
+    verification_step: 4
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: Prose describing the verb SQL; steps 1-2 test the SQL and registry it describes, and the words are bound by the approved-text sidecar.
+constraints:
+  - "Build after PLAN-merge-annotate-contract-reader's build merges (it edits _USAGE_TREE tl and derive_usage.py's last event, which this verb reuses); rebase on it. The build does not wait for PLAN-merge-annotate-producer: merge_links read [] until that producer writes."
+  - "ducklake_event_read_sql.py stays at or under 500 SLOC: the f-string draft measured 486 on main 6696da07; re-measure at build start, after whichever of the plans named under Overlap has landed; if the new SQL would cross 500, stop and send a plan-defect report (a split adds a module to the content reader's bundle, a protective manifest edit), never a raise; the report proposes the facade split of ducklake_event_read_sql.py (Decision 80/104/124 pattern) with the content reader manifest edit, for the operator's channel ruling."
+  - "No token column on the new verb and no single summed token total anywhere (reader contract usage-verbs invariant); plans sums each token class separately."
+  - "The oracle stays independent code, never an import of the reader SQL."
+  - "Every edit to ducklake_telemetry_reader.yaml is bound word for word by docs/plans/approved/telemetry-planning-cost-reads.yaml (Decision 246); read-engine.yaml takes only the roster entry and its amendment row described in scope. The sidecar's new last amendment row names the three earlier usage verbs, so tests/test_telemetry_usage.py::test_reader_contract_declares_the_usage_verbs (latest row names them) holds unchanged."
+  - "The planning rule (workflows contain plan, decision-scout or plan-critique) and the mixed rule (implement, audit or orient also present) live only in telemetry_usage.py; the verb reports facts, never a planning judgement."
+context:
+  - "Decision-scout r1: FLAGS_FOUND (WARN 79: the content reader also bundles ducklake_event_read_sql.py and ducklake_event_read_verbs.py; answered by the Decision 272 deferral constraint). CITE 84, 199, 207, 236, 246, 249, 272. RELATED 88, 128, 124, 210, 212, 221, 231, 87, 205, 228, 239, 270, 132, 244, 255, 200. Decisions triaged: 221 of 221. Roadmap items intersected: 3; CONFLICT: 0; RELATED: 3. Serves: mission 4/5."
+  - "red_overlap (2026-11-18 ~14:25 UTC, main 6696da07): blocked by rec-5355 (test_plan_walkers_stay_under_budget xdist crash on the plan corpus) and rec-5364 (vp-replay _is_pr_relative misses --base origin/main), both past the 4 h repair SLO, shared files none, both claimed by CI Reform (coordinator log 2026-11-18 12:55Z). Deferral: this plan neither touches nor repairs the plan walkers or vp-replay; the build re-runs red_overlap before it starts."
+  - "Advisor consult (blind, 2026-11-18): /mnt/project-files/planning-cost/advisor-brief/ADVICE.md; adopted: new per-tree verb, tree-level counts, merge_links list, workflows list with plan or decision-scout as the planning rule."
+  - "Probe 2026-11-18 (production, six busiest trees of 2026-11-16): each had 1-4 compact rows, all on roots; claude_code roots carried plan-critique and decision-scout sub-agents."
+  - "Planning-time split: rec-5378 runs telemetry_usage plans --last 8 live once rec-5270 link rows are written and backfilled (the CFR-07 audit target); rec-5257 acceptance re-keyed 2026-11-18 to tests/common/test_ducklake_event_read_tree_rollup.py::test_tree_rollup_counts_compact_events."
+  - "Kept graduated shards (assertions additive only): telemetry-reader-deploy-gate, telemetry-reader-smoke-covers-verification-verbs, telemetry-reads-gated-on-the-telemetry-reader, telemetry-usage-cli-fails-closed, telemetry-usage-verbs-registered."
+  - "Headroom (plan_obligations, main dfcd98df, unchanged on f32b10e4): ducklake_event_read_sql.py 471 of 500 SLOC, ducklake_reader_client.py 468 of 500; the contract-reader build spends a few SQL lines first."
+  - "Overlap: PLAN-merge-annotate-contract-reader and PLAN-merge-annotate-producer (#2150, rec-5270) are merged and unbuilt; the merge sha format is the contract-reader sidecar's external_ref. Also unbuilt on the same files: PLAN-billing-shape-local and PLAN-telemetry-claude-p-capture-adapter (SQL, verbs), PLAN-agent-proxy-signed-access (reader client); whichever builds second rebases."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:8d664bc0f77bd18026d84f4171f0e329e47334e2f6323566fd3893b743d6c546"}  # pragma: allowlist secret
+  - {gate: wording-check, round: 1, verdict: FAIL, digest: c0fb47b6645023283417c5698defcbfc3a1c8ab81d03bd05826c22b2061feede, base: dfcd98df3587e0f099a95e03db850e3669817fe8, selection: complete}  # pragma: allowlist secret
+  - {gate: wording-check, round: 2, verdict: PASS, digest: f018fe39d1cd81802f69992d5aa1cb682f0cc2066bea674432b3a57f6bcfcbf2, base: 6696da076dadf797f18446926352b9a33aaa28e5, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 4, nits: 6}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 7}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 5}
+  - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 5}
+  - {gate: plan-critique, round: 5, verdict: PROCEED, blocking: 0, nits: 3}
+  - {gate: plan-critique, round: 6, verdict: PROCEED, blocking: 0, nits: 3}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - "PLAN-merge-annotate-contract-reader's build is on main (git log --oneline origin/main --grep='merge-annotate-contract-reader' -- scripts/telemetry_verify/orphans.py shows its commit); else stop and wait."
+execution_steps:
+  - "SQL, registry, fields, client, oracle, smoke list, CLI and tests; contracts from the sidecar; VP 1-3, then the full tier (VP 4)."
+  - "PR with Resolves: rec-5257 (its acceptance is already re-keyed, see context); merge on review PROCEED + green CI; VP 5-7 after deploy; VP 8 is reported pending until the operator's next approved content reader deploy."
+rollback: Revert; the verb leaves the served set and the CLI commands go with it. No stored row changes.

@@ -29,7 +29,7 @@ _PLACEHOLDER = _ROOT / "terraform" / "lambda-placeholders" / "telemetry_content_
 _PLACEHOLDER_SHA256 = "2a04334f468f2a85f1c683c3544127c070058ccf063fcb64b7a1fe7def167464"  # pragma: allowlist secret
 _PLACEHOLDER_MEMBER = "src/lambdas/ducklake_telemetry_content_reader/handler.py"
 _FUNCTION = "agent-platform-ducklake-telemetry-content"
-_BOUNDARY_PROD_BYTES = 5427
+_BOUNDARY_PROD_BYTES = 5874
 _BOUNDARY_LIMIT = 6144
 _PREFIXES = (
     "agent-platform-ducklake-writer*",
@@ -197,7 +197,7 @@ def boundary_problems(text: str) -> list[str]:
     return problems
 
 
-def test_boundary_renders_5427_bytes_prod_and_carries_the_lock() -> None:
+def test_boundary_renders_5874_bytes_prod_and_carries_the_lock() -> None:
     assert boundary_problems(_read("github_ci_apply_boundary.tf")) == []
 
 

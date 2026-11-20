@@ -1,0 +1,127 @@
+name: persona-image-publish
+
+# Governed publish channel for the persona container image (PLAN-persona-image-channel; T4.32 c2; Decision 205 cl.2).
+#
+# Woken by each completed CI push run on main (workflow_run) and by workflow_dispatch. The gate job
+# (scripts/ci/deploy_gate.py channel persona_image, Decision 249 cl.2) picks the newest main commit whose full tier
+# passed and deploys only when an image input changed since the package's main tag, whose
+# org.opencontainers.image.revision label is the record. config/persona_image.yaml is not an input, so a pin merge
+# never republishes. The publish job builds the gate sha, runs the conformance suite against that exact image id, then
+# pushes it under GITHUB_TOKEN packages: write; the attest job alone holds id-token and attests the pushed digest.
+#
+# Dispatch inputs: force bypasses only the already-published and no-change skips, never the full-tier target;
+# first_publish counts a DENIED record read as absent, for the package's first push only (GHCR answers DENIED for an
+# absent package). No secret, no AWS role, no LLM step. Operator-owned (.github/CODEOWNERS): the channel writes a public
+# package and signs under this workflow's identity.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Republish the newest green commit even when already published or unchanged'
+        type: boolean
+        default: false
+      first_publish:
+        description: 'Treat a DENIED record read as an absent package (the package first push only)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: persona-image-publish
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    if: (github.event_name != 'workflow_dispatch' || github.actor != 'otl-workflow-dispatcher[bot]') && ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      deploy: ${{ steps.resolve.outputs.deploy }}
+      reason: ${{ steps.resolve.outputs.reason }}
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - id: install
+        run: pip install pyyaml==6.0.3 pydantic==2.14.3
+
+      - id: resolve
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python -m scripts.ci.deploy_gate resolve --channel persona_image ${{ inputs.force && '--force' || '' }} ${{ inputs.first_publish && '--first-publish' || '' }} --manifest persona-image-gate.json
+
+  publish:
+    needs: gate
+    if: needs.gate.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      image: ${{ steps.push.outputs.image }}
+      digest: ${{ steps.push.outputs.digest }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - id: install-build
+        run: pip install pyyaml==6.0.3
+
+      - id: build
+        env:
+          SHA: ${{ needs.gate.outputs.sha }}
+        run: python -m scripts.ci.persona_image_publish build --sha "$SHA"
+
+      - id: install-dev
+        run: pip install -r requirements-dev.txt
+
+      - id: suite
+        env:
+          PERSONA_IMAGE_UNDER_TEST: ${{ steps.build.outputs.image_id }}
+        run: python -m pytest tests/persona_hosts/conformance_suite.py -q
+
+      - id: push
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          IMAGE_ID: ${{ steps.build.outputs.image_id }}
+          SHA: ${{ needs.gate.outputs.sha }}
+        run: python -m scripts.ci.persona_image_publish push --image-id "$IMAGE_ID" --sha "$SHA"
+
+  attest:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ needs.publish.outputs.image }}
+          subject-digest: ${{ needs.publish.outputs.digest }}
+          push-to-registry: false

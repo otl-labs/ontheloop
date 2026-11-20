@@ -78,8 +78,9 @@ fields:
     dq_intent_local:
       not_null: true
     governance_notes_local: >-
-      The hash input for this row's event_id; grammar '<source_record_id>#0/<event_kind>'. The open marker is '<session entity_ref>#0/open'. ONE close row is written per finalization at which the session's open row is due, unless an earlier finalization already wrote the same anchor: its external_ref is the role_ref '<uuid>#0/close' of the last root-stream record carrying a uuid and a parseable timestamp at that finalize. A segment close (SC-2) has the same shape, anchored before its resume boundary; identical keys dedupe, and when records were appended after a SessionEnd cut the segment has two closes with different anchors and the reader takes the latest.
+      The hash input for this row's event_id; grammar '<source_record_id>#0/<event_kind>'. The open marker is '<session entity_ref>#0/open'. ONE close row is written per finalization at which the session's open row is due, unless an earlier finalization already wrote the same anchor: its external_ref is the role_ref '<uuid>#0/close' of the last root-stream record carrying a uuid and a parseable timestamp at that finalize. A segment close (SC-2) has the same shape, anchored before its resume boundary; identical keys dedupe, and when records were appended after a SessionEnd cut the segment has two closes with different anchors and the reader takes the latest. An annotate row (producer ci_annotate, a merge link) uses '<root entity_ref>:merge:<squash sha>#0/annotate': one row per pair of a squash merge and a root session started at or before it, written once with final values, so an identical re-send collapses and a differing one is a GrainConflict (Decision 207); its event_timestamp is the squash commit's committer time, and its session_started_at and entity_ref are the root's.
     amendment_log:
+      - {date: "2026-11-18", semantic_break: true, change_class: governance_note_add, summary: "PLAN-merge-annotate-contract-reader (rec-5270): declared the merge link's identity '<root entity_ref>:merge:<squash sha>#0/annotate', its committer-time event_timestamp and the root's session_started_at and entity_ref."}
       - {date: "2026-10-14", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-parser-v3 (slice 3b plan P-B): one close row per finalization at which the open row is due, unless an earlier finalization already wrote the same anchor."}
       - {date: "2026-10-05", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-lifecycle-friction-amendment (rec-4146, C9): declared the open marker '<session entity_ref>#0/open' and the per-finalization close-row identity '<uuid>#0/close' (last root-stream record carrying a uuid)."}
   entity_ref:
@@ -158,13 +159,14 @@ fields:
     description: "Current disposition of the session: running | abandoned | success | failed | cancelled. DERIVED at read by the same reader verb as duration_seconds; never stored, no physical column (data-modeling-standard.yaml derived-state rule)."
     semantics: >-
       ROOT session: the state of its latest lifecycle row, ordered by event_timestamp, then source_ordinal, then close ranked last on a tie, then event_id, over every producer's rows after each producer's own R5 dedupe (the envelope's generation rule); annotate rows are excluded. That state is
-      read from the session's turns (SE-1, Decision 228 (PLAN-telemetry-read-side-session-end)): a producer close that is the latest lifecycle row stands as that close's outcome (success | failed | cancelled) only while no turn opened after it; otherwise a latest root turn with a close carrying an outcome is at rest and, idle past the threshold, reads that outcome (success -> success, error -> failed, interrupted -> cancelled, blocked -> failed), else running; a latest turn with no close stopped mid-turn and reads abandoned past the threshold, else running; with no outcome-bearing turn close the session reads abandoned past the threshold, else running (the prior rule). A turn continued after a Stop that dies before its next Stop reads its earlier close's outcome, not abandoned (declared residual). abandoned: not terminal, and as_of minus the session's last event_timestamp across its rows in all four telemetry tables exceeds a governed idle threshold. The idle threshold
+      read from the session's turns (SE-1, Decision 228 (PLAN-telemetry-read-side-session-end)): a producer close that is the latest lifecycle row stands as that close's outcome (success | failed | cancelled) only while no turn opened after it; otherwise a latest root turn with a close carrying an outcome is at rest and, idle past the threshold, reads that outcome (success -> success, error -> failed, interrupted -> cancelled, blocked -> failed), else running; a latest turn with no close stopped mid-turn and reads abandoned past the threshold, else running; with no outcome-bearing turn close the session reads abandoned past the threshold, else running (the prior rule). A turn continued after a Stop that dies before its next Stop reads its earlier close's outcome, not abandoned (declared residual). abandoned: not terminal, and as_of minus the session's last event_timestamp across its rows in all four telemetry tables, telemetry_sessions annotate rows excluded (a merge link is a post-close fact, never activity), exceeds a governed idle threshold. The idle threshold
       lives in the reader's named-read registry as versioned data, seeded at 24 h and owned by 2b (PLAN-telemetry-reader-verbs, #1496); a later resume makes the session running again and nothing is stored. SUB-AGENT session (parent_session_id not NULL): state and duration come from its telemetry_agents agent-run open/close
       pair. An open with no close is running, or abandoned past the same idle threshold; a close maps its agent-run outcome into state as success -> success and failed, timeout or throttled -> failed (the detail stays on telemetry_agents.outcome).
     populated_by: a named reader verb (PLAN-telemetry-reader-verbs, #1496), bounded to this session's calendar-day partition; the idle threshold is reader registry data, never a column.
     dq_intent: {accepted_values: {values: [running, abandoned, success, failed, cancelled]}}
-    derivation: {timing: read, derived_by: reader_verb:session_state_and_duration, formula: "ROOT (parent_session_id IS NULL), after R5 dedupe, orderings by event_timestamp, source_ordinal, event_id (NULL ordinal first); tip = the latest lifecycle row (annotate excluded, close last on a tie); idle = as_of - max(event_timestamp over this session's rows in the four telemetry tables) exceeds the governed idle threshold. (1) tip is a close and no root turn opened after the latest producer close (the turn open is not after it) -> its outcome; (2) else the latest root turn has a close with an outcome -> idle ? that outcome mapped (success, error -> failed, interrupted -> cancelled, blocked -> failed) : running; (3) else idle ? abandoned : running (a turn with no close, or the prior rule). SUB-AGENT: its telemetry_agents agent-run open/close pair; open with no close is running (abandoned past the idle threshold); at close success -> success, failed|timeout|throttled -> failed", inputs: [session_id, parent_session_id, event_kind, event_timestamp, source_ordinal, event_id, outcome, telemetry_agents.session_id, telemetry_agents.event_kind, telemetry_agents.event_timestamp, telemetry_agents.outcome, telemetry_observations.session_id, telemetry_observations.event_timestamp, telemetry_observations.observation_type, telemetry_observations.event_kind, telemetry_observations.observation_id, telemetry_observations.outcome, telemetry_observations.source_ordinal, telemetry_observations.event_id, telemetry_transcripts.session_id, telemetry_transcripts.event_timestamp], realized: false}
+    derivation: {timing: read, derived_by: reader_verb:session_state_and_duration, formula: "ROOT (parent_session_id IS NULL), after R5 dedupe, orderings by event_timestamp, source_ordinal, event_id (NULL ordinal first); tip = the latest lifecycle row (annotate excluded, close last on a tie); idle = as_of - max(event_timestamp over this session's rows in the four telemetry tables, telemetry_sessions annotate rows excluded) exceeds the governed idle threshold. (1) tip is a close and no root turn opened after the latest producer close (the turn open is not after it) -> its outcome; (2) else the latest root turn has a close with an outcome -> idle ? that outcome mapped (success, error -> failed, interrupted -> cancelled, blocked -> failed) : running; (3) else idle ? abandoned : running (a turn with no close, or the prior rule). SUB-AGENT: its telemetry_agents agent-run open/close pair; open with no close is running (abandoned past the idle threshold); at close success -> success, failed|timeout|throttled -> failed", inputs: [session_id, parent_session_id, event_kind, event_timestamp, source_ordinal, event_id, outcome, telemetry_agents.session_id, telemetry_agents.event_kind, telemetry_agents.event_timestamp, telemetry_agents.outcome, telemetry_observations.session_id, telemetry_observations.event_timestamp, telemetry_observations.observation_type, telemetry_observations.event_kind, telemetry_observations.observation_id, telemetry_observations.outcome, telemetry_observations.source_ordinal, telemetry_observations.event_id, telemetry_transcripts.session_id, telemetry_transcripts.event_timestamp], realized: false}
     amendment_log:
+      - {date: "2026-11-18", semantic_break: true, change_class: governance_note_add, summary: "PLAN-merge-annotate-contract-reader (rec-5270): idleness and every last-event read exclude telemetry_sessions annotate rows, so a merge link written after a session never keeps it running; the reader verbs and the verification oracle change together.", migration_story: "Derived at read; no stored row changes. No annotate row exists before PLAN-merge-annotate-producer, so no reading changes until it writes."}
       - {date: "2026-10-18", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-read-side-session-end (Decision 228, amends Decision 199 cl.1): a root session's state is read from its turns (SE-1): the producer close stands only while no turn opened after it, else the latest turn's outcome once idle, abandoned only when stopped mid-turn.", migration_story: "Derived at read; no stored row changes. Sessions without turn outcomes keep the prior rule."}
       - {date: "2026-10-05", semantic_break: true, change_class: field_add, summary: "PLAN-telemetry-lifecycle-friction-amendment (feedback-loop review C9; W3 rulings reader-k1 (a), reader-k3 (a)): new read-derived state field (no column) with its ordering, close-last tie, governed idle threshold and sub-agent branch."}
   surface:
@@ -289,12 +291,11 @@ fields:
     description: Recommendation ids this session addressed (e.g. ["rec-2335"]).
     semantics: >-
       Optional cross-reference into ops_recommendations.id, joined tenant-locally. Stored on open (the recs a session was scoped to) and/or annotate rows (recs resolved or
-      filed after close).
+      filed after close). On a merge link (an annotate row of producer ci_annotate, PLAN-merge-annotate-producer) it is the ids named by the squash commit's Resolves trailers.
     populated_by: "unproduced: held:feedback-loop-gate (no producer writes it)"
     dq_intent: {}
     amendment_log:
-      - {date: "2026-10-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-field-realization (T3.20 c7): dropped the sentence citing TELEMETRY_TABLE_DTYPES and awswrangler null-inference (neither exists in code); field meaning unchanged."}
-      - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded semantics to name which event_kind rows carry this field (open/annotate) and to join tenant-locally; field meaning unchanged."}
+      - {date: "2026-11-18", semantic_break: true, change_class: governance_note_add, summary: "PLAN-merge-annotate-contract-reader (rec-5270): defined rec_ids on a merge link as the squash commit's Resolves trailers. Contracts-class relief valve: the 2026-10-24 PLAN-telemetry-field-realization line (dropped a sentence citing code that does not exist) and the 2026-09-24 PLAN-telemetry-event-journal-contracts line (named the open/annotate rows, tenant-local join) are compacted into this line; neither changed meaning."}
   plan_slug:
     type: str
     iceberg_type: string
@@ -328,32 +329,32 @@ fields:
     type: int
     iceberg_type: bigint
     nullable: true
-    description: Number of files changed in the session's diff.
-    semantics: Optional code-impact metric. bigint (integer-promotion safety). Stored on the close event's row.
+    description: Number of files the squash merge changed (a merge link fact).
+    semantics: Optional code-impact metric. bigint (integer-promotion safety). Stored on an annotate (merge link) row, as the squash merge's diff against its first parent (git numstat with rename detection off, so a renamed file counts as one deleted and one added file; a binary file counts as a changed file with zero lines); no producer writes it on a close row.
     populated_by: "unproduced: held:feedback-loop-gate (no producer writes it)"
     dq_intent: {}
     amendment_log:
-      - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded semantics to name the close-event row this field is stored on; field meaning unchanged."}
+      - {date: "2026-11-18", semantic_break: true, change_class: governance_note_add, summary: "PLAN-merge-annotate-contract-reader (rec-5270): the column is a merge link fact from the squash merge's numstat, no longer named as a close-row fact (no producer ever wrote it there). Contracts-class relief valve: the 2026-09-24 PLAN-telemetry-event-journal-contracts line (named the close-event row) is compacted into this line."}
   lines_added:
     type: int
     iceberg_type: bigint
     nullable: true
-    description: Lines added across the session's diff.
-    semantics: Optional code-impact metric. Stored on the close event's row.
+    description: Lines the squash merge added (a merge link fact).
+    semantics: Optional code-impact metric. Stored on an annotate (merge link) row, as the squash merge's diff against its first parent (git numstat with rename detection off, so a renamed file counts as one deleted and one added file; a binary file counts as a changed file with zero lines); no producer writes it on a close row.
     populated_by: "unproduced: held:feedback-loop-gate (no producer writes it)"
     dq_intent: {}
     amendment_log:
-      - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded semantics to name the close-event row this field is stored on; field meaning unchanged."}
+      - {date: "2026-11-18", semantic_break: true, change_class: governance_note_add, summary: "PLAN-merge-annotate-contract-reader (rec-5270): the column is a merge link fact from the squash merge's numstat, no longer named as a close-row fact (no producer ever wrote it there). Contracts-class relief valve: the 2026-09-24 PLAN-telemetry-event-journal-contracts line (named the close-event row) is compacted into this line."}
   lines_removed:
     type: int
     iceberg_type: bigint
     nullable: true
-    description: Lines removed across the session's diff.
-    semantics: Optional code-impact metric. Stored on the close event's row.
+    description: Lines the squash merge removed (a merge link fact).
+    semantics: Optional code-impact metric. Stored on an annotate (merge link) row, as the squash merge's diff against its first parent (git numstat with rename detection off, so a renamed file counts as one deleted and one added file; a binary file counts as a changed file with zero lines); no producer writes it on a close row.
     populated_by: "unproduced: held:feedback-loop-gate (no producer writes it)"
     dq_intent: {}
     amendment_log:
-      - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded semantics to name the close-event row this field is stored on; field meaning unchanged."}
+      - {date: "2026-11-18", semantic_break: true, change_class: governance_note_add, summary: "PLAN-merge-annotate-contract-reader (rec-5270): the column is a merge link fact from the squash merge's numstat, no longer named as a close-row fact (no producer ever wrote it there). Contracts-class relief valve: the 2026-09-24 PLAN-telemetry-event-journal-contracts line (named the close-event row) is compacted into this line."}
   steps_total:
     type: int
     iceberg_type: bigint
@@ -391,22 +392,23 @@ fields:
     iceberg_type: string
     nullable: true
     description: URL of the PR the session opened/merged. A post-close fact, owned by the annotate event_kind.
-    semantics: Optional provenance link to GitHub, typically recorded after the session itself has closed.
+    semantics: Optional provenance link to GitHub, typically recorded after the session itself has closed. On a merge link it is the merged pull request's URL, from the "(#N)" of the squash subject; a commit without one gets no link row.
     populated_by: "unproduced: held:feedback-loop-gate (no producer writes it)"
     dq_intent: {required_when: {event_kind: [annotate]}}
     amendment_log:
-      - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded to the annotate event_kind (a post-close fact) and added dq_intent.required_when; field meaning unchanged."}
+      - {date: "2026-11-18", semantic_break: true, change_class: governance_note_add, summary: "PLAN-merge-annotate-contract-reader (rec-5270): defined pr_url on a merge link (from the squash subject). Contracts-class relief valve: the 2026-09-24 PLAN-telemetry-event-journal-contracts line (re-grounded to the annotate event_kind and added required_when) is compacted into this line."}
   ci_outcome:
     type: str
     iceberg_type: string
     nullable: true
     description: CI result for the session's PR (e.g. success | failure | pending). A post-close fact, owned by the annotate event_kind.
-    semantics: Optional; the CI verdict correlated to the session, typically known only after close. The set is open; a closed set would be declared here and enforced at write (Decision 210 cl.3).
+    semantics: Optional; the CI verdict correlated to the session, typically known only after close. The set is open; a closed set would be declared here and enforced at write (Decision 210 cl.3). On a merge link it is the conclusion of attempt 1 of the CI workflow's own push run for the squash commit, cancelled included, written only once that attempt has concluded, so a re-run never changes a written row (Decision 207). Deferred under Decision 254 to rec-5295, because once main's full tier is batched a commit's own run may be cancelled or superseded and the binding verdict is the first completed run whose range holds the commit; this column does not yet carry that range verdict.
     populated_by: "unproduced: held:feedback-loop-gate (no producer writes it)"
     dq_intent: {required_when: {event_kind: [annotate]}}
     amendment_log:
-      - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded to the annotate event_kind (a post-close fact) and added dq_intent.required_when; field meaning unchanged."}
+      - {date: "2026-11-18", semantic_break: true, change_class: governance_note_add, summary: "PLAN-merge-annotate-contract-reader (rec-5270): on a merge link, ci_outcome is attempt 1 of the commit's own CI push run, cancelled included, with the Decision 254 range verdict deferred to rec-5295. Contracts-class relief valve: the 2026-09-24 PLAN-telemetry-event-journal-contracts line (re-grounded to the annotate event_kind, added required_when) is compacted into this line; it changed no meaning."}
       - {date: "2026-10-05", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-lifecycle-friction-amendment (fork 2 (a)): replaced 'enforcement deferred' with the open-set wording; a closed set would be declared here and enforced at write. Meaning unchanged."}
+
   model_primary:
     type: str
     iceberg_type: string
@@ -431,11 +433,11 @@ fields:
     iceberg_type: double
     nullable: true
     description: Test coverage fraction after the session's changes. A post-close fact, owned by the annotate event_kind.
-    semantics: Optional quality metric; coverage_after - coverage_before is the session coverage delta, typically finalised after close.
+    semantics: Optional quality metric; coverage_after - coverage_before is the session coverage delta, typically finalised after close. Annotate rows written while the required_when exemption stands keep coverage_after null (declared residual; rec-4599 decides any exclude_before when it lifts the exemption).
     populated_by: "unproduced: rec-4599 (no producer writes it)"
-    dq_intent: {required_when: {event_kind: [annotate]}}
+    dq_intent: {required_when: {event_kind: [annotate]}, write_time_exemptions: {required_when: {class: temporary, reason: "no producer measures coverage yet, so a merge link row (ci_annotate) could not be written", owner: rec-4599, review_by: "2027-02-17"}}}
     amendment_log:
-      - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-event-journal-contracts (Decision 199): re-grounded to the annotate event_kind (a post-close fact) and added dq_intent.required_when; field meaning unchanged."}
+      - {date: "2026-11-18", semantic_break: true, change_class: governance_note_add, summary: "PLAN-merge-annotate-contract-reader (rec-5270): required_when annotate gains a temporary write-time exemption owned by rec-4599 (review_by 2027-02-17), so ci_annotate link rows can be written before coverage is produced; pre-removal rows stay null. Contracts-class relief valve: the 2026-09-24 PLAN-telemetry-event-journal-contracts line (re-grounded to the annotate event_kind and added required_when; field meaning unchanged) is compacted into this line."}
   harness_session_key:
     type: str
     iceberg_type: string
@@ -492,14 +494,12 @@ amendment_log:
   - {date: "2026-10-18", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-read-side-session-end (Decision 228): SESSION STATE governance reads a root session's state from its turns and duration from the later of the producer close and any root turn close; the v4 last-segment residual is closed.", migration_story: "Derived at read; no stored row changes."}
   - {date: "2026-10-17", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-capture-producer-fixes (parser_version 4): governance_notes and the event_kind, event_timestamp, source_ordinal, external_ref and outcome field notes gain the segment-close rule (SC-1, SC-2: one close per root resume boundary for a segment holding an assistant-bearing turn, derived from the tree), the resume row due rule (SC-3), the four new fields' claude_code population (PV-1..PV-4) and the declared last-segment residual (owner rec-4407).", migration_story: "Notes only: no field changes. Parser v4 re-parses every tree from the start; v3 rows are superseded by version, never rewritten."}
   - {date: "2026-10-17", semantic_break: false, change_class: field_add, summary: "PLAN-telemetry-column-additions: four nullable typed columns (harness_session_key, checkout_sha, checkout_base_sha, checkout_dirty).", migration_story: "Nullable additions: every stored row stays valid and reads NULL; no producer emits them before PLAN-telemetry-capture-producer-fixes; the smoke tables gain them through Decision 222's owner step."}
-  - {date: "2026-10-16", semantic_break: false, change_class: prose_improvement, summary: "PLAN-reader-verbs-decision-notes (rec-4324): KNOWN GAPS drops rec-2173 (closed) and rec-4024 (its writer and reader verbs and dimension contracts are built; the reader verbs by PLAN-telemetry-reader-verbs, #1496)."}
+  - {date: "2026-10-16", semantic_break: false, change_class: prose_improvement, summary: "PLAN-reader-verbs-decision-notes (rec-4324): KNOWN GAPS drops rec-2173 (closed) and rec-4024 (its writer and reader verbs and dimension contracts are)..."}
   - {date: "2026-10-14", semantic_break: true, change_class: governance_note_add, summary: "PLAN-telemetry-parser-v3 (slice 3b plan P-B): the per-finalization close-row qualifier (open row due, same anchor written once) joins the governance summary; field entries on outcome, event_timestamp, source_ordinal and external_ref carry the rest."}
-  - {date: "2026-10-05", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-lifecycle-friction-amendment (feedback-loop review C9, C10, C13, rec-4146): new read-derived state, close-row identity, friction roll-up facts and rules-file home, WINDOW VERBS note, and the stale enforcement/provisioning premise reworded (projects_to keys, write_path, header, NULLABILITY AXES). Per-field changes are on their own fields' logs."}
-  - {date: "2026-09-26", semantic_break: false, change_class: prose_improvement, summary: "rec-4073: governance.partition_by respelled role-prefixed ('history=year(...), month(...), day(...)'), matching the shared ops partition grammar; resolved spec unchanged. No runtime migration: no live telemetry writer."}
-  - {date: "2026-09-25", semantic_break: false, change_class: prose_improvement, summary: "rec-4065: partition respelled to the calendar-day triple year/month/day(session_started_at); DuckLake's bare day() is day-of-month. No table exists yet."}
-  - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "Decision 199: description re-grounded to an append-only event journal (event_kind open|resume|compact|close|annotate); roll-ups moved to read-time derivation. Per-field changes are on their own fields' logs."}
-  - {date: "2026-08-26", semantic_break: false, change_class: prose_improvement, summary: "Platform cleanse: references to the removed trading-product surfaces and the retired pre-DuckLake query-engine estate were removed or reworded."}
-  - {date: "2026-10-15", semantic_break: false, change_class: prose_improvement, summary: "PLAN-rule-declarations-and-writer-conformance (rec-4158, Decision 210): the dq_intent `enforced` key is retired from every rule leg. not_null is declared by presence (`true`, or `{exclude_before: D}`); an optional column or a loosest-baseline field carries no not_null leg; the other legs lose the key. A declared rule is an enforced rule.", migration_story: "Declarations re-spelled only. No rule is added, removed or re-dated: the declared rule set, read through scripts.contract_rules, is identical before and after, and the generated field_semantics.yaml projection of this contract is unchanged."}
+  - {date: "2026-10-05", semantic_break: false, change_class: prose_improvement, summary: "PLAN-telemetry-lifecycle-friction-amendment (feedback-loop review C9, C10, C13, rec-4146): new read-derived state, close-row identity."}
+  - {date: "2026-09-26", semantic_break: false, change_class: prose_improvement, summary: "rec-4073 (2026-09-26) and rec-4065 (2026-09-25): governance.partition_by respelled to the role-prefixed calendar-day triple ('history=year(...))..."}
+  - {date: "2026-09-24", semantic_break: false, change_class: prose_improvement, summary: "Decision 199 (2026-09-24): description re-grounded to an append-only event journal (event_kind open|resume|compact|close|annotate)."}
+  - {date: "2026-10-15", semantic_break: false, change_class: prose_improvement, summary: "PLAN-rule-declarations-and-writer-conformance (rec-4158, Decision 210): the dq_intent `enforced` key is retired from every rule leg."}
 previous_versions:
   - contract_version: 1
     ratified_at: "2026-06-24"

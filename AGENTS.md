@@ -93,8 +93,8 @@ skills, slash commands -- are optimised for agent loading efficiency, not human 
 
 Decision 90 workflow: `/orient` (read-only; writes nothing; picks the item) -> `/plan` (writes
 `docs/plans/PLAN-{slug}.yaml`) -> `/implement`; the fourth tier is the Decision 185 loop, and the legacy
-`/develop-executor` is retired (Decision 247). Plans are IMPLEMENTATION or REPORT-ONLY: work too large for one plan
-splits into child recs or atomic IMPLEMENTATION plans, each planned on its own (Decision 247). `/audit` composes
+`/develop-executor` is retired (Decision 247). Plans are IMPLEMENTATION or REPORT-ONLY: one plan is one verifiable,
+revertible outcome; more work splits into child recs, each planned on its own (Decision 247). `/audit` composes
 `docs/audit-prompts/AUDIT-{slug}.md` and audits nothing. `/overseer` is being retired: it is not a fifth tier, never
 bypasses the workflow, and starts no planning or implementation agent of its own -- the coordinator dispatches each,
 one human-gated persona step on an operator-chosen rec, never the recommendation queue, hub and spoke (Decision 229
@@ -121,10 +121,9 @@ merge-on-business-key, partitioning) live in `docs/contracts/data-modeling-stand
 planning skill's Data-Model Assessment section is only the read-trigger stub.
 
 ## Git-ops procedure
-Read `docs/contracts/git-ops.yaml` before any push/PR/CI/merge action -- it carries the full
-procedure (branching topology, commit-message conventions, rebase mechanics, wake-signal detail,
-and the CI-credential/OAuth-token runbook); AGENTS.md keeps only the machine-enforced norms and
-one-line triggers below.
+Before any push/PR/CI/merge action read `docs/contracts/git-ops.yaml#push_pr_ci_merge_flow` and the keys it
+names; read its other keys (branching, commit messages, Resolves: trailer, OAuth-token runbook) only when needed.
+AGENTS.md keeps only the machine-enforced norms and one-line triggers below.
 
 - **Presubmit tier**: see the table below -- fast `--pre` gates PRs, full tier runs pre-handoff (local) + post-merge.
 - **Squash-merge**: `mcp__github__merge_pull_request(..., merge_method="squash")` once CI is green.

@@ -8,6 +8,7 @@ it explicitly. A later adapter adds an ADAPTERS entry, never a second suite. Nee
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -82,7 +83,24 @@ def daemon() -> None:
 
 @pytest.fixture(scope="module")
 def image_id(daemon: None) -> str:
-    return build_image(ROOT)
+    prebuilt = os.environ.get("PERSONA_IMAGE_UNDER_TEST")
+    if prebuilt is None:
+        return build_image(ROOT)
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", prebuilt):
+        pytest.fail(f"PERSONA_IMAGE_UNDER_TEST is not sha256:<64 hex>: {prebuilt!r}")
+    if _docker("image", "inspect", prebuilt, check=False).returncode != 0:
+        pytest.fail(f"PERSONA_IMAGE_UNDER_TEST names no local image: {prebuilt}")
+    return prebuilt
+
+
+def _teardown_tags(tag: str, base_tag: str, prebuilt: bool) -> list[str]:
+    """A prebuilt image is an input: its base tag may be the only ref keeping it, so the suite never untags it."""
+    return [tag] if prebuilt else [tag, base_tag]
+
+
+def test_a_prebuilt_image_keeps_its_base_tag() -> None:
+    assert _teardown_tags("child:1", "base:1", prebuilt=True) == ["child:1"]
+    assert _teardown_tags("child:1", "base:1", prebuilt=False) == ["child:1", "base:1"]
 
 
 @pytest.fixture(scope="module")
@@ -103,7 +121,9 @@ def fixture_image(image_id: str) -> Iterator[str]:
         yield image
     finally:
         shutil.rmtree(context, ignore_errors=True)
-        _docker("rmi", "-f", tag, base_tag, check=False)
+        _docker(
+            "rmi", "-f", *_teardown_tags(tag, base_tag, os.environ.get("PERSONA_IMAGE_UNDER_TEST") is not None), check=False
+        )
 
 
 @pytest.fixture(scope="module")

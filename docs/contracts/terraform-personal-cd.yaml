@@ -31,6 +31,7 @@ contract:
     check: validate_terraform_personal_cd
 
 amendment_log:
+  - {date: "2026-11-19", semantic_break: false, change_class: field_add, summary: "PLAN-consolidate-decision-92-chain (rec-5373, Decision 277): convergence_write_mechanism receives the mechanism of Decisions 94, 154 and 190 that no other key held, so they compact (Decision 149); dispatch_ack_unlatch names every path that clears red; referenced_repo_paths gains the files it names."}
   - date: "2026-10-30"
     semantic_break: false
     change_class: governance_note_add
@@ -51,10 +52,14 @@ amendment_log:
 # Every repo-relative path this contract names, verified to exist by
 # validate_terraform_personal_cd (scripts/checks/contracts/validate_terraform_personal_cd.py).
 referenced_repo_paths:
+  - .github/workflows/reconcile.yml
   - .github/workflows/terraform-apply-sandbox.yml
   - .github/workflows/terraform-drift.yml
   - docs/contracts/environment-taxonomy.yaml
   - docs/contracts/terraform-cc-web-operations.yaml
+  - scripts/build_lambda_config.py
+  - scripts/ci/ducklake_artifacts.py
+  - scripts/convergence_health/assess.py
   - scripts/checks/iam_tf/validate_convergence_writer_isolation.py
   - terraform/bootstrap/github_ci_apply.tf
   - terraform/personal/oidc.tf
@@ -225,9 +230,11 @@ convergence_anchor:
     admin-bypassed anyway (main-protection strict=false, admin bypass_mode=always, Decision 83).
     Do NOT add it to the ruleset's required_status_checks.
   dispatch_ack_unlatch: >-
-    The ONLY way to clear red. A red record clears ONLY when an apply from a workflow_dispatch
-    acknowledge-and-retry run succeeds; its acknowledge_red_commit input names the red commit SHA
-    (or the open rec id). A plain push never clears red (auto-allow-descendants is rejected -- on
+    A red record clears only when an apply succeeds on a heal verb (Decision 183: this
+    workflow_dispatch acknowledge-and-retry run, or Reconcile) or as an approved gated apply that the
+    gated-apply drift guard admits (environment-taxonomy.yaml axis_a.sandbox_gated_apply; a
+    stale_gated_approval red is one such case). An acknowledge-and-retry run's acknowledge_red_commit
+    input names the red commit SHA (or the open rec id). A plain push never clears red (auto-allow-descendants is rejected -- on
     linear-history main every commit is a descendant). The dispatch actor + input are the audit
     trail; the agent may dispatch via the GitHub MCP actions trigger AFTER the ci-rca rec is
     reviewed (Decision 55/72) -- nothing auto-remediates. Refusals-while-red dedupe to the one
@@ -240,3 +247,48 @@ convergence_anchor:
     axis_a.sandbox_gated_apply for the mechanism. plan_sha on the write-convergence-record call
     stays null on this route (event-gated mode kept, fail-closed) even though a real plan.bin was
     applied.
+
+# The mechanism behind Decision 277 clauses 2, 4 and 5 that no other key held, moved from Decisions 94, 154 and 190
+# when they compacted (Decision 149); Decision 277 delegates this key.
+convergence_write_mechanism:
+  pre_apply_failure: >-
+    write-convergence-record's pre-apply-failure input is computed inline at each of its four call sites (apply-sandbox,
+    gated-apply, apply-reconcile, gated-apply-reconcile), never by a job-level aggregator. It is true only when every
+    apply step of the job was skipped (apply; in apply-reconcile both apply and apply_fresh) and a step from the closed
+    allow-list {artifact_sha, tfvars, tf_init, build_ducklake, fetch_plan} failed; the writer then read-modify-writes
+    status unchanged and verifies the write against the prior status. plan, replan, guard, guard_fresh, review and
+    review_fresh are not in the list, so their step failures latch red: guard exit 1 (internal error), a plan or replan
+    failure, and a REVISE off the push path. A STARVED review also fails its step, but the writer skips the write
+    (Decision 126 pt5). A guard BLOCK (exit 2) does not fail its step: it routes with pending_gated
+    (environment-taxonomy.yaml axis_a.sandbox_gated_apply; Reconcile's routes are Decision 158's), as a push REVISE does.
+    Two properties are deliberate: the list is under-inclusive (a plan failure latches red), and fetch_plan's failures
+    include the saved-plan digest mismatch, so a tamper signal on the saved plan leaves a marker and a red job, not a red
+    record; a fresh-plan sha256 mismatch on a dispatch route is outside the list and latches red.
+  reviewed_bytes: >-
+    The fetch route itself is environment-taxonomy.yaml conformance.ducklake_detail's (gated-apply and both reconcile.yml
+    apply jobs fetch, never rebuild); this key holds what that route relies on. The fetched bytes were PR-reviewed, push-
+    rebuilt when only their inputs moved, or built by the dispatch run whose fresh plan routed; the push apply-sandbox
+    job keeps mode assert as a same-inputs canary. reconcile.yml's root checkout is the red commit: Terraform and the
+    ./.github/actions composites (materialise-tfvars, terraform-init-retry, fetch-saved-plan, deterministic-guard,
+    subagent-plan-review, write-convergence-record) run that commit's code. The artifact fetch (composite action and
+    working-directory both .dispatch-tooling) and the helper scripts a step calls by a .dispatch-tooling path run from a
+    side checkout of the dispatch ref, so a fix to those reaches a heal and a fix to one of the six red-commit composites
+    does not. The DuckLake deps layer's packages are exact-pinned in scripts/build_lambda_config.py DUCKLAKE_DEPS.
+    fetch_reviewed (scripts/ci/ducklake_artifacts.py) fails closed (DucklakeArtifactError) on any missing per-sha object;
+    with the PR-time byte-identical assert this keeps Decision 77's no-TOCTOU guarantee without a rebuild. A push-time
+    rebuild happens only when every difference traces to inputs moved on main (DUCKLAKE_ZIP_INPUTS_MOVED); any other
+    difference, or a missing reference or record, fails closed as DUCKLAKE_ZIP_MISMATCH.
+  anti_masking: >-
+    On the sandbox paths ci-rca watches terraform-apply-sandbox.yml independently of the record (Decision 142), and a
+    marker that leaves an older green while a merged change stays unapplied trips stale_green_backlog at high severity.
+    On the reconcile paths the record is already red, so an unchanged status stays red; the PR wake comment and the
+    record wake the operator. The record step runs always, so most failures before it still write red or a marker; a
+    failure at or before the credentials step leaves it unable to reach the record, so nothing is written, and on the
+    sandbox paths ci-rca's independent watch files it.
+  health_signals: >-
+    scripts/convergence_health/assess.py floors severity at low when an infra_error marker is present (a pending_gated
+    marker does not). A red record with a non-zero backlog scores high whatever its age, and escalate's over_threshold
+    files a rec. The convergence-RCA gap check counts source=tf_drift recs only, never ci_rca. red_cause is derived,
+    never stored, as environment-taxonomy.yaml's red_cause note states (Decision 142 one authority).
+  record_schema: >-
+    Additive only: the top-level commit_sha, run_id, run_url, timestamp and plan_sha fields never move or nest.
