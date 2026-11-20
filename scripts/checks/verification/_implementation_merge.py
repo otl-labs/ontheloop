@@ -18,10 +18,8 @@ import yaml
 from scripts.checks import _common
 from scripts.ops_portal import closure_gate, trailer_closure_gate
 from scripts.rec_trailer import parse_resolves_trailer
-from scripts.roadmap import approved_text
 
 _ENTRIES_PREFIX = "config/agent/verification_registry/entries/"
-_PLAN_RE = _common.PLAN_PATH_RE
 
 
 class LateClosureError(Exception):
@@ -147,8 +145,5 @@ def late_closure_route(plan_rel: str, root: Path, base: str, head: str | None = 
     if trailers is None or any(parse_resolves_trailer(m) for m in trailers.split("\0")):
         return None
     if not _bundled(base_plan):
-        return None
-    match = _PLAN_RE.match(plan_rel)
-    if not match or approved_text.sidecar_state(match.group(1), root, base) != "absent":
         return None
     return find_implementation_merge(plan_rel, root, base)

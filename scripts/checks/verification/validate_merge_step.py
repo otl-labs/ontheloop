@@ -9,7 +9,8 @@ For every plan whose implementation_declared flips in this diff:
   (A) the approved-text sidecar docs/plans/approved/<slug>.yaml is read AT THE BASE: a build may not add,
       edit or delete it, and when present every bound file must carry exactly the approved words, and the base
       sidecar needs provenance (the operator's GitHub approval, or grandfathered; rec-4769): MISSING or UNVERIFIED
-      fails in pull-request CI, is advisory elsewhere, and is skipped on a push.
+      fails in pull-request CI, is advisory elsewhere, and is skipped on a push. A bound file the branch leaves
+      unchanged passes when exactly one earlier commit applied its words (approved_text.verify_landed; LANDED).
 """
 
 from __future__ import annotations
@@ -151,7 +152,8 @@ def _check_sidecar(slug: str, root: Path, base: str, in_push: bool, deadline: pr
         return [f"{approved_text.sidecar_rel(slug)}: {exc}"]
     if not sidecar:
         return []
-    failures = approved_text.verify(sidecar, root, base)
+    failures, landed = approved_text.verify_landed(sidecar, slug, root, base)
+    notes.info.extend(f"LANDED {rel} at {sha}" for rel, sha in landed.items())
     return failures or _provenance_leg(slug, sidecar, root, in_push, deadline, notes)
 
 

@@ -141,30 +141,125 @@ def _first_difference(expected: list[str], head: list[str]) -> str:
     return f"first difference at word {pos}: approved `{ctx(expected)}` vs found `{ctx(head)}`"
 
 
-def verify(sidecar: Sidecar, root: Path, base_ref: str) -> list[str]:
-    """One message per failing bound file: head words differ from the approved result, or a bound
-    YAML file no longer parses."""
+def _blocks_by_file(sidecar: Sidecar) -> dict[str, list[Block]]:
     files: dict[str, list[Block]] = {}
     for block in sidecar.blocks:
         files.setdefault(block.file, []).append(block)
+    return files
+
+
+def _same_words(expected: list[str], found: list[str]) -> bool:
+    return len(expected) == len(found) and all(_token_matches(e, h) for e, h in zip(expected, found))
+
+
+def _verify_file(rel: str, blocks: list[Block], root: Path, base_ref: str) -> list[str]:
+    head_text = _read_tree(rel, root) or ""
+    base_words = words(_git_show(base_ref, rel, root) or "")
+    try:
+        expected = apply(base_words, blocks)
+    except ApprovedTextError as exc:
+        return [f"{rel}: {exc}"]
     messages: list[str] = []
-    for rel, blocks in files.items():
-        head_text = _read_tree(rel, root) or ""
-        base_words = words(_git_show(base_ref, rel, root) or "")
+    head_words = words(head_text)
+    if not _same_words(expected, head_words):
+        messages.append(f"{rel}: {_first_difference(expected, head_words)}")
+    if rel.endswith(".yaml"):
         try:
-            expected = apply(base_words, blocks)
-        except ApprovedTextError as exc:
-            messages.append(f"{rel}: {exc}")
-            continue
-        head_words = words(head_text)
-        if len(expected) != len(head_words) or not all(_token_matches(e, h) for e, h in zip(expected, head_words)):
-            messages.append(f"{rel}: {_first_difference(expected, head_words)}")
-        if rel.endswith(".yaml"):
-            try:
-                yaml.safe_load(head_text)
-            except yaml.YAMLError as exc:
-                messages.append(f"{rel}: does not parse as YAML at HEAD: {exc}")
+            yaml.safe_load(head_text)
+        except yaml.YAMLError as exc:
+            messages.append(f"{rel}: does not parse as YAML at HEAD: {exc}")
     return messages
+
+
+def verify(sidecar: Sidecar, root: Path, base_ref: str) -> list[str]:
+    """One message per failing bound file: head words differ from the approved result, or a bound
+    YAML file no longer parses."""
+    messages: list[str] = []
+    for rel, blocks in _blocks_by_file(sidecar).items():
+        messages += _verify_file(rel, blocks, root, base_ref)
+    return messages
+
+
+def _git_out(root: Path, *args: str) -> str | None:
+    result = subprocess.run(
+        ["git", *args], cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False
+    )
+    return result.stdout if result.returncode == 0 else None
+
+
+def _plan_doc_at(plan_rel: str, root: Path, ref: str) -> dict:
+    try:
+        data = yaml.safe_load(_git_show(ref, plan_rel, root) or "")
+    except yaml.YAMLError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _landing_ok(
+    sha: str,
+    files: dict[str, list[Block]],
+    sidecar: Sidecar,
+    slug: str,
+    plan_rel: str,
+    scope: set[str],
+    root: Path,
+    base_ref: str,
+) -> bool:
+    for rel, blocks in files.items():
+        try:
+            expected = apply(words(_git_show(f"{sha}^", rel, root) or ""), blocks)
+        except ApprovedTextError:
+            return False
+        if not _same_words(expected, words(_git_show(sha, rel, root) or "")):
+            return False
+    changed = set((_git_out(root, "diff", "--name-only", f"{sha}^", sha) or "").split())
+    if not changed & (scope - set(files) - {plan_rel, sidecar_rel(slug)}):
+        return False
+    if _plan_doc_at(plan_rel, root, sha).get("implementation_declared") is True:
+        return False
+    text = _git_show(sha, sidecar_rel(slug), root)
+    try:
+        at_c = None if text is None else parse_sidecar(text)
+    except ApprovedTextError:
+        return False
+    return at_c is not None and approved_digest(at_c) == approved_digest(sidecar)
+
+
+def verify_landed(sidecar: Sidecar, slug: str, root: Path, base_ref: str) -> tuple[list[str], dict[str, str]]:
+    """verify, but a bound file the working tree leaves unchanged passes when exactly one first-parent
+    commit C after the sidecar was added applied every such file's blocks exactly. Returns
+    (messages, {file: C full sha}); the strict messages stay for any file not landed."""
+    files = _blocks_by_file(sidecar)
+    per_file = {rel: _verify_file(rel, blocks, root, base_ref) for rel, blocks in files.items()}
+    candidates = {
+        rel: files[rel] for rel, msgs in per_file.items() if msgs and _read_tree(rel, root) == _git_show(base_ref, rel, root)
+    }
+    strict = [m for msgs in per_file.values() for m in msgs]
+    if not candidates:
+        return strict, {}
+    added = (
+        _git_out(root, "log", "--first-parent", "--diff-filter=A", "--format=%H", base_ref, "--", sidecar_rel(slug)) or ""
+    ).split()
+    plan_rel = f"docs/plans/PLAN-{slug}.yaml"
+    scope = {
+        s["file"]
+        for s in _plan_doc_at(plan_rel, root, base_ref).get("scope") or []
+        if isinstance(s, dict) and isinstance(s.get("file"), str)
+    }
+    log = (
+        _git_out(root, "log", "--first-parent", "--format=%H", f"{added[-1]}..{base_ref}", "--", *candidates)
+        if added
+        else None
+    )
+    landing = [
+        sha for sha in (log or "").split() if _landing_ok(sha, candidates, sidecar, slug, plan_rel, scope, root, base_ref)
+    ]
+    if len(landing) > 1:
+        return [*strict, f"{', '.join(candidates)}: competing landing commits {', '.join(landing)}"], {}
+    if not landing:
+        return [*strict, f"{', '.join(candidates)}: no landing commit"], {}
+    others = [m for rel, msgs in per_file.items() if rel not in candidates for m in msgs]
+    return others, dict.fromkeys(candidates, landing[0])
 
 
 def _cmd_record(args: argparse.Namespace) -> int:
