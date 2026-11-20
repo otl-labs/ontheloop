@@ -156,6 +156,8 @@ def test_oracle_matches_every_friction_vector(vector: dict[str, Any]) -> None:
     assert row["classifier_version"] == derive.FRICTION_RULES["classifier_version"]
     if "absorbed" in vector:
         assert row["absorbed_count"] == vector["absorbed"], vector["id"]
+    if "unmapped" in vector:
+        assert row["unmapped_count"] == vector["unmapped"], vector["id"]
     assert (row["rework_total"], row["exception_total"], row["label_counts"]) != (0, 0, []) or not facts
 
 

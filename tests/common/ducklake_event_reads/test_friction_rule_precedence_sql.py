@@ -9,9 +9,8 @@ import pytest
 
 duckdb = pytest.importorskip("duckdb", reason="env: duckdb is not installed in the fast tier")
 
-from src.common import ducklake_event_read_sql as sql  # noqa: E402
 from src.common import ducklake_event_reads as ev  # noqa: E402
-from src.common.ducklake_event_read_verbs import FRICTION_RULES  # noqa: E402
+from src.common.ducklake_event_read_verbs import FRICTION_FACTS_SQL, FRICTION_RULES  # noqa: E402
 from src.telemetry.identity import derive_entity_key  # noqa: E402
 from tests.fixtures import telemetry_read_db as db  # noqa: E402
 
@@ -47,7 +46,7 @@ def _labels(name: str) -> list[str]:
     entry = ev.EventRead(
         verb="friction_facts",
         tables=(),
-        sql=sql.FRICTION_FACTS_SQL,
+        sql=FRICTION_FACTS_SQL,
         params=("session_id",),
         binding="session",
         data=dict(FRICTION_RULES, rules=_RULES),

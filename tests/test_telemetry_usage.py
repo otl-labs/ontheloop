@@ -407,3 +407,140 @@ def test_plans_fails_closed_when_the_ref_has_no_plan_merge() -> None:
     other = Commit("f" * 40, datetime(2026, 10, 10, tzinfo=timezone.utc), "feat(y): other", "")
     code = cli.run(["plans"], reader=FakeReader([]), out=out, err=err, commits=lambda root, ref: [other])
     assert code == 1 and out.getvalue() == "" and "no plan( merge" in err.getvalue()
+
+
+def _friction_row(day: str, root: str, signature: str | None, fact_count: int = 1, **over: Any) -> dict[str, Any]:
+    row = {
+        "root_session_id": root,
+        "harness_session_key": f"session_{root}",
+        "branch": "claude/project-thread-x",
+        "session_started_at": f"{day}T10:00:00+00:00",
+        "roots_in_tree": 1,
+        "workflow": "plan",
+        "observation_type": "process_event",
+        "signature": signature,
+        "disposition": "error",
+        "rule_id": "r90",
+        "label": "unmapped_block",
+        "class": "exception",
+        "generic": True,
+        "fact_count": fact_count,
+        "session_count": 1,
+        "classifier_version": 3,
+        "generations": [],
+        "conflicted_grain_keys": [],
+        "derivation_conflicted": False,
+    }
+    return {**row, **over}
+
+
+_FRICTION_ARGV = ["friction", "--from", "2026-10-01", "--to", "2026-10-14"]
+_SPECIFIC = {"rule_id": "r20", "label": "check_failure", "generic": False}
+_RUN = {"observation_type": "tool_call", "rule_id": "run", "label": "repeated_tool_failure", "generic": False}
+
+
+def test_friction_sums_signatures_across_trees_and_windows() -> None:
+    rows = [
+        _friction_row("2026-10-02", "a", "gate:validate_plan_documents", 2, **_SPECIFIC),
+        _friction_row("2026-10-09", "b", "gate:validate_plan_documents", 3, session_count=2, **_SPECIFIC),
+        _friction_row("2026-10-09", "b", "gate:other", 5),
+        _friction_row(
+            "2026-10-09", "b", "Bash", 4, observation_type="tool_call", rule_id="r92", label="tool_error", generic=True
+        ),
+        _friction_row("2026-10-09", "b", "Bash", 1, **_RUN),
+    ]
+    code, result, err = _run(_FRICTION_ARGV, FakeReader(rows))
+    assert code == 0 and result is not None and "rows" not in result
+    assert result["verb"] == "friction_signature_counts" and result["calls"] == 2 and result["conflicted_rows"] == 0
+    (v3,) = result["by_classifier_version"].values()
+    assert list(result["by_classifier_version"]) == ["3"]
+    assert (v3["process_event_facts"], v3["generic_process_event_facts"], v3["tool_call_facts"]) == (10, 5, 5)
+    assert v3["unmapped_failure_share"] == 0.5
+    assert [(s["signature"], s["rule_id"], s["fact_count"], s["session_count"]) for s in v3["signatures"]] == [
+        ("gate:other", "r90", 5, 1),
+        ("gate:validate_plan_documents", "r20", 5, 3),
+        ("Bash", "r92", 4, 1),
+        ("Bash", "run", 1, 1),
+    ]
+
+
+def test_friction_share_is_null_without_process_events() -> None:
+    rows = [_friction_row("2026-10-02", "a", "Bash", 2, observation_type="tool_call", rule_id="r92", generic=True)]
+    _, result, _ = _run(_FRICTION_ARGV, FakeReader(rows))
+    assert result is not None
+    (v3,) = result["by_classifier_version"].values()
+    assert v3["unmapped_failure_share"] is None and v3["process_event_facts"] == 0 and v3["tool_call_facts"] == 2
+    _, empty, _ = _run(_FRICTION_ARGV, FakeReader([]))
+    assert empty is not None and empty["by_classifier_version"] == {}
+
+
+def test_friction_share_is_per_classifier_version() -> None:
+    rows = [
+        _friction_row("2026-10-02", "a", "gate:x", 3, classifier_version=2),
+        _friction_row("2026-10-03", "b", "gate:x", 1, classifier_version=3),
+        _friction_row("2026-10-03", "b", "gate:y", 1, classifier_version=3, **_SPECIFIC),
+    ]
+    _, result, _ = _run(_FRICTION_ARGV, FakeReader(rows))
+    assert result is not None
+    versions = result["by_classifier_version"]
+    assert [versions[k]["unmapped_failure_share"] for k in ("2", "3")] == [1.0, 0.5]
+    assert [versions[k]["process_event_facts"] for k in ("2", "3")] == [3, 2]
+
+
+def test_friction_workflow_filter() -> None:
+    rows = [
+        _friction_row("2026-10-02", "a", "gate:x", 2, workflow="plan"),
+        _friction_row("2026-10-02", "a", "gate:y", 3, workflow=None),
+        _friction_row("2026-10-02", "b", "gate:z", 4, workflow="implement"),
+    ]
+
+    def signatures(*extra: str) -> list[str]:
+        _, result, _ = _run([*_FRICTION_ARGV, *extra], FakeReader(rows))
+        assert result is not None
+        return sorted(s["signature"] for v in result["by_classifier_version"].values() for s in v["signatures"])
+
+    assert signatures() == ["gate:x", "gate:y", "gate:z"]
+    assert signatures("--workflow", "plan") == ["gate:x"]
+    assert signatures("--workflow", "none") == ["gate:y"]
+
+
+def test_friction_lists_every_signature_with_disposition() -> None:
+    rows = [_friction_row("2026-10-02", "a", f"gate:s{i:02d}", 1) for i in range(30)]
+    rows.append(_friction_row("2026-10-02", "a", "gate:s00", 1, disposition="warning", rule_id="r91", label="hook_fault"))
+    _, result, _ = _run(_FRICTION_ARGV, FakeReader(rows))
+    assert result is not None
+    (v3,) = result["by_classifier_version"].values()
+    assert len(v3["signatures"]) == 31
+    assert {(s["signature"], s["disposition"]) for s in v3["signatures"]} >= {("gate:s00", "error"), ("gate:s00", "warning")}
+    assert all(
+        set(s) >= {"observation_type", "signature", "disposition", "rule_id", "label", "generic"} for s in v3["signatures"]
+    )
+    assert [s["fact_count"] for s in v3["signatures"]] == [1] * 31
+    assert [s["signature"] for s in v3["signatures"]][:2] == ["gate:s00", "gate:s00"]
+
+
+def test_friction_refuses_by_root_by_agent_and_foreign_workflow() -> None:
+    reader = FakeReader([])
+    for extra in (["--by-root"], ["--by-agent"]):
+        assert _run([*_FRICTION_ARGV, *extra], reader)[0] == 2
+    assert _run(["tools", "--from", "2026-10-01", "--to", "2026-10-02", "--workflow", "plan"], reader)[0] == 2
+    assert _run(["plans", "--workflow", "plan"], reader)[0] == 2
+    assert reader.calls == []
+
+
+def test_friction_verb_is_registered_agent_facing_window_verb() -> None:
+    entry = EVENT_READS["friction_signature_counts"]
+    assert (entry.binding, entry.max_window_days, entry.agent_facing, entry.paginable) == ("window", 7, True, False)
+    assert entry.params == ("day_from", "day_to") and "one tree is the rows sharing" in entry.description
+    assert VERB_FIELDS["friction_signature_counts"][-3:] == ("generations", "conflicted_grain_keys", "derivation_conflicted")
+    assert cli.VERBS["friction"] == "friction_signature_counts"
+
+
+def test_reader_contract_declares_the_friction_signature_verb() -> None:
+    contract = yaml.safe_load(CONTRACT.read_text(encoding="utf-8"))
+    invariant = next(i for i in contract["audit_invariants"] if i.startswith("Friction signature verb"))
+    assert "friction_signature_counts" in invariant
+    logged = [e for e in contract["amendment_log"] if "PLAN-friction-signature-coverage" in str(e.get("summary"))]
+    assert len(logged) == 1
+    assert logged[0]["change_class"] == "field_add" and logged[0]["semantic_break"] is False
+    assert "friction_signature_counts" in logged[0]["summary"]

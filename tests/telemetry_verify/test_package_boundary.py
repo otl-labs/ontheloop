@@ -30,6 +30,17 @@ _FORBIDDEN = (
 )
 
 
+_VERBS = "src.common.ducklake_event_read_verbs"
+
+
+def _is_sql_text_name(name: str) -> bool:
+    return name.endswith("_SQL") or name == "FRICTION_CTES"
+
+
+def _sql_attribute_references(tree: ast.Module) -> list[str]:
+    return sorted({n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute) and _is_sql_text_name(n.attr)})
+
+
 def _imported_modules(tree: ast.Module) -> set[str]:
     modules: set[str] = set()
     for node in ast.walk(tree):
@@ -46,6 +57,8 @@ def _violations(modules: set[str]) -> list[str]:
     for name in sorted(modules):
         root = name.split(".", 1)[0]
         if any(name == f or name.startswith(f + ".") for f in _FORBIDDEN):
+            bad.append(name)
+        elif name.startswith(_VERBS + ".") and _is_sql_text_name(name.rsplit(".", 1)[1]):
             bad.append(name)
         elif root in sys.stdlib_module_names or name.startswith("scripts.telemetry_verify"):
             continue
@@ -70,14 +83,16 @@ def test_oracle_has_no_direct_reader_sql_duckdb_streams_or_tests_import() -> Non
         "__init__.py",
     }
     for path in files:
-        found = _imported_modules(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
-        assert _violations(found) == [], path.name
+        parsed = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        assert _violations(_imported_modules(parsed)) == [], path.name
+        assert _sql_attribute_references(parsed) == [], path.name
 
 
 def test_the_scan_flags_each_forbidden_and_unlisted_import() -> None:
     sample = ast.parse(
         "import duckdb\nfrom src.common.ducklake_event_read_sql import SESSIONS\nimport src.turn_capture.streams\n"
         "from src.turn_capture import observations\nfrom tests.fixtures import x\nimport requests\n"
+        "from src.common.ducklake_event_read_verbs import FRICTION_CTES, FRICTION_SIGNATURE_SQL, FRICTION_RULES\n"
     )
     flagged = _violations(_imported_modules(sample))
     for expected in (
@@ -87,5 +102,9 @@ def test_the_scan_flags_each_forbidden_and_unlisted_import() -> None:
         "src.turn_capture.observations",
         "tests.fixtures",
         "requests",
+        f"{_VERBS}.FRICTION_CTES",
+        f"{_VERBS}.FRICTION_SIGNATURE_SQL",
     ):
         assert expected in flagged
+    assert f"{_VERBS}.FRICTION_RULES" not in flagged
+    assert _sql_attribute_references(ast.parse("x = verbs.FRICTION_CTES + verbs.FRICTION_RULES")) == ["FRICTION_CTES"]
