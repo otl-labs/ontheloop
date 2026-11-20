@@ -78,6 +78,22 @@ def test_root_resolution_from_chdir_cd_pushd_env_c_and_cwd() -> None:
     assert hits("cd rel && terraform -chdir=terraform/github apply")
 
 
+def test_organization_root_is_a_live_root() -> None:
+    for command in (
+        "terraform -chdir=terraform/organization apply",
+        "terraform -chdir=terraform/organization import aws_iam_user.x y",
+        "terraform -chdir=/tmp/wt/terraform/organization apply",
+        "cd terraform/organization && terraform apply",
+    ):
+        assert ("tf-state-change", "organization") in hits(command), command
+    assert ("tf-state-change", "organization") in hits("terraform apply", cwd="/work/repo/terraform/organization")
+    for command in (
+        "terraform -chdir=terraform/organization init -backend=false",
+        "terraform -chdir=terraform/organization validate",
+    ):
+        assert hits(command) == set(), command
+
+
 def test_secret_read_covers_every_value_verb() -> None:
     sr = ("secret-read", "unknown")
     commands = [
