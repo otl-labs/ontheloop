@@ -50,7 +50,13 @@ _PERSONA_VERDICT_APP_REASON = (
     "created by the approved terraform-github-apply.yml dispatch naming it in gate_change"
     " (PLAN-persona-verdict-app-grant, VP 10); the remote object does not exist before it"
 )
+_GATED_ENVS_MAIN_ONLY_REASON = (
+    "created by the approved terraform-github-apply.yml dispatch naming it in gate_change"
+    " (PLAN-pypi-and-gated-apply-environments, VP 6); the remote object does not exist before it"
+)
 EXEMPT: dict[str, str] = {
+    "github_repository_environment_deployment_policy.tf_gated_apply_main": _GATED_ENVS_MAIN_ONLY_REASON,
+    "github_repository_environment_deployment_policy.pypi_main": _GATED_ENVS_MAIN_ONLY_REASON,
     "github_repository_environment.approved_text": _APPROVED_TEXT_REASON,
     "github_repository_environment_deployment_policy.approved_text_main": _APPROVED_TEXT_REASON,
     "github_repository_environment.tf_github_apply": _APPROVED_TEXT_REASON,

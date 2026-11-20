@@ -2,7 +2,9 @@
 
 Pure over each tree's live generation (the rows scripts.telemetry_verify.dedupe keeps, so a later generation never
 double-counts). Each check reports a numerator and its denominator over rows at parser_version PARSER_FLOOR or later; a zero
-denominator reads untested, never green. Columns are read by name from row dicts; a column absent from a row counts as null.
+denominator reads untested, never green. Only producer claude_code's rows are checked (telemetry-event-envelope.yaml LL-5):
+the checks read Claude Code transcript facts and PARSER_FLOOR is a claude_code parser_version, comparable within one producer
+only. Columns are read by name from row dicts; a column absent from a row counts as null.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ from typing import Any, Iterable, Mapping
 from scripts.telemetry_verify.dedupe import Row, compute_generations, resolve_table
 
 PARSER_FLOOR = 4
+PRODUCER = "claude_code"
 KNOWN_NOTICE_FAILURE_TOKENS = ("failed", "killed")
 ALARM_CHECKS = ("harness_key_missing", "background_notice_unknown", "resume_without_prior_close")
 REPORT_ONLY_CHECKS = ("checkout_sha_missing",)
@@ -95,7 +98,7 @@ def _resume(sessions: list[Row], observations: list[Row]) -> tuple[int, int]:
 
 def check_tree(tables: Mapping[str, Iterable[Row]]) -> Counts:
     """The four checks' (numerator, denominator) over one tree's rows."""
-    live = live_rows(tables)
+    live = {name: [r for r in rows if r.get("producer") == PRODUCER] for name, rows in live_rows(tables).items()}
     sessions, observations, agents = live[_SESSIONS], live[_OBSERVATIONS], live[_AGENTS]
     return {
         "harness_key_missing": _harness_key(sessions),
