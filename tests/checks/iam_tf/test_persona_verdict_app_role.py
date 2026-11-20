@@ -33,7 +33,7 @@ _KEY = "arn:aws:ssm:${var.aws_region}:*:parameter/secret/agent-platform-persona-
 _DENY_RESOURCES = {
     _KEY,
     "arn:aws:ssm:${var.aws_region}:*:parameter",
-    "arn:aws:ssm:${var.aws_region}:*:parameter/",
+    "arn:aws:ssm:${var.aws_region}:*:parameter?",
     "arn:aws:ssm:${var.aws_region}:*:parameter/secret",
     "arn:aws:ssm:${var.aws_region}:*:parameter/secret/",
 }
@@ -235,6 +235,7 @@ def test_red_boundary_deny() -> None:
     text = _BOUNDARY_FILE.read_text(encoding="utf-8")
     broken = (
         text.replace('"arn:aws:ssm:${var.aws_region}:*:parameter/secret/",', "", 1),
+        text.replace('parameter?"', 'parameter/"', 1),
         text.replace(
             f'ArnNotLike = {{ "aws:PrincipalArn" = "arn:aws:iam::*:role/{_ROLE_NAME}"',
             f'StringNotLike = {{ "aws:PrincipalArn" = "arn:aws:iam::*:role/{_ROLE_NAME}"',
