@@ -26,10 +26,15 @@ scope:
       --batch` subprocess framed by byte count, returned in memory only (Decision 176 cl.5: no index, no cache file) as
       a path-to-text mapping that omits a path whose header reads `missing` (today's skip of a failed git show), and
       raising GraduationError when the subprocess cannot start, exits non-zero or its output is misframed (today every
-      show failing silently yields an empty baseline; Decision 55 fail loud); and shared_worktrees(root), a context manager whose get(ref)
-      lazily adds one real `git worktree add --detach` per distinct ref, whose restore(path) runs `git checkout -f -q`
-      plus `git clean -fdxq -e .venv` and then requires `git status --porcelain --ignored` to list nothing but .venv
-      (else GraduationError, Decision 55), and whose exit removes every worktree it added.
+      show failing silently yields an empty baseline; Decision 55 fail loud); and shared_worktrees(root), a context
+      manager whose get(ref) lazily, once per distinct ref, resolves the ref to a commit sha (`git rev-parse --verify
+      <ref>^{commit}`), adds one real `git worktree add --detach <path> <sha>` and provisions the .venv symlink through
+      _provision_venv_symlink exactly as git_worktree does; whose restore(path) runs `git checkout -f -q --detach <sha>`
+      (the sha recorded at add, so a base leg that ran git checkout, switch or commit cannot move the next candidate's
+      base) plus `git clean -fdxq -e .venv`, then requires `git rev-parse HEAD` to equal that sha and `git status
+      --porcelain --ignored` to list nothing but the .venv symlink (which .gitignore's `.venv/` leaves reported as
+      `?? .venv`), raising GraduationError otherwise (Decision 55); and whose exit, for every worktree it added, unlinks
+      the .venv symlink before `git worktree remove --force` and falls back to `git worktree prune` as git_worktree does.
     new_imports: []
   - file: scripts/verification_graduation.py
     action: Modify
@@ -51,7 +56,11 @@ scope:
       TestModifiedRecordReadmitted's one-argument calls keep working); then call
       verification_graduation.run_differential(row, ..., worktree_for=wt.get) SERIALLY, one candidate at a time as
       today, inside one shared_worktrees() context restored between candidates (Decision 132: each base leg sees a
-      clean pre-fix tree). Each candidate keeps exactly one HEAD draw and one base draw; nothing is pooled or retried.
+      clean pre-fix tree). The restore before a reused worktree runs inside that candidate's existing per-candidate
+      try/except (lines 113-124 today), so a failed restore is reported as an error for the candidate about to run and
+      never escapes the check. When the shared baseline read returns None (origin/main does not resolve), the gate
+      takes today's no-baseline path once rather than passing None on, so baseline=None only ever means not supplied.
+      Each candidate keeps exactly one HEAD draw and one base draw; nothing is pooled or retried.
       run_differential stays the per-row verdict seam the existing tests patch, so
       test_validate_verification_registry.py and test_validate_verification_registry_portability.py need no edit.
     new_imports: [scripts.checks.verification._graduation_git]
@@ -94,8 +103,11 @@ scope:
     action: Create
     purpose: >-
       Mirror test (Decision 131): TestBatchedShardRead::test_one_subprocess_reads_every_shard (equal rows to a per-blob
-      git show over a fixture repo, one subprocess), shared worktree reuse per ref, restore removes a planted untracked
-      and a modified tracked file, a failed restore raises GraduationError, exit removes every worktree.
+      git show over a fixture repo, one subprocess), a `missing` header omits the path, a failed subprocess raises;
+      shared worktree reuse per ref; restore removes a planted untracked and a modified tracked file; restore puts HEAD
+      back to the recorded sha after a commit or checkout made inside the worktree; a restore that cannot reach the sha
+      or leaves anything but .venv raises GraduationError; get provisions the .venv symlink (canary mirroring
+      tests/verification_graduation/test_provisioning.py:199-213) and exit unlinks it before removing every worktree.
   - file: tests/verification_graduation/test_loader.py
     action: Modify
     purpose: >-
@@ -136,8 +148,9 @@ followon_recs: [rec-5435]
 infrastructure_dependencies: []
 acceptance_criteria:
   - entries_at_ref returns rows equal to today's per-shard reader at origin/main and reads the blobs in one git subprocess.
-  - A registry run with N added entries against one base ref adds exactly one worktree, restores it between entries,
-    fails loud when a restore leaves anything behind, and never runs two base legs at once.
+  - A registry run with N added entries against one base ref adds exactly one worktree, restores it to the recorded
+    base sha between entries, fails loud when a restore leaves anything behind or HEAD elsewhere, and never runs two
+    base legs at once.
   - Every candidate still gets exactly one HEAD draw and one base draw, run one candidate at a time; nothing is pooled
     or retried.
   - Every switched parse site yields data identical to yaml.safe_load over the real files it reads.
@@ -148,18 +161,29 @@ acceptance_criteria:
 verification_plan:
   - step: 1
     phase: pre-deploy
-    action: The registry gate's shared worktree and the batched shard reader (red before, green after).
+    action: The batched shard reader reads every registry blob in one subprocess (red before, green after).
+    command: >-
+      bin/venv-python -m pytest -q
+      tests/checks/verification/test__graduation_git.py::TestBatchedShardRead::test_one_subprocess_reads_every_shard
+    expected: 1 passed; before the build the node does not exist.
+    fix_if: A failure names the behaviour; fix the code, never the test.
+    hermetic: true
+    expected_literals: ["1 passed"]
+    graduation: graduate
+    graduation_check_id: graduation-registry-batched-shard-read
+  - step: 2
+    phase: pre-deploy
+    action: The registry gate runs N added entries against one base ref through one shared worktree (red before, green after).
     command: >-
       bin/venv-python -m pytest -q
       tests/checks/verification/test_validate_verification_registry_gate_cost.py::TestWorktreeReuse::test_added_entries_share_one_worktree
-      tests/checks/verification/test__graduation_git.py::TestBatchedShardRead::test_one_subprocess_reads_every_shard
-    expected: 2 passed; before the build the nodes do not exist.
+    expected: 1 passed; before the build the node does not exist.
     fix_if: A failure names the behaviour; fix the code, never the test.
     hermetic: true
-    expected_literals: ["2 passed"]
+    expected_literals: ["1 passed"]
     graduation: graduate
-    graduation_check_id: fast-tier-registry-gate-shared-worktree-and-batched-read
-  - step: 2
+    graduation_check_id: registry-gate-added-entries-share-one-worktree
+  - step: 3
     phase: pre-deploy
     action: The plan_obligations unbuilt-plan scan parses through the shared libyaml loader (red before, green after).
     command: >-
@@ -171,7 +195,7 @@ verification_plan:
     expected_literals: ["1 passed"]
     graduation: graduate
     graduation_check_id: fast-tier-headroom-unbuilt-scan-fast-loader
-  - step: 3
+  - step: 4
     phase: pre-deploy
     action: Run every test file the change creates or edits, the neighbouring registry and plan-reader suites, and the three manifest mirrors.
     command: >-
@@ -186,6 +210,9 @@ verification_plan:
       tests/roadmap/plan_lint/test_headroom.py tests/test_plan_obligations.py
       tests/checks/roadmap/test__manifest.py tests/checks/verification/test__manifest.py tests/checks/contracts/test__manifest.py
       tests/checks/verification/test_validate_differential_gate_baseline.py tests/checks/deps/test_fast_tier_harness.py
+      tests/verification_graduation/test_provisioning.py tests/verification_graduation/test_materialize.py
+      tests/test_session_merge_step.py
+      tests/checks/verification/validate_graduation_completeness/test_implement_leg.py
     expected: >-
       All pass, including the graduated pins named in constraints and the patch-target tests that patch
       scripts.verification_graduation.git_worktree, .run_differential and .entries_at_ref.
@@ -197,8 +224,8 @@ verification_plan:
     graduation: waive
     graduation_waiver_reason: >-
       These are this plan's own and neighbouring pytest modules, which the fast tier's affected-test selection runs on
-      every PR touching the edited modules; steps 1 and 2 graduate the acceptance nodes.
-  - step: 4
+      every PR touching the edited modules; steps 1-3 graduate the acceptance nodes.
+  - step: 5
     phase: pre-deploy
     action: Prove the libyaml loader parses every real file the switched sites read identically to yaml.safe_load.
     command: >-
@@ -209,7 +236,7 @@ verification_plan:
       bad=[p for p in ps if parse_yaml(open(p,encoding='utf-8').read())!=yaml.safe_load(open(p,encoding='utf-8').read())];
       assert not bad, bad[:5]; print('YAML_PARITY_OK', len(ps))"
     expected: >-
-      Exit 0 and the marker with the file count (about 2,660 today; config/*.yaml covers the budget files
+      Exit 0 and the marker with the file count (about 2,690 today; config/*.yaml covers the budget files
       headroom._load reads, such as config/sloc_budgets.yaml and config/prose_budgets.yaml).
     expected_literals: [YAML_PARITY_OK]
     fix_if: >-
@@ -218,9 +245,9 @@ verification_plan:
     hermetic: true
     graduation: waive
     graduation_waiver_reason: >-
-      A whole-corpus parse costs about 20s, too slow for a standing fast-tier guard; the per-site spy tests (step 3)
+      A whole-corpus parse costs about 20s, too slow for a standing fast-tier guard; the per-site spy tests (step 4)
       guard the wiring and this one-off proof covers the corpus at build time.
-  - step: 5
+  - step: 6
     phase: pre-deploy
     action: Prove the batched baseline equals today's per-shard read on the real registry at origin/main.
     command: >-
@@ -236,7 +263,7 @@ verification_plan:
     graduation_waiver_reason: >-
       Reads the moving origin/main ref, so it is a one-off live parity proof; TestBatchedShardRead (step 1, graduated)
       guards the reader on a fixture repo.
-  - step: 6
+  - step: 7
     phase: pre-deploy
     action: Run the fast tier.
     command: bin/venv-python -m scripts.validate --pre
@@ -245,7 +272,7 @@ verification_plan:
     hermetic: false
     graduation: waive
     graduation_waiver_reason: Duplicates the PR fast tier, which runs the same command on every push.
-  - step: 7
+  - step: 8
     phase: pre-deploy
     action: Run the full tier before handoff (backgrounded, 2 h limit) and read its verdict.
     command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
@@ -253,7 +280,7 @@ verification_plan:
     fix_if: A failure -- fix in scope and re-run; a failure outside scope is a plan defect, never a handoff to PR CI.
     hermetic: false
     graduation: not-applicable
-  - step: 8
+  - step: 9
     phase: pre-deploy
     action: >-
       Measure in GitHub: read the build PR's pr-validate selection-manifest artifact (downloaded through the GitHub MCP
@@ -261,7 +288,7 @@ verification_plan:
       of the ten kept phase_times (scripts/checks/_budget_recs.py _PHASE_TIMES_KEPT) by the smallest kept time.
     command: >-
       bin/venv-python -c "import json; b=json.load(open('logs/debug/pr-selection-manifest.json'))['budget'];
-      pt=b['phase_times']; names=['validate_graduated_rerun_plan_readers','validate_verification_registry',
+      pt=b['phase_times']; assert pt, 'empty phase_times'; names=['validate_graduated_rerun_plan_readers','validate_verification_registry',
       'validate_platform_roadmap','validate_contract_drift']; floor=min(pt.values());
       absent=[n for n in names if n not in pt]; s=sum(pt.get(n,floor) for n in names);
       nt=b['static_s']+b['replay_s']+b['unattributed_s']-b.get('escalation_s',0);
@@ -274,11 +301,11 @@ verification_plan:
       44356030362).
     fix_if: >-
       Over 75s -- profile the slowest of the four from the run's own log and fix it in scope; never lower the target or
-      move a check out of the fast tier. A fix commit re-runs steps 6 and 7 before the next measurement
+      move a check out of the fast tier. A fix commit re-runs steps 7 and 8 before the next measurement
       (handoff_policy). A target that still cannot be met is reported to the operator, not waived.
     hermetic: false
     graduation: not-applicable
-  - step: 9
+  - step: 10
     phase: post-deploy
     action: Prove the merge closed rec-5372.
     command: >-
@@ -297,49 +324,49 @@ test_obligations:
     red_green_expectation: red before (the module does not exist), green after.
   - source: scripts/verification_graduation.py
     behavior: entries_at_ref keeps its four branches on the batched reader and run_differential's verdicts are unchanged.
-    verification_step: 3
+    verification_step: 4
     test_selector: tests/verification_graduation/test_loader.py
     red_green_expectation: red before (no batched-reader or parse_yaml assertions pass), green after.
   - source: scripts/checks/verification/validate_verification_registry.py
     behavior: N added entries share one worktree, the baseline is read once, candidates stay serial with one draw per leg.
-    verification_step: 1
+    verification_step: 2
     test_selector: tests/checks/verification/test_validate_verification_registry_gate_cost.py::TestWorktreeReuse::test_added_entries_share_one_worktree
     red_green_expectation: red before (one worktree per entry), green after.
   - source: scripts/checks/roadmap/validate_platform_roadmap.py
     behavior: Plan and roadmap parses go through parse_yaml and malformed plans still fail.
-    verification_step: 3
+    verification_step: 4
     test_selector: tests/checks/roadmap/test_validate_platform_roadmap_loader.py
     red_green_expectation: red before (the file does not exist), green after.
   - source: scripts/checks/contracts/_shared.py
     behavior: baseline_class_d_envelopes parses through parse_yaml.
-    verification_step: 3
+    verification_step: 4
     test_selector: tests/checks/contracts/test__shared.py
     red_green_expectation: red before (the spy sees no parse_yaml call), green after.
   - source: scripts/checks/contracts/validate_contract_drift.py
     behavior: Contract parses go through parse_yaml and the live tree still passes.
-    verification_step: 3
+    verification_step: 4
     test_selector: tests/checks/contracts/validate_contract_drift/test_parse_loader.py
     red_green_expectation: red before (the file does not exist), green after.
   - source: scripts/roadmap/plan_lint/headroom.py
     behavior: The unbuilt-plan scan parses through parse_yaml.
-    verification_step: 2
+    verification_step: 3
     test_selector: tests/roadmap/plan_lint/test_headroom.py::TestHeadroomLoader::test_unbuilt_scan_parses_through_fast_loader
     red_green_expectation: red before (the node does not exist), green after.
   - source: scripts/checks/roadmap/_manifest.py
     behavior: Entries reaching scripts/contract_rules.py carry it in pre_globs.
-    verification_step: 3
+    verification_step: 4
     test_selector: tests/checks/roadmap/test__manifest.py
-    waiver_reason: A pre_globs widening is enforced by validate_pre_glob_closure in step 6; the manifest mirror only re-reads the literal.
+    waiver_reason: A pre_globs widening is enforced by validate_pre_glob_closure in step 7; the manifest mirror only re-reads the literal.
   - source: scripts/checks/verification/_manifest.py
     behavior: Entries reaching scripts/contract_rules.py or _graduation_git.py carry them in pre_globs.
-    verification_step: 3
+    verification_step: 4
     test_selector: tests/checks/verification/test__manifest.py
-    waiver_reason: A pre_globs widening is enforced by validate_pre_glob_closure in step 6; the manifest mirror only re-reads the literal.
+    waiver_reason: A pre_globs widening is enforced by validate_pre_glob_closure in step 7; the manifest mirror only re-reads the literal.
   - source: scripts/checks/contracts/_manifest.py
     behavior: Entries reaching the edited contract-check modules carry scripts/contract_rules.py in pre_globs.
-    verification_step: 3
+    verification_step: 4
     test_selector: tests/checks/contracts/test__manifest.py
-    waiver_reason: A pre_globs widening is enforced by validate_pre_glob_closure in step 6; the manifest mirror only re-reads the literal.
+    waiver_reason: A pre_globs widening is enforced by validate_pre_glob_closure in step 7; the manifest mirror only re-reads the literal.
 constraints:
   - No check verifies less after this plan; the plan-reader re-run is not narrowed (operator's scope choice, 2026-11-18).
   - >-
@@ -390,7 +417,7 @@ context:
     drift.
   - >-
     Kept as one plan though two revertible changes ship (the libyaml switch and the registry-gate rework): one
-    measured outcome, step 8, needs both. read_blobs_at_ref is a new byte-framed cat-file reader rather than a reuse of
+    measured outcome, step 9, needs both. read_blobs_at_ref is a new byte-framed cat-file reader rather than a reuse of
     contracts/_shared._parse_batch_output, which frames by character count in text mode and so misreads non-ASCII
     blobs; consolidating the repo's batch readers is out of scope.
 gate_rounds:
@@ -415,6 +442,7 @@ gate_rounds:
     round: 5
     verdict: NO_FLAGS
     scout_input_fingerprint: "v1:a522026d6de57bbdab683971c349faabb2dfff448f9a276d067c1aba9115c096"
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 7}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -436,17 +464,17 @@ execution_steps:
     Modify validate_verification_registry.py: one baseline read passed as baseline=, then serial
     vg.run_differential(..., worktree_for=wt.get) calls in one shared_worktrees() context. Late-closure bases (bases[cid]) use get(that ref).
   - Switch validate_platform_roadmap.py, contracts/_shared.py, validate_contract_drift.py and plan_lint/headroom.py to parse_yaml.
-  - Run validate_pre_glob_closure and add exactly the pre_globs it reports to the two manifests.
+  - Run validate_pre_glob_closure and add exactly the pre_globs it reports to the three manifests.
   - >-
     Write the tests in scope (red before, green after for each new node) and apply the patch retargets the scope rows
     name in test_loader.py and test_differential.py; edit no graduated pin node.
   - Execute Verification Plan -- run each step; loop until pass; on unrecoverable failure stop and RCA (Decision 55)
   - >-
     Open the build PR; after its pr-validate completes, download the selection-manifest artifact through the GitHub MCP
-    to logs/debug/pr-selection-manifest.json and run step 8; put the four phase times and the run id in the PR body.
+    to logs/debug/pr-selection-manifest.json and run step 9; put the four phase times and the run id in the PR body.
   - >-
-    After merge, run step 9, then update_rec rec-3374 to record the registry-gate cost this plan removed and its
+    After merge, run step 10, then update_rec rec-3374 to record the registry-gate cost this plan removed and its
     GitHub phase time (read its context first; update_rec --context replaces, so carry the existing text forward).
   - >-
-    Report: what was implemented; the step 7 verify-head result; the build PR number; the step 8 run id and four phase
+    Report: what was implemented; the step 8 verify-head result; the build PR number; the step 9 run id and four phase
     times against the series; and the merge SHA.
