@@ -39,3 +39,12 @@ def test_role_vocabulary() -> None:
     assert "process_event" in refs.ROLE_OBSERVATION and "agent_close" in refs.ROLE_AGENT
     assert "gate_event" in refs.ROLE_OBSERVATION
     assert refs.ROLE_TRANSCRIPT == ("full",)
+
+
+def test_litellm_refs() -> None:
+    root = refs.litellm_root_ref("gha:1/1/job/1")
+    assert root == "litellm:gha:1/1/job/1" and refs.litellm_run_ref(root) == root + "/run"
+    assert refs.litellm_call_ref(root, 2, 3) == root + "/call/2/3"
+    assert refs.litellm_call_ref(root, 2, "probe") == root + "/call/2/probe"
+    for ref in (root, refs.litellm_run_ref(root), refs.litellm_call_ref(root, 1, "probe")):
+        assert canonical_ref(ref) == ref

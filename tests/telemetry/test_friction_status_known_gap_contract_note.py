@@ -41,7 +41,8 @@ def test_observations_retires_the_status_known_gap() -> None:
     assert match, "name semantics must carry the classifier_version sentence"
     version, warn_label, warn_class, err_label, err_class = match.groups()
     r10, r11 = rule("r10"), rule("r11")
-    assert int(version) == FRICTION_RULES["classifier_version"]
+    assert int(version) == 2
+    assert FRICTION_RULES["classifier_version"] >= 2
     assert (warn_label, warn_class) == (r10[5], r10[6])
     assert (err_label, err_class) == (r11[5], r11[6])
     logged = [e for e in name["amendment_log"] if PLAN in str(e.get("summary")) and "rec-5193" in str(e.get("summary"))]

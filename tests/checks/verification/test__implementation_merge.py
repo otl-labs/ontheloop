@@ -128,10 +128,11 @@ def test_foreign_shard_id_gives_no_route(tmp_path, monkeypatch):
     assert _route(repo) is None
 
 
-def test_sidecar_plan_gets_no_route(tmp_path, monkeypatch):
-    repo, _ = lc.build_main(tmp_path, monkeypatch, sidecar=True)
+def test_sidecar_plan_routes_to_x(tmp_path, monkeypatch):
+    repo, x = lc.build_main(tmp_path, monkeypatch, sidecar=True)
     lc.closure_branch(repo)
-    assert _route(repo) is None
+    route = _route(repo)
+    assert route is not None and route.sha == x
 
 
 @pytest.mark.parametrize(

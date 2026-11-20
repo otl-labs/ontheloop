@@ -2,12 +2,21 @@ import asyncio
 import json
 import os
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
+from mcp.client import stdio as mcp_stdio
 from mcp.client.stdio import StdioServerParameters
 
-from src.persona_backends.mcp_bridge import BridgeFailed, BridgeTimeout, BridgeUnavailable, open_bridge
+from src.persona_backends import mcp_bridge
+from src.persona_backends.mcp_bridge import (
+    BridgeFailed,
+    BridgeTeardownFailed,
+    BridgeTimeout,
+    BridgeUnavailable,
+    open_bridge,
+)
 from src.persona_backends.read_input import READ_CAP_BYTES
 from tests.persona_backends.fake_mcp_server import MARKER
 
@@ -156,3 +165,72 @@ def test_startup_errors_leave_unwrapped():
             assert type(exc) is expected
         else:
             raise AssertionError("no error raised")
+
+
+SENTINEL = "sentinel-secret-text"
+
+
+class _Base(BaseException):
+    pass
+
+
+def _inject(monkeypatch, make):
+    fired = []
+
+    @asynccontextmanager
+    async def wrapped(*args, **kwargs):
+        try:
+            async with mcp_stdio.stdio_client(*args, **kwargs) as streams:
+                yield streams
+        finally:
+            fired.append(True)
+            raise make()
+
+    monkeypatch.setattr(mcp_bridge, "stdio_client", wrapped)
+    return fired
+
+
+async def _noop(_bridge):
+    return None
+
+
+@pytest.mark.parametrize(
+    ("make", "rendered"),
+    [
+        (lambda: OSError(SENTINEL), "OSError"),
+        (lambda: ExceptionGroup(SENTINEL, [OSError(SENTINEL)]), "ExceptionGroup[OSError]"),
+        (
+            lambda: ExceptionGroup(SENTINEL, [OSError(), ExceptionGroup("n", [BrokenPipeError(), OSError()])]),
+            "ExceptionGroup[BrokenPipeError, OSError]",
+        ),
+    ],
+)
+def test_teardown_error_after_normal_exit_is_typed(monkeypatch, make, rendered):
+    fired = _inject(monkeypatch, make)
+    with pytest.raises(BridgeTeardownFailed) as info:
+        run("ok", _noop)
+    assert fired and str(info.value) == f"the server failed during shutdown: {rendered}"
+    assert SENTINEL not in str(info.value)
+
+
+def test_teardown_error_after_body_error_keeps_body_error(monkeypatch):
+    fired = _inject(monkeypatch, lambda: OSError(SENTINEL))
+
+    async def body(_bridge):
+        raise ValueError("body")
+
+    with pytest.raises(ValueError, match="body"):
+        run("ok", body)
+    assert fired
+
+
+@pytest.mark.parametrize(
+    "make",
+    [lambda: BaseExceptionGroup("g", [_Base()]), lambda: ExceptionGroup("g", [RuntimeError()])],
+)
+def test_teardown_unclassified_group_after_normal_exit_propagates(monkeypatch, make):
+    fired = _inject(monkeypatch, make)
+    with pytest.raises(BaseExceptionGroup) as info:
+        run("ok", _noop)
+    assert fired and not isinstance(info.value, BridgeUnavailable | BridgeTeardownFailed)
+    assert info.value.args[0] == "g"
