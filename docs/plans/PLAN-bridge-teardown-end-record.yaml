@@ -28,9 +28,12 @@ scope:
         shutdown: OSError".
       - open_bridge records that the body exited normally (after its yield returns). In the outer
         except (OSError, BaseExceptionGroup): a recorded body or startup exception is re-raised as today; else, when
-        the body exited normally, raise BridgeTeardownFailed from the exception; else BridgeUnavailable as today
-        (spawn and startup failures keep their meaning).
-      - No other exception class is caught or converted; cancellation and KeyboardInterrupt still propagate.
+        the body exited normally, raise BridgeTeardownFailed from the exception only if it is an OSError or an
+        Exception-only group (isinstance(exc, ExceptionGroup)); any other BaseExceptionGroup after a normal exit (a
+        leaf that is not an Exception, such as KeyboardInterrupt or SystemExit) is re-raised unchanged; else (no
+        normal exit) BridgeUnavailable as today (spawn and startup failures keep their meaning).
+      - No other exception class is caught or converted; cancellation and KeyboardInterrupt still propagate, bare or
+        grouped.
   - file: src/persona_backends/litellm_backend.py
     action: Modify
     purpose: >-
@@ -49,12 +52,16 @@ scope:
     purpose: >-
       Bridge classification, with the real fake MCP server and stdio_client wrapped (monkeypatch
       src.persona_backends.mcp_bridge.stdio_client with an async context manager that delegates to the real one and
-      raises the injected exception after the real exit):
+      raises the injected exception after the real exit; the wrapper is a small private helper defined in each of the
+      two test files, since test modules never import each other and fakes.py is not in scope):
       - test_teardown_error_after_normal_exit_is_typed (rec-5334's acceptance after its re-point): OSError and
         ExceptionGroup([OSError]) injected after a body that returns normally raise BridgeTeardownFailed, not
         BridgeUnavailable; str() names the class only, and an injected message sentinel is absent.
       - test_teardown_error_after_body_error_keeps_body_error: a body raising ValueError plus an injected teardown
         OSError still raises the ValueError (the recorded path).
+      - test_teardown_base_group_after_normal_exit_propagates: an injected BaseExceptionGroup("g", [_Base()]) after a
+        normal exit, where _Base subclasses BaseException directly (keeping pytest's interrupt handling out of it),
+        propagates as that group and is not BridgeTeardownFailed or BridgeUnavailable.
   - file: tests/persona_backends/test_litellm_backend.py
     action: Modify
     purpose: >-
@@ -83,6 +90,7 @@ acceptance_criteria:
     one end record carrying the run's own outcome; stderr gets one class-only line. Any other teardown exception
     propagates with that same single end record.
   - A run that aborted or was cancelled before teardown still ends with exactly one end record and propagates as today.
+  - A teardown group carrying a non-Exception leaf after a normal exit propagates unchanged, never BridgeTeardownFailed.
   - rec-5402 and rec-5334 close on the merge (each by its own acceptance node).
 verification_plan:
   - step: 1
@@ -92,13 +100,16 @@ verification_plan:
       bin/venv-python -m pytest
       tests/persona_backends/test_mcp_bridge.py::test_teardown_error_after_normal_exit_is_typed
       tests/persona_backends/test_mcp_bridge.py::test_teardown_error_after_body_error_keeps_body_error
+      tests/persona_backends/test_mcp_bridge.py::test_teardown_base_group_after_normal_exit_propagates
       tests/persona_backends/test_litellm_backend.py::test_bridge_teardown_error_after_end_keeps_one_end_record
       tests/persona_backends/test_litellm_backend.py::test_bridge_teardown_error_after_abort_keeps_one_aborted_end
       tests/persona_backends/test_litellm_backend.py::test_bridge_teardown_unexpected_error_after_end_propagates
       tests/persona_backends/test_litellm_backend.py::test_bridge_teardown_cancellation_after_end_propagates -q
     expected: >-
-      Exit 0, every node passes. Red before: the nodes are absent (pytest exits 4); written first against main's code,
-      the success case raises RunAborted tool_server_unavailable with two end records.
+      Exit 0, every node passes. Red before: the nodes are absent (pytest exits 4). Written first against main's code,
+      the two acceptance nodes are red (the bridge raises BridgeUnavailable; the success case raises RunAborted
+      tool_server_unavailable with two end records) and the base-group node is red (main converts it to
+      BridgeUnavailable); the other four are regression guards already green on main.
     fix_if: >-
       Two end records, a lost result, exception text on stderr, or a swallowed cancellation: fix the bridge or the
       backend, never the wrapper.
@@ -170,6 +181,9 @@ context:
   - >-
     Persona image: build.copy holds src/persona_backends/, so the image channel republishes after main's CI if it has
     built; no consumer runs a pinned digest yet (config/persona_image.yaml digest null). Not a deploy from this plan.
+  - >-
+    test_litellm_backend.py has 89 SLOC of headroom (plan_obligations, 2026-11-20): keep its five new nodes and private
+    wrapper under 500 SLOC; if they would cross it, decompose into a mirror sub-module (Decision 128), never raise.
   - "red_overlap at plan write (2026-11-20): verdict clear, no reds."
   - "selection_budget on the four scope paths: within_budget (8 selected, predicted test half 10.5-36.0s)."
   - >-
@@ -182,6 +196,7 @@ context:
     and a manual close needs a holds verdict.
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:f5aa7c49a8ccbbf6f2c45b3a4e5f367c5b9a8e8883db8ad08923b999524cb38e"}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 1, nits: 4}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -189,7 +204,7 @@ pre_implementation_checklist:
   - All files in scope located and readable; telemetry-event-envelope.yaml LL-3 read
   - Acceptance criteria understood and verifiable
 execution_steps:
-  - Write the five test nodes red against main's code and confirm the success case shows two end records.
+  - Write the seven test nodes against main's code; confirm the two acceptance nodes and the base-group node are red (the success case shows two end records) and the other four are green regression guards.
   - Edit mcp_bridge.py (BridgeTeardownFailed and the normal-exit flag), then litellm_backend.py (keep go()'s result; tolerate only BridgeTeardownFailed at teardown; one class-only stderr line).
   - Run bin/venv-python -m scripts.validate --pre and fix; git add the changed files.
   - Execute Verification Plan steps 1-3. Run each step and loop until it passes; on an unrecoverable failure stop and RCA (Decision 55).
