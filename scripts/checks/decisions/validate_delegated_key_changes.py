@@ -16,7 +16,7 @@ from typing import Any, Callable, Optional
 import yaml
 
 from scripts.checks import _common, registry
-from scripts.checks.decisions import entry_measure
+from scripts.checks.decisions import consolidation, entry_measure
 from scripts.checks.decisions._baseline import BaselineReaderFn, base_file_text, baseline_decision_numbers
 from scripts.checks.decisions.envelope_rules import amended_numbers, dotted_value, split_delegated_key
 from scripts.decisions_md import extract_entry_envelope, extract_superseded_by, iter_decision_sections
@@ -24,6 +24,11 @@ from scripts.decisions_md import extract_entry_envelope, extract_superseded_by, 
 BaseTextReaderFn = Callable[[Path, str], Optional[str]]
 _FILES = ("docs/DECISIONS.md", "docs/DECISIONS_ARCHIVE.md")
 _UNIT = "base_delegations"
+_MANIFEST_UNIT = "consolidation_units"
+
+
+def _manifest_unit(count: int) -> str:
+    return _MANIFEST_UNIT if count else _UNIT
 
 
 def _entries(texts: dict[str, str | None]) -> dict[int, str]:
@@ -156,12 +161,20 @@ def validate_delegated_key_changes(
     baseline_reader = baseline_reader or baseline_decision_numbers
     base_text_reader = base_text_reader or base_file_text
 
+    manifest_failures, manifest_count = consolidation.scan(root, base_text_reader)
+    for problem in manifest_failures:
+        print(f"  FAIL: {problem}")
+    if manifest_failures:
+        failed.append("Consolidation manifests")
+    elif manifest_count:
+        print(f"  PASS: {manifest_count} consolidation unit(s) resolve.")
+
     if using_default_root and not any(f in _FILES or f.endswith((".yaml", ".yml")) for f in _common.get_changed_files(root)):
-        registry.examined(0, unit=_UNIT)
+        registry.examined(manifest_count, unit=_manifest_unit(manifest_count))
         return
     base_texts = {rel: base_text_reader(root, rel) for rel in _FILES}
     if not any("delegates:" in (text or "") for text in base_texts.values()):
-        registry.examined(0, unit=_UNIT)
+        registry.examined(manifest_count, unit=_manifest_unit(manifest_count))
         return
     baseline_numbers = baseline_reader(root)
     if baseline_numbers is None:

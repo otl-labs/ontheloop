@@ -30,6 +30,7 @@ class TestScannedPaths:
             "scripts/executor/branch_lifecycle.py",
             "scripts/ducklake_smoke/lambda_ops_gates.py",
             "scripts/backlog_health/escalate.py",
+            "scripts/checks/decisions/append_only_census_recs.py",
             "scripts/telemetry_verify/alarms.py",
             "scripts/ci/actions_capacity_alarm.py",
             "scripts/convergence_health/dispatch_integrity.py",

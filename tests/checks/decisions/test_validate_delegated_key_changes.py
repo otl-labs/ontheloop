@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -222,3 +223,71 @@ class TestMalformedBaseInputsNeverRaise:
         run = _setup(tmp_path, 2, 4)
         run.base["config/knob.yaml"] = "sec: ["
         assert run.go({5})[0] == []
+
+
+_MKEY = "docs/contracts/c.yaml#thing"
+_MREL = "docs/decision-migration/consolidations/m.yaml"
+
+
+def _manifest_root(tmp_path: Path, target_present: bool) -> None:
+    stub = (
+        "## Decision 1: Old (Decided)\n\n**Status:** Superseded\n\n**Decision:** Superseded by Decision 4.\n\n"
+        "**Superseded by: Decision 4**\n\n---\n\n"
+    )
+    entry = _entry(
+        4,
+        extra=f"supersedes: [1]\ndelegates:\n  - key: {_MKEY}\n    change_rule: operator_approval\n    bounds: {{text: x}}\n",
+    )
+    files = {
+        DECISIONS: stub + entry,
+        _MREL: yaml.safe_dump({"supersedes": [1], "units": [{"id": "1 decision p1", "delegated": [_MKEY]}]}),
+        "docs/decisions-index.json": json.dumps(
+            {"decisions": [{"number": 1, "currency": "superseded_compacted"}, {"number": 4, "currency": "current"}]}
+        ),
+    }
+    if target_present:
+        files["docs/contracts/c.yaml"] = "thing: v\n"
+    for rel, text in files.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text, encoding="utf-8")
+
+
+def _production_run(tmp_path: Path, changed: list[str], baseline: set[int] | None, base_text: str | None):
+    with (
+        patch("scripts.checks._common.ROOT", tmp_path),
+        patch("scripts.checks._common.get_changed_files", return_value=changed),
+    ):
+        failed: list[str] = []
+        registry.pop_declaration()
+        validate_delegated_key_changes(failed, baseline_reader=lambda r: baseline, base_text_reader=lambda r, rel: base_text)
+        return failed, registry.pop_declaration()
+
+
+@pytest.mark.parametrize(
+    ("changed", "baseline", "base_text"),
+    [
+        (["a.py"], set(), "delegates:"),
+        (["x.yaml"], set(), None),
+        (["x.yaml"], None, "delegates:"),
+        (["x.yaml"], set(), "delegates:"),
+    ],
+    ids=["py_only_diff", "base_without_delegates", "origin_main_unreachable", "full_path"],
+)
+def test_unresolved_manifest_target_fails_on_any_diff(
+    tmp_path: Path, changed: list[str], baseline: set[int] | None, base_text: str | None
+) -> None:
+    _manifest_root(tmp_path, target_present=False)
+    failed, _ = _production_run(tmp_path, changed, baseline, base_text)
+    assert "Consolidation manifests" in failed
+
+
+def test_a_resolving_manifest_passes_and_counts_its_units(tmp_path: Path) -> None:
+    _manifest_root(tmp_path, target_present=True)
+    failed, declaration = _production_run(tmp_path, ["a.py"], set(), None)
+    assert failed == [] and declaration.kind == "examined" and declaration.count == 1
+    assert declaration.unit == "consolidation_units"
+
+
+def test_with_no_manifest_the_check_is_unchanged(tmp_path: Path) -> None:
+    failed, declaration = _production_run(tmp_path, ["a.py"], set(), "delegates:")
+    assert failed == [] and declaration.count == 0 and declaration.unit == "base_delegations"

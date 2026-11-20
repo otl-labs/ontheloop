@@ -43,6 +43,7 @@ from typing import Optional
 import yaml
 
 from scripts.checks import _common, registry
+from scripts.checks.decisions import consolidation
 from scripts.decisions_md import _extract_title_relation_targets, _iter_decision_sections, extract_entry_envelope
 
 _LIVE_REL_PATH = "docs/DECISIONS.md"
@@ -234,6 +235,10 @@ def validate_supersession_annotations(failed: list[str], root: Path | None = Non
     """
     print(f"\n=== {_GUARD_NAME} (DPI-01/DPI-06/DPI-03-ext) ===")
     root = root if root is not None else _common.ROOT
+    threshold = consolidation.load_threshold(root)
+    warn = consolidation.candidates_warn_line(consolidation.load_rows(root), threshold) if threshold else None
+    if warn:
+        print(warn)
 
     waived_edges = _load_waivers(root, failed)
     if waived_edges is None:

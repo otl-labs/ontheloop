@@ -50,3 +50,22 @@ def test_attempt_and_probe_fields():
     assert events[1]["record"]["response_id"] == "resp-1" and events[1]["attempts"][0]["provider"] == "p"
     _, plain = fakes.drive(fakes.ScriptedTransport([fakes.final()]))
     assert plain[1]["probe_record"] is None
+
+
+def test_header_schema_two_and_capture_defaults():
+    assert ev.header("c", "p", 1, "h", "i", 1)["schema"] == 2
+    capture = ev.Capture()
+    assert (capture.filled, capture.attempts, capture.in_flight, capture.record, capture.probe_record) == (
+        False,
+        [],
+        None,
+        None,
+        None,
+    )
+    assert ev.Capture().attempts is not capture.attempts
+
+
+def test_cancelled_dict_overrides_outcome_and_latency():
+    fixed = ev.cancelled_dict(fakes.attempt(), 77)
+    assert (fixed["outcome"], fixed["latency_ms"]) == ("cancelled", 77)
+    assert (fixed["role"], fixed["attempt"], fixed["provider"], fixed["started_at_ms"]) == ("primary", 1, "p", 1000)
