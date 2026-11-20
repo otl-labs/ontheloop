@@ -20,7 +20,7 @@ if [ "$HAS_MCP_GITHUB" -ne 1 ] && { [ "$HAS_GIT" -ne 1 ] || [ "$HAS_PUSH" -ne 1 
 fi
 
 STATUS=2
-trap 'exit $STATUS' EXIT
+trap '[ "$STATUS" -eq 2 ] && echo "HOOK-BLOCK v1 hook=handoff_evidence_gate" >&2; exit $STATUS' EXIT
 
 if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
     echo "handoff-evidence-gate: carve-out (GITHUB_ACTIONS=true) -- not enforced in this environment" >&2
