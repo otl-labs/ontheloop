@@ -9,11 +9,16 @@ PLAN-platform-iam-bootstrap-adopt move of the grant into terraform/bootstrap nee
       verbs and whose Resource is the single platform-security-trail ARN template;
   (c) that statement's policy is attached only to PlatformAdmin;
   (d) cloudtrail:StopLogging, cloudtrail:DeleteTrail, cloudtrail:* and any cloudtrail
-      Delete*/Stop*/Put*/Update*/Create* wildcard appear nowhere.
+      Delete*/Stop*/Put*/Update*/Create* wildcard appear nowhere as a grant.
+Read per account until the organisation trail (Decision 202 note, PLAN-sit-organization): a quoted verb
+inside a statement whose Effect is Deny is not a grant (an SCP names StopLogging to forbid it), and
+terraform/organization's policy templates are read as JSON, admitting exactly one second write
+statement, Sid OrgSecurityTrailManage, on the management trail, read only by OrganizationAdmin's inline policy.
 """
 
 from __future__ import annotations
 
+import json
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -117,13 +122,50 @@ _READ_RE = re.compile(r"^cloudtrail:(?:Get|Describe|List)[A-Za-z*]*$|^cloudtrail
 _ADMIN_ROLE_REFS = {'"PlatformAdmin"', "aws_iam_role.platform_admin.name", "aws_iam_role.platform_admin.id"}
 
 
+ORG_SID = "OrgSecurityTrailManage"
+ORG_FILE = "terraform/organization/policies/organization_admin.json.tftpl"
+ORG_TRAIL_ARN = "arn:aws:cloudtrail:${region}:${account_id}:trail/agent-platform-org-security-trail"
+_ORG_TEMPLATE_REF = re.compile(r"policies/organization_admin\.json\.tftpl")
+
+
 def terraform_texts() -> dict[str, str]:
     root = _REPO_ROOT / "terraform"
+    paths = [*root.rglob("*.tf"), *(root / "organization" / "policies").glob("*.json.tftpl")]
     return {
-        str(p.relative_to(_REPO_ROOT)): p.read_text(encoding="utf-8")
-        for p in sorted(root.rglob("*.tf"))
-        if ".terraform" not in p.parts
+        str(p.relative_to(_REPO_ROOT)): p.read_text(encoding="utf-8") for p in sorted(paths) if ".terraform" not in p.parts
     }
+
+
+def _is_template(path: str) -> bool:
+    return path.endswith(".json.tftpl")
+
+
+def _object_effect(text: str, open_idx: int) -> str | None:
+    """The Effect of the object opened at open_idx (its own top level, nested objects blanked)."""
+    body = _block_body(text, open_idx)
+    masked = _mask(body)
+    depth, top = 0, []
+    for i, ch in enumerate(body):
+        if masked[i] == "{":
+            depth += 1
+        top.append(" " if depth else ch)
+        if masked[i] == "}":
+            depth -= 1
+    m = re.search(r'\bEffect\s*=\s*"(\w+)"', _strip_comments("".join(top)))
+    return None if m is None else m.group(1)
+
+
+def _is_deny_only(text: str, offset: int) -> bool:
+    """True when every enclosing object that carries an Effect says Deny (and at least one does)."""
+    masked = _mask(text)
+    stack: list[int] = []
+    for i in range(offset):
+        if masked[i] == "{":
+            stack.append(i)
+        elif masked[i] == "}" and stack:
+            stack.pop()
+    effects = [e for e in (_object_effect(text, i) for i in stack) if e]
+    return bool(effects) and all(e == "Deny" for e in effects)
 
 
 def _container(text: str, offset: int) -> tuple[str, str] | None:
@@ -156,7 +198,15 @@ def statements(texts: dict[str, str]) -> list[dict]:
 
 
 def cloudtrail_occurrences(texts: dict[str, str]) -> list[tuple[str, str]]:
-    return [(p, a) for p, t in texts.items() for a in re.findall(r'"(cloudtrail:[^"]*)"', _strip_comments(t))]
+    """Every quoted cloudtrail verb in the .tf texts that sits in a grant (a Deny statement grants nothing)."""
+    out: list[tuple[str, str]] = []
+    for path, text in texts.items():
+        if _is_template(path):
+            continue
+        for m in re.finditer(r'"(cloudtrail:[^"]*)"', _strip_comments(text)):
+            if not _is_deny_only(text, m.start()):
+                out.append((path, m.group(1)))
+    return out
 
 
 def _attached_roles(texts: dict[str, str], container: tuple[str, str]) -> list[str]:
@@ -174,7 +224,60 @@ def _attached_roles(texts: dict[str, str], container: tuple[str, str]) -> list[s
     return roles
 
 
+def _as_list(value: object) -> list[str]:
+    return [value] if isinstance(value, str) else [str(v) for v in value or []]  # type: ignore[union-attr]
+
+
+def _template_problems(texts: dict[str, str]) -> list[str]:
+    """Allow statements in terraform/organization's policy templates, read as JSON."""
+    problems: list[str] = []
+    writes: list[tuple[str, dict]] = []
+    for path, text in sorted(texts.items()):
+        if not _is_template(path):
+            continue
+        try:
+            doc = json.loads(text)
+        except ValueError:
+            problems.append(f"{path}: not valid JSON")
+            continue
+        stmts = doc.get("Statement", [])
+        for stmt in [stmts] if isinstance(stmts, dict) else stmts:
+            if stmt.get("Effect") != "Allow":
+                continue
+            verbs = [a for a in _as_list(stmt.get("Action")) if a.startswith("cloudtrail:")]
+            problems += [f"{path}: banned {a}" for a in verbs if a in _BANNED_EXACT or _BANNED_WILDCARD_RE.match(a)]
+            if any(not _READ_RE.match(a) for a in verbs):
+                writes.append((path, stmt))
+    if not writes:
+        return problems
+    if len(writes) != 1:
+        return problems + [f"expected at most one template write statement, found {len(writes)}"]
+    path, stmt = writes[0]
+    if path != ORG_FILE or stmt.get("Sid") != ORG_SID:
+        problems.append(f"{path}: template write statement {stmt.get('Sid')} is not {ORG_SID} in {ORG_FILE}")
+    actions = _as_list(stmt.get("Action"))
+    if set(actions) != SIX or len(actions) != len(SIX):
+        problems.append(f"{ORG_SID} actions {sorted(actions)} != the six trail-management verbs")
+    if _as_list(stmt.get("Resource")) != [ORG_TRAIL_ARN]:
+        problems.append(f"{ORG_SID} Resource {stmt.get('Resource')!r} is not the single management trail ARN template")
+    readers = [
+        (atype, _attr(_resource_body(t, atype, aname) or "", "role"))
+        for t in texts.values()
+        if not _is_template(t)
+        for _, atype, aname in _resources(t)
+        if _ORG_TEMPLATE_REF.search(_resource_body(t, atype, aname) or "")
+    ]
+    if not readers or any(r != ("aws_iam_role_policy", "aws_iam_role.organization_admin.name") for r in readers):
+        problems.append(f"{ORG_SID} template is read by {readers or 'nothing'}, not only OrganizationAdmin's inline policy")
+    return problems
+
+
 def grant_problems(texts: dict[str, str]) -> list[str]:
+    problems = _tf_grant_problems({p: t for p, t in texts.items() if not _is_template(p)})
+    return problems + _template_problems(texts)
+
+
+def _tf_grant_problems(texts: dict[str, str]) -> list[str]:
     occurrences = cloudtrail_occurrences(texts)
     problems = (
         [] if any(a == "cloudtrail:LookupEvents" for _, a in occurrences) else ["cloudtrail:LookupEvents is granted nowhere"]
@@ -217,6 +320,32 @@ _SECOND_CREATE_TRAIL = """locals {
   })
 }
 """
+_ALLOW_NESTING_DENY = """locals {
+  p = jsonencode({
+    Statement = [
+      {
+        Sid      = "Other"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
+        Resource = "*"
+        Nested = {
+          Effect = "Deny"
+          Action = ["cloudtrail:StopLogging"]
+        }
+      },
+    ]
+  })
+}
+"""
+_DENY_ONLY = """locals {
+  p = {
+    deny_stop = {
+      Effect = "Deny"
+      Action = ["cloudtrail:StopLogging", "cloudtrail:DeleteTrail"]
+    }
+  }
+}
+"""
 _DEV_ATTACHMENT = """resource "aws_iam_role_policy_attachment" "dev" {
   role       = "PlatformDev"
   policy_arn = aws_iam_policy.platform_security_admin.arn
@@ -250,6 +379,32 @@ _REDS: dict[str, Callable[[dict[str, str]], dict[str, str]]] = {
     },
     "Resource of star": lambda t: {**t, _ADMIN_FILE: t[_ADMIN_FILE].replace(f'Resource = "{TRAIL_ARN}"', 'Resource = "*"')},
     "LookupEvents removed": lambda t: {k: v.replace('"cloudtrail:LookupEvents",', "") for k, v in t.items()},
+    "Allow statement nesting a Deny-shaped map": lambda t: {**t, "terraform/personal/x.tf": _ALLOW_NESTING_DENY},
+    "StopLogging allowed in the org template": lambda t: {
+        **t,
+        ORG_FILE: t[ORG_FILE].replace('"cloudtrail:AddTags"', '"cloudtrail:StopLogging", "cloudtrail:AddTags"'),
+    },
+    "seventh verb in OrgSecurityTrailManage": lambda t: {
+        **t,
+        ORG_FILE: t[ORG_FILE].replace('"cloudtrail:AddTags"', '"cloudtrail:PutInsightSelectors", "cloudtrail:AddTags"'),
+    },
+    "OrgSecurityTrailManage on another trail": lambda t: {
+        **t,
+        ORG_FILE: t[ORG_FILE].replace("trail/agent-platform-org-security-trail", "trail/other-trail"),
+    },
+    "third write statement": lambda t: {
+        **t,
+        ORG_FILE: t[ORG_FILE].replace(
+            '"Statement": [',
+            '"Statement": [\n    {"Sid": "Extra", "Effect": "Allow", "Action": ["cloudtrail:CreateTrail"], "Resource": "*"},',
+        ),
+    },
+    "org template read by another role": lambda t: {
+        **t,
+        "terraform/organization/management_admin.tf": t["terraform/organization/management_admin.tf"].replace(
+            "role   = aws_iam_role.organization_admin.name", 'role   = "PlatformDev"'
+        ),
+    },
     "wildcard Delete verb": lambda t: {**t, "terraform/personal/x.tf": 'locals {\n  a = ["cloudtrail:Delete*"]\n}\n'},
 }
 
@@ -261,6 +416,17 @@ class TestCloudTrailWriteGrantScoped:
     def test_manage_statement_is_parsed(self) -> None:
         manage = [s for s in statements(terraform_texts()) if s["sid"] == SID]
         assert [s["container"] for s in manage] == [("aws_iam_policy", "platform_security_admin")]
+
+    def test_deny_statements_are_not_grants(self) -> None:
+        base = terraform_texts()
+        assert grant_problems({**base, "terraform/personal/x.tf": _DENY_ONLY}) == []
+        denied = json.loads(base[ORG_FILE])
+        denied["Statement"].append({"Effect": "Deny", "Action": ["cloudtrail:StopLogging"], "Resource": "*"})
+        assert grant_problems({**base, ORG_FILE: json.dumps(denied)}) == []
+
+    def test_org_write_statement_is_parsed(self) -> None:
+        doc = json.loads(terraform_texts()[ORG_FILE])
+        assert [s["Sid"] for s in doc["Statement"] if s["Sid"] == ORG_SID] == [ORG_SID]
 
     @pytest.mark.parametrize("label", sorted(_REDS))
     def test_red_case(self, label: str) -> None:

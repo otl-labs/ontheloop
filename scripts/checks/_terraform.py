@@ -112,7 +112,7 @@ def _is_proxy_blocked_init(output: str) -> bool:
 # terraform/github/ is the isolated GitHub-settings module (T2.12), CI-applied behind one operator approval
 # by terraform-github-apply.yml (Decision 248).
 # terraform/bootstrap/ is the CI/CD bootstrap root (admin-only, NEVER auto-apply -- CD.35 Wave 4 / T2.23).
-_TERRAFORM_ROOTS = ("terraform/personal", "terraform/github", "terraform/bootstrap")
+_TERRAFORM_ROOTS = ("terraform/personal", "terraform/github", "terraform/bootstrap", "terraform/organization")
 
 
 def _terraform_init_with_retry(label: str, cmd: list[str], failed: list[str]) -> str:

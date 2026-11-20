@@ -1,8 +1,10 @@
-"""Independent re-derivation of the usage verbs (model_usage_rollup, tool_use_rollup, session_startup_baseline) from deduped
+"""Independent re-derivation of the usage verbs (model_usage_rollup, tool_use_rollup, session_startup_baseline,
+friction_signature_counts) from deduped
 stored rows: pure functions over passed-in rows, no catalog, no SQL (Decision 84 I-3).
 
 Written from the contract text of PLAN-telemetry-usage-reader-verbs (docs/contracts/ducklake_telemetry_reader.yaml, usage
-verbs invariant), never from src/common/ducklake_event_read_sql.py. A tree is the deduped rows sharing one root's
+verbs invariant), never from src/common/ducklake_event_read_sql.py or the SQL text in ducklake_event_read_verbs.py. A tree is
+the deduped rows sharing one root's
 (tenant_id, project_id, session_started_at) pin (Decision 199 cl.2); every row is a derivation over one tree, and a verb never
 sums across trees. Dedupe, generations and the per-session conflict owner come from derive.Scope and dedupe.py; column names
 come from ducklake_reader_client.VERB_FIELDS (never from src.common.event_usage_fields, which the oracle allowlist excludes).
@@ -21,7 +23,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
 from scripts.telemetry_verify.dedupe import Row, normalise_row
-from scripts.telemetry_verify.derive import AGENTS, OBSERVATIONS, SESSIONS, TRANSCRIPTS, Scope, Tables
+from scripts.telemetry_verify.derive import AGENTS, OBSERVATIONS, SESSIONS, TRANSCRIPTS, Scope, Tables, labelled_facts
+from src.common.ducklake_event_read_verbs import FRICTION_RULES
 from src.common.ducklake_reader_client import VERB_FIELDS
 
 _MCP_SERVER = re.compile(r"^mcp__(.+?)__")
@@ -274,4 +277,39 @@ def session_tree_rollup(tables: Tables, projects: Mapping[str, str], day_from: s
             ],
         }
         out.append((pin[2], _nulls_last(columns["root_session_id"]), pin[1], row))
+    return trees.finish([entry[-1] for entry in sorted(out, key=lambda e: e[:-1])])
+
+
+def friction_signature_counts(tables: Tables, projects: Mapping[str, str], day_from: str, day_to: str) -> list[dict[str, Any]]:
+    """The friction facts of each session (derive.labelled_facts, run once per session) grouped per tree and workflow."""
+    trees = _Trees(tables, projects, day_from, day_to, "friction_signature_counts")
+    groups: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for pin, sids in trees.pins.items():
+        for sid in sids:
+            mine = [r for r in trees.observations if _pin(r) == pin and r["session_id"] == sid]
+            workflow = _first(trees.session_rows.get((pin, sid), []), "workflow")
+            for _ref, label, klass, rule_id, generic, kind, name, disposition in labelled_facts(mine):
+                group = groups.setdefault(
+                    (pin, workflow, kind, name, disposition, rule_id, label, klass, generic), {"facts": 0, "sessions": set()}
+                )
+                group["facts"] += 1
+                group["sessions"].add(sid)
+    out = []
+    for (pin, workflow, kind, name, disposition, rule_id, label, klass, generic), group in groups.items():
+        row = {
+            **trees.tree_columns(pin),
+            "workflow": workflow,
+            "observation_type": kind,
+            "signature": name,
+            "disposition": disposition,
+            "rule_id": rule_id,
+            "label": label,
+            "class": klass,
+            "generic": generic,
+            "fact_count": group["facts"],
+            "session_count": len(group["sessions"]),
+            "classifier_version": FRICTION_RULES["classifier_version"],
+        }
+        order = (row["session_started_at"], _nulls_last(row["root_session_id"]), pin[1])
+        out.append((*order, *map(_nulls_last, (workflow, kind, name, disposition, rule_id)), row))
     return trees.finish([entry[-1] for entry in sorted(out, key=lambda e: e[:-1])])

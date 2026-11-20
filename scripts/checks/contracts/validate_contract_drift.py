@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 from scripts.checks import _common, registry
 from scripts.checks.contracts import _amendment_retention, _evaluator_coverage, _population, _shared
+from scripts.contract_rules import parse_yaml
 
 if TYPE_CHECKING:
     from scripts.contracts_schema import ContractDocument, ContractMeta
@@ -203,7 +204,7 @@ def validate_contract_drift(
             census.scanned += 1
             try:
                 raw_text = p.read_text(encoding="utf-8")
-                data = _yaml.safe_load(raw_text)
+                data = parse_yaml(raw_text)
             except (OSError, UnicodeDecodeError, _yaml.YAMLError) as exc:
                 failed.append(f"Contract drift (cat-1): {name}: {exc}")
                 census.skipped += 1
@@ -361,7 +362,7 @@ def validate_contract_drift(
                     continue
                 rel_path = f"{_DOCS_CONTRACTS_PREFIX}{name}"
                 try:
-                    head_data = _yaml.safe_load(p.read_text(encoding="utf-8"))
+                    head_data = parse_yaml(p.read_text(encoding="utf-8"))
                 except (OSError, UnicodeDecodeError, _yaml.YAMLError):
                     continue
                 if not isinstance(head_data, dict):
@@ -380,7 +381,7 @@ def validate_contract_drift(
                     continue  # genuinely new -- nothing to diff against
 
                 try:
-                    base_data = _yaml.safe_load(base_text)
+                    base_data = parse_yaml(base_text)
                 except _yaml.YAMLError:
                     continue
                 if not isinstance(base_data, dict):
@@ -453,7 +454,7 @@ def _load_router_routes(router_path: Path, yaml_module) -> list[dict]:
     authoritative (validate_placement owns strict router validation); this gate only consults it
     for the topic-equals-subject cross-check."""
     try:
-        data = yaml_module.safe_load(router_path.read_text(encoding="utf-8"))
+        data = parse_yaml(router_path.read_text(encoding="utf-8"))
     except (OSError, yaml_module.YAMLError):
         return []
     if not isinstance(data, dict):

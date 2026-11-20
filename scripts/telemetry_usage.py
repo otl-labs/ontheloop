@@ -1,16 +1,19 @@
 """Agent CLI for production usage questions: per-model tokens, tool use and startup baselines over a date range.
 
-    bin/venv-python -m scripts.telemetry_usage {models|tools|startup|trees} --from YYYY-MM-DD --to YYYY-MM-DD
-        [--by-root] [--by-agent] [--max-windows N]
+    bin/venv-python -m scripts.telemetry_usage {models|tools|startup|trees|friction} --from YYYY-MM-DD --to YYYY-MM-DD
+        [--by-root] [--by-agent] [--workflow NAME|none] [--max-windows N]
     bin/venv-python -m scripts.telemetry_usage plans [--last N] [--as-of REF] [--lookback-days D]
 
 Each command reads one telemetry reader window verb (model_usage_rollup, tool_use_rollup, session_startup_baseline,
-session_tree_rollup), which
+session_tree_rollup, friction_signature_counts), which
 answers at most seven UTC days of per-tree rows and never sums across trees (Decision 199 cl.1). The range is split into
 consecutive windows of at most seven days and the rows are summed here: exact, because every tree row carries its root's
 partition pin and so lands in exactly one window. A window the reader refuses as too large (413) or too slow (504) is halved
 down to one day. Any other failed window prints no total and exits 1 naming the window and error_type (Decision 215); the
-call count is bounded and printed (Decision 88). One JSON object goes to stdout; windows and calls go to stderr.
+call count is bounded and printed (Decision 88). One JSON object goes to stdout; windows and calls go to stderr. friction
+answers by_classifier_version in place of rows: per classifier_version, the process_event facts, the generic ones, their
+share (null without process_event facts) and every signature ranked by fact_count;
+versions are never mixed. --workflow keeps one workflow (none keeps the null workflow).
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ VERBS = {
     "tools": "tool_use_rollup",
     "startup": "session_startup_baseline",
     "trees": "session_tree_rollup",
+    "friction": "friction_signature_counts",
 }
 THREAD_PREFIX = "claude/project-thread-"
 PLANNING_WORKFLOWS = frozenset({"plan", "decision-scout", "plan-critique"})
@@ -247,6 +251,38 @@ def trees(rows: list[dict[str, Any]], args: argparse.Namespace) -> list[dict[str
     return out
 
 
+def friction(rows: list[dict[str, Any]], args: argparse.Namespace) -> dict[str, Any]:
+    if args.workflow is not None:
+        want = None if args.workflow == "none" else args.workflow
+        rows = [r for r in rows if r.get("workflow") == want]
+    out: dict[str, Any] = {}
+    for version in sorted({r["classifier_version"] for r in rows}):
+        mine = [r for r in rows if r["classifier_version"] == version]
+        events = [r for r in mine if r["observation_type"] == "process_event"]
+        generic = _sum(r["fact_count"] for r in events if r["generic"]) or 0
+        total = _sum(r["fact_count"] for r in events) or 0
+        keys = ("observation_type", "signature", "disposition", "rule_id", "label", "generic")
+        signatures = [
+            {
+                **dict(zip(keys, key)),
+                "fact_count": _sum(r["fact_count"] for r in group),
+                "session_count": _sum(r["session_count"] for r in group),
+            }
+            for key, group in _group(mine, lambda r: tuple(r.get(k) for k in keys))
+        ]
+        signatures.sort(
+            key=lambda x: (-x["fact_count"], *((v is None, "" if v is None else str(v)) for v in (x[k] for k in keys[:4])))
+        )
+        out[str(version)] = {
+            "process_event_facts": total,
+            "generic_process_event_facts": generic,
+            "unmapped_failure_share": generic / total if total else None,
+            "tool_call_facts": _sum(r["fact_count"] for r in mine if r["observation_type"] == "tool_call") or 0,
+            "signatures": signatures,
+        }
+    return out
+
+
 SUMMARIES = {"models": models, "tools": tools, "startup": startup, "trees": trees}
 
 
@@ -327,6 +363,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--lookback-days", type=int, default=DEFAULT_LOOKBACK_DAYS, help="plans: days before the oldest merge")
     parser.add_argument("--by-root", action="store_true", help="keep one row per thread tree (keyed by harness_session_key)")
     parser.add_argument("--by-agent", action="store_true", help="split root from sub-agent rows (tools, startup)")
+    parser.add_argument(
+        "--workflow", default=None, help="friction: keep one workflow's rows (none = interactive, null workflow)"
+    )
     parser.add_argument("--max-windows", type=int, default=DEFAULT_MAX_WINDOWS, help="refuse a longer range before any call")
     parser.epilog = (
         "tools: session_row_count sums the verb's per-row session_count, so a session whose calls of one tool differ in "
@@ -372,8 +411,14 @@ def run(
 ) -> int:
     out, err = out or sys.stdout, err or sys.stderr
     args = _parser().parse_args(argv)
+    if args.workflow is not None and args.command != "friction":
+        print("telemetry_usage: --workflow applies to friction only", file=err)
+        return 2
     if args.command == "plans":
         return _run_plans(args, reader, out, err, commits)
+    if args.command == "friction" and (args.by_root or args.by_agent):
+        print("telemetry_usage: friction takes no --by-root or --by-agent", file=err)
+        return 2
     if args.first is None or args.last is None or args.last < args.first or (args.command == "models" and args.by_agent):
         print("telemetry_usage: invalid arguments (range missing or reversed, or --by-agent with models)", file=err)
         return 2
@@ -390,14 +435,17 @@ def run(
         print(f"telemetry_usage FAIL {exc}", file=err)
         return 1
     print(f"calls={reads.calls}", file=err)
-    result = {
+    result: dict[str, Any] = {
         "verb": VERBS[args.command],
         "from": args.first.isoformat(),
         "to": args.last.isoformat(),
         "calls": reads.calls,
         "conflicted_rows": sum(1 for r in reads.rows if r.get("derivation_conflicted")),
-        "rows": SUMMARIES[args.command](reads.rows, args),
     }
+    if args.command == "friction":
+        result["by_classifier_version"] = friction(reads.rows, args)
+    else:
+        result["rows"] = SUMMARIES[args.command](reads.rows, args)
     print(json.dumps(result, sort_keys=True, default=str), file=out)
     return 0
 

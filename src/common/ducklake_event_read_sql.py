@@ -1,7 +1,7 @@
 """SQL templates for the telemetry event-journal reads (Decision 199, 207).
 
 Strings only: nothing here runs SQL, reads a file or can raise at import. Placeholders ({scope}, {sessions}, {cmp_sessions},
-{idle_seconds}, {rules}, ...) are SQL text rendered server-side by src.common.ducklake_event_reads; every caller value reaches
+{idle_seconds}, ...) are SQL text rendered server-side by src.common.ducklake_event_reads; every caller value reaches
 the statement as a bound named parameter ($session_id, $as_of, $part_from, $part_to, $meta_schema), never as text.
 
 One rule, one copy: the R4/R5 dedupe, the conflict report, the session/agent-run state rule and the root turn rule (SE-1..SE-3)
@@ -261,62 +261,6 @@ MODEL_CALL_COST_SQL = compose(
     + " FROM o "
     + STAMPS_JOIN.format(sid="o.session_id")
     + " WHERE o.observation_type = 'model_call' ORDER BY o.event_timestamp, o.observation_id",
-)
-
-# Friction (REPORT-w1-friction-classifier.md section 2; classifier_version 2): facts are process_events at severity
-# error/warning/critical and tool_call closes with outcome error/blocked; one label per fact (an exact signature beats a
-# literal signature prefix, which beats the generic rule); a tool_call close at error or blocked whose own child
-# process_event at error is already a fact is absorbed, not counted twice; rework is the repeat-run rule over named closes.
-FRICTION_CTES = (
-    "f AS (SELECT * FROM o WHERE (observation_type = 'process_event' AND severity IN ('error', 'warning', 'critical')) "
-    "OR (observation_type = 'tool_call' AND event_kind = 'close' AND outcome IN ('error', 'blocked'))), "
-    "rules AS (SELECT * FROM {rules}), "
-    "absorbed AS (SELECT c.session_id AS session_id, c.observation_id AS observation_id FROM f c "
-    "WHERE c.observation_type = 'tool_call' AND c.outcome IN ('error', 'blocked') AND EXISTS ("
-    "SELECT 1 FROM f h WHERE h.observation_type = 'process_event' AND h.severity = 'error' "
-    "AND h.parent_observation_id = c.observation_id)), "
-    "labelled AS (SELECT f.session_id AS session_id, f.observation_id AS ref, r.label AS label, r.class AS class, "
-    "row_number() OVER (PARTITION BY f.observation_id "
-    "ORDER BY r.signature IS NULL, r.signature_prefix IS NULL, r.rule_id) AS rk "
-    "FROM f JOIN rules r ON r.observation_type = f.observation_type AND r.disposition = coalesce(f.severity, f.outcome) "
-    "AND (r.signature IS NULL OR r.signature = f.name) "
-    "AND (r.signature_prefix IS NULL OR starts_with(f.name, r.signature_prefix)) "
-    "WHERE f.observation_id NOT IN (SELECT observation_id FROM absorbed)), "
-    "seq0 AS (SELECT session_id, observation_id, parent_observation_id, name, outcome, "
-    "row_number() OVER (PARTITION BY parent_observation_id, name ORDER BY event_timestamp, source_ordinal) AS pos, "
-    "row_number() OVER (PARTITION BY parent_observation_id, name, outcome ORDER BY event_timestamp, source_ordinal) AS pos_o "
-    "FROM o WHERE observation_type = 'tool_call' AND event_kind = 'close' AND name IS NOT NULL), "
-    "seq AS (SELECT *, pos - pos_o AS run FROM seq0), "
-    "friction AS (SELECT session_id, ref, label, class FROM labelled WHERE rk = 1 UNION ALL "
-    "SELECT min(session_id), min_by(observation_id, pos), '{run_label}', '{run_class}' FROM seq WHERE outcome = 'error' "
-    "GROUP BY parent_observation_id, name, run HAVING count(*) >= {repeat_threshold})"
-)
-
-# Facts only (ref, label, class): the test seam for the committed friction vectors, sharing FRICTION_CTES with the verb.
-FRICTION_FACTS_SQL = compose((SESSIONS, OBSERVATIONS), FRICTION_CTES + " SELECT ref, label, class FROM friction")
-
-FRICTION_ROLLUP_SQL = compose(
-    (SESSIONS, OBSERVATIONS),
-    FRICTION_CTES + ", ids AS (SELECT session_id FROM s UNION SELECT session_id FROM o), "
-    "by_label AS (SELECT session_id, label, count(*) AS n FROM friction GROUP BY session_id, label), "
-    "cnt AS (SELECT session_id, count(*) FILTER (WHERE class = 'rework') AS rework_total, "
-    "count(*) FILTER (WHERE class = 'exception') AS exception_total, "
-    "count(*) FILTER (WHERE label = 'unmapped_block') AS unmapped_count FROM friction GROUP BY session_id), "
-    "abs_cnt AS (SELECT session_id, count(*) AS absorbed_count FROM absorbed GROUP BY session_id), "
-    "labels AS (SELECT session_id, list(struct_pack(label := label, n := n) ORDER BY label) AS label_counts "
-    "FROM by_label GROUP BY session_id) "
-    "SELECT ids.session_id AS session_id, coalesce(cnt.rework_total, 0) AS rework_total, "
-    "coalesce(cnt.exception_total, 0) AS exception_total, coalesce(labels.label_counts, []) AS label_counts, "
-    "coalesce(cnt.unmapped_count, 0) AS unmapped_count, coalesce(abs_cnt.absorbed_count, 0) AS absorbed_count, "
-    "CAST({classifier_version} AS BIGINT) AS classifier_version, "
-    + STAMPS_SELECT
-    + _ROLLUP_TAIL.replace(
-        "LEFT JOIN gens",
-        "LEFT JOIN labels ON labels.session_id = ids.session_id LEFT JOIN abs_cnt ON abs_cnt.session_id = ids.session_id "
-        "LEFT JOIN gens",
-        1,
-    )
-    + " ORDER BY ids.session_id",
 )
 
 # Catalog metadata only (no data file): per-table committed record counts and the pinned meta schema as a bound value.
