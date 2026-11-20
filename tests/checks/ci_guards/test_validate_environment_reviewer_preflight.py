@@ -113,7 +113,14 @@ def test_a_expression_environment_name_is_refused(wfs, declared) -> None:
     assert any("expression" in x for x in v.check_environment_names(wfs, declared))
 
 
-def test_b_ui_managed_name_also_declared_in_hcl_fails(tree) -> None:
+def test_pypi_is_declared_in_hcl(tree) -> None:
+    declared = v.declared_environments(tree[1])
+    assert "pypi" in declared and declared["pypi"]["reviewers"] and declared["pypi"]["no_bypass"]
+    assert "pypi" not in v.UI_MANAGED
+
+
+def test_b_ui_managed_name_also_declared_in_hcl_fails(tree, monkeypatch) -> None:
+    monkeypatch.setattr(v, "UI_MANAGED", {"pypi": "rec-4549"})
     declared = v.declared_environments(tree[1])
     declared["pypi"] = {"reviewers": True, "no_bypass": False}
     assert any(x.startswith("b:") and "rec-4549" in x for x in v.check_environment_names({}, declared))
