@@ -164,3 +164,70 @@ class TestSharedWorktrees:
             assert (again / ".venv").is_symlink()
         assert (venv / "canary.txt").read_text(encoding="utf-8") == "keep\n"
         assert not path.exists()
+
+
+class TestEdgeBranches:
+    def test_git_worktree_adds_and_removes(self, tmp_path: Path) -> None:
+        repo = _repo(tmp_path)
+        with gg.git_worktree("HEAD", repo_root=repo) as wt:
+            assert (wt / "a.yaml").exists()
+        assert not wt.exists()
+
+    def test_git_worktree_bad_ref_raises(self, tmp_path: Path) -> None:
+        repo = _repo(tmp_path)
+        with pytest.raises(gg.GraduationError, match="worktree add failed"):
+            with gg.git_worktree("refs/heads/nope", repo_root=repo):
+                pass  # pragma: no cover
+
+    def test_remove_failure_falls_back_to_prune(self, tmp_path: Path) -> None:
+        repo = _repo(tmp_path)
+        real = gg.run_git
+        calls: list[list[str]] = []
+
+        def fake(args, cwd):
+            calls.append(args)
+            if args[:2] == ["worktree", "remove"]:
+                return subprocess.CompletedProcess(args, 1, stdout="", stderr="no")
+            return real(args, cwd)
+
+        with mock.patch.object(gg, "run_git", fake):
+            with gg.git_worktree("HEAD", repo_root=repo):
+                pass
+        assert ["worktree", "prune"] in calls
+
+    def test_header_without_newline_raises(self, tmp_path: Path) -> None:
+        repo = _repo(tmp_path)
+        bad = subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"")
+        with mock.patch.object(gg.subprocess, "run", return_value=bad):
+            with pytest.raises(gg.GraduationError, match="misframed before"):
+                gg.read_blobs_at_ref("HEAD", ["a.yaml"], repo)
+
+    def test_unexpected_header_raises(self, tmp_path: Path) -> None:
+        repo = _repo(tmp_path)
+        bad = subprocess.CompletedProcess([], 0, stdout=b"abc tree 5\nxxxxx\n", stderr=b"")
+        with mock.patch.object(gg.subprocess, "run", return_value=bad):
+            with pytest.raises(gg.GraduationError, match="unexpected header"):
+                gg.read_blobs_at_ref("HEAD", ["a.yaml"], repo)
+
+    def test_non_utf8_blob_raises(self, tmp_path: Path) -> None:
+        repo = _repo(tmp_path)
+        bad = subprocess.CompletedProcess([], 0, stdout=b"abc blob 2\n\xff\xfe\n", stderr=b"")
+        with mock.patch.object(gg.subprocess, "run", return_value=bad):
+            with pytest.raises(gg.GraduationError, match="not UTF-8"):
+                gg.read_blobs_at_ref("HEAD", ["a.yaml"], repo)
+
+    def test_restore_clean_failure_and_head_mismatch_raise(self, tmp_path: Path) -> None:
+        repo = _repo(tmp_path)
+        real = gg.run_git
+        for failing, match in ((["clean"], "clean failed"), (["rev-parse", "HEAD"], "recorded base")):
+            with gg.shared_worktrees(repo) as wt:
+                wt.get("HEAD")
+
+                def fake(args, cwd, failing=failing):
+                    if args[: len(failing)] == failing and cwd != repo:
+                        return subprocess.CompletedProcess(args, 0 if failing[0] == "rev-parse" else 1, "deadbeef\n", "no")
+                    return real(args, cwd)
+
+                with mock.patch.object(gg, "run_git", fake):
+                    with pytest.raises(gg.GraduationError, match=match):
+                        wt.get("HEAD")
