@@ -8,7 +8,7 @@ appends to `failed` here -- making any category blocking is out of scope (Decisi
 Decision 187 reversal c1): telling a genuinely-corrected assertion/tolerance from a quietly
 loosened one is the test-oracle problem, which this module does not attempt to solve. It only
 surfaces candidates; code review disposes each one (see validate_weakening_dispositions, the
-implement-PR leg that makes recording a disposition mandatory).
+gate that makes recording a disposition mandatory on every diff with candidates).
 
 find_candidates() is pure -- no I/O -- over injected (status, path) pairs and readers, so it is
 exercised identically by the mirror test, the real-history replay (VP step 7), and the registered

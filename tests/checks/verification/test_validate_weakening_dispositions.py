@@ -7,7 +7,6 @@ exercised without mocking git itself. No new conftest.py; fixtures live in this 
 
 from __future__ import annotations
 
-import subprocess
 import unittest.mock as mock
 from pathlib import Path
 
@@ -26,34 +25,22 @@ from scripts.checks.verification.validate_weakening_dispositions import (
     run_check,
     validate_weakening_dispositions,
 )
-
-_REVIEW_DISPOSITIONS_YAML = """
-invariants:
-  content:
-    review_dispositions:
-      refactor: "cite file.py::name"
-      planned-change: "cite acceptance_criteria[N] or test_obligations[N]"
-      retirement: "cite the deleted path or file.py::name"
-      growth-safe-pin: "cite file.py::name"
-      owned-skip: "cite rec-NNNN or env: label"
-      weakening: "never"
-"""
-
-
-def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
-    result = subprocess.run(["git", *args], cwd=str(repo), capture_output=True, text=True, encoding="utf-8")
-    assert result.returncode == 0, f"git {args} failed: {result.stderr}"
-    return result
+from tests.fixtures.weakening_dispositions_repo import (
+    STRONG_TEST,
+    WEAK_TEST,
+    commit_all,
+    init_repo,
+    planned_entry,
+    write,
+    write_plan,
+)
+from tests.fixtures.weakening_dispositions_repo import (
+    git as _git,
+)
 
 
 def _init_committed_repo(repo: Path) -> None:
-    """git init + identity config + one empty commit, for tests that only need a resolvable HEAD."""
-    _git(repo, "init", "-q")
-    _git(repo, "config", "user.email", "t@example.com")
-    _git(repo, "config", "user.name", "T")
-    (repo / ".gitkeep").write_text("", encoding="utf-8")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", "base")
+    init_repo(repo)
 
 
 def _cand(
@@ -65,37 +52,7 @@ def _cand(
 @pytest.fixture
 def repo(tmp_path: Path) -> tuple[Path, str]:
     root = tmp_path / "repo"
-    root.mkdir()
-    _git(root, "init", "-q")
-    _git(root, "config", "user.email", "t@example.com")
-    _git(root, "config", "user.name", "T")
-
-    (root / "scripts" / "checks").mkdir(parents=True)
-    (root / "scripts" / "checks" / "foo.py").write_text("def kept_fn():\n    pass\n", encoding="utf-8")
-    (root / "tests").mkdir()
-    (root / "tests" / "old_subject.py").write_text("def helper_fn():\n    pass\n", encoding="utf-8")
-    (root / "docs" / "contracts").mkdir(parents=True)
-    (root / "docs" / "contracts" / "implement-scope-boundary.yaml").write_text(_REVIEW_DISPOSITIONS_YAML, encoding="utf-8")
-
-    _git(root, "add", "-A")
-    _git(root, "commit", "-q", "-m", "base")
-    base_sha = _git(root, "rev-parse", "HEAD").stdout.strip()
-    return root, base_sha
-
-
-def _write_plan(root: Path, rel: str, weakening_dispositions: list[dict]) -> None:
-    path = root / rel
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        yaml.safe_dump(
-            {
-                "acceptance_criteria": ["ac 0", "ac 1"],
-                "test_obligations": [{"source": "x"}],
-                "weakening_dispositions": weakening_dispositions,
-            }
-        ),
-        encoding="utf-8",
-    )
+    return root, init_repo(root, {"tests/old_subject.py": "def helper_fn():\n    pass\n"})
 
 
 def _candidate_sources(category: str, path: str, node: str) -> dict:
@@ -123,15 +80,14 @@ class TestDispositionsRequired:
         status_changed: list[tuple[str, str]] | None = None,
         sources: dict | None = None,
     ) -> list[str]:
-        _write_plan(root, plan_rel, dispositions)
+        write_plan(root, plan_rel, dispositions)
         sources = sources or {}
-        changed = status_changed if status_changed is not None else [("M", p) for p in sources]
+        changed = (status_changed if status_changed is not None else [("M", p) for p in sources]) + [("M", plan_rel)]
         failed: list[str] = []
         run_check(
             failed,
             root=root,
             base=base_sha,
-            resolved=[plan_rel],
             status_changed=changed,
             read_base=lambda p: sources.get(p, (None, None))[0],
             read_head=lambda p: sources.get(p, (None, None))[1],
@@ -157,7 +113,7 @@ class TestDispositionsRequired:
     def test_stale_entry_fails(self, repo: tuple[Path, str]) -> None:
         root, base_sha = repo
         entry = {"candidate": "[assertion-removed] tests/gone.py::test_z", "disposition": "refactor", "cite": "x.py::y"}
-        failed = self._rc(root, base_sha, self._PLAN, [entry])
+        failed = self._rc(root, base_sha, self._PLAN, [entry], status_changed=[("M", "scripts/checks/foo.py")])
         assert any("stale" in f for f in failed)
 
     def test_unknown_disposition_fails(self, repo: tuple[Path, str]) -> None:
@@ -251,20 +207,43 @@ class TestDispositionsRequired:
         assert self._rc(root, base_sha, self._PLAN, [entry], sources=spec["sources"]) == []
 
 
-class TestImplementLegOnly:
-    def test_no_flip_is_noop_even_with_candidates(self, tmp_path: Path) -> None:
-        registry.pop_declaration()
-        failed: list[str] = []
-        import unittest.mock as mock
+def _validate_in(tmp_path: Path, status_changed: list[tuple[str, str]]) -> list[str]:
+    registry.pop_declaration()
+    failed: list[str] = []
+    with (
+        mock.patch("scripts.checks._common.status_diff_base", return_value="B"),
+        mock.patch("scripts.checks._common.push_context_base", return_value=None),
+        mock.patch("scripts.checks._common.get_status_aware_diff", return_value=status_changed),
+        mock.patch(
+            "scripts.checks.verification.validate_weakening_dispositions._read_file_at_ref",
+            return_value=STRONG_TEST,
+        ),
+        mock.patch(
+            "scripts.checks.verification.validate_weakening_dispositions._read_file",
+            side_effect=lambda root, rel: WEAK_TEST if rel == "tests/t.py" else None,
+        ),
+    ):
+        validate_weakening_dispositions(failed, root=tmp_path)
+    return failed
 
-        with mock.patch("scripts.checks._common.resolve_declared_plans", return_value=[]):
-            with mock.patch("scripts.checks._common.status_diff_base", return_value="deadbeef"):
-                validate_weakening_dispositions(failed, changed_files=[], root=tmp_path)
-        assert failed == []
+
+class TestImplementLegOnly:
+    def test_candidates_with_no_plan_fail_on_non_tests_path(self, tmp_path: Path) -> None:
+        failed = _validate_in(tmp_path, [("M", "scripts/x.py"), ("M", "tests/t.py")])
+        assert any("touches no plan" in f for f in failed)
         decl = registry.pop_declaration()
         assert decl is not None
-        assert decl.kind == "examined"
+        assert (decl.count, decl.unit) == (1, "candidates")
+
+    def test_no_candidates_and_no_plan_passes_examined_zero(self, tmp_path: Path) -> None:
+        assert _validate_in(tmp_path, [("M", "scripts/x.py")]) == []
+        decl = registry.pop_declaration()
+        assert decl is not None
         assert decl.count == 0
+
+    def test_tests_only_planless_is_report_only_note(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+        assert _validate_in(tmp_path, [("M", "tests/t.py")]) == []
+        assert "rec-4442" in capsys.readouterr().out
 
     def test_unreachable_base_skips(self, tmp_path: Path) -> None:
         registry.pop_declaration()
@@ -345,7 +324,7 @@ class TestHelpers:
 
     def test_cite_resolves_retirement_resolving_cite_passes(self, tmp_path: Path) -> None:
         _init_committed_repo(tmp_path)
-        (tmp_path / "scripts").mkdir()
+        (tmp_path / "scripts").mkdir(exist_ok=True)
         (tmp_path / "scripts" / "foo.py").write_text("def helper_fn():\n    pass\n", encoding="utf-8")
         _git(tmp_path, "add", "-A")
         _git(tmp_path, "commit", "-q", "-m", "foo")
@@ -368,8 +347,7 @@ class TestHelpers:
             failed,
             root=tmp_path,
             base="B",
-            resolved=[plan_rel],
-            status_changed=[],
+            status_changed=[("M", plan_rel)],
             read_base=lambda p: None,
             read_head=lambda p: None,
         )
@@ -387,9 +365,8 @@ class TestHelpers:
         with (
             mock.patch("scripts.checks._common.ROOT", tmp_path),
             mock.patch("scripts.checks._common.status_diff_base", return_value="BASE"),
-            mock.patch("scripts.checks._common.get_changed_files", return_value=[plan_rel]),
-            mock.patch("scripts.checks._common.resolve_declared_plans", return_value=[plan_rel]),
-            mock.patch("scripts.checks._common.get_status_aware_diff", return_value=[]),
+            mock.patch("scripts.checks._common.push_context_base", return_value=None),
+            mock.patch("scripts.checks._common.get_status_aware_diff", return_value=[("M", plan_rel)]),
         ):
             failed: list[str] = []
             validate_weakening_dispositions(failed, root=tmp_path)
@@ -415,11 +392,10 @@ class TestHelpers:
         with (
             mock.patch("scripts.checks._common.ROOT", tmp_path),
             mock.patch("scripts.checks._common.status_diff_base", return_value="BASE"),
-            mock.patch("scripts.checks._common.get_changed_files", return_value=[plan_rel]),
-            mock.patch("scripts.checks._common.resolve_declared_plans", return_value=[plan_rel]),
+            mock.patch("scripts.checks._common.push_context_base", return_value=None),
             mock.patch(
                 "scripts.checks._common.get_status_aware_diff",
-                return_value=[("M", "tests/t.py")],
+                return_value=[("M", "tests/t.py"), ("M", plan_rel)],
             ),
             mock.patch(
                 "scripts.checks.verification.validate_weakening_dispositions._read_file_at_ref",
@@ -437,3 +413,79 @@ class TestHelpers:
             code = main([])
         assert code == 1
         assert "FAILED:" in capsys.readouterr().out
+
+
+class TestHeadRefAndRange:
+    def test_head_ref_plan_and_cite_reads(self, tmp_path: Path) -> None:
+        root = tmp_path / "repo"
+        base = init_repo(root, {"tests/t.py": STRONG_TEST})
+        write_plan(root, "docs/plans/PLAN-x.yaml", [planned_entry(), planned_entry(cite="acceptance_criteria[1]")])
+        write(root, "tests/t.py", WEAK_TEST)
+        head = commit_all(root, "build")
+        write(root, "tests/t.py", STRONG_TEST)
+        (root / "docs" / "plans" / "PLAN-x.yaml").unlink()
+        failed: list[str] = []
+        run_check(
+            failed,
+            root=root,
+            base=base,
+            status_changed=[("M", "tests/t.py"), ("A", "docs/plans/PLAN-x.yaml")],
+            read_base=lambda p: _read_file_at_ref(root, base, p),
+            read_head=lambda p: _read_file_at_ref(root, head, p),
+            head=head,
+        )
+        assert any("has 2 recorded entries" in f for f in failed)
+        refactor = {
+            "candidate": planned_entry()["candidate"],
+            "disposition": "refactor",
+            "cite": "scripts/checks/foo.py::kept_fn",
+        }
+        retire = {
+            "candidate": "[test-removed] tests/gone.py::g",
+            "disposition": "retirement",
+            "cite": "scripts/checks/foo.py::kept_fn",
+        }
+        assert _cite_resolves("refactor", refactor["cite"], _cand(), root=root, base=base, deleted_paths=set(), head=head)
+        assert (
+            _cite_resolves(
+                "retirement",
+                retire["cite"],
+                _cand("test-removed", "tests/gone.py", "g"),
+                root=root,
+                base=base,
+                deleted_paths=set(),
+                head=head,
+            )
+            is False
+        )
+        assert _planned_change_resolves("acceptance_criteria[0]", root, "NOPE", ["docs/plans/PLAN-x.yaml"], head)
+
+    def test_range_mode_and_single_commit_fall_through(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+        root = tmp_path / "repo"
+        base = init_repo(root, {"tests/t.py": STRONG_TEST})
+        write(root, "tests/t.py", WEAK_TEST)
+        first = commit_all(root, "tests-only")
+        registry.pop_declaration()
+        failed: list[str] = []
+        with (
+            mock.patch("scripts.checks._common.status_diff_base", return_value=base),
+            mock.patch("scripts.checks._common.push_context_base", return_value=base),
+        ):
+            validate_weakening_dispositions(failed, root=root)
+        assert failed == []
+        decl = registry.pop_declaration()
+        assert decl is not None
+        assert decl.unit != "first_parent_commits"
+        write_plan(root, "docs/plans/PLAN-x.yaml", [planned_entry("[assertion-removed] tests/o.py::z")])
+        second = commit_all(root, "plan-only")
+        with (
+            mock.patch("scripts.checks._common.status_diff_base", return_value=base),
+            mock.patch("scripts.checks._common.push_context_base", return_value=base),
+        ):
+            validate_weakening_dispositions(failed, root=root)
+        out = capsys.readouterr().out
+        assert failed == []
+        assert first[:8] in out and second[:8] in out
+        decl = registry.pop_declaration()
+        assert decl is not None
+        assert (decl.count, decl.unit) == (2, "first_parent_commits")

@@ -22,8 +22,10 @@ OWN declared graduation dispositions across two legs:
   Implement leg: resolves plans via `_common.resolve_declared_plans` (content-keyed: an
     edge-triggered `implementation_declared` False->True flip between the diff base and the
     working tree), loads each resolved PLAN-{slug}.yaml, and asserts every VP step declared
-    graduate produced a matching NEW-in-diff registry row (plan_slug == slug AND
-    check_id == graduation_check_id). waive/not-applicable steps require no row. A step whose
+    graduate has a matching row in the CURRENT registry (plan_slug == slug AND
+    check_id == graduation_check_id): one new in this diff, or one already on the base (an earlier PR
+    of the same plan graduated it). A base row listed in known_red.yaml does not count.
+    waive/not-applicable steps require no row. A step whose
     graduation proved impossible at implement time is expected to have been flipped to waive
     (with a reason) in the same PR -- that flip satisfies this leg with no row.
 
@@ -61,6 +63,7 @@ from typing import TYPE_CHECKING, Callable
 
 from scripts import verification_graduation
 from scripts.checks import _common, registry
+from scripts.checks.verification import validate_known_red_shrinks
 
 if TYPE_CHECKING:
     from scripts.roadmap.plan_document import PlanDocument
@@ -151,12 +154,6 @@ def _default_baseline_registry_entries(root: Path, base: str = "origin/main") ->
     return baseline if baseline is not None else []
 
 
-def _new_registry_rows(root: Path, baseline_registry_reader: BaselineRegistryReaderFn) -> list[dict]:
-    current = _current_registry_entries(root)
-    baseline_ids = {e.get("check_id") for e in baseline_registry_reader(root) if isinstance(e, dict)}
-    return [e for e in current if isinstance(e, dict) and e.get("check_id") not in baseline_ids]
-
-
 def _obligation_sources_for_step(doc: object, step_id: int) -> list[str]:
     """Sources whose schema-v4 test obligation is proven by this verification_plan step.
 
@@ -175,8 +172,9 @@ def _implement_pr_leg(
     load_plan: LoadPlanFn | None = None,
     baseline_registry_reader: BaselineRegistryReaderFn | None = None,
 ) -> None:
-    """Assert every graduate-disposition step of a resolved plan produced a matching new-in-diff
-    registry row. `resolved` is the content-keyed resolution from `_common.resolve_declared_plans`
+    """Assert every graduate-disposition step of a resolved plan has a matching row in the current
+    registry (new in this diff or already on the base; a known-red base row does not count). `resolved` is
+    the content-keyed resolution from `_common.resolve_declared_plans`
     -- every path in it already exists on disk.
     """
     load_plan = load_plan or _common.load_plan
@@ -186,7 +184,14 @@ def _implement_pr_leg(
         print("  PASS (implement-PR leg): no plan(s) with a newly-true implementation_declared in this diff -- no-op.")
         return
 
-    added_rows = _new_registry_rows(root, baseline_registry_reader)
+    current_rows = [e for e in _current_registry_entries(root) if isinstance(e, dict)]
+    baseline_ids = {e.get("check_id") for e in baseline_registry_reader(root) if isinstance(e, dict)}
+    known_red_path = root / validate_known_red_shrinks.KNOWN_RED_REL
+    known_red_ids = (
+        set(validate_known_red_shrinks.ids_from_text(known_red_path.read_text(encoding="utf-8")))
+        if known_red_path.is_file()
+        else set()
+    )
 
     for plan_rel in resolved:
         try:
@@ -207,18 +212,27 @@ def _implement_pr_leg(
 
         for step in graduate_steps:
             cid = step.graduation_check_id
-            match = next((row for row in added_rows if row.get("check_id") == cid and row.get("plan_slug") == doc.slug), None)
-            if match is None:
-                sources = _obligation_sources_for_step(doc, step.step)
-                obligations_note = f" [test obligation(s) losing their guard: {', '.join(sources)}]" if sources else ""
+            match = next((r for r in current_rows if r.get("check_id") == cid and r.get("plan_slug") == doc.slug), None)
+            if match is not None and cid in baseline_ids and cid in known_red_ids:
                 failed.append(
                     f"graduation-completeness (implement-PR leg) {plan_rel}: step {step.step} declared graduate "
-                    f"(check_id={cid!r}) but no matching new-in-diff registry row found (plan_slug={doc.slug!r}) -- "
+                    f"(check_id={cid!r}) but its row is on known_red.yaml; repair it before declaring"
+                )
+            elif match is None:
+                sources = _obligation_sources_for_step(doc, step.step)
+                obligations_note = f" [test obligation(s) losing their guard: {', '.join(sources)}]" if sources else ""
+                other = next((r.get("plan_slug") for r in current_rows if r.get("check_id") == cid), None)
+                other_note = f" -- a row with this check_id belongs to plan_slug={other!r}" if other is not None else ""
+                failed.append(
+                    f"graduation-completeness (implement-PR leg) {plan_rel}: step {step.step} declared graduate "
+                    f"(check_id={cid!r}) but no matching new-in-diff registry row found, and none already on main "
+                    f"(plan_slug={doc.slug!r}){other_note} -- "
                     "add the registry row, or flip this step to waive with a reason if it proved un-graduatable"
                     f"{obligations_note}"
                 )
             else:
-                print(f"  PASS (implement-PR leg): {plan_rel}:{step.step} -- registry row {cid!r} present.")
+                label = "already on main" if cid in baseline_ids else "new in this diff"
+                print(f"  PASS (implement-PR leg): {plan_rel}:{step.step} -- registry row {cid!r} present ({label}).")
 
 
 @registry.register("validate_graduation_completeness", owner="platform")

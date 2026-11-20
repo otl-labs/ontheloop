@@ -453,10 +453,12 @@ def test_late_shard_is_tautological_without_the_route(tmp_path, monkeypatch):
     assert len(failed) == 1 and "tautological" in failed[0] and lc.SHARD_ID in failed[0]
 
 
-def test_sidecar_plan_shard_stays_on_origin_main(tmp_path, monkeypatch):
-    repo, _ = lc.build_main(tmp_path, monkeypatch, sidecar=True)
-    lc.closure_branch(repo)
-    assert any("tautological" in f for f in _late_registry(repo))
+def test_sidecar_plan_shard_admitted_against_x_parent(tmp_path, monkeypatch, capsys):
+    repo, x = lc.build_main(tmp_path, monkeypatch, sidecar_landed=True)
+    lc.closure_branch(repo, doc_scope=True)
+    assert _late_registry(repo) == []
+    out = capsys.readouterr().out
+    assert f"admitted: {lc.SHARD_ID}" in out and fx.git(repo, "rev-parse", f"{x}^") in out
 
 
 def test_modified_shard_still_compares_against_origin_main(tmp_path, monkeypatch):

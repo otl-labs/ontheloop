@@ -211,10 +211,56 @@ def test_merge_step_fails_as_today_without_a_route(tmp_path, monkeypatch, kwargs
     assert "LATE-CLOSURE" not in capsys.readouterr().out
 
 
-def test_merge_step_sidecar_plan_fails_leg_t_as_today(tmp_path, monkeypatch):
+def test_sidecar_words_landed_in_earlier_pr_pass(tmp_path, monkeypatch, capsys):
+    repo, x = lc.build_main(tmp_path, monkeypatch, bundled=[], sidecar_landed=True, later_edit=True)
+    lc.closure_branch(repo, bundled=[], doc_scope=True)
+    failed: list[str] = []
+    validate_merge_step(failed, root=repo, base="main", changed=[lc.PLAN], push_base=None)
+    assert failed == []
+    assert f"LANDED doc.md at {x}" in capsys.readouterr().out
+
+
+def test_landed_bundled_sidecar_plan_closure_passes_with_late_closure(tmp_path, monkeypatch, capsys):
+    repo, x = lc.build_main(tmp_path, monkeypatch, sidecar_landed=True, later_edit=True)
+    lc.closure_branch(repo, doc_scope=True)
+    assert _late_merge(repo) == []
+    out = capsys.readouterr().out
+    assert "LATE-CLOSURE" in out and f"LANDED doc.md at {x}" in out
+
+
+def test_sidecar_plan_whose_words_never_landed_fails_leg_a(tmp_path, monkeypatch):
     repo, _ = lc.build_main(tmp_path, monkeypatch, sidecar=True)
     lc.closure_branch(repo)
-    assert any("!= bundled_recommendations" in f for f in _late_merge(repo))
+    failed = _late_merge(repo)
+    assert failed and all("approved text" in f for f in failed) and any("no landing commit" in f for f in failed)
+
+
+def test_declaring_pr_that_edits_a_bound_file_and_misses_the_words_fails(tmp_path, monkeypatch):
+    repo, _ = lc.build_main(tmp_path, monkeypatch, bundled=[], sidecar_landed=True)
+    lc.closure_branch(repo, bundled=[], doc_scope=True, extra_files={lc.DOC: "alpha beta gamma delta extra\n"})
+    failed: list[str] = []
+    validate_merge_step(failed, root=repo, base="main", changed=[lc.PLAN, lc.DOC], push_base=None)
+    assert len(failed) == 1 and "approved text" in failed[0] and "landing commit" not in failed[0]
+
+
+def test_landed_sidecar_plan_still_needs_its_approval(tmp_path, monkeypatch):
+    repo, _ = lc.build_main(tmp_path, monkeypatch, bundled=[], sidecar_landed=True)
+    lc.closure_branch(repo, bundled=[], doc_scope=True)
+    missing = approved_text_provenance.Verdict(approved_text_provenance.MISSING, "no approval run")
+    monkeypatch.setattr(
+        module, "_sidecar_provenance", lambda slug, sidecar, root, in_push, deadline: (missing, "enforce", None)
+    )
+    failed: list[str] = []
+    validate_merge_step(failed, root=repo, base="main", changed=[lc.PLAN], push_base=None)
+    assert len(failed) == 1 and "approval MISSING" in failed[0]
+
+
+def test_sidecar_plan_whose_x_changes_only_bound_files_fails(tmp_path, monkeypatch):
+    repo, _ = lc.build_main(tmp_path, monkeypatch, bundled=[], sidecar_landed=True, impl_file=lc.DOC)
+    lc.closure_branch(repo, bundled=[], doc_scope=True)
+    failed: list[str] = []
+    validate_merge_step(failed, root=repo, base="main", changed=[lc.PLAN], push_base=None)
+    assert any("no landing commit" in f for f in failed)
 
 
 def test_merge_step_fails_on_competing_anchors(tmp_path, monkeypatch):
