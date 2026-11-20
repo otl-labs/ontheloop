@@ -58,7 +58,7 @@ if [ -z "${CLAUDE_CODE_OAUTH_TOKEN}" ]; then
   exit 1
 fi
 if ! command -v claude &> /dev/null; then
-  sudo npm install -g @anthropic-ai/claude-code@2.1.148 --omit=dev --omit=optional && sudo npm cache clean --force
+  sudo npm install -g @anthropic-ai/claude-code@2.1.323 --omit=dev --omit=optional && sudo npm cache clean --force
 fi
 
 CONTEXT_RE='^[A-Za-z0-9 ().,:_/-]{1,300}$'
@@ -105,7 +105,7 @@ _review() {
   (
     cd "$REVIEW_CWD" || exit 1
     env -i "${keep[@]}" "${WORKSPACE_ROOT}/scripts/ci/claude_p_retry.sh" "${STEP_DIR}/${out}" -- \
-      --output-format json --tools "" --strict-mcp-config --max-turns "$MAX_TURNS" "$PROMPT" < "${STEP_DIR}/plan_digest.txt"
+      --output-format json --model opus --effort high --tools "" --strict-mcp-config --max-turns "$MAX_TURNS" "$PROMPT" < "${STEP_DIR}/plan_digest.txt"
   ) || true
 }
 

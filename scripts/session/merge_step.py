@@ -160,6 +160,7 @@ def _sidecar_blocks_stale(sidecar: Any, root: Path) -> list[str]:
 
 def _approved_text(slug: str, root: Path, expect: str | None) -> bool:
     from scripts.roadmap import approved_text  # noqa: PLC0415
+    from scripts.session import merge_step_landed  # noqa: PLC0415
 
     base = _git(root, "merge-base", "origin/main", "HEAD").stdout.strip() or "origin/main"
     try:
@@ -174,19 +175,21 @@ def _approved_text(slug: str, root: Path, expect: str | None) -> bool:
     if state != "unchanged":
         print(f"PREMERGE APPROVED-TEXT SIDECAR {state}")
         return False
-    for message in approved_text.verify(sidecar, root, base):
+    messages, landed = merge_step_landed.verify(sidecar, slug, root, base)
+    for message in messages:
         print(f"PREMERGE APPROVED-TEXT MISMATCH {message}")
         ok = False
+    merge_step_landed.print_landed(landed)
     found = approved_text.digest(sidecar)
     if expect and expect != found:
         print(f"PREMERGE APPROVED-TEXT MISMATCH digest {found} != expected {expect}")
         ok = False
     if ok:
         print(f"PREMERGE APPROVED-TEXT OK {found}")
-    for block_id in _sidecar_blocks_stale(sidecar, root):
+    for block_id in _sidecar_blocks_stale(merge_step_landed.unlanded(sidecar, landed), root):
         print(f"PREMERGE STALE BASE {block_id}: rebase and re-run CI")
         ok = False
-    return ok
+    return merge_step_landed.report_stale(sidecar, slug, root, landed) and ok
 
 
 def _decision_collisions(root: Path) -> bool:
