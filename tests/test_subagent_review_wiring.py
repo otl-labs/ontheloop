@@ -298,6 +298,12 @@ class TestProceed:
         harness.run()
         assert harness.network_calls == 0
 
+    def test_model_and_effort_reach_the_cli(self, harness):
+        harness.set_verdicts("PROCEED")
+        result = harness.run()
+        assert "--model opus --effort high" in Path(harness.env["CLAUDE_INVOCATION_LOG"]).read_text(encoding="utf-8")
+        assert result.returncode == 0
+
 
 class TestRevise:
     """Classifier exit 2 -> outcome=revise, non-zero rc, and NO retry (Decision 55)."""
