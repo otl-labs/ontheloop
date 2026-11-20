@@ -41,3 +41,8 @@ import {
   to = github_repository_environment.deployment_approval_probe
   id = "${var.repository_name}:deployment-approval-probe"
 }
+
+import {
+  to = github_repository_environment.pypi
+  id = "${var.repository_name}:pypi"
+}
