@@ -54,6 +54,27 @@ class TestKernelDifferential:
         outcome = vg.run_differential(row, repo_root=repo)
         assert outcome.admitted, outcome.reason
 
+    def test_worktree_for_gives_same_verdicts(self, tmp_path: Path) -> None:
+        """A caller-supplied base worktree yields the same verdicts as the default per-call worktree."""
+        for base_has_sentinel, expect in ((False, True), (True, False)):
+            repo = self._build_repo(tmp_path / str(base_has_sentinel), base_has_sentinel=base_has_sentinel)
+            row = {
+                "check_id": "x",
+                "primitive_slot": "grep_count",
+                "check_spec": {"path": "target.txt", "pattern": "sentinel", "operator": "eq", "count": 1},
+            }
+            default = vg.run_differential(row, repo_root=repo)
+            seen: list[str] = []
+            with vg.git_worktree("origin/main", repo_root=repo) as wt:
+
+                def worktree_for(ref: str, wt: Path = wt) -> Path:
+                    seen.append(ref)
+                    return wt
+
+                supplied = vg.run_differential(row, repo_root=repo, worktree_for=worktree_for)
+            assert seen == ["origin/main"]
+            assert supplied.admitted == default.admitted == expect
+
     def test_tautological_entry_is_rejected(self, tmp_path: Path) -> None:
         """origin/main ALSO has the sentinel -- passes on both trees -> rejected, not admitted."""
         repo = self._build_repo(tmp_path, base_has_sentinel=True)
@@ -405,7 +426,9 @@ class TestInjectedRevertRunnerAndFailLoud:
         (repo / "f.txt").write_text("x\n", encoding="utf-8")
         _commit_all(repo, "base")
 
-        real_run_git = vg._run_git
+        from scripts.checks.verification import _graduation_git
+
+        real_run_git = _graduation_git.run_git
         calls: list[list[str]] = []
 
         def fake_run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
@@ -414,7 +437,7 @@ class TestInjectedRevertRunnerAndFailLoud:
                 return subprocess.CompletedProcess(args=["git", *args], returncode=1, stdout="", stderr="simulated failure")
             return real_run_git(args, cwd)
 
-        monkeypatch.setattr(vg, "_run_git", fake_run_git)
+        monkeypatch.setattr(_graduation_git, "run_git", fake_run_git)
         with vg.git_worktree("HEAD", repo_root=repo):
             pass
         assert any(a[:2] == ["worktree", "prune"] for a in calls), calls

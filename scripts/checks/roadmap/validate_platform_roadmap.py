@@ -10,6 +10,7 @@ import sys
 from scripts.checks import _common, registry
 from scripts.checks._marker_guard import default_base_reader
 from scripts.checks.roadmap import _roadmap_spans
+from scripts.contract_rules import parse_yaml
 
 _40HEX_RE = re.compile(r"^[0-9a-f]{40}$")
 _ROADMAP_MAX_LINES = 10_000  # Decision 114 (raised from KG.11's 2500)
@@ -125,7 +126,7 @@ def validate_platform_roadmap(failed: list[str]) -> None:
             _print_span_attribution(diff_result.stdout, roadmap_text, touched_ids)
             if touched_ids:
                 with roadmap_path.open(encoding="utf-8") as fh:
-                    raw_doc = _yaml.safe_load(fh)
+                    raw_doc = parse_yaml(fh.read())
                 for raw_item in raw_doc.get("tier_items", []):
                     if raw_item.get("id") in touched_ids:
                         for raw_crit in raw_item.get("exit_criteria", []):
@@ -145,7 +146,7 @@ def validate_platform_roadmap(failed: list[str]) -> None:
             for plan_file in sorted(plans_root.glob("PLAN-*.yaml")):
                 try:
                     with plan_file.open(encoding="utf-8") as fh:
-                        plan_data = _yaml.safe_load(fh)
+                        plan_data = parse_yaml(fh.read())
                     if not isinstance(plan_data, dict):
                         continue
                     closes = plan_data.get("closes_criteria") or []

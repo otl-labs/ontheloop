@@ -18,18 +18,23 @@ an error; an empty candidate set is the only legitimate case for recording nothi
 from __future__ import annotations
 
 import ast
-import contextlib
 import json
 import re
-import shutil
 import subprocess
 import sys
-import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from scripts import contract_rules as _contract_rules
 from scripts.checks._scaffolding import _excluded_and_absent, _excluded_heavy_import_names
+from scripts.checks.verification import _graduation_git
+from scripts.checks.verification._graduation_git import (  # noqa: F401 -- re-exported for existing importers
+    GraduationError,
+    _provision_venv_symlink,
+    git_worktree,
+)
+from scripts.checks.verification._graduation_git import run_git as _run_git
 from scripts.checks.verification.validate_verifier_hermeticity import _verifier_is_non_hermetic
 from scripts.verification_checks import (
     CANONICAL_SLOTS,
@@ -47,10 +52,6 @@ from scripts.verification_checks import (
 )
 
 ROOT = Path(__file__).resolve().parent.parent
-
-
-class GraduationError(RuntimeError):
-    """Raised on any worktree/materialize/revert failure (fail-loud, Decision 55)."""
 
 
 # ---------------------------------------------------------------------------
@@ -93,12 +94,10 @@ def load_entries(repo_root: str | Path | None = None) -> list[dict]:
     if not entries_dir.is_dir():
         return []
 
-    import yaml as _yaml  # noqa: PLC0415
-
     rows: list[dict] = []
     for path in sorted(entries_dir.glob("*.yaml")):
         try:
-            data = _yaml.safe_load(path.read_text(encoding="utf-8"))
+            data = _contract_rules.parse_yaml(path.read_text(encoding="utf-8"))
         except Exception as exc:
             raise GraduationError(f"load_entries: malformed shard {path.relative_to(root)}: {exc}") from exc
         if not isinstance(data, dict):
@@ -149,17 +148,16 @@ def entries_at_ref(ref: str, repo_root: str | Path | None = None) -> list[dict] 
     if not _ref_resolves(ref, root):
         return None  # (iv)
 
-    import yaml as _yaml  # noqa: PLC0415
-
     shard_paths = _shard_paths_at_ref(ref, root)
     if shard_paths:  # (i)
         rows: list[dict] = []
+        blobs = _graduation_git.read_blobs_at_ref(ref, shard_paths, root)
         for rel in shard_paths:
-            shown = _run_git(["show", f"{ref}:{rel}"], root)
-            if shown.returncode != 0:
+            text = blobs.get(rel)
+            if text is None:
                 continue
             try:
-                data = _yaml.safe_load(shown.stdout)
+                data = _contract_rules.parse_yaml(text)
             except Exception:
                 continue
             if isinstance(data, dict):
@@ -170,7 +168,7 @@ def entries_at_ref(ref: str, repo_root: str | Path | None = None) -> list[dict] 
     flat_shown = _run_git(["show", f"{ref}:{flat_rel}"], root)
     if flat_shown.returncode == 0:  # (ii) legacy pre-migration layout
         try:
-            data = _yaml.safe_load(flat_shown.stdout)
+            data = _contract_rules.parse_yaml(flat_shown.stdout)
         except Exception:
             return []
         if not isinstance(data, dict):
@@ -272,58 +270,6 @@ def materialize_check(row: dict) -> BaseCheck:
 # ---------------------------------------------------------------------------
 
 
-def _run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, encoding="utf-8")
-
-
-def _provision_venv_symlink(wt_path: Path, repo_root: Path) -> Path | None:
-    """Symlink ``repo_root``'s ``.venv`` into the worktree, if ``repo_root`` has one.
-
-    Keyed off the ``repo_root`` ARGUMENT, never the module-level ``ROOT`` -- a synthetic
-    fixture repo (tests build these under tmp_path, with neither a `.venv` nor a
-    `bin/venv-python`) must stay unprovisioned so its own environment-probe tests can still
-    exercise the unrunnable-interpreter path. Without this, `bin/venv-python` invoked inside
-    the worktree resolves its own location via `$0` and re-derives `REPO_ROOT` relative to
-    cwd (see `bin/venv-python`), landing on `<worktree>/.venv/bin/python` -- absent on a bare
-    `git worktree add`, since `.venv` is gitignored and was never checked out. Returns the
-    created symlink path, or None if `repo_root` carries no `.venv` to provision.
-    """
-    real_venv = repo_root / ".venv"
-    if not real_venv.exists():
-        return None
-    wt_venv = wt_path / ".venv"
-    wt_venv.symlink_to(real_venv, target_is_directory=True)
-    return wt_venv
-
-
-@contextlib.contextmanager
-def git_worktree(ref: str, repo_root: Path | None = None) -> Iterator[Path]:
-    """Check out ``ref`` into a temporary git worktree; remove it on exit.
-
-    Raises GraduationError on any git failure (fail-loud, Decision 55).
-    """
-    root = Path(repo_root) if repo_root is not None else ROOT
-    tmp_parent = tempfile.mkdtemp(prefix="verif-graduation-")
-    wt_path = Path(tmp_parent) / "wt"
-    add_result = _run_git(["worktree", "add", "--detach", str(wt_path), ref], root)
-    if add_result.returncode != 0:
-        shutil.rmtree(tmp_parent, ignore_errors=True)
-        raise GraduationError(f"git worktree add failed for ref {ref!r}: {add_result.stderr.strip()}")
-    venv_symlink = _provision_venv_symlink(wt_path, root)
-    try:
-        yield wt_path
-    finally:
-        # Explicit unlink before `worktree remove`/`rmtree` even though both were verified not
-        # to follow the symlink into the real .venv -- a 432MB destructive failure mode is not
-        # a property to rely on implicitly.
-        if venv_symlink is not None and venv_symlink.is_symlink():
-            venv_symlink.unlink()
-        remove_result = _run_git(["worktree", "remove", "--force", str(wt_path)], root)
-        if remove_result.returncode != 0:
-            _run_git(["worktree", "prune"], root)
-        shutil.rmtree(tmp_parent, ignore_errors=True)
-
-
 # Allowlisted interpreter tokens the environment probe recognises, longest-first so a
 # whole-word match on "bin/venv-python" is found before "python" is ever attempted at the
 # same span -- see _probed_interpreter_tokens for why order alone isn't the whole story.
@@ -412,7 +358,10 @@ def _probe_environment_on_fail(row: dict, check: BaseCheck, wt_root: Path) -> No
 
 
 def make_worktree_revert_runner(
-    row: dict, ref: str = "origin/main", repo_root: Path | None = None
+    row: dict,
+    ref: str = "origin/main",
+    repo_root: Path | None = None,
+    worktree_for: Callable[[str], Path] | None = None,
 ) -> Callable[[BaseCheck], CheckResult]:
     """Return a revert_runner for ``scripts.verification_checks.is_admitted`` (kernel entries).
 
@@ -421,13 +370,18 @@ def make_worktree_revert_runner(
     is_admitted's callable interface.
     """
 
+    def _run_in(wt_root: Path) -> CheckResult:
+        reverted_check = materialize_check_in_tree(row, wt_root)
+        result = reverted_check.run()
+        if result.status == CheckStatus.FAIL:
+            _probe_environment_on_fail(row, reverted_check, wt_root)
+        return result
+
     def revert_runner(_check: BaseCheck) -> CheckResult:
+        if worktree_for is not None:
+            return _run_in(worktree_for(ref))
         with git_worktree(ref, repo_root=repo_root) as wt_root:
-            reverted_check = materialize_check_in_tree(row, wt_root)
-            result = reverted_check.run()
-            if result.status == CheckStatus.FAIL:
-                _probe_environment_on_fail(row, reverted_check, wt_root)
-            return result
+            return _run_in(wt_root)
 
     return revert_runner
 
@@ -483,7 +437,12 @@ def _differential_skip_reason(row: dict, live: CheckResult, repo_root: Path) -> 
     return f"skipped -- node in importorskip-guarded fast-tier-excluded file ({found})"
 
 
-def run_differential(row: dict, repo_root: Path | None = None, base_ref: str = "origin/main") -> DifferentialOutcome:
+def run_differential(
+    row: dict,
+    repo_root: Path | None = None,
+    base_ref: str = "origin/main",
+    worktree_for: Callable[[str], Path] | None = None,
+) -> DifferentialOutcome:
     """Kernel-entry differential (VF-06 c2): `base_ref` (default origin/main) must FAIL, HEAD/live must PASS."""
     root = Path(repo_root) if repo_root is not None else ROOT
     head_check = materialize_check_in_tree(row, root)
@@ -496,7 +455,7 @@ def run_differential(row: dict, repo_root: Path | None = None, base_ref: str = "
             admitted=False, reason=f"not admitted -- check does not pass on HEAD: {live.message or live.actual}"
         )
 
-    revert_runner = make_worktree_revert_runner(row, ref=base_ref, repo_root=root)
+    revert_runner = make_worktree_revert_runner(row, ref=base_ref, repo_root=root, worktree_for=worktree_for)
     if not is_admitted(head_check, revert_runner):
         return DifferentialOutcome(admitted=False, reason="not admitted -- revert did not produce FAIL (tautological)")
     resolved = _run_git(["rev-parse", "--verify", "-q", f"{base_ref}^{{commit}}"], root).stdout.strip() or base_ref
