@@ -39,6 +39,7 @@ def _base_repo(tmp_path: Path, slug: str, cid: str, rows: list[dict], known_red:
     """origin/main holds the undeclared plan and the given rows; HEAD is a non-main branch."""
     repo = tmp_path / "repo"
     _init_repo(repo)
+    _git(repo, ["config", "commit.gpgsign", "false"])
     _write_plan(repo, slug, _steps(cid))
     _write_registry(repo, rows)
     if known_red is not None:
