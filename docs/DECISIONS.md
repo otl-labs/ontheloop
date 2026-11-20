@@ -1932,6 +1932,8 @@ conditions:
 
 > **Amended by Decision 256 (2026-11-13):** Clause 5's "SIT agent roles" reads as SIT's agent identities, held per Decision 256 cl.1; because the proxy signs by host and the accounts share the region's hosts, agent access to SIT needs its own environment. Clause 7's "an ADMIN-session agent applies it" reads "the operator applies it from an agent-prepared CloudShell block (Decision 256 cl.3)".
 
+> **Update (2026-11-20):** Clause 7's admin tier for terraform/organization runs as Decision 256 cl.3 directs: the operator pastes agent-prepared blocks into AWS CloudShell in the management account, the one-time seed as root and every later sitting signed in with MFA as the console-only IAM user org-admin-operator, switched in the console to role OrganizationAdmin; the apply comes only after deploy-paths.yaml pre_merge_live_plan, one sitting at a time and never beside another admin apply. No agent environment and no CI role holds a management-account identity. Outside Terraform those blocks run only the seed's IAM creates (the operator user, its group agent-platform-org-admin-operators with the group's inline policy and the user's membership, and the OrganizationAdmin role with its inline policy), the state bucket's create-bucket, the PROD invitation and an emergency detach-policy. The operator alone signs up an account, creates the tfvars parameter in the console, seeds the user, group and role as root, sets the user's password and MFA, accepts the invitation in PROD as the break-glass user, and removes or closes an account (deploy-paths.yaml admin_out_of_band.organization_provisioning; procedure in terraform/organization/CLAUDE.md; PLAN-sit-organization).
+
 ---
 
 ## Decision 251: The SIT restore rehearsal runs as one human-directed ADMIN-agent sitting on ephemeral functions and a throwaway Neon branch, never on a production function, catalog or prefix (amends Decisions 81, 126 and 237) (Decided)
@@ -5493,6 +5495,8 @@ Roadmap refs: rec-4044, rec-4049, rec-4067.
 > **Amended by Decision 256 (2026-11-13):** Clause 1's "applied only by PlatformAdmin under the human-gated admin tier" reads "applied by PlatformAdmin or by the operator from an agent-prepared CloudShell block under the operator's own sign-in, still human-gated": PlatformAdmin's trust names only the retiring agent user. The detector stays outside the reach of the principals it watches, and a further alarm pair watches the agent-platform-session user and its policies.
 
 > **Amended by Decision 270 (2026-11-17):** Clause 3's family also holds the telemetry content reader's access log group, its change filter and its alarms, so the detector's Denies and tamper alarm cover them.
+
+> **Update (2026-11-20):** Clauses 1 and 2 read per account until the organisation trail (Decision 252 cl.8) replaces PROD's account trail: each account's Terraform owns one trail, and one principal holds the six verbs on that trail's ARN alone. In the Organization's management account, which no SCP reaches, the trail is agent-platform-org-security-trail in terraform/organization and the principal is OrganizationAdmin (Sid OrgSecurityTrailManage). StopLogging, DeleteTrail and cloudtrail:* stay banned in every grant; an SCP Deny that names them grants nothing. cloudtrail-write-grant-scoped-to-platform-trail checks both. PLAN-sit-organization.
 
 ---
 
@@ -11383,6 +11387,8 @@ model the auth primitive change preserves).
 > **Update (2026-10-25):** The agent_static key no longer sits in the containers. Each cloud environment's agent proxy holds it as an AWS network secret and signs requests to the project region's STS host only; `~/.aws` holds placeholder credentials printed by `bin/aws-proxy-placeholder-credentials` (rec-4510, PLAN-agent-aws-proxy-credentials). Because the proxy re-signs every call to that host as the IAM user, identity checks read the assumed role from a second region's STS host (`scripts/aws_identity.py` `caller_arn`). The two roles, their ExternalId conditions and the two-principal semantic are unchanged.
 
 > **Amended by Decision 256 (2026-11-13):** The chained AssumeRole is retired for agent sessions: the proxy refuses it. Sessions reach AWS as the proxy-held user agent-platform-session, which signs each call itself; admin work is the operator's from CloudShell (Decision 256 cl.3). The two roles stay declared and the two-principal semantic stands (Decision 256 cl.5).
+
+> **Update (2026-11-20):** The reversal's second account arrived with Decision 252's Organization. Identity Center was reconsidered and stays out (the operator's 2026-11-10 choice; Decision 242 cl.3 had removed its unused instance). The management account's admin lane holds no access key: the operator signs in with MFA as the console-only IAM user org-admin-operator, switches to that account's OrganizationAdmin role in the console and runs AWS CloudShell in that role (Decision 256 cl.3; deploy-paths.yaml admin_out_of_band.organization_provisioning). This entry's two roles are unchanged.
 
 ---
 
