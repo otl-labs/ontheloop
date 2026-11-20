@@ -1,0 +1,139 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: selection-budget-breach-rounding
+intent: >-
+  Make the plan-time fast-tier fit predictor (selection_budget --plan) stop reporting a false breach when its predicted
+  test-half high end equals the gate's own allowance up to float rounding, so the one-plan-per-rec split test (rec-5390)
+  orders a split only on a real budget breach. Report path only; the CI gate's allowance stays bit-identical.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-selection-budget-breach-rounding.yaml
+phase: >-
+  ad_hoc_rec (soft-warn exception category: rec-5397, filed by the one-rec-per-plan split rules planner; no tier_item
+  claimed, so the Tier Item Freshness Gate is skipped). Downstream beneficiary: rec-5390 (the planning skill splits on the
+  selection_budget verdict). No Lambda-packaged file changes, so V2.
+cites: [dec:208]
+scope:
+  - file: scripts/checks/deps/selection_budget.py
+    action: Modify
+    purpose: >-
+      Add one private helper, _cost_path_seconds(cost_s, n_modules), returning COST_COEFFICIENT * cost_s +
+      PREPASS_FIXED_SECONDS + PREPASS_PER_MODULE_SECONDS * max(n_modules, 0) -- exactly cost_based_allowance's current
+      expression and summation order, so the gate's allowance value is unchanged bit for bit. cost_based_allowance's raw
+      becomes _cost_path_seconds(cost_s, effective); predict_test_half's cost-path high end becomes
+      _cost_path_seconds(cost_s, n_selected) instead of COST_COEFFICIENT * cost_s + overhead. The cost-path low end, the
+      legacy path, classify(), budget_extra_keys(), _report() and every constant stay unchanged. Docstrings of the two
+      functions name the shared helper; the module docstring's "a plan-time breach is reachable only at the derived cap
+      or under a derivation fallback" claim becomes true and is kept.
+  - file: tests/checks/deps/test_selection_budget_breach_rounding.py
+    action: Create
+    purpose: >-
+      rec-5397's acceptance file. Four nodes: (1) test_measured_case_classifies_breadth_waived -- n=48, cost_s=89.821
+      (the measured 2026-11-18 case): classify(test_s=predict_test_half high, cost_s=89.821, n_selected=48, census=None,
+      derivation_ok=True, forced=False, non-test inputs at _PREDICT_NON_TEST_HIGH as _report passes them) returns
+      breadth_waived (red before: breach); (2) test_high_end_equals_allowance_exactly -- over n in 1..400 and cost_s in a
+      fixed grid of 3-decimal values, wherever the raw value lies strictly between TEST_BASE_SECONDS and the derived cap,
+      predict_test_half's high end == cost_based_allowance(cost_s, n) with plain == (red before: the measured pair and
+      others differ by one ulp); (3) test_gate_allowance_is_bit_identical -- cost_based_allowance(89.821, 48) ==
+      210.15629999999996 and == COST_COEFFICIENT * 89.821 + PREPASS_FIXED_SECONDS + PREPASS_PER_MODULE_SECONDS * 48
+      (green before and after: the guard that the gate value did not move); (4)
+      test_cli_reports_breadth_waived_for_the_measured_case -- TestCli's monkeypatch seams (derive_affected_tests -> 48
+      selected, read_at_base_ref -> ok table, selection_cost -> 89.821, precommit_escalates -> False), main([... --json])
+      prints predicted_outcome breadth_waived (red before: breach). Mirror home test_selection_budget.py is not edited.
+bundled_recommendations: [rec-5397]
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - With the cost table read, the plan-time high end and the gate allowance are computed by one helper and compare equal with plain == for every unclamped input.
+  - The measured case (48 modules, cost 89.821) predicts breadth_waived, not breach, in both classify() and the CLI.
+  - cost_based_allowance returns the same float as before for every input (the CI gate is unaffected).
+  - rec-5397's acceptance command passes and rec-5397 is closed by the build's merge.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: "The whole acceptance file; rec-5397's acceptance node test_high_end_equals_allowance_exactly is one of its four (red before: the file is absent; with the file but no helper, nodes 1, 2 and 4 fail)."
+    command: bin/venv-python -m pytest tests/checks/deps/test_selection_budget_breach_rounding.py -q
+    expected: exit 0, 4 passed
+    fix_if: node 1 or 4 still reports breach (the high end is not routed through the helper); node 3 fails (the gate's summation order moved)
+    hermetic: true
+    expected_literals: ["4 passed"]
+    graduation: graduate
+    graduation_check_id: selection-budget-breach-rounding
+  - step: 2
+    phase: pre-deploy
+    action: Re-run every existing selection_budget test, including the calibration pins.
+    command: bin/venv-python -m pytest tests/checks/deps/test_selection_budget.py tests/checks/deps/test_selection_budget_calibration.py tests/validate/test_budget.py tests/validate/test_budget_split.py tests/validate/test_budget_manifest.py -q
+    expected: exit 0, no failures
+    fix_if: an existing node fails (fix the edit, never loosen an assertion, Decision 235)
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Whole-file re-run of existing standing tests already selected by any --pre run touching selection_budget.py; it adds no new guard.
+  - step: 3
+    phase: pre-deploy
+    action: Run the real plan-time CLI on this plan's own scope and print the record.
+    command: bin/venv-python -m scripts.checks.deps.selection_budget --plan docs/plans/PLAN-selection-budget-breach-rounding.yaml --json
+    expected: exit 0; a JSON record whose predicted_outcome is within_budget or breadth_waived
+    fix_if: predicted_outcome is breach while predicted_test_half_s's high end equals allowance_s
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Live-tree sanity read whose numbers move with the cost table; step 1 is the standing guard for the property.
+  - step: 4
+    phase: pre-deploy
+    action: >-
+      Fast tier, then the full tier before handoff (handoff_policy): bin/venv-python -m scripts.validate --pre in the
+      foreground (exit 0), then this command as its own backgrounded run with a 2 h limit from the top-level session.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: "--pre exited 0 first; this command exits 0 for HEAD"
+    fix_if: >-
+      a failure in this plan's files is fixed at root and the full tier rerun; a failure only in another project's open
+      red goes to the operator as the implement skill's go/no-go, and without his word the build waits for that red's
+      repair (red-main-recovery.yaml); it never hands off on a non-green full tier by default
+    hermetic: false
+    graduation: not-applicable
+  - step: 5
+    phase: post-deploy
+    action: Confirm rec-5397 closed after the squash merge (Resolves trailer).
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import make_reader;
+      r=make_reader(profile='agent_platform').named('recs_by_ids', ids='rec-5397')[0]; print(r['status']); assert r['status']=='closed'"
+    expected: rec-5397 status closed
+    fix_if: still open after ci.yml's closure job ran; close it with update_rec citing the merge SHA
+    hermetic: false
+test_obligations:
+  - source: scripts/checks/deps/selection_budget.py
+    behavior: With the cost table read, the plan-time high end equals the gate allowance exactly, so equal formulas never classify as breach.
+    verification_step: 1
+    test_selector: tests/checks/deps/test_selection_budget_breach_rounding.py::test_high_end_equals_allowance_exactly
+    red_green_expectation: red before (one-ulp differences, e.g. 210.1563 vs 210.15629999999996 at n=48, cost 89.821), green after.
+constraints:
+  - Never change cost_based_allowance's value for any input, classify(), any constant, or the CI gate's comparison (the gate compares measured test_s).
+  - No tolerance or epsilon in classify(); equal formulas are made to compute equal values instead.
+  - No assertion in an existing test changes (Decision 235).
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - "Decision-scout verdict NO_FLAGS (round 1). CITE: Decision 208 (cl.1: the SAME function gates CI and predicts at plan time; this fix restores it). Decisions triaged: 222 of 222. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2. Serves: NS.6 3/5."
+  - "Decision 181 CONTENT invariant: no budget is weakened (gate allowance bit-identical, no epsilon); the build records the predictor change as planned-change citing acceptance criterion 1."
+  - "Root cause (probe 2026-11-18 on main 2ba61504): predict_test_half adds overhead first (C*cost + (F + P*n)); cost_based_allowance sums left to right ((C*cost + F) + P*n). n=48, cost 89.821: high 210.1563 > allowance 210.15629999999996, so classify returns breach. A random sweep (n 1..400, cost 60..600) gives about 4% false breaches above the 180s base."
+  - "Census clamp: cost_based_allowance clamps n by the on-disk census, predict_test_half does not; they differ only when n_selected exceeds the census. Unchanged here (not this rec)."
+  - "rec-5167 (Low, open) names the same float tie plus a KeyError for forced outcomes missing from _DECLARE_OR_SPLIT. One plan solves one rec (ruling 2026-11-18): the forced-row crash stays in rec-5167; at closure the build narrows rec-5167's context via update_rec to the forced-row half, citing this merge."
+  - "rec-5389 (VP replay pricing in the same CLI) is separate and not touched."
+  - "No approved-text sidecar: no contract or always-ask wording changes, so no approval run."
+  - "Neither file is in .github/CODEOWNERS; no open PR or unbuilt plan edits either file (checked 2026-11-18). The build merges on green (operator ruling 2026-11-16)."
+  - "red_overlap at plan write (2026-11-20, main c22ce103): clear, no reds. Operator said write the plan 2026-11-20 11:44 UTC."
+  - "Declared breadth (selection_budget --plan on this draft, cost table ok): 70 selected, predicted test half 82.4-313.6s against a 314s allowance -> breadth_waived; the scope is kept as one unit."
+  - "Owning planning thread: 'Fix budget check false breach' (Agents in GitHub). Plan defects go to the coordinator, which forwards them here."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: NO_FLAGS, scout_input_fingerprint: "v1:f1a094123e0fea794101da9ba44f4a1f808bbc008357b5a0850552f16a01ead2"}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "Create tests/checks/deps/test_selection_budget_breach_rounding.py per its scope row; run step 1 red (nodes 1, 2, 4 fail; node 3 passes)."
+  - "Add _cost_path_seconds and route cost_based_allowance and predict_test_half's cost-path high end through it per the scope row. Post: steps 1 and 2 pass."
+  - Execute Verification Plan -- run each pre-deploy step; loop until pass; on unrecoverable failure stop and RCA (Decision 55)
+  - "CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; commit; rebase on origin/main; re-run red_overlap; VP 1-4; push; open the PR; subscribe; code review in a fresh context; squash-merge on PROCEED and green CI with `Resolves: rec-5397` in the commit body; report PR number, CI run ids and the read-back merge SHA; VP 5; then update_rec rec-5167 per context."
+  - "Report: what was implemented, verification results"
