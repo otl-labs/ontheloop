@@ -8,7 +8,8 @@ intent: >-
   approved_text.verify_landed accepts a bound file the declaring PR leaves unchanged when one first-parent commit C
   after the sidecar was added applied that file's blocks exactly (found by content, no trailer needed), with guards;
   validate_merge_step and premerge use it, late closure stops excluding sidecar plans, and the strict verify used at
-  build, rebase and wording-check time is unchanged. Unblocks rec-5382's six late closures and PLAN-sit-restore-spike.
+  build, rebase and wording-check time is unchanged. Removes the merge-step blocker for rec-5382's six late closures and PLAN-sit-restore-spike (the registry and
+  weakening legs stay with rec-2837 and rec-5441).
 plan_type: IMPLEMENTATION
 verification_tier: V2
 plan_path: docs/plans/PLAN-approved-text-landed-words.yaml
@@ -26,7 +27,8 @@ scope:
       the candidates it walks `git log --first-parent <adding commit>..<base_ref> -- <candidate files>` (adding
       commit = the oldest first-parent commit that added the sidecar, as find_implementation_merge finds the plan's)
       and keeps each commit C where, for EVERY candidate file, words(C:f) equals apply(words(C^:f), f's blocks), C's
-      changed files intersect the plan's scope read at base_ref, the plan is not implementation_declared at C, and
+      changed files intersect the plan's scope read at base_ref minus the sidecar's bound files, the plan file and the
+      sidecar (as find_implementation_merge uses scope - {plan_rel}), the plan is not implementation_declared at C, and
       approved_digest of the sidecar at C equals the base sidecar's. Exactly one such C passes every candidate and
       returns landed = {file: C full sha}; zero keeps the strict messages, adding "no landing commit"; two or more
       fail with "competing landing commits <shas>". Reads git through its own _git_show and a new subprocess helper;
@@ -82,7 +84,9 @@ scope:
       tests/fixtures/late_closure_repos.py (never imported from another test module).
   - file: tests/fixtures/late_closure_repos.py
     action: Modify
-    purpose: build_main gains a sidecar_landed option that writes doc.md's base words in the plan commit and the approved words in X.
+    purpose: >-
+      build_main gains a sidecar_landed option that writes doc.md's base words in the plan commit and the approved words
+      in X, and plan_doc can put doc.md in the plan's scope (the realistic shape: real plans scope their bound files).
 bundled_recommendations: [rec-5057]
 followon_recs: []
 infrastructure_dependencies: []
@@ -103,7 +107,8 @@ acceptance_criteria:
     Decision 235 cl.1 confirmation (operator, 2026-11-20, with "write the plan"): the four tests pinning "a sidecar
     plan gets no late-closure route" are replaced; refusals stay pinned for words never landed, two landing commits,
     landing in different commits per file, sidecar approved words changed since C, a bound file the declaring PR
-    touches, the plan declared at C and C outside the plan's scope.
+    touches, the plan declared at C, and C changing no scope file other than the bound files, plan and sidecar (its
+    fixture puts the bound file inside the plan's scope).
   - >-
     docs/contracts/git-ops.yaml carries exactly the sidecar's words (validate_merge_step leg A at the build), stays at
     or under 54542 bytes and 500 effective lines, and passes validate_contract_drift's amendment retention.
@@ -119,7 +124,7 @@ verification_plan:
       exit 0. New nodes fail before the change (no verify_landed): landed earlier passes and returns the commit; words
       edited after C still pass; never landed fails with "no landing commit"; two qualifying commits fail with
       "competing landing commits"; files landed in different commits fail; sidecar approved words changed after C
-      give no C; plan declared at C gives no C; C touching no scope file gives no C; a working-tree edit to a bound
+      give no C; plan declared at C gives no C; C changing only bound files (each in the plan's scope) gives no C; a working-tree edit to a bound
       file gets only the strict check; verify itself still fails in the landed case. Existing nodes pass unedited.
     fix_if: Fix verify_landed; never relax a refusal.
     hermetic: true
@@ -168,44 +173,41 @@ verification_plan:
     expected_literals: []
     graduation: graduate
     graduation_check_id: approved-text-landed-premerge
-  - step: 9
-    phase: pre-deploy
-    action: Existing premerge and readback nodes.
-    command: bin/venv-python -m pytest -q tests/test_session_merge_step.py
-    expected: exit 0 with only the two named nodes removed and no other node edited (the STALE BASE nodes included).
-    fix_if: A changed existing assertion is a weakening; fix the code.
-    hermetic: true
-    expected_literals: []
-    graduation: waive
-    graduation_waiver_reason: Covered by the existing whole-file shard merge-step-verb-tests.
   - step: 5
     phase: pre-deploy
-    action: Real history resolves the seven blocked plans' landing commits.
+    action: Real history resolves the seven blocked plans' landing commits, read in a detached worktree at origin/main.
     command: >-
-      bin/venv-python -c "from pathlib import Path; from scripts.roadmap import approved_text as at;
-      [print(s, sorted({c[:10] for c in at.verify_landed(at.load_sidecar_at('origin/main', s, Path('.')), s, Path('.'), 'origin/main')[1].values()}))
-      for s in ['persona-verdict-chain', 'persona-verdict-egress', 'persona-verdict-wake', 'planning-eligibility-start-edges',
-      'graduated-rerun-plan-readers', 'plans-only-main-fast-tier', 'sit-restore-spike']]"
+      bash -c 'set -e; T=$(mktemp -d); trap "git worktree remove --force $T" EXIT; git worktree add -q --detach "$T"
+      origin/main; bin/venv-python -c "import sys; from pathlib import Path; from scripts.roadmap import approved_text as at; r=Path(sys.argv[1]);
+      [print(s, sorted({c[:10] for c in at.verify_landed(at.load_sidecar_at(\"origin/main\", s, r), s, r, \"origin/main\")[1].values()}))
+      for s in sys.argv[2:]]" "$T" persona-verdict-chain persona-verdict-egress persona-verdict-wake
+      planning-eligibility-start-edges graduated-rerun-plan-readers plans-only-main-fast-tier sit-restore-spike'
     expected: >-
       Seven lines, each one sha: chain 4aecbb4441, egress b12809afbb, wake 4ac3243e81, planning-eligibility
       7348574916, graduated-rerun 9352f40f31, plans-only 932622ff02, sit-restore 98e84cf09d (measured by the planning
-      prototype on 878d6425). A plan rec-5382 has already declared still resolves (the guard reads the plan at C).
-    fix_if: An empty list means a guard is wrong for real history; fix verify_landed, never widen a guard silently.
+      prototype on 878d6425; each C also changes 1 to 35 non-bound scope files, measured 2026-11-20). The worktree
+      root matters: on the build branch git-ops.yaml differs from origin/main, so two plans would read no candidate.
+      A plan rec-5382 has already declared still resolves (the guard reads the plan at C).
+    fix_if: >-
+      An empty list from the origin/main worktree means a guard is wrong for real history; fix verify_landed, never
+      widen a guard silently. An empty list from any other root means this step was run wrong.
     hermetic: false
     graduation: not-applicable
   - step: 6
     phase: pre-deploy
     action: End-to-end flip in a scratch worktree.
     command: >-
-      bash -c 'set -e; for s in persona-verdict-wake plans-only-main-fast-tier; do T=$(mktemp -d); git worktree add -q
-      --detach "$T" origin/main; printf "implementation_declared: true\n" >> "$T/docs/plans/PLAN-$s.yaml";
+      bash -c 'set -e; for s in persona-verdict-wake plans-only-main-fast-tier; do P="docs/plans/PLAN-$s.yaml";
+      if git show "origin/main:$P" | grep -q "^implementation_declared: true"; then echo "SKIP $s already declared"; continue; fi;
+      T=$(mktemp -d); trap "git worktree remove --force $T" EXIT; git worktree add -q --detach "$T" origin/main;
+      printf "implementation_declared: true\n" >> "$T/$P";
       git -C "$T" -c user.name=vp -c user.email=vp@example.invalid commit -qam "declare $s";
-      bin/venv-python -c "import sys; from pathlib import Path; from scripts.checks.verification.validate_merge_step import validate_merge_step as v; f=[]; v(f, root=Path(sys.argv[1]), base=\"origin/main\", changed=[sys.argv[2]], push_base=None); sys.exit(1 if f else 0)" "$T" "docs/plans/PLAN-$s.yaml";
-      git worktree remove --force "$T"; done'
+      bin/venv-python -c "import sys; from pathlib import Path; from scripts.checks.verification.validate_merge_step import validate_merge_step as v; f=[]; v(f, root=Path(sys.argv[1]), base=\"origin/main\", changed=[sys.argv[2]], push_base=None); sys.exit(1 if f else 0)" "$T" "$P";
+      git worktree remove --force "$T"; trap - EXIT; done'
     expected: >-
       exit 0. The wake run prints LANDED for docs/contracts/git-ops.yaml at 4ac3243e; the plans-only run prints
-      LATE-CLOSURE and LANDED at 932622ff. The approval lookup is advisory outside pull-request CI. Skip a plan
-      rec-5382 has already declared on main (its flip would be a no-op) and record that.
+      LATE-CLOSURE and LANDED at 932622ff; each examines 1 declared plan. A plan rec-5382 has already declared prints
+      SKIP and is recorded as such. The approval lookup is advisory outside pull-request CI.
     fix_if: Fix the code; never edit the seven plans or their sidecars here.
     hermetic: false
     graduation: not-applicable
@@ -233,6 +235,16 @@ verification_plan:
     fix_if: Follow git-ops.yaml resolves_trailer (readback, then recover); never a manual close after an acceptance refusal.
     hermetic: false
     graduation: not-applicable
+  - step: 9
+    phase: pre-deploy
+    action: Existing premerge and readback nodes.
+    command: bin/venv-python -m pytest -q tests/test_session_merge_step.py
+    expected: exit 0 with only the two named nodes removed and no other node edited (the STALE BASE nodes included).
+    fix_if: A changed existing assertion is a weakening; fix the code.
+    hermetic: true
+    expected_literals: []
+    graduation: waive
+    graduation_waiver_reason: Covered by the existing whole-file shard merge-step-verb-tests.
   - step: 10
     phase: pre-deploy
     action: Full tier on the committed, rebased tree before handoff (git-ops.yaml handoff_sequence).
@@ -302,12 +314,15 @@ context:
   - "Residual (named in approved_text_binding): words edited on main after C are not rechecked. Provenance of old approvals rests on approved_text_github RUN_PAGES=10 (reaches early October 2026; the seven approvals are 2026-11-09..17; inferred, proven by rec-5382's first closure PR)."
   - "Breadth: selection_budget on this scope predicts breadth_waived (n_selected 228, test half 188.7-715.7s); declared here."
   - "Unbuilt plans editing git-ops.yaml: PLAN-trailer-range-closure (rec-5106, build parked) binds three anchors this plan leaves intact; whichever builds second re-measures bytes and lines."
+  - "Scope guard measured 2026-11-20 on origin/main 7f2915f3: every bound file of the seven plans is in its plan's scope, and each landing commit changes 1 to 35 other scope files, so the guard excludes bound files, plan and sidecar."
+  - "The LANDED residual (words edited on main after C are not rechecked) is by design: later edits are other plans' approved or reviewed changes; no owning rec."
   - "Graduated shards kept unchanged: approved-text-tests, merge-step-check-tests, late-closure-resolver, merge-step-verb-tests, late-closure-merge-step-session (its node test_premerge_passes_when_the_rec_is_closed_by_x is not edited); new shard approved-text-landed-premerge (VP 4)."
   - "Fast-tier cost: verify_landed walks only when the strict check fails for an unchanged file; the prototype took about 2 s per plan on real history."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:6d02a1980cadd9ca4322efa1267302f73368da89ed3c59125aacbf9a82a1bc2e"}
   - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: "v1:c85b1d3a628c9f814c449a74dc4a8c99fe4cfd9aed18801e794f070b675de44d"}
   - {gate: wording-check, round: 1, verdict: PASS, digest: bb420697b76925d8ec66e57909e6523a22c7219c5d146f4d592fa703289f5db2, base: 7f2915f3cc96fc8d471181dfd368b8b8e7c5cd8d, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 3, nits: 6}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -315,12 +330,15 @@ pre_implementation_checklist:
   - All files in scope located and readable
   - Acceptance criteria understood and verifiable
 execution_steps:
-  - scripts/roadmap/approved_text.py -- add verify_landed per its scope row; verify unchanged.
-  - scripts/checks/verification/validate_merge_step.py and scripts/session/merge_step.py -- opt in per their scope rows.
-  - scripts/checks/verification/_implementation_merge.py -- drop the sidecar exclusion only.
-  - docs/contracts/git-ops.yaml -- place the sidecar's words (approved_text verify must print OK); wrap or join lines as needed to stay inside 54542 bytes and 500 effective lines.
+  - "Run bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-approved-text-landed-words.yaml; on blocked, stop and report."
+  - scripts/roadmap/approved_text.py -- add verify_landed per its scope row; verify unchanged; VP 1.
+  - scripts/checks/verification/validate_merge_step.py and scripts/session/merge_step.py -- opt in per their scope rows; VP 2, VP 4, VP 9.
+  - scripts/checks/verification/_implementation_merge.py -- drop the sidecar exclusion only; VP 3.
+  - "Governed text: place the sidecar's blocks in docs/contracts/git-ops.yaml word for word ({{DATE}} = the build date). Joining lines is REQUIRED: placed with the sidecar's own wrapping the file reaches 501 effective lines; put the LANDED paragraph and the merge_step_coverage edit on as few lines as fit (each line under 2,000 characters; the wording check measured 495 lines, 54257 bytes). VP 7."
   - Tests and tests/fixtures/late_closure_repos.py per the scope rows; replace exactly the four named tests.
-  - Execute Verification Plan -- run each step; loop until pass; on unrecoverable failure stop and RCA (Decision 55).
-  - "Commit with the trailer Resolves: rec-5057 and flip implementation_declared in the build PR."
-  - 'Report: what was implemented, verification results'
+  - VP 5 and VP 6 (real history, in origin/main worktrees).
+  - "Graduate VP 4 into config/agent/verification_registry/entries/approved-text-landed-premerge.yaml."
+  - "CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; commit with the trailer 'Resolves: rec-5057'; git fetch origin main && git rebase origin/main; VP 7; VP 10 (full tier backgrounded from the top-level session, then --verify-head; a timeout is BLOCKED, no push); push; open the PR; subscribe; code review; merge on green under standing authorisation (validate_merge_step reads the sidecar's approval), merge_pull_request with an explicit commit_message carrying the trailer and expectedHeadSha; merge_step premerge before and readback after."
+  - "Closure evidence, recorded as four SEPARATE facts (implement skill Commit Flows): GitHub readiness state (scripts.session.github_readiness; unknown is not PASS); parent validator evidence (VP 10 plus --verify-head for the pushed HEAD); structured postflight evidence (scripts.session.postflight --evidence); the real outcome -- push, build PR, CI green by event-driven wake, merge SHA."
+  - "Report: what was implemented, verification results, merge SHA, each closure fact separately; VP 8 after the merge commit's trailer jobs conclude."
 rollback: Revert the build squash; the sidecar stays (it binds nothing until a later build).
