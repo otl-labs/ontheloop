@@ -190,7 +190,13 @@ def test_environment_with_a_reviewers_block(real_terraform) -> None:
 
 
 def test_policy_branch_pattern_star(real_terraform) -> None:
-    assert v.check_terraform(_mutate_tf(real_terraform, 'branch_pattern = "main"', 'branch_pattern = "*"'))
+    block = v._blocks("\n".join(real_terraform.values()), "github_repository_environment_deployment_policy")[
+        "tf_trusted_plan_main"
+    ]
+    assert 'branch_pattern = "main"' in block
+    assert v.check_terraform(
+        _mutate_tf(real_terraform, block, block.replace('branch_pattern = "main"', 'branch_pattern = "*"'))
+    )
 
 
 def test_second_deployment_policy(real_terraform) -> None:
