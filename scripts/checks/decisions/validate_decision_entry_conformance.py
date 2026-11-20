@@ -56,6 +56,7 @@ from scripts.north_star_models import load_north_star
 
 _CONTRACT_REL_PATH = "docs/contracts/decision-entry.yaml"
 _KIND_CONTRACT_REL_PATH = "docs/contracts/decision-kind.yaml"
+_COMPACTION_CONTRACT_REL_PATH = "docs/contracts/decision-compaction.yaml"
 _DECISIONS_REL_PATHS = ("docs/DECISIONS.md", "docs/DECISIONS_ARCHIVE.md")
 
 _BOLD_DATE_RE = re.compile(r"\*\*Date:\*\*\s*(.+)")
@@ -185,7 +186,9 @@ def _load_grammar_config(root: Path) -> dict:
     serves: dict = shapes["serves"] if isinstance(shapes.get("serves"), dict) else {}
     required = [str(f) for f in cfg.get("required_fields") or []]
     optional = [str(f) for f in cfg.get("optional_fields") or []]
+    delegates: dict = shapes["delegates"] if isinstance(shapes.get("delegates"), dict) else {}
     return {
+        "change_rules": [str(r) for r in delegates.get("change_rules") or []],
         "kind": "kind" in required,
         "closed_keys": required + optional if cfg.get("closed_key_set") else None,
         "serves_target": str(serves["resolves_against"]) if serves.get("resolves_against") else None,
@@ -272,13 +275,13 @@ def _superseded_stub_grammar_issues(
         if missing:
             issues.append(
                 f"  FAIL: Decision {n} declares '**Status:** Superseded' but is missing marker(s): {missing} "
-                "(docs/contracts/decision-entry.yaml compaction.stub_grammar)."
+                f"({_COMPACTION_CONTRACT_REL_PATH} compaction.stub_grammar)."
             )
         if not extract_superseded_by(block):
             issues.append(
                 f"  FAIL: Decision {n} declares '**Status:** Superseded' but carries no resolvable "
                 "'**Superseded by: Decision N**' pointer -- malformed compacted stub "
-                "(docs/contracts/decision-entry.yaml compaction.stub_grammar)."
+                f"({_COMPACTION_CONTRACT_REL_PATH} compaction.stub_grammar)."
             )
     return issues, checked
 
@@ -308,6 +311,28 @@ def _envelope_body_conflicts(envelope: dict, block: str) -> list[str]:
     return conflicts
 
 
+def _resolves(root: Path, key: str) -> bool:
+    path, dotted = envelope_rules.split_delegated_key(key) or ("", "")
+    try:
+        parsed = yaml.safe_load((root / path).read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return False
+    return envelope_rules.dotted_value(parsed, dotted)[0]
+
+
+def _delegation_plan_issues(envelope: dict, grammar: dict, root: Path) -> list[str]:
+    """delegates and plan rules, applied only when the envelope carries the field (the contract declares change_rules)."""
+    if not grammar.get("change_rules"):
+        return []
+    return envelope_rules.delegates_issues(envelope, grammar["change_rules"], lambda key: _resolves(root, key)) + (
+        envelope_rules.plan_issues(envelope)
+    )
+
+
+def _plan_warnings(envelope: dict, root: Path) -> list[str]:
+    return envelope_rules.plan_warnings(envelope, lambda slug: (root / "docs" / "plans" / f"PLAN-{slug}.yaml").exists())
+
+
 def _new_entry_conformance_issues(
     new_numbers: list[int],
     current_entries: dict[int, str],
@@ -319,6 +344,7 @@ def _new_entry_conformance_issues(
     kind_values: list[str] | None = None,
     north_star_ids: set[str] | None = None,
     baseline_max: int = 0,
+    root: Path | None = None,
 ) -> list[str]:
     """Full envelope-conformance sweep over new-in-diff decision numbers: required markers, the
     block_separator obligation, metadata-envelope well-formedness, the number-match sub-check,
@@ -373,6 +399,10 @@ def _new_entry_conformance_issues(
             rule_issues += envelope_rules.unknown_key_issues(envelope, grammar["closed_keys"])
         if grammar.get("number"):
             rule_issues += envelope_rules.number_issues(envelope.get("number"), baseline_max)
+        if root is not None:
+            rule_issues += _delegation_plan_issues(envelope, grammar, root)
+            for warning in _plan_warnings(envelope, root):
+                print(f"  WARN: Decision {n} {warning}.")
         issues += [f"  FAIL: Decision {n} {r}." for r in rule_issues]
 
         for conflict in _envelope_body_conflicts(envelope, block):
@@ -460,6 +490,7 @@ def validate_decision_entry_conformance(
         kind_values,
         north_star_ids,
         max(baseline_numbers, default=0),
+        root,
     )
 
     if issues:

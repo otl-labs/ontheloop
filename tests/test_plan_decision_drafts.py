@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -16,13 +17,15 @@ _FIXTURE = REPO / "tests/fixtures/decision_drafts/placeholder_conforming.txt"
 _ENV_TAIL = "significance:\n  value: numbered_decision\n  justification: r.\nkind:\n  value: direction\n  justification: j.\n"
 
 
+_OPTIONS = "**Options considered:** a second table -- rejected: it would drift.\n"
+
+
 def _draft(
     number: str = "{{N}}", env_number: str | None = None, kind: bool = True, extra: str = "", title: str = "Drafted"
 ) -> str:
     tail = _ENV_TAIL if kind else _ENV_TAIL.split("kind:")[0]
-    return (
-        f"## Decision {number}: {title}\n\n```yaml\nnumber: {env_number or number}\n{tail}{extra}```\n\n**Status:** Decided\n"
-    )
+    head = f"## Decision {number}: {title}\n\n```yaml\nnumber: {env_number or number}\n"
+    return f"{head}{tail}{extra}```\n\n**Status:** Decided\n\n{_OPTIONS}"
 
 
 def _plan(tmp_path: Path, text: str, slug: str = "demo") -> Path:
@@ -233,6 +236,39 @@ class TestDraftsReportInfo:
         assert len(_infos(lines)) == 1
 
 
+def _candidate_root(root: Path, threshold: int) -> Path:
+    (root / "docs/contracts").mkdir(parents=True)
+    rows = [{"number": 1, "live": True, "currency": "current", "amends": []}]
+    rows += [{"number": n, "live": True, "currency": "current", "amends": [1]} for n in (2, 3, 4)]
+    (root / "docs/decisions-index.json").write_text(json.dumps({"decisions": rows}), encoding="utf-8")
+    (root / "docs/contracts/decision-compaction.yaml").write_text(
+        f"consolidation:\n  threshold: {threshold}\n", encoding="utf-8"
+    )
+    return root
+
+
+def test_amending_a_candidate_root_prints_nomination(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(pdd, "ROOT", _candidate_root(tmp_path / "fixture", 4))
+    plan = _plan(tmp_path, _draft(title="Drafted (amends Decision 1)"))
+    lines = pdd.report_for_plan(plan)
+    assert lines[0].startswith("decision_drafts: 1 drafted")
+    (nomination,) = [x for x in lines if x.lstrip().startswith("NOMINATION")]
+    assert "Decision 1, a consolidation candidate: 4 live amenders" in nomination
+    assert _infos(lines) == []
+    assert not any("NOMINATION" in f.detail for f in pdd.findings_for_plan(plan))
+
+
+def test_a_sidecar_drafted_amender_prints_nomination_and_a_non_candidate_prints_none(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(pdd, "ROOT", _candidate_root(tmp_path / "fixture", 4))
+    after = _draft(title="Drafted (amends Decision 1)")
+    _sidecar(tmp_path, [{"id": "b", "file": "docs/DECISIONS.md", "before": "", "after": after}])
+    assert any(x.lstrip().startswith("NOMINATION") for x in pdd.report_for_plan(_plan(tmp_path, "x"), tmp_path))
+    monkeypatch.setattr(pdd, "ROOT", _candidate_root(tmp_path / "other", 9))
+    assert not any(x.lstrip().startswith("NOMINATION") for x in pdd.report_for_plan(_plan(tmp_path, "x"), tmp_path))
+    monkeypatch.setattr(pdd, "ROOT", tmp_path / "absent")
+    assert not any(x.lstrip().startswith("NOMINATION") for x in pdd.report_for_plan(_plan(tmp_path, "x"), tmp_path))
+
+
 def test_drafted_entries_and_blind_text(tmp_path: Path) -> None:
     mech = _draft(title="Mech (amends Decision 12)", kind=False).replace(
         "significance:", "kind:\n  value: mechanism\n  justification: only the means,\n    over two lines.\nsignificance:"
@@ -274,3 +310,76 @@ def test_a_title_drafted_in_text_and_sidecar_appears_twice(tmp_path: Path) -> No
     _sidecar(tmp_path, [{"id": "d", "file": "docs/DECISIONS.md", "before": "", "after": _draft(title="Same")}])
     path = _plan(tmp_path, _draft(title="Same"))
     assert pdd.drafted_titles(path, tmp_path) == ["Same", "Same"]
+
+
+_DELEGATES = (
+    "delegates:\n  - key: docs/contracts/decision-entry.yaml#size_governance.measured_size_norm.cap_bytes\n"
+    "    change_rule: contract_amendment\n    bounds: {min: 4096, max: 5120}\n"
+)
+
+
+def _fields(text: str, tmp_path: Path, slug: str = "demo") -> list[tuple[str, str, str]]:
+    return [(f.severity, f.field, f.detail) for f in pdd.findings_for_plan(_plan(tmp_path, text, slug=slug))]
+
+
+class TestOptionsSizeDelegatesAndPlan:
+    """The planning-time report applies the gate's delegates, plan, options and measured-cap rules."""
+
+    def test_a_draft_without_an_options_block_fails(self, tmp_path: Path) -> None:
+        found = _fields(_draft().replace(_OPTIONS, ""), tmp_path)
+        assert [f[1] for f in found] == ["size"] and "carries no **Options considered:**" in found[0][2]
+
+    def test_a_draft_over_the_measured_cap_fails(self, tmp_path: Path) -> None:
+        text = _draft().replace("**Status:** Decided\n", "**Status:** Decided\n\n" + "x" * 5200 + "\n")
+        assert any("measured without its envelope" in f[2] for f in _fields(text, tmp_path))
+
+    def test_a_draft_listed_in_the_exemptions_for_its_plan_passes_without_options(self, tmp_path: Path, monkeypatch) -> None:
+        listing = tmp_path / "exempt.yaml"
+        listing.write_text("exempt_sidecars:\n- {slug: demo, title: Drafted}\n", encoding="utf-8")
+        monkeypatch.setattr(pdd, "_EXEMPTIONS", listing.as_posix())
+        text = _draft().replace(_OPTIONS, "")
+        assert _fields(text, tmp_path) == []
+        assert _fields(text, tmp_path, slug="other")
+
+    def test_a_malformed_delegates_fails_and_a_well_formed_one_resolving_at_head_passes(self, tmp_path: Path) -> None:
+        assert any(f[1] == "delegates" for f in _fields(_draft(extra="delegates: []\n"), tmp_path))
+        assert _fields(_draft(extra=_DELEGATES), tmp_path) == []
+
+    def test_a_key_that_does_not_resolve_is_a_fail_unless_the_sidecar_binds_its_file(self, tmp_path: Path) -> None:
+        missing = _DELEGATES.replace("measured_size_norm.cap_bytes", "nope.cap_bytes")
+        assert any(f[0] == "FAIL" and "does not resolve" in f[2] for f in _fields(_draft(extra=missing), tmp_path))
+        path = _plan(tmp_path, "x", slug="bound")
+        _sidecar(
+            tmp_path,
+            [{"id": "c", "file": "docs/contracts/decision-entry.yaml", "before": "a\n", "after": "b\n"}]
+            + [{"id": "d", "file": "docs/DECISIONS.md", "before": "", "after": _draft(extra=missing)}],
+            slug="bound",
+        )
+        found = [(f.severity, f.field) for f in pdd.findings_for_plan(path, tmp_path)]
+        assert ("WARN", "delegates") in found and ("FAIL", "delegates") not in found
+
+    def test_a_plan_field_fails_when_malformed_and_warns_when_the_plan_is_unknown(self, tmp_path: Path) -> None:
+        assert any(f[:2] == ("FAIL", "plan") for f in _fields(_draft(extra="plan: Not A Slug\n"), tmp_path))
+        assert any(f[:2] == ("WARN", "plan") for f in _fields(_draft(extra="plan: no-such-plan\n"), tmp_path))
+        assert not any(f[1] == "plan" for f in _fields(_draft(extra="plan: decision-delegation-and-cap-measure\n"), tmp_path))
+
+
+class TestSizeFindingsDegradeQuietly:
+    def test_a_missing_exemptions_file_or_contract_adds_no_exemption_and_no_crash(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(pdd, "_EXEMPTIONS", (tmp_path / "absent.yaml").as_posix())
+        assert [f.field for f in pdd.findings_for_plan(_plan(tmp_path, _draft().replace(_OPTIONS, "")))] == ["size"]
+        monkeypatch.setattr(pdd, "_ENTRY_CONTRACT", "docs/contracts/does-not-exist.yaml")
+        assert pdd._size_findings(_draft(), "demo") == []
+
+    def test_a_contract_that_no_longer_parses_skips_the_size_legs(self, tmp_path: Path, monkeypatch) -> None:
+        broken = tmp_path / "broken.yaml"
+        broken.write_text("size_governance: [", encoding="utf-8")
+        monkeypatch.setattr(pdd, "_ENTRY_CONTRACT", broken.as_posix())
+        assert pdd._size_findings(_draft(), "demo") == []
+
+    @pytest.mark.parametrize("text", ["a: [", "other: 1\n"])
+    def test_a_key_in_an_unparseable_or_keyless_file_does_not_resolve(self, tmp_path: Path, monkeypatch, text: str) -> None:
+        (tmp_path / "k.yaml").write_text(text, encoding="utf-8")
+        monkeypatch.setattr(pdd, "ROOT", tmp_path)
+        assert pdd._resolves_at_head("k.yaml", "a.b") is False
+        assert pdd._resolves_at_head("absent.yaml", "a") is False

@@ -24,6 +24,7 @@ from typing import Any, Callable, Optional
 import yaml
 
 from scripts.checks import _common, _marker_guard, registry
+from scripts.checks.structural import _byte_raises
 
 _REGISTRY_REL_PATH = "config/structural_size_budgets.yaml"
 
@@ -161,6 +162,7 @@ def validate_structural_size_budget_raises(
         + _marker_guard.check_diff(_LONG_LINE_SPEC, base_reader=lambda _rel: base_text)
         + _marker_guard.check_present_markers(_LONG_LINE_SPEC)
         + _frozen_leg(base_text, current_text)
+        + _byte_raises.violations(base_text, base_reader)
     )
 
     if violations:
@@ -174,5 +176,9 @@ def validate_structural_size_budget_raises(
     if base_text is None:
         registry.skipped("origin/main unreachable")
     else:
-        examined = len(_BUDGET_SPEC.extractor(current_text)) + len(_LONG_LINE_SPEC.extractor(current_text))
+        examined = (
+            len(_BUDGET_SPEC.extractor(current_text))
+            + len(_LONG_LINE_SPEC.extractor(current_text))
+            + _byte_raises.entry_count(current_text)
+        )
         registry.examined(examined, unit="entries")

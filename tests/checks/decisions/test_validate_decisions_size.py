@@ -15,6 +15,7 @@ return, and (rec-3243) the WARN-tier-only amendment-delta and standing-pressure 
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 import yaml
 
 from scripts.checks import registry
@@ -24,6 +25,7 @@ from scripts.checks.decisions.validate_decisions_size import (
     _per_entry_cap_failures,
     validate_decisions_size,
 )
+from tests.fixtures.decision_entry import ENTRY, FULL, OPTS, gov, make_root
 
 
 class TestValidateDecisionsSizeRegisteredCheck:
@@ -516,3 +518,59 @@ class TestStandingPressure:
         )
         assert failed == []
         assert "1.2x the" not in capsys.readouterr().out
+
+
+def _run(root: Path, base_numbers: set[int] | None = None, bodies: dict | None = None, **kwargs: object) -> list[str]:
+    failed: list[str] = []
+    registry.pop_declaration()
+    validate_decisions_size(
+        failed, root=root, baseline_reader=lambda r: base_numbers or set(), baseline_body_reader=lambda r: bodies, **kwargs
+    )
+    return failed
+
+
+class TestRejectedAlternativesRequired:
+    @pytest.mark.parametrize(
+        ("body", "contract", "exempt", "needle"),
+        [
+            ("", FULL, None, "carries no"),
+            (OPTS, FULL, None, ""),
+            ("", FULL, "exempt_sidecars:\n- {slug: s, title: Persona entry}\n", ""),
+            ("", None, None, ""),
+            ("", "a: [", None, "unreadable"),
+        ],
+    )
+    def test_the_options_rule(
+        self, tmp_path: Path, capsys, body: str, contract: str | None, exempt: str | None, needle: str
+    ) -> None:
+        assert bool(_run(make_root(tmp_path, body, contract, exempt))) is bool(needle)
+        assert needle in capsys.readouterr().out
+
+
+class TestProductionCostGate:
+    @pytest.mark.parametrize(
+        "head",
+        [gov(measured_size_norm={"cap_bytes": 1}), gov(options_considered={"cap_bytes": 1}), gov(measured_size_norm={})],
+    )
+    def test_dropping_a_cap_key_fails(self, tmp_path: Path, head: str) -> None:
+        make_root(tmp_path, OPTS, head)
+        failed: list[str] = []
+        with (
+            patch("scripts.checks._common.ROOT", tmp_path),
+            patch("scripts.checks._common.get_changed_files", return_value=["docs/contracts/decision-entry.yaml"]),
+        ):
+            validate_decisions_size(
+                failed, baseline_reader=lambda r: {5}, base_text_reader=lambda r, rel: FULL if "entry" in rel else None
+            )
+        assert failed and registry.pop_declaration().kind == "examined"
+
+
+class TestInPlaceAndExemptionWiring:
+    def test_growth_and_exemption_findings_reach_the_run(self, tmp_path: Path, capsys) -> None:
+        base = ENTRY.format("x" * 5100 + "\n\n" + OPTS)
+        root = make_root(tmp_path, "x" * 5102 + "\n\n" + OPTS, exempt="exempt_sidecars:\n- {slug: gone, title: T}\n")
+        assert _run(
+            root, {5}, {"docs/DECISIONS.md": {5: base}}, base_text_reader=lambda r, rel: FULL if "entry" in rel else None
+        )
+        out = capsys.readouterr().out
+        assert "clause 6" in out and "has no approved sidecar" in out
