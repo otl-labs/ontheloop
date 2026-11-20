@@ -95,13 +95,7 @@ discipline rule. Do not re-author it here.
 
 ## Suggest Aligned Recommendations
 No local recs cache exists. Run `bin/venv-python -m scripts.recs_related <scope files>` (ranked hits with why and a completeness envelope; `--terms` for keyword search; bodies via `recs_by_ids`), plus `recs_by_title_prefix`:
-1. Extract keywords and scope file paths from the task description
-2. Match the returned open recs against the task's `title`, `file`, and `context`
-3. Present top 3-5 matches (if any):
-> "These open recommendations may align with your task:
-> - **rec-XXX**: [title] (effort: [effort], priority: [priority])
->
-> Want to bundle any into this session? Say 'include rec-XXX' or 'skip'."
+Match the open recs it returns against the task's keywords and scope, present the top 3-5 (id, title, effort, priority) and ask which to bundle or skip. Bundle at most two beside the primary rec, each one this change closes whole; the merge's Resolves trailer closes it only when its own acceptance holds (Decision 201).
 
 ## Recommendation Relevance Gate (Workflow Step 3, fires before bundling any rec)
 
@@ -138,9 +132,9 @@ When a plan creates or modifies documentation artefacts, apply these rules:
 
 
 ## Complexity Assessment (Workflow Step 4)
-- **Scope files > 5** OR **estimated steps > 8** suggests the item may be too large for one plan (a heuristic). Plan types are IMPLEMENTATION and REPORT-ONLY only (Decision 247; the schema refuses STRATEGIC): author one larger IMPLEMENTATION plan, or decompose -- file child recs or split into atomic IMPLEMENTATION plans now, each planned on its own.
+- **One plan delivers one outcome that can be verified and reverted on its own, under one primary rec.** Never split on a file count. `/plan` Step 4 item 5 holds the split test and Step 8 the filing: child recs, never nested plan names (no `3b-2a`); a second split of one lineage goes to the human (Decision 247 cl.5).
 - If IMPLEMENTATION (and complex), execution steps must have explicit pre/post-conditions.
-- **Presentation Rule:** The classification MUST be presented to the human and confirmed, not assumed.
+- **Presentation Rule:** present the verdict to the human to confirm; never assume it.
 - **Size headroom (Decisions 128, 166):** `plan_obligations --plan` reports each scope file's headroom (SLOC, structural lines, prose bytes) and the unbuilt plans editing the same file. Plan a crossing as a decomposition (facade package, Decision 80/104/124) or the class relief valve, never a default raise: a raise is a Decision-cited exception (`# raise-approved: dec-NNN`), never a bare `--update-sloc-budgets` re-seed. A NEAR_CAP row carries a relief step measured against main at build time, never a fixed line count.
 
 

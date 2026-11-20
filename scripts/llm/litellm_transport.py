@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from scripts.llm import litellm_cold_start as cold_start
 from scripts.llm import tier_selection
 from scripts.llm.litellm_cold_start import (
     ColdStartResult,
@@ -77,6 +78,22 @@ class _Call:
     credential_holder: str
     max_attempts: int
     root: Path | None
+    capture: Any = None
+
+
+def _forward(capture: Any) -> dict[str, Any]:
+    return {} if capture is None else {"capture": capture}
+
+
+def _begin(call: _Call, selection: tier_selection.Selection, role: str, attempt: int, started_ms: int) -> None:
+    if call.capture is not None:
+        call.capture.in_flight = _attempt(selection, role, attempt, "cancelled", 0, started_ms)
+
+
+def _settle(call: _Call, tried: list[Attempt]) -> None:
+    if call.capture is not None:
+        call.capture.in_flight = None
+        call.capture.attempts.append(tried[-1])
 
 
 def _prepare(call: _Call, role: str) -> tuple[tier_selection.Selection, dict[str, Any]]:
@@ -116,6 +133,7 @@ def _attempt(
 
 
 def _failure(
+    call: _Call,
     selection: tier_selection.Selection,
     exc: BaseException,
     attempt: int,
@@ -126,6 +144,7 @@ def _failure(
     outcome = classify(exc)
     status = getattr(exc, "status_code", None)
     tried.append(_attempt(selection, selection.role, attempt, outcome, _elapsed(started), started_ms))
+    _settle(call, tried)
     error = TransportError(
         outcome,
         f"{selection.role} call failed as {outcome} after {len(tried)} attempt(s) (status {status})",
@@ -155,6 +174,7 @@ def _checked(
         blank = not (message.content or "").strip() and not getattr(message, "tool_calls", None)
         outcome = "empty_output" if blank else "ok"
     tried.append(_attempt(selection, role, attempt, outcome, latency, started_ms))
+    _settle(call, tried)
     if outcome != "ok":
         raise TransportError(outcome, f"{role} returned {outcome}", role=role, attempts=tuple(tried))
     content, tool_calls, message_dict, record = read_response(
@@ -167,6 +187,8 @@ def _checked(
         started_at_ms=started_ms,
         responded_at_ms=_wall_ms(),
     )
+    if call.capture is not None:
+        call.capture.record = record
     return TransportResult(content, tool_calls, message_dict, response.choices[0].finish_reason, record, tuple(tried), False)
 
 
@@ -178,10 +200,11 @@ def _run_role(call: _Call, role: str) -> TransportResult:
     while True:
         attempt += 1
         started, started_ms = time.monotonic(), _wall_ms()
+        _begin(call, selection, role, attempt, started_ms)
         try:
             response = litellm.completion(**kwargs)
         except Exception as exc:  # intentionally broad: classified below, chained, never swallowed
-            outcome, error = _failure(selection, exc, attempt, started, started_ms, tried)
+            outcome, error = _failure(call, selection, exc, attempt, started, started_ms, tried)
             if outcome == "outage" and attempt < call.max_attempts:
                 _sleep(2 ** (attempt - 1))
                 continue
@@ -197,10 +220,12 @@ async def _arun_role(call: _Call, role: str) -> TransportResult:
     while True:
         attempt += 1
         started, started_ms = time.monotonic(), _wall_ms()
+        _begin(call, selection, role, attempt, started_ms)
         try:
             response = await litellm.acompletion(**kwargs)
         except Exception as exc:  # intentionally broad, as in _run_role
-            outcome, error = _failure(selection, exc, attempt, started, started_ms, tried)
+            cold_start.reraise_if_cancelling(exc)
+            outcome, error = _failure(call, selection, exc, attempt, started, started_ms, tried)
             if outcome == "outage" and attempt < call.max_attempts:
                 await _asleep(2 ** (attempt - 1))
                 continue
@@ -226,6 +251,11 @@ def _refuse_zero_attempts(max_attempts: int) -> None:
         raise TransportError("refused", "max_attempts must be at least 1", tag="max_attempts_below_one")
 
 
+def _note_probe(capture: Any, probe: CallRecord | None) -> None:
+    if capture is not None and probe is not None:
+        capture.probe_record = probe
+
+
 def _probe_record(result: ColdStartResult) -> CallRecord | None:
     return result.record if result.fresh else None
 
@@ -244,22 +274,38 @@ def complete(
     credential_holder: str = "on_the_loop",
     max_attempts: int = 3,
     root: Path | None = None,
+    capture: Any = None,
 ) -> TransportResult:
     call = _Call(
-        persona, messages, max_tokens, tools, tool_choice, response_format, timeout, credential_holder, max_attempts, root
+        persona,
+        messages,
+        max_tokens,
+        tools,
+        tool_choice,
+        response_format,
+        timeout,
+        credential_holder,
+        max_attempts,
+        root,
+        capture,
     )
+    if capture is not None:
+        capture.filled = True
     _refuse_zero_attempts(max_attempts)
     refuse_end_user_fail_over(fail_over, credential_holder)
     probe = None
     if role == _FALLBACK:
-        probe = _probe_record(ensure_asserted(role, credential_holder=credential_holder, root=root))
+        probe = _probe_record(ensure_asserted(role, credential_holder=credential_holder, root=root, **_forward(capture)))
+        _note_probe(capture, probe)
     try:
         return dataclasses.replace(_run_role(call, role), probe_record=probe)
     except TransportError as exc:
         if not (fail_over and role == _PRIMARY and exc.kind == "outage"):
             exc.probe_record = probe
             raise
-        probe = _probe_record(fallback_gate(messages, exc, credential_holder=credential_holder, root=root))
+        gate = fallback_gate(messages, exc, credential_holder=credential_holder, root=root, **_forward(capture))
+        probe = _probe_record(gate)
+        _note_probe(capture, probe)
         try:
             return _merged(_run_role(call, _FALLBACK), exc.attempts, probe)
         except TransportError as second:
@@ -282,23 +328,40 @@ async def acomplete(
     credential_holder: str = "on_the_loop",
     max_attempts: int = 3,
     root: Path | None = None,
+    capture: Any = None,
 ) -> TransportResult:
     call = _Call(
-        persona, messages, max_tokens, tools, tool_choice, response_format, timeout, credential_holder, max_attempts, root
+        persona,
+        messages,
+        max_tokens,
+        tools,
+        tool_choice,
+        response_format,
+        timeout,
+        credential_holder,
+        max_attempts,
+        root,
+        capture,
     )
+    if capture is not None:
+        capture.filled = True
     _refuse_zero_attempts(max_attempts)
     refuse_end_user_fail_over(fail_over, credential_holder)
     probe = None
     if role == _FALLBACK:
-        probe = _probe_record(await aensure_asserted(role, credential_holder=credential_holder, root=root))
+        probe = _probe_record(
+            await aensure_asserted(role, credential_holder=credential_holder, root=root, **_forward(capture))
+        )
+        _note_probe(capture, probe)
     try:
         return dataclasses.replace(await _arun_role(call, role), probe_record=probe)
     except TransportError as exc:
         if not (fail_over and role == _PRIMARY and exc.kind == "outage"):
             exc.probe_record = probe
             raise
-        gate = await afallback_gate(messages, exc, credential_holder=credential_holder, root=root)
+        gate = await afallback_gate(messages, exc, credential_holder=credential_holder, root=root, **_forward(capture))
         probe = _probe_record(gate)
+        _note_probe(capture, probe)
         try:
             return _merged(await _arun_role(call, _FALLBACK), exc.attempts, probe)
         except TransportError as second:

@@ -237,6 +237,7 @@ ENTRIES: tuple[Entry, ...] = (
             "scripts/roadmap/approved_text.py",
             "scripts/roadmap/approved_words.py",
             "scripts/roadmap/review_page.py",
+            "scripts/checks/decisions/consolidation.py",
             "scripts/checks/decisions/envelope_rules.py",
             "scripts/checks/decisions/entry_measure.py",
             "scripts/checks/decisions/decisions_size_measure.py",

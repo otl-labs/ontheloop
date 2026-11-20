@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -233,6 +234,39 @@ class TestDraftsReportInfo:
         _sidecar(tmp_path, [{"id": "b", "file": "docs/DECISIONS.md", "before": "", "after": after}])
         lines = pdd.report_for_plan(_plan(tmp_path, "x"), tmp_path)
         assert len(_infos(lines)) == 1
+
+
+def _candidate_root(root: Path, threshold: int) -> Path:
+    (root / "docs/contracts").mkdir(parents=True)
+    rows = [{"number": 1, "live": True, "currency": "current", "amends": []}]
+    rows += [{"number": n, "live": True, "currency": "current", "amends": [1]} for n in (2, 3, 4)]
+    (root / "docs/decisions-index.json").write_text(json.dumps({"decisions": rows}), encoding="utf-8")
+    (root / "docs/contracts/decision-compaction.yaml").write_text(
+        f"consolidation:\n  threshold: {threshold}\n", encoding="utf-8"
+    )
+    return root
+
+
+def test_amending_a_candidate_root_prints_nomination(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(pdd, "ROOT", _candidate_root(tmp_path / "fixture", 4))
+    plan = _plan(tmp_path, _draft(title="Drafted (amends Decision 1)"))
+    lines = pdd.report_for_plan(plan)
+    assert lines[0].startswith("decision_drafts: 1 drafted")
+    (nomination,) = [x for x in lines if x.lstrip().startswith("NOMINATION")]
+    assert "Decision 1, a consolidation candidate: 4 live amenders" in nomination
+    assert _infos(lines) == []
+    assert not any("NOMINATION" in f.detail for f in pdd.findings_for_plan(plan))
+
+
+def test_a_sidecar_drafted_amender_prints_nomination_and_a_non_candidate_prints_none(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(pdd, "ROOT", _candidate_root(tmp_path / "fixture", 4))
+    after = _draft(title="Drafted (amends Decision 1)")
+    _sidecar(tmp_path, [{"id": "b", "file": "docs/DECISIONS.md", "before": "", "after": after}])
+    assert any(x.lstrip().startswith("NOMINATION") for x in pdd.report_for_plan(_plan(tmp_path, "x"), tmp_path))
+    monkeypatch.setattr(pdd, "ROOT", _candidate_root(tmp_path / "other", 9))
+    assert not any(x.lstrip().startswith("NOMINATION") for x in pdd.report_for_plan(_plan(tmp_path, "x"), tmp_path))
+    monkeypatch.setattr(pdd, "ROOT", tmp_path / "absent")
+    assert not any(x.lstrip().startswith("NOMINATION") for x in pdd.report_for_plan(_plan(tmp_path, "x"), tmp_path))
 
 
 def test_drafted_entries_and_blind_text(tmp_path: Path) -> None:

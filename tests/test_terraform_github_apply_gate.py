@@ -23,6 +23,7 @@ ENV = "github_repository_environment"
 POLICY = "github_repository_environment_deployment_policy"
 RULESET = "github_repository_ruleset"
 REPO = "github_repository"
+PERM = "github_actions_repository_permissions"
 HIDDEN = {"security_and_analysis": "hidden", "ruleset_bypass_actors": "hidden"}
 
 
@@ -80,6 +81,11 @@ def _bypass_only() -> dict[str, Any]:
     )
 
 
+def _perm(pin: bool) -> dict[str, Any]:
+    after = {"id": SENTINEL_TEXT, "enabled": True, "allowed_actions": "all", "sha_pinning_required": pin}
+    return _rc(f"{PERM}.this", ["update"], {**after, "sha_pinning_required": not pin}, after)
+
+
 def _reviewed(plan: dict[str, Any]) -> list[dict[str, Any]]:
     return gate.rows(plan)
 
@@ -89,6 +95,11 @@ def _markers(out: str) -> list[str]:
 
 
 class TestRows:
+    def test_actions_permissions_row_carries_allowlisted_values(self) -> None:
+        [row] = gate.rows(_plan(_perm(True)))
+        assert row["values"] == {"enabled": True, "allowed_actions": "all", "sha_pinning_required": True}
+        assert SENTINEL_TEXT not in str(row)
+
     def test_values_hold_the_allowlist_only(self) -> None:
         [row] = gate.rows(_plan(_env_create()))
         assert row["values"] == {
@@ -282,6 +293,11 @@ class TestCheck:
         applied = _plan(_rc(f"{REPO}.ontheloop", ["update"], {"description": "a"}, {"description": "b", "topics": ["t"]}))
         rc, out = self._check(applied, reviewed)
         assert rc == 1 and out == f"TF_GITHUB_APPLY_UNREVIEWED {REPO}.ontheloop changed=description,topics\n"
+
+    def test_actions_permissions_value_differing_from_review_is_unreviewed(self) -> None:
+        names, plan_true, plan_false = [f"{PERM}.this"], _plan(_perm(True)), _plan(_perm(False))
+        rc, out = self._check(plan_false, reviewed_plan=plan_true, names=names)
+        assert rc == 1 and _markers(out) == ["TF_GITHUB_APPLY_UNREVIEWED"]
 
     def test_a_changed_allowlisted_value_is_refused(self) -> None:
         names = [f"{ENV}.tf_github_apply"]

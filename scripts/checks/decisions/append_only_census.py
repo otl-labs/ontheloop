@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import re
 import sys
 from dataclasses import dataclass, field
@@ -58,6 +59,8 @@ class Result:
     open: list[Finding] = field(default_factory=list)
     defects: list[str] = field(default_factory=list)
     self_test_ok: bool = False
+    head: str = ""
+    replayed: list[str] = field(default_factory=list)
 
 
 def _git(root: Path, args: list[str]) -> str:
@@ -109,7 +112,7 @@ def _commits(root: Path, head: str) -> list[tuple[str, str]]:
 
 def _replay(root: Path, head: str, rows: list[dict]) -> tuple[Result, set[tuple[str, int]]]:
     commits = _commits(root, head)
-    result = Result(merges=len(commits))
+    result = Result(merges=len(commits), replayed=[sha for sha, _ in commits])
     position = {sha: i for i, (sha, _) in enumerate(commits)}
     pending = {(r["merge"], r["decision"]) for r in rows if r["merge"] in position}
     satisfied: set[tuple[str, int]] = set()
@@ -149,7 +152,9 @@ def census(root: Path, head: str = "HEAD") -> Result:
     if anc != 0:
         raise CensusError("anchor is not an ancestor of head (shallow clone or wrong head)")
     rows = _ledger(root)
+    head_sha = _git(root, ["rev-parse", f"{head}^{{commit}}"]).strip()
     result, satisfied = _replay(root, head, rows)
+    result.head = head_sha
     fixture_merge, fixture_numbers = SELF_TEST_FIXTURE
     flagged = {f.decision for f in result.findings if f.merge == fixture_merge}
     result.self_test_ok = set(fixture_numbers) <= flagged
@@ -195,10 +200,28 @@ def render(result: Result) -> list[str]:
     return lines
 
 
+def result_payload(result: Result) -> dict:
+    grouped: dict[str, dict] = {}
+    for f in result.open:
+        entry = grouped.setdefault(f.merge, {"merge": f.merge, "pr": f.pr, "decisions": []})
+        entry["decisions"].append({"decision": f.decision, "digest": f.digest, "kinds": list(f.kinds), "line": f.line})
+    order = {sha: i for i, sha in enumerate(result.replayed)}
+    return {
+        "schema": 1,
+        "head": result.head,
+        "merges": result.merges,
+        "replayed": list(result.replayed),
+        "acknowledged": len(result.acknowledged),
+        "open": sorted(grouped.values(), key=lambda e: order.get(e["merge"], 0)),
+        "ledger_defects": list(result.defects),
+    }
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Decision 177 append-only census over main")
     parser.add_argument("--head", default="HEAD")
     parser.add_argument("--summary", default=None)
+    parser.add_argument("--result", default=None)
     args = parser.parse_args(argv)
     try:
         result = census(_common.ROOT, args.head)
@@ -213,6 +236,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not result.self_test_ok:
         print("CENSUS ERROR: self-test failed, the detector is blind")
         return 2
+    if args.result:
+        try:
+            Path(args.result).write_text(json.dumps(result_payload(result), indent=1) + "\n", encoding="utf-8")
+        except OSError as exc:
+            print(f"CENSUS ERROR: cannot write result: {exc}")
+            return 2
     return 1 if (result.open or result.defects) else 0
 
 
