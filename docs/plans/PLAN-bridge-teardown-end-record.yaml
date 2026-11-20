@@ -28,10 +28,13 @@ scope:
         shutdown: OSError".
       - open_bridge records that the body exited normally (after its yield returns). In the outer
         except (OSError, BaseExceptionGroup): a recorded body or startup exception is re-raised as today; else, when
-        the body exited normally, raise BridgeTeardownFailed from the exception only if it is an OSError or an
-        Exception-only group (isinstance(exc, ExceptionGroup)); any other BaseExceptionGroup after a normal exit (a
-        leaf that is not an Exception, such as KeyboardInterrupt or SystemExit) is re-raised unchanged; else (no
+        the body exited normally, raise BridgeTeardownFailed from the exception only if it is an OSError or a group
+        whose every leaf is an OSError (exc.split(OSError) leaves no rest); any other group after a normal exit (a
+        RuntimeError leaf, or a non-Exception leaf such as KeyboardInterrupt) is re-raised unchanged, so an
+        unexpected defect stays loud whether bare or grouped (the operator's narrowing, critique r5 N1); else (no
         normal exit) BridgeUnavailable as today (spawn and startup failures keep their meaning).
+      - The BridgeTeardownFailed message names classes only, leaf classes included, e.g. "the server failed during
+        shutdown: ExceptionGroup[OSError]" (Decision 101 clause (d)).
       - No other exception class is caught or converted; cancellation and KeyboardInterrupt still propagate, bare or
         grouped.
   - file: src/persona_backends/litellm_backend.py
@@ -39,8 +42,9 @@ scope:
     purpose: >-
       - run_with_bridge keeps the value go() returned. Once go() has returned (its single end record emitted), only
         BridgeTeardownFailed is tolerated (operator choice 2026-11-20, Decision 55): the result is returned unchanged,
-        no further record is emitted, and one line "bridge teardown failed after the run ended: <cause class>" goes to
-        sys.stderr (the class of the error's __cause__, class name only, never exception text).
+        no further record is emitted, and one line "bridge teardown failed after the run ended: <the error's
+        class-only message>" goes to stderr through print(..., file=sys.stderr) resolved at call time (so capsys sees
+        it), never exception text from the cause.
       - Any other exception raised at teardown after go() returned propagates unchanged and emits no further record
         (no abort, no second end), so an unexpected defect stays loud while the events file keeps its single end. At
         the CLI that path is a traceback and exit 1 with the result dropped: rec-5334's "must not discard the result"
@@ -65,12 +69,14 @@ scope:
       scope. Every node below asserts the injection fired (the flag), so no guard passes without a teardown fault):
       - test_teardown_error_after_normal_exit_is_typed (rec-5334's acceptance after its re-point): OSError and
         ExceptionGroup([OSError]) injected after a body that returns normally raise BridgeTeardownFailed, not
-        BridgeUnavailable; str() names the class only, and an injected message sentinel is absent.
+        BridgeUnavailable; str() names the classes only (OSError; ExceptionGroup[OSError]), and an injected message
+        sentinel is absent.
       - test_teardown_error_after_body_error_keeps_body_error: a body raising ValueError plus an injected teardown
         OSError still raises the ValueError (the recorded path).
-      - test_teardown_base_group_after_normal_exit_propagates: an injected BaseExceptionGroup("g", [_Base()]) after a
-        normal exit, where _Base subclasses BaseException directly (keeping pytest's interrupt handling out of it),
-        propagates as that group and is not BridgeTeardownFailed or BridgeUnavailable.
+      - test_teardown_unclassified_group_after_normal_exit_propagates, parametrized: an injected
+        BaseExceptionGroup("g", [_Base()]) (where _Base subclasses BaseException directly, keeping pytest's interrupt
+        handling out of it) and an injected ExceptionGroup("g", [RuntimeError()]) after a normal exit each propagate
+        as that same group, never BridgeTeardownFailed or BridgeUnavailable.
   - file: tests/persona_backends/test_litellm_backend.py
     action: Modify
     purpose: >-
@@ -80,9 +86,9 @@ scope:
         failure schema_invalid via [final("nope"), final("nope")]): the returned result is what go() returned; events
         and the on_event sink each hold exactly one end record, with the run's own outcome; stderr (capsys) holds
         the class-only line exactly once and not the injected message sentinel.
-      - test_bridge_teardown_unexpected_error_after_end_propagates: an injected RuntimeError after a successful run
-        propagates as RuntimeError (pytest.raises), and the on_event sink holds exactly one end record, outcome
-        success.
+      - test_bridge_teardown_unexpected_error_after_end_propagates, parametrized over an injected RuntimeError and
+        ExceptionGroup([RuntimeError()]) after a successful run: it propagates as the injected type (pytest.raises),
+        and the on_event sink holds exactly one end record, outcome success.
       - test_bridge_teardown_error_after_abort_keeps_one_aborted_end: a transport outage (RunAborted kind outage) plus
         an injected teardown OSError raises RunAborted kind outage with exactly one aborted end record.
       - test_bridge_teardown_cancellation_after_end_propagates: an injected asyncio.CancelledError after a successful
@@ -101,7 +107,7 @@ acceptance_criteria:
   - >-
     A run that aborted before teardown still ends with exactly one aborted end record and propagates as today; a
     cancellation raised at teardown after the end record propagates with that single end record.
-  - A teardown group carrying a non-Exception leaf after a normal exit propagates unchanged, never BridgeTeardownFailed.
+  - A teardown group carrying any non-OSError leaf after a normal exit propagates unchanged, never BridgeTeardownFailed.
   - rec-5402 and rec-5334 close on the merge (each by its own acceptance node).
 verification_plan:
   - step: 1
@@ -111,7 +117,7 @@ verification_plan:
       bin/venv-python -m pytest
       tests/persona_backends/test_mcp_bridge.py::test_teardown_error_after_normal_exit_is_typed
       tests/persona_backends/test_mcp_bridge.py::test_teardown_error_after_body_error_keeps_body_error
-      tests/persona_backends/test_mcp_bridge.py::test_teardown_base_group_after_normal_exit_propagates
+      tests/persona_backends/test_mcp_bridge.py::test_teardown_unclassified_group_after_normal_exit_propagates
       tests/persona_backends/test_litellm_backend.py::test_bridge_teardown_error_after_end_keeps_one_end_record
       tests/persona_backends/test_litellm_backend.py::test_bridge_teardown_error_after_abort_keeps_one_aborted_end
       tests/persona_backends/test_litellm_backend.py::test_bridge_teardown_unexpected_error_after_end_propagates
@@ -119,8 +125,8 @@ verification_plan:
     expected: >-
       Exit 0, every node passes. Red before: the nodes are absent (pytest exits 4). Written first against main's code,
       the two acceptance nodes are red (the bridge raises BridgeUnavailable; the success case raises RunAborted
-      tool_server_unavailable with two end records) and the base-group node is red (main converts it to
-      BridgeUnavailable). test_mcp_bridge.py imports BridgeTeardownFailed at module top, so on main that whole file
+      tool_server_unavailable with two end records) and the unclassified-group node is red (main converts
+      both groups to BridgeUnavailable). test_mcp_bridge.py imports BridgeTeardownFailed at module top, so on main that whole file
       fails collection (its body-error guard included); the three other test_litellm_backend.py nodes are regression
       guards already green on main.
     fix_if: >-
@@ -175,12 +181,12 @@ test_obligations:
     test_selector: tests/persona_backends/test_litellm_backend.py::test_bridge_teardown_error_after_end_keeps_one_end_record
     red_green_expectation: red before (node absent; on main the run raises RunAborted and emits a second end record), green after.
   - source: src/persona_backends/mcp_bridge.py
-    behavior: A teardown group with a non-Exception leaf after a normal exit propagates unchanged.
+    behavior: A teardown group with a non-OSError leaf after a normal exit propagates unchanged.
     verification_step: 1
-    test_selector: tests/persona_backends/test_mcp_bridge.py::test_teardown_base_group_after_normal_exit_propagates
+    test_selector: tests/persona_backends/test_mcp_bridge.py::test_teardown_unclassified_group_after_normal_exit_propagates
     red_green_expectation: red before (node absent; on main the group becomes BridgeUnavailable), green after.
 constraints:
-  - src/persona_backends imports nothing under scripts; error and stderr text name an exception class only (Decision 101).
+  - src/persona_backends imports nothing under scripts; error and stderr text name exception classes only (Decision 101 clause (d)).
   - No change to events.py, the events-file shape or telemetry-event-envelope.yaml; rec-5396 maps the file as it is.
   - No rescue agents or workaround loops (Decision 55); never skip, disable or quarantine a test (Decision 235).
 context:
@@ -227,6 +233,7 @@ gate_rounds:
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 3}
   - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: "v1:a0d55e738a080f44c2ed614e5290416280331ccb2d6d6c36f6bd6c4951466329"}
   - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 2}
+  - {gate: plan-critique, round: 5, verdict: PROCEED, blocking: 0, nits: 4}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
