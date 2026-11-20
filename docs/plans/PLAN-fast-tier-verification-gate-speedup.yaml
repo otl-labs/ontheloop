@@ -27,13 +27,14 @@ scope:
       a path-to-text mapping that omits a path whose header reads `missing` (today's skip of a failed git show), and
       raising GraduationError when the subprocess cannot start, exits non-zero or its output is misframed (today every
       show failing silently yields an empty baseline; Decision 55 fail loud); and shared_worktrees(root), a context
-      manager whose get(ref) is the only surface callers use: on the first call for a ref it resolves the ref to a
+      manager whose get(ref) is the only surface callers use and raises GraduationError when the ref does not resolve
+      or the worktree add fails (today's git_worktree failure shape): on the first call for a ref it resolves the ref to a
       commit sha (`git rev-parse --verify <ref>^{commit}`), adds one real `git worktree add --detach <path> <sha>` and
       provisions the .venv symlink through _provision_venv_symlink exactly as git_worktree does; on every later call
       for that ref it restores the existing worktree before returning it, so a worktree is added only when a base leg
       asks for one (a candidate whose HEAD leg fails never adds one). The private restore runs `git checkout -f -q --detach <sha>`
       (the sha recorded at add, so a base leg that ran git checkout, switch or commit cannot move the next candidate's
-      base) plus `git clean -fdxq -e .venv`, then requires `git rev-parse HEAD` to equal that sha and `git status
+      base) plus `git clean -ffdxq -e .venv` (-ff so an untracked nested repo a leg created is removed too), then requires `git rev-parse HEAD` to equal that sha and `git status
       --porcelain --ignored` to list nothing but the .venv symlink (which .gitignore's `.venv/` leaves reported as
       `?? .venv`), raising GraduationError otherwise (Decision 55); and whose exit, for every worktree it added, unlinks
       the .venv symlink before `git worktree remove --force` and falls back to `git worktree prune` as git_worktree does.
@@ -47,7 +48,8 @@ scope:
       and reads shard blobs through _graduation_git.read_blobs_at_ref (called as a module attribute so tests can patch
       it), skipping a path absent from the mapping as today; load_entries and entries_at_ref parse through
       scripts.contract_rules.parse_yaml; give run_differential one optional keyword, worktree_for (a ref-to-worktree
-      callable used for the base leg instead of git_worktree), defaulting to today's behaviour for every other caller
+      callable used for the base leg instead of git_worktree; make_worktree_revert_runner keeps today's `with
+      git_worktree(ref)` path when it is None and calls worktree_for(ref) otherwise), defaulting to today's behaviour for every other caller
       (validate_differential_gate_baseline among them). The HEAD leg is unchanged.
     new_imports: [scripts.checks.verification._graduation_git, scripts.contract_rules]
   - file: scripts/checks/verification/validate_verification_registry.py
@@ -64,10 +66,12 @@ scope:
       calls _added_entries(entries, root) and _modified_entries(entries, root) without the keyword, exactly as today,
       so each does its own read (an empty list in production) and the existing wiring tests, which patch those two
       helpers on a non-git tmp root, keep driving the differential.
-      Each candidate keeps exactly one HEAD draw and one base draw; nothing is pooled or retried.
+      The gate's own HEAD-shard read (yaml.safe_load at line 210 today, about 1,770 shards) also parses through
+      scripts.contract_rules.parse_yaml (about 1s locally). Each candidate keeps exactly one HEAD draw and one base
+      draw; nothing is pooled or retried.
       run_differential stays the per-row verdict seam the existing tests patch, so
       test_validate_verification_registry.py and test_validate_verification_registry_portability.py need no edit.
-    new_imports: [scripts.checks.verification._graduation_git]
+    new_imports: [scripts.checks.verification._graduation_git, scripts.contract_rules]
   - file: scripts/checks/roadmap/validate_platform_roadmap.py
     action: Modify
     purpose: The roadmap parse and the 815 plan parses go through scripts.contract_rules.parse_yaml (YAMLError handling unchanged).
@@ -135,7 +139,8 @@ scope:
       the baseline is read once; a planted untracked file left by one candidate's base leg is gone before the next
       candidate's leg starts; a failed restore surfaces as a registry failure, never an admission; candidates run
       one at a time (a recording fake asserts no two differentials are open at once); when the shared baseline read
-      returns None the two helpers are called without the baseline keyword (spy).
+      returns None the two helpers are called without the baseline keyword (spy); the gate's HEAD-shard read parses
+      through parse_yaml (spy).
   - file: tests/checks/roadmap/test_validate_platform_roadmap_loader.py
     action: Create
     purpose: Sibling of the near-cap mirror test (8 SLOC headroom). The check's plan and roadmap parses go through parse_yaml (spy), and a malformed plan still fails as today.
@@ -335,10 +340,15 @@ test_obligations:
     test_selector: tests/checks/verification/test__graduation_git.py
     red_green_expectation: red before (the module does not exist), green after.
   - source: scripts/verification_graduation.py
-    behavior: entries_at_ref keeps its four branches on the batched reader and run_differential's verdicts are unchanged.
+    behavior: entries_at_ref keeps its four branches on the batched reader and both loaders parse through parse_yaml.
     verification_step: 4
     test_selector: tests/verification_graduation/test_loader.py
     red_green_expectation: red before (no batched-reader or parse_yaml assertions pass), green after.
+  - source: scripts/verification_graduation.py
+    behavior: run_differential's verdicts are unchanged with worktree_for given and omitted.
+    verification_step: 4
+    test_selector: tests/verification_graduation/test_differential.py
+    red_green_expectation: red before (no worktree_for keyword exists), green after.
   - source: scripts/checks/verification/validate_verification_registry.py
     behavior: N added entries share one worktree, the baseline is read once, candidates stay serial with one draw per leg.
     verification_step: 2
@@ -456,6 +466,7 @@ gate_rounds:
     scout_input_fingerprint: "v1:a522026d6de57bbdab683971c349faabb2dfff448f9a276d067c1aba9115c096"
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 7}
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 3}
+  - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 4}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
