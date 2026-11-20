@@ -149,6 +149,7 @@ def _run(script: list[Any], *, cut: bool = False) -> tuple[dict[str, Any], Path]
 
 
 def _bodies(events: dict[str, Any]) -> dict[str, str]:
+    events["header"]["contract_path"] = "tests/fixtures/persona_backends/fixture_persona.yaml"
     return {"events.json": json.dumps(events, sort_keys=True, indent=2) + "\n", "host-run.json": HOST_RUN}
 
 
