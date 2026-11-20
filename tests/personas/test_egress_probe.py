@@ -64,6 +64,29 @@ def _connect(monkeypatch: pytest.MonkeyPatch, ok: bool = True, calls: list[tuple
     monkeypatch.setattr(P.socket, "create_connection", fake)
 
 
+ROUTE_HEAD = "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n"
+
+
+def _route(iface: str, dest: str = "00000000", metric: int = 0, mask: str = "00000000") -> str:
+    return f"{iface}\t{dest}\t0100000A\t0003\t0\t0\t{metric}\t{mask}\t0\t0\t0\n"
+
+
+def _stub_placement(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rows: str | None, vendor: str | None = "Microsoft Corporation") -> None:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    route, vend = tmp_path / "route", tmp_path / "vendor"
+    if rows is not None:
+        route.write_text(ROUTE_HEAD + rows)
+    if vendor is not None:
+        vend.write_text(vendor + "\n")
+    monkeypatch.setattr(P, "ROUTE_PATH", str(route))
+    monkeypatch.setattr(P, "VENDOR_PATH", str(vend))
+
+
+@pytest.fixture(autouse=True)
+def _eth0_default(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
+    _stub_placement(monkeypatch, tmp_path_factory.mktemp("placement"), _route("eth0"))
+
+
 def _case(case_id: str) -> P.Case:
     return P.BY_ID[case_id]
 
@@ -253,8 +276,9 @@ def test_self_check_runs_agent_binary_first_and_passes_when_all_refused(
     _patch_attempts(monkeypatch, set())
     assert egress_self_check.main([]) == 0
     lines = capsys.readouterr().out.splitlines()
-    assert lines[0].startswith("EGRESS-SELF-CHECK case=agent_binary") and lines[-1] == "EGRESS-SELF-CHECK PASS"
-    assert [ln.split()[1] for ln in lines[:-1]] == [f"case={c}" for c in egress_self_check.SELF_CHECK_IDS]
+    assert lines[0].startswith("EGRESS-PLACEMENT ")
+    assert lines[1].startswith("EGRESS-SELF-CHECK case=agent_binary") and lines[-1] == "EGRESS-SELF-CHECK PASS"
+    assert [ln.split()[1] for ln in lines[1:-1]] == [f"case={c}" for c in egress_self_check.SELF_CHECK_IDS]
 
 
 @pytest.mark.parametrize("leak", list(egress_self_check.SELF_CHECK_IDS))
@@ -352,3 +376,77 @@ def test_control_fails_when_the_vendor_list_cannot_be_fetched(
     _control(monkeypatch, _all_but("agent_binary"), error, tmp_path)
     assert egress_control.main([]) == 1
     assert "VENDOR-LIST fetch-failed" in capsys.readouterr().out
+
+
+def test_placement_reads_the_default_route_interface_and_the_vendor(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _stub_placement(monkeypatch, tmp_path, _route("eth0"))
+    assert P.placement() == ("Microsoft Corporation", "eth0")
+    _stub_placement(monkeypatch, tmp_path, _route("ens5", metric=100) + _route("eth0", dest="0000000A"), "Amazon EC2")
+    assert P.placement() == ("Amazon EC2", "ens5")
+
+
+def test_placement_takes_the_lowest_metric_default_row(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _stub_placement(monkeypatch, tmp_path, _route("ens5", metric=200) + _route("eth0", metric=100) + _route("lo", mask="000000FF"))
+    assert P.placement()[1] == "eth0"
+
+
+def test_placement_is_unknown_or_empty_when_nothing_is_readable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _stub_placement(monkeypatch, tmp_path, _route("eth0", dest="0000000A"), None)
+    assert P.placement() == ("unknown", "")
+    _stub_placement(monkeypatch, tmp_path / "none", None, None)
+    assert P.placement() == ("unknown", "")
+    _stub_placement(monkeypatch, tmp_path / "bad", _route("eth0", metric="x"))  # type: ignore[arg-type]
+    assert P.placement()[1] == ""
+
+
+def test_default_iface_is_reached_unless_the_interface_is_eth0(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    assert P.attempt(_case("default_iface")) is False
+    _stub_placement(monkeypatch, tmp_path, _route("ens5"))
+    assert P.attempt(_case("default_iface")) is True
+    _stub_placement(monkeypatch, tmp_path / "none", None)
+    assert P.attempt(_case("default_iface")) is True
+
+
+def test_probe_main_prints_the_placement_first(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    _patch_attempts(monkeypatch, {"listed"})
+    assert P.main([]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "EGRESS-PLACEMENT vendor=Microsoft Corporation iface=eth0"
+    assert "EGRESS-PROBE case=default_iface expect=refused got=refused" in lines
+
+
+def test_probe_main_stops_as_unsupported_placement(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _stub_placement(monkeypatch, tmp_path, _route("ens5"), "Amazon EC2")
+    _patch_attempts(monkeypatch, {"listed", "default_iface"})
+    assert P.main([]) == 1
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "EGRESS-PLACEMENT vendor=Amazon EC2 iface=ens5"
+    assert lines[-2] == "EGRESS-PROBE UNSUPPORTED_PLACEMENT iface=ens5" and lines[-1] == "EGRESS-PROBE FAIL default_iface"
+
+
+def test_self_check_default_iface_is_second() -> None:
+    assert egress_self_check.SELF_CHECK_IDS[:2] == ("agent_binary", "default_iface")
+
+
+def test_self_check_stops_as_unsupported_placement_when_default_iface_is_reached(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _stub_placement(monkeypatch, tmp_path, _route("ens5"))
+    real = P.attempt
+    monkeypatch.setattr(P, "attempt", lambda case: real(case) if case[0] == "default_iface" else False)
+    assert egress_self_check.main([]) == 1
+    out = capsys.readouterr().out
+    assert "EGRESS-SELF-CHECK UNSUPPORTED_PLACEMENT iface=ens5" in out
+    assert out.rstrip().endswith("EGRESS-SELF-CHECK FAIL default_iface")
+
+
+def test_control_reports_the_placement_and_never_fails_on_default_iface(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _control(monkeypatch, _all_but("agent_binary", "ipv6", "default_iface"), ["ghcr.io"], tmp_path)
+    assert egress_control.main([]) == 0
+    out = capsys.readouterr().out
+    assert out.splitlines()[0].startswith("EGRESS-PLACEMENT ")
+    assert "EGRESS-CONTROL case=default_iface expect=reported got=refused" in out
