@@ -71,7 +71,9 @@ def _route(iface: str, dest: str = "00000000", metric: int = 0, mask: str = "000
     return f"{iface}\t{dest}\t0100000A\t0003\t0\t0\t{metric}\t{mask}\t0\t0\t0\n"
 
 
-def _stub_placement(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rows: str | None, vendor: str | None = "Microsoft Corporation") -> None:
+def _stub_placement(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rows: str | None, vendor: str | None = "Microsoft Corporation"
+) -> None:
     tmp_path.mkdir(parents=True, exist_ok=True)
     route, vend = tmp_path / "route", tmp_path / "vendor"
     if rows is not None:
@@ -386,7 +388,9 @@ def test_placement_reads_the_default_route_interface_and_the_vendor(monkeypatch:
 
 
 def test_placement_takes_the_lowest_metric_default_row(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    _stub_placement(monkeypatch, tmp_path, _route("ens5", metric=200) + _route("eth0", metric=100) + _route("lo", mask="000000FF"))
+    _stub_placement(
+        monkeypatch, tmp_path, _route("ens5", metric=200) + _route("eth0", metric=100) + _route("lo", mask="000000FF")
+    )
     assert P.placement()[1] == "eth0"
 
 
