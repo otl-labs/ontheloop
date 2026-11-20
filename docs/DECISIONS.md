@@ -10269,6 +10269,8 @@ not modify), VF-11, tier_item T3.18 (predecessor, complete) and T3.21 (this Deci
 
 [Amendment 2026-08-17: the implement-PR leg's commit-subject resolution (`feat({slug})` commit subjects on `git log origin/main..HEAD`) is replaced by an explicit, schema-validated `implementation_declared` boolean on `PlanDocument`, resolved content-keyed via `scripts.checks._common.resolve_declared_plans` (PLAN-plan-resolution-content-keyed, provenance: explicit operator direction given during that plan's authoring). The plan-PR leg's disposition-presence obligation and the differential admission gate are unchanged; only the implement-PR leg's resolution signal moves from commit-message grammar to diff-carried plan content.]
 
+[Amendment 2026-11-20: clause 2's implement-PR leg accepts a matching registry row that is in the registry at the PR head, whether the diff adds it or an earlier PR of the same plan did (a plan built over several PRs, or closed late under git-ops.yaml LATE CLOSURE), instead of new-in-diff rows only. The (plan_slug, check_id) join is unchanged, a row already on main that known_red.yaml lists does not count, and the differential admission gate is unchanged, so every such row was admitted to main by the registry's admission gate (PLAN-graduation-rows-on-main, rec-2837).]
+
 ---
 
 ## Decision 131: Test-colocation mapping inverted to a mirror rule + retiring grandfather-table; no-cross-test-import guard and per-package conftest hierarchy (amends Decision 104; enables rec-2709) (Decided)
