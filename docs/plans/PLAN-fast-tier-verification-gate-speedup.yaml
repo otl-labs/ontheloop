@@ -27,9 +27,11 @@ scope:
       a path-to-text mapping that omits a path whose header reads `missing` (today's skip of a failed git show), and
       raising GraduationError when the subprocess cannot start, exits non-zero or its output is misframed (today every
       show failing silently yields an empty baseline; Decision 55 fail loud); and shared_worktrees(root), a context
-      manager whose get(ref) lazily, once per distinct ref, resolves the ref to a commit sha (`git rev-parse --verify
-      <ref>^{commit}`), adds one real `git worktree add --detach <path> <sha>` and provisions the .venv symlink through
-      _provision_venv_symlink exactly as git_worktree does; whose restore(path) runs `git checkout -f -q --detach <sha>`
+      manager whose get(ref) is the only surface callers use: on the first call for a ref it resolves the ref to a
+      commit sha (`git rev-parse --verify <ref>^{commit}`), adds one real `git worktree add --detach <path> <sha>` and
+      provisions the .venv symlink through _provision_venv_symlink exactly as git_worktree does; on every later call
+      for that ref it restores the existing worktree before returning it, so a worktree is added only when a base leg
+      asks for one (a candidate whose HEAD leg fails never adds one). The private restore runs `git checkout -f -q --detach <sha>`
       (the sha recorded at add, so a base leg that ran git checkout, switch or commit cannot move the next candidate's
       base) plus `git clean -fdxq -e .venv`, then requires `git rev-parse HEAD` to equal that sha and `git status
       --porcelain --ignored` to list nothing but the .venv symlink (which .gitignore's `.venv/` leaves reported as
@@ -55,11 +57,13 @@ scope:
       optional keyword baseline=None (None keeps today's own entries_at_ref read, so the graduated pin
       TestModifiedRecordReadmitted's one-argument calls keep working); then call
       verification_graduation.run_differential(row, ..., worktree_for=wt.get) SERIALLY, one candidate at a time as
-      today, inside one shared_worktrees() context restored between candidates (Decision 132: each base leg sees a
-      clean pre-fix tree). The restore before a reused worktree runs inside that candidate's existing per-candidate
-      try/except (lines 113-124 today), so a failed restore is reported as an error for the candidate about to run and
+      today, inside one shared_worktrees() context (Decision 132: each base leg sees a clean pre-fix tree). The restore
+      happens inside wt.get, which run_differential calls, so it runs inside that candidate's existing per-candidate
+      try/except (lines 118-125 today): a failed restore is reported as an error for the candidate about to run and
       never escapes the check. When the shared baseline read returns None (origin/main does not resolve), the gate
-      takes today's no-baseline path once rather than passing None on, so baseline=None only ever means not supplied.
+      calls _added_entries(entries, root) and _modified_entries(entries, root) without the keyword, exactly as today,
+      so each does its own read (an empty list in production) and the existing wiring tests, which patch those two
+      helpers on a non-git tmp root, keep driving the differential.
       Each candidate keeps exactly one HEAD draw and one base draw; nothing is pooled or retried.
       run_differential stays the per-row verdict seam the existing tests patch, so
       test_validate_verification_registry.py and test_validate_verification_registry_portability.py need no edit.
@@ -130,7 +134,8 @@ scope:
       TestWorktreeReuse::test_added_entries_share_one_worktree (three added entries, one base ref, one worktree add);
       the baseline is read once; a planted untracked file left by one candidate's base leg is gone before the next
       candidate's leg starts; a failed restore surfaces as a registry failure, never an admission; candidates run
-      one at a time (a recording fake asserts no two differentials are open at once).
+      one at a time (a recording fake asserts no two differentials are open at once); when the shared baseline read
+      returns None the two helpers are called without the baseline keyword (spy).
   - file: tests/checks/roadmap/test_validate_platform_roadmap_loader.py
     action: Create
     purpose: Sibling of the near-cap mirror test (8 SLOC headroom). The check's plan and roadmap parses go through parse_yaml (spy), and a malformed plan still fails as today.
@@ -318,9 +323,16 @@ verification_plan:
     graduation: not-applicable
 test_obligations:
   - source: scripts/checks/verification/_graduation_git.py
-    behavior: One cat-file subprocess reads every shard blob; one worktree per ref is reused, restored clean, fails loud, and removed on exit.
+    behavior: One cat-file subprocess reads every shard blob.
     verification_step: 1
     test_selector: tests/checks/verification/test__graduation_git.py::TestBatchedShardRead::test_one_subprocess_reads_every_shard
+    red_green_expectation: red before (the module does not exist), green after.
+  - source: scripts/checks/verification/_graduation_git.py
+    behavior: >-
+      One worktree per ref is reused, restored to the recorded sha and clean on reuse, fails loud when it cannot be,
+      provisions and unlinks the .venv symlink, and is removed on exit.
+    verification_step: 4
+    test_selector: tests/checks/verification/test__graduation_git.py
     red_green_expectation: red before (the module does not exist), green after.
   - source: scripts/verification_graduation.py
     behavior: entries_at_ref keeps its four branches on the batched reader and run_differential's verdicts are unchanged.
@@ -443,6 +455,7 @@ gate_rounds:
     verdict: NO_FLAGS
     scout_input_fingerprint: "v1:a522026d6de57bbdab683971c349faabb2dfff448f9a276d067c1aba9115c096"
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 7}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 3}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
