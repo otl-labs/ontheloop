@@ -202,10 +202,15 @@ def test_execution_allowance(n_selected: int, census: int | None = None) -> floa
     return min(max(TEST_BASE_SECONDS, PER_MODULE_SECONDS * max(effective, 0)), cap)
 
 
+def _cost_path_seconds(cost_s: float, n_modules: int) -> float:
+    return COST_COEFFICIENT * cost_s + PREPASS_FIXED_SECONDS + PREPASS_PER_MODULE_SECONDS * max(n_modules, 0)
+
+
 def cost_based_allowance(cost_s: float, n_selected: int, census: int | None = None) -> float:
     """The MEASURED-cost allowance for the test half (Decision 208 point 1): the same function the
-    plan-time predictor's high end uses, so a plan-time `breach` is reachable only at the derived
-    cap or under a derivation fallback.
+    plan-time predictor's high end uses (both go through _cost_path_seconds), so a plan-time `breach` is
+    reachable only at the derived cap or under a derivation fallback, while n_selected does not exceed
+    the census.
 
     ``cost_s`` is priced by scripts/checks/deps/module_cost_table.py's selection_cost() over the
     selection this run actually made. The measured collect-only prepass/session overhead term
@@ -216,7 +221,7 @@ def cost_based_allowance(cost_s: float, n_selected: int, census: int | None = No
     """
     effective = min(n_selected, census) if census is not None else n_selected
     cap = CEILING_SECONDS - NON_TEST_BUDGET_SECONDS - PRECOMMIT_ESCALATION_ALLOWANCE_SECONDS
-    raw = COST_COEFFICIENT * cost_s + PREPASS_FIXED_SECONDS + PREPASS_PER_MODULE_SECONDS * max(effective, 0)
+    raw = _cost_path_seconds(cost_s, effective)
     return min(max(TEST_BASE_SECONDS, raw), cap)
 
 
@@ -273,13 +278,14 @@ def predict_test_half(n_selected: int, *, cost_s: float | None = None) -> tuple[
 
     ``cost_s`` given: the SAME cost function the gate asserts on (Decision 208) -- the high end,
     COST_COEFFICIENT x cost_s + overhead, IS cost_based_allowance's raw value before the
-    base/cap clamp. ``cost_s`` None: the legacy floor+slopes prediction (Decision 182).
+    base/cap clamp, computed by the same _cost_path_seconds so the two agree bit for bit.
+    ``cost_s`` None: the legacy floor+slopes prediction (Decision 182).
     """
     if cost_s is not None:
         overhead = PREPASS_FIXED_SECONDS + PREPASS_PER_MODULE_SECONDS * max(n_selected, 0)
         return (
             PREDICT_COST_RATIO_LOW * cost_s + overhead,
-            COST_COEFFICIENT * cost_s + overhead,
+            _cost_path_seconds(cost_s, n_selected),
         )
     above = max(0, n_selected - _PREDICT_FLOOR_MODULES)
     return (
