@@ -7,6 +7,7 @@ anti-pattern, validate_test_count_coupling)."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -519,3 +520,33 @@ class TestWaiverIntegrity:
         validate_supersession_annotations(failed, root=tmp_path)
         assert len(failed) == 1
         assert "malformed waiver entry #0" in failed[0]
+
+
+def test_consolidation_candidates_warn_once_and_never_fail(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    _write_decisions(tmp_path)
+    _write_waivers(tmp_path)
+    (tmp_path / "docs/contracts").mkdir(parents=True)
+    (tmp_path / "docs/contracts/decision-compaction.yaml").write_text("consolidation:\n  threshold: 3\n", encoding="utf-8")
+    rows = [{"number": 1, "live": True, "currency": "current", "amends": []}]
+    rows += [{"number": n, "live": True, "currency": "current", "amends": [1]} for n in (2, 3, 4)]
+    rows += [{"number": 5, "live": True, "currency": "superseded_compacted", "amends": [1]}]
+    (tmp_path / "docs/decisions-index.json").write_text(json.dumps({"decisions": rows}), encoding="utf-8")
+    failed: list[str] = []
+    validate_supersession_annotations(failed, root=tmp_path)
+    out = capsys.readouterr().out
+    assert failed == []
+    assert [ln for ln in out.splitlines() if "consolidation threshold" in ln and "WARN" in ln] == [
+        (
+            "  WARN: 1 Decision root(s) at or over the consolidation threshold (3 live amenders); largest Decision 1 with 3. "
+            "Nomination only: nothing fails (Decision 278 cl.2)."
+        )
+    ]
+
+
+def test_no_index_or_contract_prints_no_consolidation_line_even_without_a_waiver_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    _write_decisions(tmp_path)
+    failed: list[str] = []
+    validate_supersession_annotations(failed, root=tmp_path)
+    assert "consolidation threshold" not in capsys.readouterr().out

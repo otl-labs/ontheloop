@@ -9,7 +9,7 @@ import asyncio
 import dataclasses
 import os
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO
 
@@ -83,7 +83,9 @@ class _Run:
         self.max_tokens = max_tokens
         self.clock = clock
         self.wall = wall
-        self.events: list[dict[str, Any]] = [head]
+        self.head = head
+        self.head_out = False
+        self.events: list[dict[str, Any]] = []
         self.turns_used = 0
         self.revisions = 0
         self.role = "primary"
@@ -96,18 +98,22 @@ class _Run:
         self.bridge: Any = None
         self.bridge_errors: tuple[type[BaseException], ...] = ()
         self.deadline = 0.0
-        self.emit(head)
 
     def emit(self, record: dict[str, Any]) -> None:
-        if self.events[-1] is not record:
-            self.events.append(record)
+        self.events.append(record)
         if self.on_event is not None:
             self.on_event(record)
+
+    def emit_head(self) -> None:
+        if not self.head_out:
+            self.head_out = True
+            self.emit(self.head)
 
     def now_ms(self) -> int:
         return int(self.wall() * 1000)
 
     def end(self, value: dict[str, Any], outcome: str | None = None, error: str | None = None) -> dict[str, Any]:
+        self.emit_head()
         failure_id = value.get("failure") if value.get("outcome") == "failure" else None
         record = ev.end_record(
             outcome or str(value.get("outcome")), failure_id, self.turns_used, self.revisions, self.now_ms(), error
@@ -146,9 +152,8 @@ class _Run:
                 self.bridge = bridge
                 self.bridge_errors = (mcp_bridge.BridgeFailed,)
                 self.tools = [*self.tools, *bridge.tool_specs()]
-                self.events[0]["tools_sha256"] = ev.tools_sha256(self.tools)
-                if self.on_event is not None:
-                    self.on_event(self.events[0])
+                self.head["tools_sha256"] = ev.tools_sha256(self.tools)
+                self.emit_head()
                 return await self.go()
         except mcp_bridge.BridgeTimeout:
             return self.budget_failure("max_wall_clock_seconds reached while the MCP server started")
@@ -175,6 +180,7 @@ class _Run:
         allowed = min(3, (left - 1) // 2) if fail_over else min(3, left)
         started = self.now_ms()
         upper = allowed + 1 + allowed if fail_over else allowed
+        capture = ev.Capture()
         try:
             result = await asyncio.wait_for(
                 self.transport(
@@ -187,13 +193,13 @@ class _Run:
                     role=self.role,
                     fail_over=fail_over,
                     max_attempts=allowed,
+                    capture=capture,
                 ),
                 remaining,
             )
         except asyncio.TimeoutError:
             self.first = False
-            self.turns_used += upper
-            self.transport_turn((), False, 0, started, "transport_error")
+            self.timed_out(capture, upper, started)
             return self.budget_failure("max_wall_clock_seconds reached during a call")
         except Exception as exc:  # intentionally broad: anything else the transport raises aborts the run
             kind, attempts = getattr(exc, "kind", None), getattr(exc, "attempts", None)
@@ -204,9 +210,33 @@ class _Run:
         self.first = False
         return await self.on_result(result, started)
 
+    def timed_out(self, capture: ev.Capture, upper: int, started: int) -> None:
+        if not capture.filled:
+            self.turns_used += upper
+            self.transport_turn((), False, 0, started, "transport_error")
+            return
+        now = self.now_ms()
+        entries: list[Any] = list(capture.attempts)
+        flight = capture.in_flight
+        if flight is not None:
+            since = flight.started_at_ms
+            entries.append(ev.cancelled_dict(flight, 0 if since is None else max(0, now - since)))
+        sent = capture.probe_record is not None or any(
+            (a["role"] if isinstance(a, dict) else a.role) == _FALLBACK
+            and (a["attempt"] if isinstance(a, dict) else a.attempt) >= 1
+            for a in entries
+        )
+        failed_over = self.role == "primary" and sent
+        if failed_over:
+            self.role = _FALLBACK
+        probe = 1 if failed_over else 0
+        self.turns_used += len(entries) + probe
+        record = None if capture.record is None else dataclasses.asdict(capture.record)
+        self.transport_turn(entries, True, probe, started, "transport_error", capture, record=record, failed_over=failed_over)
+
     def transport_turn(
         self,
-        attempts: tuple[Any, ...],
+        attempts: Iterable[Any],
         known: bool,
         probe: int,
         started: int,
@@ -216,7 +246,7 @@ class _Run:
     ) -> dict[str, Any]:
         fields: dict[str, Any] = {
             "turn": len([e for e in self.events if "turn" in e]) + 1,
-            "attempts": [ev.attempt_dict(a) for a in attempts],
+            "attempts": [a if isinstance(a, dict) else ev.attempt_dict(a) for a in attempts],
             "attempts_known": known,
             "probe_turn": probe,
             "record": None,
@@ -240,6 +270,8 @@ class _Run:
         known = bool(attempts)
         primary_outages = sum(1 for a in attempts if a.role == "primary" and a.outcome == "outage")
         failed_over = any(a.role == _FALLBACK for a in attempts) or (fail_over and primary_outages == allowed and known)
+        if kind == "fallback_unavailable":
+            failed_over = False
         probe = 1 if failed_over else 0
         self.turns_used += len(attempts) + probe if known else upper
         if failed_over:
@@ -363,5 +395,6 @@ async def run_persona(
     if loaded.warehouse_verbs:
         result = await run.run_with_bridge(mcp_server, mcp_errlog)
     else:
+        run.emit_head()
         result = await run.go()
     return result, run.events

@@ -2,7 +2,8 @@
 """PreToolUse hook: refuse a session command that calls the ops writer directly -- a tripwire, never a control.
 
 Exit 2 with the portal pointer on a match; every other path (other tools, malformed input, lexer errors, any exception,
-a failed import) exits 0 with no output. It never prints to stdout and never returns a permission decision.
+a failed import) exits 0 with no output. A block ends with the HOOK-BLOCK marker line (rule HB-1; grammar in
+src/turn_capture/markers.py). It never prints to stdout and never returns a permission decision.
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ def main() -> int:
         "No approval clears this refusal. If the portal lacks what you need, file a rec; if this match is wrong, "
         "tell the operator and file a rec naming the command.\n"
         "This hook is a tripwire, not a control (docs/contracts/ducklake_writer.yaml audit_invariants).\n"
+        "HOOK-BLOCK v1 hook=rec_writer_tripwire\n"
     )
     return 2
 

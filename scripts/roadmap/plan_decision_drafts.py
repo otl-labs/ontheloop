@@ -17,7 +17,7 @@ from typing import Any, Iterator
 
 import yaml
 
-from scripts.checks.decisions import envelope_rules
+from scripts.checks.decisions import consolidation, decisions_size_measure, envelope_rules
 from scripts.decisions_md import (
     PLACEHOLDER_NUMBER,
     _extract_related_decisions,
@@ -36,6 +36,7 @@ _KIND_CONTRACT = "docs/contracts/decision-kind.yaml"
 _DECISIONS = ("docs/DECISIONS.md", "docs/DECISIONS_ARCHIVE.md")
 _DECISIONS_MD = "docs/DECISIONS.md"
 _CONCRETE_NUMBER = "assign at implementation: Decision 217 cl.5"
+_EXEMPTIONS = "config/decision_options_exemptions.yaml"
 
 
 @dataclass(frozen=True)
@@ -85,7 +86,53 @@ def _existing_headings(root: Path) -> set[tuple[int, str]]:
     return found
 
 
-def _rule_findings(number: str, title: str, block: str) -> list[Finding]:
+def _resolves_at_head(path: str, dotted: str) -> bool:
+    try:
+        parsed = yaml.safe_load((ROOT / path).read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return False
+    return envelope_rules.dotted_value(parsed, dotted)[0]
+
+
+def _delegation_findings(env: dict, bound_files: set[str], meta: dict) -> list[Finding]:
+    """delegates and plan findings; a key that does not resolve but whose file the plan's sidecar binds is a WARN."""
+    rules = [str(r) for r in ((meta.get("field_shapes") or {}).get("delegates") or {}).get("change_rules") or []]
+    found = [("FAIL", "delegates", i) for i in envelope_rules.delegates_issues(env, rules, lambda _k: True)] if rules else []
+    delegates = env.get("delegates")
+    for item in delegates if isinstance(delegates, list) and rules else []:
+        split = envelope_rules.split_delegated_key(item.get("key")) if isinstance(item, dict) else None
+        if split and not _resolves_at_head(*split):
+            severity = "WARN" if split[0] in bound_files else "FAIL"
+            found.append((severity, "delegates", f"delegates key {item['key']!r} does not resolve at head"))
+    found += [("FAIL", "plan", i) for i in envelope_rules.plan_issues(env)]
+    found += [
+        ("WARN", "plan", i)
+        for i in envelope_rules.plan_warnings(env, lambda s: (ROOT / "docs/plans" / f"PLAN-{s}.yaml").exists())
+    ]
+    return [Finding("", "", sev, field, detail) for sev, field, detail in found]
+
+
+def _size_findings(block: str, slug: str | None) -> list[Finding]:
+    """The options rule and the measured cap, read from the live contract and skipped when its keys are absent."""
+    try:
+        text = (ROOT / _ENTRY_CONTRACT).read_text(encoding="utf-8")
+    except OSError:
+        return []
+    gov = decisions_size_measure.size_governance(text)
+    if isinstance(gov, str):
+        return []
+    try:
+        rows = decisions_size_measure.exemption_rows((ROOT / _EXEMPTIONS).read_text(encoding="utf-8"))
+    except OSError:
+        rows = []
+    exempt = {title for row_slug, title in rows if row_slug == slug}
+    issues = decisions_size_measure.options_issues(block, gov, exempt) + decisions_size_measure.measured_cap_issues(block, gov)
+    return [Finding("", "", "FAIL", "size", issue) for issue in issues]
+
+
+def _rule_findings(
+    number: str, title: str, block: str, slug: str | None = None, bound_files: set[str] | None = None
+) -> list[Finding]:
     def fnd(severity: str, field: str, detail: str) -> Finding:
         return Finding(number, title, severity, field, detail)
 
@@ -116,7 +163,8 @@ def _rule_findings(number: str, title: str, block: str) -> list[Finding]:
     out += [fnd("FAIL", "number", i) for i in envelope_rules.number_issues(env.get("number"), None, draft=True)]
     if number != PLACEHOLDER_NUMBER or env.get("number") != PLACEHOLDER_NUMBER:
         out.append(fnd("WARN", "number", _CONCRETE_NUMBER))
-    return out
+    extra = _delegation_findings(env, bound_files or set(), meta) + _size_findings(block, slug)
+    return out + [Finding(number, title, f.severity, f.field, f.detail) for f in extra]
 
 
 def _int_list(value: Any) -> list[int]:
@@ -151,6 +199,21 @@ def _info_lines(number: str, title: str, block: str) -> list[str]:
     return out
 
 
+def _nomination_lines(number: str, title: str, block: str) -> list[str]:
+    """Decision 278 cl.2: one NOMINATION line per amended root at the consolidation threshold; never a finding, total."""
+    env = extract_entry_envelope(block, placeholder=True) or {}
+    amends = sorted(set(extract_amends_edges(title)) | set(_int_list(env.get("amends"))))
+    threshold = consolidation.load_threshold(ROOT)
+    if not amends or threshold is None:
+        return []
+    return [
+        "  " + line
+        for line in consolidation.nomination_info(
+            number, amends, consolidation.load_rows(ROOT), threshold, consolidation.entry_sizes(ROOT)
+        )
+    ]
+
+
 def _drafted_blocks(content: str, root: Path, skip_quoted: bool) -> Iterator[tuple[str, str, str]]:
     """(number, title, block) of each drafted entry: the skip-and-count loop the report and drafted_titles share."""
     concrete = any(n != PLACEHOLDER_NUMBER for n, _, _ in _blocks(content))
@@ -161,15 +224,26 @@ def _drafted_blocks(content: str, root: Path, skip_quoted: bool) -> Iterator[tup
         yield number, title, block
 
 
-def _draft_findings(content: str, root: Path, skip_quoted: bool) -> tuple[int, list[Finding], list[str]]:
+def _draft_findings(
+    content: str, root: Path, skip_quoted: bool, slug: str | None = None
+) -> tuple[int, list[Finding], list[str]]:
     drafted = 0
     findings: list[Finding] = []
     infos: list[str] = []
     for number, title, block in _drafted_blocks(content, root, skip_quoted):
         drafted += 1
-        findings += _rule_findings(number, title, block)
-        infos += _info_lines(number, title, block)
+        findings += _rule_findings(number, title, block, slug)
+        infos += _info_lines(number, title, block) + _nomination_lines(number, title, block)
     return drafted, findings, infos
+
+
+def _sidecar_bound_files(plan: dict, root: Path) -> set[str]:
+    slug = plan.get("slug")
+    try:
+        path = root / approved_text.sidecar_rel(str(slug))
+        return {b.file for b in approved_text.parse_sidecar(path.read_text(encoding="utf-8")).blocks}
+    except (OSError, approved_text.ApprovedTextError, UnicodeDecodeError):
+        return set()
 
 
 def _sidecar_contents(plan: dict, root: Path) -> tuple[list[str], list[Finding]]:
@@ -209,15 +283,16 @@ def _scan_plan(path: str | Path, root: Path) -> tuple[int, list[Finding], list[s
     findings: list[Finding] = []
     infos: list[str] = []
     for text in _strings(plan):
-        d, f, i = _draft_findings(text, root, skip_quoted=True)
+        d, f, i = _draft_findings(text, root, skip_quoted=True, slug=str(plan.get("slug")))
         drafted, findings, infos = drafted + d, findings + f, infos + i
     sidecar_texts, findings_extra = _sidecar_contents(plan, root)
     findings += findings_extra
+    bound = _sidecar_bound_files(plan, root)
     for text in sidecar_texts:
         drafted += 1
         head = next(iter(_blocks(text)))
-        findings += _rule_findings(*head)
-        infos += _info_lines(head[0], head[1], text)
+        findings += _rule_findings(*head, str(plan.get("slug")), bound)
+        infos += _info_lines(head[0], head[1], text) + _nomination_lines(head[0], head[1], text)
     return drafted, findings, infos
 
 

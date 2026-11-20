@@ -11,6 +11,9 @@ if [ -z "$ROOT" ]; then
     ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 fi
 
+# HB-1 (src/turn_capture/markers.py): every exit 2 ends with the marker line; exit 0 prints none.
+trap 'rc=$?; [ "$rc" -eq 2 ] && echo "HOOK-BLOCK v1 hook=protected_action_gate" >&2; exit $rc' EXIT
+
 COARSE="terraform secretsmanager ssm get_secret_value WithDecryption materialise_tfvars sync-terraform-assets neon_api_key agent_platform_admin"
 
 fail() {

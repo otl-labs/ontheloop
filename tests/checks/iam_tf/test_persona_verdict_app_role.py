@@ -6,14 +6,16 @@ the workflow fence) and PR 3 (the role in terraform/personal). Each case is a pu
 
 from __future__ import annotations
 
+import fnmatch
 import re
 from pathlib import Path
 from typing import Any
 
 from scripts.checks.ci_guards.validate_trusted_plan_environment import _arg, _blocks
+from scripts.checks.iam_tf.validate_secret_parameter_grants import covers_value_verb, normalise, parse_statements
 from scripts.verify_ci_workflow import _load
-from tests.checks.iam_tf._ci_platform_role_iam import _attr_raw, _jsonencode_statement_blocks
-from tests.checks.iam_tf._platform_security_hcl import _strip_comments
+from tests.checks.iam_tf._ci_platform_role_iam import _attr_raw, _hcl_statement_blocks, _jsonencode_statement_blocks
+from tests.checks.iam_tf._platform_security_hcl import _block_body, _mask, _strip_comments
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _TF_GITHUB_DIR = _REPO_ROOT / "terraform" / "github"
@@ -250,3 +252,192 @@ def test_red_boundary_deny() -> None:
     for variant in broken:
         assert variant != text
         assert boundary_deny_problems(variant), variant
+
+
+_PERSONAL_DIR = _REPO_ROOT / "terraform" / "personal"
+_ROLE_FILE = _PERSONAL_DIR / "oidc_persona_verdict_app_role.tf"
+_OIDC_FILE = _PERSONAL_DIR / "oidc.tf"
+_BOUNDARY_ARN = "arn:aws:iam::${var.account_id}:policy/agent-platform-github-ci-apply-boundary"
+_JOB_WORKFLOW_REF = "otl-labs/ontheloop/.github/workflows/persona-verdict.yml@refs/heads/main"
+_KEY_LITERAL = "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-persona-verdict-app-key"
+_KEY_PATH = "parameter/secret/agent-platform-persona-verdict-app-key"
+_LITERAL_READERS = {("oidc_persona_verdict_app_role.tf", "VerdictAppKeyParameterRead")}
+_PATTERN_READERS = {("github_ci_apply_boundary.tf", "DataPlaneAllow"), ("platform_admin_policies.tf", "SecretParameterAdmin")}
+_WRITE_ALLOWED_IN = {"platform_admin_policies.tf": "SecretParameterAdmin", "github_ci_apply_boundary.tf": "DataPlaneAllow"}
+_WRITE_VERBS = ("ssm:PutParameter", "ssm:DeleteParameter", "ssm:DeleteParameters")
+
+
+def _read(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def _block(text: str, kind: str, rtype: str, name: str) -> str:
+    m = re.search(rf'^{kind}\s+"{rtype}"\s+"{name}"\s*\{{', _strip_comments(text), re.M)
+    assert m, f"{kind} {rtype}.{name} not found"
+    return _block_body(_strip_comments(text), m.end() - 1)
+
+
+def trust_problems(text: str) -> list[str]:
+    role = _block(text, "resource", "aws_iam_role", "github_ci_persona_verdict_app")
+    problems: list[str] = []
+    if _attr_raw(role, "permissions_boundary") != f'"{_BOUNDARY_ARN}"':
+        problems.append("permissions_boundary is not the apply boundary")
+    env_local = re.search(r'^\s*persona_verdict_app_environment\s*=\s*"([^"]*)"', _strip_comments(text), re.M)
+    if env_local is None or env_local.group(1) != _ENV:
+        problems.append(f'local.persona_verdict_app_environment is not "{_ENV}"')
+    statements = _jsonencode_statement_blocks(role)
+    if len(statements) != 1:
+        return problems + [f"expected exactly one trust statement, found {len(statements)}"]
+    stmt = _strip_comments(statements[0])
+    cond = re.search(r"Condition\s*=\s*\{", _mask(stmt))
+    if cond is None:
+        return problems + ["trust has no Condition"]
+    body = _block_body(stmt, cond.end() - 1)
+    operators = re.findall(r"^\s*(\w+)\s*=\s*\{", _mask(body), re.M)
+    if operators != ["StringEquals"]:
+        return problems + [f"condition operators are {operators}, expected only StringEquals"]
+    se = _block_body(body, re.search(r"StringEquals\s*=\s*\{", _mask(body)).end() - 1)
+    keys = re.findall(r'"token\.actions\.githubusercontent\.com:(\w+)"\s*=', se)
+    if sorted(keys) != ["aud", "job_workflow_ref", "sub"]:
+        problems.append(f"StringEquals keys are {sorted(keys)}")
+    sub = re.search(r':sub"\s*=\s*flatten\(\[(.*?)\]\)\s*\n', se, re.S)
+    if sub is None or "for repo in local.github_repos" not in sub.group(1):
+        problems.append("sub does not iterate local.github_repos")
+    elif re.findall(r'"([^"]+)"', sub.group(1)) != ["repo:${repo}:environment:${local.persona_verdict_app_environment}"]:
+        problems.append("sub is not the persona-verdict-app environment")
+    if not re.search(rf':job_workflow_ref"\s*=\s*"{re.escape(_JOB_WORKFLOW_REF)}"\s*$', se, re.M):
+        problems.append("job_workflow_ref is not the one exact persona-verdict.yml ref")
+    return problems
+
+
+def policy_problems(text: str) -> list[str]:
+    doc = _block(text, "data", "aws_iam_policy_document", "github_ci_persona_verdict_app")
+    problems: list[str] = []
+    if _attr_raw(doc, "source_policy_documents") is not None:
+        problems.append("document sources another document")
+    statements = [_strip_comments(b) for b in _hcl_statement_blocks(doc)]
+    if len(statements) != 1:
+        return problems + [f"expected exactly one statement, found {len(statements)}"]
+    stmt = statements[0]
+    for attr, want in (
+        ("sid", '"VerdictAppKeyParameterRead"'),
+        ("effect", '"Allow"'),
+        ("actions", '["ssm:GetParameter"]'),
+        ("resources", f'["{_KEY_LITERAL}"]'),
+    ):
+        if _attr_raw(stmt, attr) != want:
+            problems.append(f"{attr} is not {want}")
+    if re.search(r"^\s*(condition|not_actions|not_resources)\b", stmt, re.M):
+        problems.append("statement carries a condition or a not_* form")
+    return problems
+
+
+def _tf_files() -> dict[str, str]:
+    return {p.name: _read(p) for d in (_PERSONAL_DIR, _BOOTSTRAP_DIR) for p in sorted(d.glob("*.tf"))}
+
+
+def _readers(files: dict[str, str]) -> tuple[set[tuple[str, str | None]], set[tuple[str, str | None]]]:
+    literal: set[tuple[str, str | None]] = set()
+    pattern: set[tuple[str, str | None]] = set()
+    for fname, text in files.items():
+        for stmt in parse_statements(text):
+            kind, resources = stmt["resource"]
+            if stmt["effect"] != "Allow" or kind != "literal" or not resources or not covers_value_verb(stmt["actions"]):
+                continue
+            for res in resources:
+                if res.endswith(_KEY_PATH):
+                    literal.add((fname, stmt["sid"]))
+                elif fnmatch.fnmatchcase(f"arn:aws:ssm:region:account:{_KEY_PATH}", normalise(res)):
+                    pattern.add((fname, stmt["sid"]))
+    return literal, pattern
+
+
+def write_problems(files: dict[str, str]) -> list[tuple[str, str | None]]:
+    out: list[tuple[str, str | None]] = []
+    for fname, text in files.items():
+        for stmt in parse_statements(text):
+            kind, resources = stmt["resource"]
+            if stmt["effect"] != "Allow" or kind != "literal" or _WRITE_ALLOWED_IN.get(fname) == stmt["sid"]:
+                continue
+            covers_key = any(
+                fnmatch.fnmatchcase(f"arn:aws:ssm:region:account:{_KEY_PATH}", normalise(r)) for r in (resources or [])
+            )
+            if covers_key and any(
+                fnmatch.fnmatchcase(v, a) or fnmatch.fnmatchcase(v.lower(), a.lower())
+                for v in _WRITE_VERBS
+                for a in stmt["actions"]
+            ):
+                out.append((fname, stmt["sid"]))
+    return out
+
+
+def test_trust_is_one_environment_and_workflow_bound_statement() -> None:
+    assert trust_problems(_read(_ROLE_FILE)) == []
+
+
+def test_policy_is_exactly_the_one_key_read() -> None:
+    assert policy_problems(_read(_ROLE_FILE)) == []
+
+
+def test_role_has_one_inline_policy_and_no_attachment() -> None:
+    text = "\n".join(_strip_comments(t) for t in _tf_files().values())
+    assert len(re.findall(r"role\s*=\s*aws_iam_role\.github_ci_persona_verdict_app\.(?:id|name)\b", text)) == 1
+    assert _strip_comments(_read(_ROLE_FILE)).count('resource "aws_iam_role_policy"') == 1
+    assert "aws_iam_role_policy_attachment" not in _strip_comments(_read(_ROLE_FILE))
+
+
+def test_personal_iam_ci_roles_read_lists_the_role() -> None:
+    assert _iam_roles_read_resources_in(_read(_OIDC_FILE), "IAMCIRolesRead").count(_ROLE_ARN) == 1
+
+
+def _iam_roles_read_resources_in(text: str, sid: str) -> list[str]:
+    match = re.search(rf'[Ss]id\s*=\s*"{sid}".*?[Rr]esources?\s*=\s*\[(.*?)\n\s*\]', text, re.DOTALL)
+    assert match, f"{sid} statement not found"
+    return re.findall(r'"([^"]+)"', re.sub(r"#[^\n]*", "", match.group(1)))
+
+
+def test_key_readers_are_exactly_the_declared_ones() -> None:
+    literal, pattern = _readers(_tf_files())
+    assert literal == _LITERAL_READERS
+    assert pattern == _PATTERN_READERS
+
+
+def test_no_other_grant_writes_or_deletes_the_key() -> None:
+    assert write_problems(_tf_files()) == []
+
+
+def test_red_trust() -> None:
+    base = _read(_ROLE_FILE)
+    sub = '"repo:${repo}:environment:${local.persona_verdict_app_environment}"'
+    assert trust_problems(base.replace(sub, sub + ',\n "repo:${repo}:pull_request"'))
+    assert trust_problems(base.replace("StringEquals = {", "StringLike = {", 1))
+    assert trust_problems(base.replace("persona-verdict.yml@refs/heads/main", "*@refs/heads/main"))
+    assert trust_problems(base.replace('"persona-verdict-app"', '"persona-verdict"', 1))
+    assert trust_problems(base.replace(f'"{_BOUNDARY_ARN}"', '"arn:aws:iam::${var.account_id}:policy/other"'))
+
+
+def test_red_policy() -> None:
+    base = _read(_ROLE_FILE)
+    extra = (
+        '  statement {\n    sid       = "Extra"\n    effect    = "Allow"\n'
+        '    actions   = ["s3:GetObject"]\n    resources = ["*"]\n  }\n\n'
+    )
+    assert policy_problems(base.replace("  statement {\n", extra + "  statement {\n", 1))
+    assert policy_problems(base.replace('actions   = ["ssm:GetParameter"]', 'actions   = ["ssm:GetParameter*"]', 1))
+    assert policy_problems(base.replace("agent-platform-persona-verdict-app-key", "agent-platform-deepseek-api-key", 1))
+
+
+def test_red_readers_and_writers() -> None:
+    files = _tf_files()
+    key = "arn:aws:ssm:${var.aws_region}:${var.account_id}:" + _KEY_PATH
+    third = (
+        f'statement {{\n  sid = "Third"\n  effect = "Allow"\n  actions = ["ssm:GetParameter"]\n  resources = ["{key}"]\n}}\n'
+    )
+    assert _readers({**files, "extra.tf": third})[0] != _LITERAL_READERS
+    wide = third.replace(key, "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/*").replace(
+        '"Third"', '"Wide"'
+    )
+    assert _readers({**files, "extra.tf": wide})[1] != _PATTERN_READERS
+    for actions in ('["ssm:PutParameter"]', '["ssm:Delete*"]', '["ssm:*"]'):
+        put = third.replace('["ssm:GetParameter"]', actions)
+        assert write_problems({**files, "extra.tf": put}), actions

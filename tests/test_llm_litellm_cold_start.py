@@ -13,7 +13,8 @@ import pytest
 
 from scripts.llm import litellm_cold_start as cs
 from scripts.llm import tier_selection
-from scripts.llm.litellm_wire import TransportError
+from scripts.llm.litellm_wire import Attempt, TransportError
+from src.persona_backends.events import Capture
 from tests.fixtures import litellm_capture as cap
 
 FALLBACK = "warm_fetched_escape_hatch"
@@ -187,6 +188,119 @@ class TestGates:
 
 def _asserted(role: str) -> cs.ColdStartResult:
     return cs.ColdStartResult(role, "remaining_allowance", "asserted", None, "fake probe", True)
+
+
+def _probe(is_async: bool, role: str = FALLBACK, **kwargs):
+    if is_async:
+        return asyncio.run(cs.acold_start_check(role, **kwargs))
+    return cs.cold_start_check(role, **kwargs)
+
+
+BOTH = pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+
+
+class TestProbeAttempt:
+    @BOTH
+    def test_raising_probe_carries_attempt(self, is_async: bool) -> None:
+        sel = cs._resolve(FALLBACK, "on_the_loop", None)
+        with cap.capture([cap.error_body(401)]):
+            result = _probe(is_async)
+        attempt = result.attempt
+        assert (attempt.role, attempt.attempt, attempt.outcome) == (FALLBACK, 0, "provider_error")
+        assert (attempt.model, attempt.provider, attempt.billing_shape) == (sel.model, sel.provider, sel.billing_shape)
+        assert attempt.latency_ms >= 0 and isinstance(attempt.started_at_ms, int)
+
+    @BOTH
+    def test_no_choices_and_no_request_probes_carry_none(self, is_async: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+        with cap.capture([cap.deepseek_body(choices=False)]):
+            assert _probe(is_async, "primary").attempt is None
+        monkeypatch.delenv(cap.selection(role="primary").env_name)
+        assert _probe(is_async, "primary").attempt is None
+
+    @BOTH
+    def test_unavailable_error_carries_it(self, is_async: bool) -> None:
+        with cap.capture([cap.error_body(401)]):
+            with pytest.raises(TransportError) as exc:
+                if is_async:
+                    asyncio.run(cs.aensure_asserted(FALLBACK))
+                else:
+                    cs.ensure_asserted(FALLBACK)
+        assert exc.value.kind == "fallback_unavailable" and [a.attempt for a in exc.value.attempts] == [0]
+        assert exc.value.attempts[0] is exc.value.result.attempt
+
+    @BOTH
+    def test_gates_prepend_primary_attempts_and_fill_capture(self, is_async: bool) -> None:
+        prior = Attempt("primary", "m/x", 1, "outage", 5)
+        primary = TransportError("outage", "down", role="primary", attempts=(prior,))
+        seen = Capture()
+        with cap.capture([cap.error_body(401)]):
+            with pytest.raises(TransportError) as exc:
+                if is_async:
+                    asyncio.run(cs.afallback_gate(USER, primary, capture=seen))
+                else:
+                    cs.fallback_gate(USER, primary, capture=seen)
+        assert exc.value.__cause__ is primary and exc.value.attempts[0] is prior and exc.value.attempts[1].attempt == 0
+        assert seen.attempts == [exc.value.attempts[1]] and seen.in_flight is None
+
+    @BOTH
+    def test_asserted_probe_fills_nothing_and_clears_in_flight(self, is_async: bool) -> None:
+        seen = Capture()
+        with cap.capture([cap.anthropic_body()]):
+            if is_async:
+                asyncio.run(cs.aensure_asserted(FALLBACK, capture=seen))
+            else:
+                cs.ensure_asserted(FALLBACK, capture=seen)
+        assert seen.attempts == [] and seen.in_flight is None
+
+    def test_cancelled_async_probe_leaves_in_flight(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import litellm
+
+        async def hang(**_kwargs):
+            await asyncio.sleep(3600)
+
+        monkeypatch.setattr(litellm, "acompletion", hang)
+
+        async def main() -> Capture:
+            seen = Capture()
+            task = asyncio.ensure_future(cs.acold_start_check(FALLBACK, capture=seen))
+            for _ in range(200):
+                if seen.in_flight is not None:
+                    break
+                await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            return seen
+
+        seen = asyncio.run(main())
+        assert (seen.in_flight.role, seen.in_flight.attempt, seen.in_flight.outcome) == (FALLBACK, 0, "cancelled")
+        assert seen.attempts == []
+
+    def test_probe_cancel_raised_as_error_is_cancelled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import litellm
+
+        async def turns_cancel_into_error(**_kwargs):
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                raise litellm.APIConnectionError(message="cancelled", llm_provider="p", model="m") from None
+
+        monkeypatch.setattr(litellm, "acompletion", turns_cancel_into_error)
+
+        async def main() -> Capture:
+            seen = Capture()
+            task = asyncio.ensure_future(cs.acold_start_check(FALLBACK, capture=seen))
+            for _ in range(200):
+                if seen.in_flight is not None:
+                    break
+                await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            return seen
+
+        seen = asyncio.run(main())
+        assert seen.in_flight is not None and seen.attempts == []
 
 
 class TestColdStartLock:

@@ -93,6 +93,16 @@ def image_id(daemon: None) -> str:
     return prebuilt
 
 
+def _teardown_tags(tag: str, base_tag: str, prebuilt: bool) -> list[str]:
+    """A prebuilt image is an input: its base tag may be the only ref keeping it, so the suite never untags it."""
+    return [tag] if prebuilt else [tag, base_tag]
+
+
+def test_a_prebuilt_image_keeps_its_base_tag() -> None:
+    assert _teardown_tags("child:1", "base:1", prebuilt=True) == ["child:1"]
+    assert _teardown_tags("child:1", "base:1", prebuilt=False) == ["child:1", "base:1"]
+
+
 @pytest.fixture(scope="module")
 def fixture_image(image_id: str) -> Iterator[str]:
     base_tag = f"persona-image-under-test:{image_id.split(':')[-1][:12]}"
@@ -111,7 +121,9 @@ def fixture_image(image_id: str) -> Iterator[str]:
         yield image
     finally:
         shutil.rmtree(context, ignore_errors=True)
-        _docker("rmi", "-f", tag, base_tag, check=False)
+        _docker(
+            "rmi", "-f", *_teardown_tags(tag, base_tag, os.environ.get("PERSONA_IMAGE_UNDER_TEST") is not None), check=False
+        )
 
 
 @pytest.fixture(scope="module")
