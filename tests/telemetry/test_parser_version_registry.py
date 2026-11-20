@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from src.turn_capture import litellm_producer
 from src.turn_capture.record_turn import FULL_OUTPUT_CAP_BYTES, PARSER_VERSION, PRODUCER, record_turn
 from tests.fixtures.turn_capture_corpus import (
     GOLDEN_DIR,
@@ -26,6 +27,12 @@ from tests.fixtures.turn_capture_corpus import (
     load_case,
     mem_tree,
     normalise,
+)
+from tests.fixtures.turn_capture_litellm_cases import (
+    LITELLM_BUILDERS,
+    LITELLM_GOLDEN_DIR,
+    litellm_case_names,
+    load_litellm_case,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -95,6 +102,15 @@ CASES = (
     "subagent_persona_sync.json",
     "subagent_persona_background.json",
 )
+LITELLM_CASES = (
+    "single_call.json",
+    "anthropic_thinking.json",
+    "fail_over_probe.json",
+    "deadline_cancelled.json",
+    "repair_loss_markers.json",
+    "aborted_transport.json",
+    "partial_no_end.json",
+)
 
 
 def _cap_of(entry: dict) -> int | None:
@@ -111,7 +127,9 @@ def _contract_sources() -> list[str]:
     return match.group(1).split("|")
 
 
-def registry_problems(registry: dict, producer: str, code_version: int, recomputed: str, expected: str) -> list[str]:
+def registry_problems(
+    registry: dict, producer: str, code_version: int, recomputed: str, expected: str, has_process_events: bool = True
+) -> list[str]:
     """Every way the registry, the producer constant and the golden corpus can disagree."""
     entry = registry["producers"][producer]
     history = entry["history"]
@@ -126,7 +144,10 @@ def registry_problems(registry: dict, producer: str, code_version: int, recomput
     if history[-1]["golden_digest"] != expected:
         problems.append("expected files edited without a bump: the committed expected_rows digest differs from the registry")
     prefixes = history[-1].get("signature_prefixes")
-    if not isinstance(prefixes, list) or not prefixes:
+    if not has_process_events:
+        if prefixes is not None:
+            problems.append("the current version declares signature_prefixes but its corpus holds no process_event row")
+    elif not isinstance(prefixes, list) or not prefixes:
         problems.append("the current version declares no signature_prefixes")
     elif len(set(prefixes)) != len(prefixes) or not set(prefixes) <= set(_contract_sources()):
         problems.append("signature_prefixes repeats a prefix or names a source outside the contract's")
@@ -250,17 +271,54 @@ def _live_digests() -> tuple[str, str]:
     return golden_digest(recomputed, names), golden_digest(committed, names)
 
 
+def _litellm_digests() -> tuple[str, str]:
+    names = litellm_case_names()
+    recomputed: dict[str, list] = {}
+    committed: dict[str, list] = {}
+    for name in names:
+        files = LITELLM_BUILDERS[name]()
+        mapped = litellm_producer.map_run(json.loads(files["events.json"]), files["host-run.json"].encode())
+        recomputed[name] = normalise(mapped.batches)
+        committed[name] = load_litellm_case(name)[1]
+    return golden_digest(recomputed, names), golden_digest(committed, names)
+
+
+def _has_process_events(rows: list[dict]) -> bool:
+    return any(r.get("table") == "telemetry_observations" and r.get("observation_type") == "process_event" for r in rows)
+
+
+def _producers() -> dict[str, tuple[int, tuple[str, str], bool]]:
+    litellm_rows = [row for name in litellm_case_names() for row in load_litellm_case(name)[1]]
+    return {
+        PRODUCER: (PARSER_VERSION, _live_digests(), True),
+        litellm_producer.PRODUCER: (litellm_producer.PARSER_VERSION, _litellm_digests(), _has_process_events(litellm_rows)),
+    }
+
+
 def test_registry_matches_producer() -> None:
     registry = _live_registry()
-    entry = registry["producers"][PRODUCER]
-    assert PARSER_VERSION == entry["current"] == entry["history"][-1]["version"]
-    recomputed, committed = _live_digests()
-    assert recomputed == committed == entry["history"][-1]["golden_digest"]
-    history = entry["history"]
-    assert all(a["golden_digest"] != b["golden_digest"] or _cap_of(a) != _cap_of(b) for a, b in zip(history, history[1:])), (
-        "a history entry repeats its predecessor's digest without a different producer input cap"
-    )
-    assert registry_problems(registry, PRODUCER, PARSER_VERSION, recomputed, committed) == []
+    assert set(registry["producers"]) == set(_producers())
+    for producer, (code_version, (recomputed, committed), process_events) in _producers().items():
+        entry = registry["producers"][producer]
+        assert code_version == entry["current"] == entry["history"][-1]["version"], producer
+        assert recomputed == committed == entry["history"][-1]["golden_digest"], producer
+        history = entry["history"]
+        assert all(
+            a["golden_digest"] != b["golden_digest"] or _cap_of(a) != _cap_of(b) for a, b in zip(history, history[1:])
+        ), "a history entry repeats its predecessor's digest without a different producer input cap"
+        assert registry_problems(registry, producer, code_version, recomputed, committed, process_events) == []
+
+
+def test_producer_without_process_events_declares_no_prefixes() -> None:
+    assert registry_problems(_synthetic(), "p", 2, "d2", "d2", has_process_events=False) == [
+        "the current version declares signature_prefixes but its corpus holds no process_event row"
+    ]
+    bare = copy.deepcopy(_synthetic())
+    del bare["producers"]["p"]["history"][1]["signature_prefixes"]
+    assert registry_problems(bare, "p", 2, "d2", "d2", has_process_events=False) == []
+    assert registry_problems(bare, "p", 2, "d2", "d2") == ["the current version declares no signature_prefixes"]
+    live = _live_registry()["producers"][litellm_producer.PRODUCER]["history"]
+    assert all("signature_prefixes" not in h and "full_output_cap_bytes" not in h for h in live)
 
 
 def test_declared_signature_prefixes_match_the_corpus() -> None:
@@ -280,6 +338,14 @@ def test_cases_match_index() -> None:
     on_disk = sorted(p.name for p in GOLDEN_DIR.glob("*.json") if p.name != "index.json")
     assert on_disk == sorted(CASES)
     assert len(set(CASES)) == len(CASES)
+
+
+def test_litellm_cases_match_index() -> None:
+    index = json.loads((LITELLM_GOLDEN_DIR / "index.json").read_text(encoding="utf-8"))
+    assert list(LITELLM_CASES) == index["cases"]
+    on_disk = sorted(p.name for p in LITELLM_GOLDEN_DIR.glob("*.json") if p.name != "index.json")
+    assert on_disk == sorted(LITELLM_CASES)
+    assert len(set(LITELLM_CASES)) == len(LITELLM_CASES)
 
 
 def test_digest_repeating_bump_is_accepted_iff_the_cap_differs() -> None:
