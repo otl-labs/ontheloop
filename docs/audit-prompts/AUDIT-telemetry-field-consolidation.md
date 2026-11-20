@@ -52,7 +52,11 @@ Terms used in the table and throughout this prompt:
   merely governs the area (for example 199, 207, 210 or 216) is context: cite it in
   `roadmap_crossref.note`, not in `item_ids`, and it does not stop a finding from being `novel`.
 - An "approved plan" is any `docs/plans/PLAN-*.yaml` file on main; plans merge only after
-  approval.
+  approval. A plan is "built" when every file its `scope` lists with `action: Create` exists on
+  main and, for a producer plan, its producer is registered in config/telemetry/parser_versions.yaml.
+  Otherwise it is unbuilt.
+- "Open" means: a recommendation whose `status` is `open`; a roadmap criterion whose `status` is
+  `open`; a roadmap item whose `status` is not `complete`.
 - A "live owner" is an open recommendation, an open roadmap criterion, or an approved plan not
   yet built, whose text names the field or fact at issue. The `held:feedback-loop-gate` label
   alone is not a live owner.
@@ -187,6 +191,11 @@ Candidates. Anchors were taken at compose time; re-derive them per Section 4.
   obligation on a parser_version bump. The realization check's R7 is owner well-formedness.
 - "lean" is a value of three different enums (Q1, Q5 and maturity), with a different meaning in
   each. Read it by its slot.
+- Decision 216's "metadata schema" is a DuckLake catalog's Postgres metadata schema. It has
+  nothing to do with the `metadata` column on telemetry_observations; never cite Decision 216 as
+  governing `metadata` keys.
+- Contract class labels (Class A data contract, Class B reader contract, Class D mechanism
+  contract) are this repository's own vocabulary. No rule in this prompt depends on them.
 - The `metadata` key `agent_id` (a harness agent id on a tool_call close row) is not agents
   `agent_run_id` (the run's identity key) and not agents `agent_name` (the spawn label).
 - `external_ref` and `entity_ref` are both record references. The envelope's `external_ref`
@@ -253,9 +262,12 @@ of them.
 A finding whose subject spans several of the first seven surfaces uses `surface: shared` and lists
 them in `surfaces_affected`.
 
-Context only (read; do not audit):
+Context only. Read these, but they are not rubric surfaces. A finding may still propose a change
+to them, for example a producer that should stop writing a key:
 - the producers: src/turn_capture/, plus any other producer registered in
-  config/telemetry/parser_versions.yaml at the audited commit;
+  config/telemetry/parser_versions.yaml at the audited commit. Locate another producer's code
+  from its registry entry (`golden_index`) and its module under src/ or scripts/; if you cannot
+  locate it, record that in `meta.contract_notes`;
 - the reader: src/common/ducklake_event_read_verbs.py, ducklake_event_read_sql.py and
   ducklake_event_reads.py;
 - docs/contracts/ducklake_telemetry_reader.yaml;
@@ -325,7 +337,10 @@ read_derived):
 | persona_findings | 0 / 0 / 0 / 18 |
 | total | 64 / 52 / 27 / 31 = 174 |
 
-That is 174 entries, 116 distinct names, and 25 names on more than one contract.
+That is 174 entries, 116 distinct names, and 25 names on more than one contract. The same counts
+held when re-checked at commit d44b5b0c. `meta.field_counts` covers these five contracts plus
+hidden keys; the envelope's own 11 entries are not counted again. A `field_verdicts` row about an
+envelope entry takes kind `bookkeeping`.
 
 Trust nothing quoted here, and expect drift:
 - Main moves while this prompt waits, and other agents keep building telemetry work. Obtain every
@@ -338,7 +353,9 @@ Trust nothing quoted here, and expect drift:
   - PLAN-merge-annotate-producer (producer `ci_annotate`; six sessions fields leave
     `held:feedback-loop-gate`);
   - PLAN-litellm-telemetry-producer (producer `litellm`; observations `attempt`, `provider` and
-    `persona_backend` leave `unproduced`; MODEL_CALL `metadata` gains the keys `loss` and `error`);
+    `persona_backend` leave `unproduced`. The plan's approved wording adds the MODEL_CALL
+    `metadata` key `loss` to the contract. The litellm producer also writes `error`, which the
+    `metadata` semantics already list under MODEL_CALL, and which claude_code does not write);
   - status changes to any recommendation cited here.
 
   Record the producer keys registered at the audited commit in `meta.producers_registered`.
@@ -410,6 +427,17 @@ Run these first. NEVER abort on a failure -- take the named degraded path.
 7. Subagent capability for DD-B (Section 9): check whether your harness offers a tool that starts
    a fresh subagent with no shared context. IF it does not: set `meta.degraded_probe = true` and
    take DD-B's degraded path.
+8. Context budget. This is a large audit. Write intermediate tables to your scratchpad as you go.
+   If you judge you will run short of context before Section 16, drop work in this order, and
+   record each drop in `meta.contract_notes`:
+   1. web lookups beyond 4;
+   2. trees beyond 6;
+   3. DD-C pickaxe searches for stored_written fields (keep them for declared_unwritten fields);
+   4. rubric `note` text.
+
+   Never drop the C1-C16 coverage, the Q1-Q7 answers or the counting invariant. If you still
+   cannot finish, commit and push what you have per Section 16, with `meta.contract_notes`
+   starting "PARTIAL:".
 
 Repo-wide validate is advisory outside CI. Running it is optional and never a gate (Section 16).
 
@@ -451,8 +479,9 @@ and give its basis in `prose`.
 - Q1 Overlap among written fields. For every `stored_written` field, and every bookkeeping field
   a candidate names (for example C4 and C12): is it independently necessary, a copy of another
   stored field, or computable from other stored fields (apply the Section 11 counterfactual)?
-  Verdict, by the number of fields of any kind you give `merge` or `derive_at_read`: lean (0) |
-  some_redundancy (1-4) | substantial_redundancy (5 or more).
+  Verdict, by the share of the fields Q1 covers that you give `merge` or `derive_at_read`: lean
+  (none) | some_redundancy (under 10%) | substantial_redundancy (10% or more). State the count
+  and the denominator in `prose`.
 - Q2 Unwritten fields. For every `declared_unwritten` field: should it be produced, kept reserved
   under a live owner (Section 2), or retired -- and by which mechanism (DD-C)? No field is exempt.
   Verdict, by the share of declared_unwritten fields that you give `retire`, or that have no live
@@ -462,9 +491,15 @@ and give its basis in `prose`.
   column's inputs; which does any code read? `metadata` is the only JSON-carrying column
   (scripts/telemetry_verify/compare.py `JSON_COLUMNS`); confirm that. Name, in Q3's `prose`, any
   other free-form text column that carries structured facts, and raise a finding if it warrants
-  one. Verdict (current state), by the share of fact-carrying hidden keys that no contract text
-  names -- not the `metadata` entry's semantics, not another contract: declared (none) |
-  partly_declared (some, under half) | undeclared (half or more).
+  one. Definitions for the verdict:
+  - A hidden key is fact-carrying if it is non-null on at least one sampled row, or if code sets
+    it from a source value rather than only null or a constant. Keys that copy a typed column
+    count.
+  - A key is "named" if any docs/contracts/*.yaml file names it as a telemetry_observations
+    `metadata` key, including the reader's Class B contract. Record where in `evidence`.
+
+  Verdict (current state), by the share of fact-carrying hidden keys that are not named: declared
+  (none) | partly_declared (some, under half) | undeclared (half or more).
 - Q4 Findability. Which stored facts would an agent fail to find, or find wrongly, from what it
   reads in this repository (contracts first, then code)? Consider:
   - a generic column qualified by a discriminator value;
@@ -473,22 +508,41 @@ and give its basis in `prose`.
   - a fact held only in `metadata` or only in transcript content;
   - a design step that never asks whether a fact exists.
 
-  Measure this with DD-B, and assess rec-5440, rec-5438 and rec-5439 for sufficiency. Verdict, by
-  the share of DD-B's valid non-control items (items 1-6 and 9, excluding any marked
-  `contaminated`) graded correct: findable (85% or more) | partly_findable (40-84%) |
-  not_findable (under 40%). If either control item is not graded correct, still apply these
-  thresholds, but say so in `prose`, add "probe controls failed" to every VD4 rating's `note`,
-  and mark findings that rest on the probe HYPOTHESIS.
+  Measure this with DD-B, and assess rec-5440, rec-5438 and rec-5439 for sufficiency.
+
+  Verdict, from the lookup probe (DD-B2): count the valid lookup items (items 1-6, excluding any
+  marked `contaminated`) and those graded correct:
+  - findable: at most one valid item is not correct;
+  - partly_findable: more than one is not correct, but at least 40% are correct;
+  - not_findable: under 40% are correct.
+
+  Then:
+  - State the raw count (for example "4 of 6") in `prose`, and call it a trap-set rate. The items
+    target known weak spots, so they do not sample the field set evenly.
+  - Report the design probe (DD-B1) beside the verdict, not inside the count. It tests whether an
+    agent checks for an existing fact before proposing a field, which is the incidents' failure
+    mode.
+  - If either control item (7, 8) is not graded correct, still apply the thresholds, but say so in
+    `prose`, add "probe controls failed" to every VD4 rating's `note`, and mark findings that rest
+    on the probe HYPOTHESIS.
+  - If no lookup item is valid, set the verdict from your static reading, say so in `prose`, and
+    mark findings that rest on it HYPOTHESIS.
 - Q5 Size against practice. Is this field set lean, proportionate or excessive for agent and
   LLM-call telemetry read by agents? Assess the EXTERNAL CHECKLIST property by property, rating
   each met | partial | missed with evidence, AND judging for each whether its rationale transfers
   to an agent reader (yes | partly | no). A property is `missed` if it is missed on at least one
-  surface; list those surfaces in `surfaces_missed`.
+  surface; list those surfaces in `surfaces_missed`. Attribute a gap to the surface whose own
+  text or data carries it:
+  - E2 (a design-time rule) and E4's join half (`_joins.yaml`) attribute to
+    `design_and_lookup_path`;
+  - every other gap attributes to the rubric surface whose contract text or stored data shows it.
   - E1 One enforced specification for every field (schema-registry practice).
   - E2 An explicit reuse-before-create rule for new fields. OpenTelemetry "How to write semantic
     conventions", section "Defining attributes": "Reuse existing attributes when possible."
   - E3 Each field carries a plain meaning, synonyms or examples. Open Data Contract Standard
-    property fields: description, businessName, synonyms, examples.
+    property fields: description, businessName, synonyms, examples. Rate it met when most fields
+    carry a description plus synonyms or examples; partial when they carry descriptions only;
+    missed when descriptions are missing.
   - E4 Every supported join and derivation path is declared (column-level lineage practice).
   - E5 The keys of free-form attribute bags are declared in the specification (OpenTelemetry
     attribute-registry practice).
@@ -502,6 +556,8 @@ and give its basis in `prose`.
 - Q6 Cost and timing. For each merge, retire, derive_at_read and declare verdict, cover four
   things in that row's `cost`:
   - what the change costs here (Section 10, G7 and G8);
+  - which reader verbs, checks, tests and scripts read the field. `rg` the field or key name over
+    src/, scripts/ and tests/;
   - which stored history it affects;
   - whether it has ever held a value (`ever_non_null`, DD-C);
   - for any verdict that adds contract text (declare, or a merge that adds a note), the bytes and
@@ -534,12 +590,25 @@ Rate each of the seven rubric surfaces (Section 4) on each dimension: strong | a
 absent | n/a. n/a is correct and costless where a dimension does not structurally apply (for
 example VD5 on persona_findings). Never manufacture a rating or a finding to fill a cell.
 
+Level anchors:
+- strong: no gap found on that dimension for that surface;
+- adequate: only low-severity gaps;
+- weak: at least one medium or high gap;
+- absent: the property is not attempted at all on that surface (for example, no declaration of
+  any kind for a stored fact family).
+
+For VD4, use the mapped DD-B2 items:
+- strong: all are correct;
+- adequate: none is wrong or not_found;
+- weak: at least one is wrong or not_found, but not all;
+- absent: all are wrong or not_found.
+
 - VD1 Necessity -- each stored field is needed by a reader, a rule or an identity (Q1, Q2).
 - VD2 Non-redundancy -- no fact is stored twice or beside its own inputs without a declared reason
   (Q1, Q6).
 - VD3 Declaredness -- every stored fact, including `metadata` keys, has a contract entry (Q3).
 - VD4 Agent findability -- an agent locates and correctly reads a fact by its meaning at low cost
-  (Q4, Q5). Rate it from the DD-B items mapped to the surface (DD-B gives the map). For a surface
+  (Q4, Q5). Rate it from the DD-B2 items mapped to the surface (DD-B2 gives the map). For a surface
   with no mapped item, rate it from your own static reading and put "no probe item" in `note`.
 - VD5 Liveness -- declared fields are written, or owned by a live owner with a reason (Q2).
 - VD6 Consistency -- one concept has one name, type, value list and meaning across tables (Q1,
@@ -564,57 +633,73 @@ DD-A Metadata key census (feeds Q1, Q3, C5-C7, C13, C16).
 4. Each distinct key name gets exactly one field_verdicts row: `table: telemetry_observations`,
    `field: metadata.<key>`, `kind: hidden_key`. The row types that carry the key go in `evidence`.
 
-DD-B Agent findability probe (feeds Q4, Q5, Q7, VD4; operationalises NS8).
-- Before dispatching, write your own answer key for all nine items from your field table, into
-  each item's `correct_location`. Write it as "all of: ..." or "any of: ..." so grading is
-  mechanical.
-- Dispatch exactly ONE fresh subagent with no shared context. Give it read access to the
-  repository, which is what a planning agent has. Forbid it: the telemetry warehouse, the web,
-  and the paths `docs/audit-prompts/`, `audits/` and `logs/`. This prompt is on main and states
-  the answers, so require every search it runs to exclude those paths (for example
-  `rg --glob '!docs/audit-prompts/**' --glob '!audits/**' --glob '!logs/**' ...`), and require it
-  to report every search command and every file it opened.
-- Give it the nine items below verbatim, in plain words. You may replace at most two of items 1-6
-  with questions your own findings make more decisive, keeping them in plain words with no table,
-  column or key names. Items 7-9 are fixed. Never pass it your answer key or any candidate text.
-- Ask it, for items 1-8: where the fact is stored (table and column; or table, `metadata` key and
-  discriminator value; or "derived at read by <verb>"; or "not stored"). For item 9, ask for the
-  storage change it would make. For every item, ask for the searches it ran, the files it opened,
-  approximate bytes read, whether the answer came from contracts, code or both, and its total
-  tool calls. Cap its report at about 1,200 words.
+DD-B Agent findability probes (feed Q4, Q5, Q7, VD4; operationalise NS8). There are two probes,
+each in its own fresh subagent with no shared context: DD-B1 (design) first, then DD-B2 (lookup).
+
+Rules common to both:
+- Before dispatching either, write your own answer key from your field table into each item's
+  `correct_location`. Write it as "all of: ..." or "any of: ..." so grading is mechanical.
+- Give each subagent read access to the repository, which is what a planning agent has. Forbid
+  it: the telemetry warehouse, the web, and the paths `docs/audit-prompts/`, `audits/` and
+  `logs/`. This prompt is on main and states the answers, so require every search it runs to
+  exclude those paths (for example
+  `rg --glob '!docs/audit-prompts/**' --glob '!audits/**' --glob '!logs/**' ...`).
+- Require it to report every search command, every file it opened, approximate bytes read,
+  whether each answer came from contracts, code or both, and its total tool calls. Cap its report
+  at about 1,200 words.
+- Never pass it your answer key, any candidate text, or the other probe's items.
 - Contamination: mark an item `contaminated: true` if its reported searches or files touched a
   forbidden path, or if it reports no search log. A contaminated item keeps its grade but gets
-  `confidence: HYPOTHESIS`, and is excluded from Q4's share.
-- Grading:
-  - correct: meets the key ("all of" means every listed location; "any of" means at least one),
-    with the discriminator value or link where the key has one. Naming an extra location that
-    also holds the fact does not lower the grade. For item 9: recognises that the fact is already
-    stored and proposes no new stored field.
-  - partly: names a location that holds the fact, but misses a qualifier, the link, or a location
-    an "all of" key requires; or adds an extra location that does not hold the fact.
-  - wrong: names only locations that do not hold the fact, or says "not stored" for a stored fact.
-    For item 9: proposes a new column or key for a stored fact.
-  - not_found: gives no location.
-
-  Record each grade, `answered_from` and `contaminated` in `findability_probe`.
-- Item-to-surface map, for VD4:
-  - item 1 and item 2 -> telemetry_transcripts;
-  - item 3 -> observations_metadata;
-  - items 4, 7 and 9 -> telemetry_observations;
-  - items 5 and 6 -> telemetry_agents;
-  - item 8 -> telemetry_sessions.
-
-  envelope and persona_findings have no item. A replacement item takes the surface its answer
-  lives on.
-- Bounds: one subagent, nine items, no re-dispatch. If its report is empty, truncated or over the
-  cap, grade whatever it answered, grade the rest `not_found`, and note it in
+  `confidence: HYPOTHESIS`, and is excluded from Q4's count.
+- Bounds: two subagents in total, one per probe, no re-dispatch. If a report is empty, truncated
+  or over the cap, grade whatever it answered, grade the rest `not_found`, and note it in
   `findability_probe.summary`.
 - Degraded path (`meta.degraded_probe = true`, `findability_probe.mode: static_estimate`): for each
-  item, estimate statically the read path a grep-first agent would take (files, bytes, likely
-  wrong turns). Grade each by the same criteria with `confidence: HYPOTHESIS`, and mark the VD4
-  ratings and dependent findings HYPOTHESIS.
+  item, estimate statically the path a grep-first agent would take (files, bytes, likely wrong
+  turns). Grade each by the same criteria with `confidence: HYPOTHESIS`, and mark the VD4 ratings
+  and dependent findings HYPOTHESIS.
 
-The nine items:
+DD-B1 Design probe (first). It reproduces the incidents: an agent designing a change, not asked
+whether the fact exists. Give the subagent this one item verbatim:
+
+  "You are planning a change to this repository's friction analysis: repeated identical tool
+  calls -- the same tool given exactly the same input -- should be recognised as one run. That
+  needs, for every tool call, a key derived from its exact input. Using this repository's
+  telemetry, what would you add or change to make that key available? Describe the storage and
+  read changes you would make."
+
+Grade it:
+- correct: identifies that a digest of the exact input is already stored and how a tool call
+  reaches it, and proposes no new stored field. A read-side join or a newly declared link is
+  fine.
+- partly: identifies the existing digest but still proposes a new stored field; or proposes no
+  new stored field without saying where the existing digest is.
+- wrong: proposes a new column or `metadata` key for the input digest without finding the stored
+  one.
+- not_found: makes no proposal.
+
+DD-B1 maps to `design_and_lookup_path` and feeds no VD4 rating.
+
+DD-B2 Lookup probe (second). Give the subagent the eight items below verbatim, in plain words.
+You may replace at most two of items 1-6 with questions your own findings make more decisive,
+keeping them in plain words with no table, column or key names. Items 7-8 are fixed. For each
+item, ask where the fact is stored, in one of these forms:
+- table and column;
+- table, `metadata` key and discriminator value;
+- "inside the payload of <table.column> on rows where <discriminator>";
+- "derived at read by <verb>";
+- "not stored".
+
+Grade each:
+- correct: meets the key ("all of" means every listed location; "any of" means at least one),
+  with the discriminator value or link where the key has one. Naming an extra location that also
+  holds the fact does not lower the grade.
+- partly: names a location that holds the fact, but misses a qualifier, the link, or a location
+  an "all of" key requires; or adds an extra location that does not hold the fact.
+- wrong: names only locations that do not hold the fact, or says "not stored" for a stored fact.
+- not_found: gives no location.
+
+The eight items:
 1. "Where is the SHA-256 of the exact input a tool call was given?"
 2. "Where is the name of the skill a Skill tool call invoked?"
 3. "Where is the exit code of a hook run?"
@@ -623,11 +708,19 @@ The nine items:
 6. "Where is the hash of the persona definition a verdict-persona run loaded?"
 7. (control) "Where is the number of output tokens an LLM call used?"
 8. (control) "Where is the git branch a session ran on?"
-9. (design) "You are planning a change that needs, for every tool call, a digest of the tool's
-   output, so that identical repeated outputs can be counted. What storage change would you make?"
 
-No answer key is given here. Derive yours from your field table; Q7(c) asks you to test the
-premises behind items 1 and 2, so derive those two with particular care.
+Item-to-surface map, for VD4:
+- items 1 and 2 -> telemetry_transcripts;
+- item 3 -> observations_metadata;
+- items 4 and 7 -> telemetry_observations;
+- items 5 and 6 -> telemetry_agents;
+- item 8 -> telemetry_sessions.
+
+envelope and persona_findings have no item. A replacement item takes the surface its answer lives
+on. Record each grade, `answered_from` and `contaminated` in `findability_probe`.
+
+No answer key is given here. Derive yours from your field table. Q7(c) asks you to test the
+premises behind DD-B1 and items 1 and 2, so derive those with particular care.
 
 DD-C Retire and merge evidence (feeds Q2, Q6). For each declared_unwritten field and each field
 you consider for merge or retire, determine `ever_non_null` from:
@@ -646,7 +739,12 @@ you consider for merge or retire, determine `ever_non_null` from:
 - (v) sampled rows across parser versions.
 
 For a hidden key (`metadata.<key>`), sources (i), (ii) and (iv) do not apply: use (iii), searching
-for the key name, and (v). A key observed non-null in sampled rows is `yes`.
+for the key name, and (v). A key observed non-null in sampled rows is `yes`; otherwise it is
+`unknown`, never `no`, because stored rows outside your sample may hold values.
+
+IF the realization test in (iv) fails or errors, record that in `meta.contract_notes` and treat
+(iv) as inconclusive. IF `describe()` (Section 4) errors, assess the reader's describe surface from
+docs/contracts/ducklake_telemetry_reader.yaml instead, and say so in the finding.
 
 Set `ever_non_null`:
 - `yes` when any source shows a value;
@@ -757,8 +855,8 @@ config/telemetry/parser_versions.yaml: `producers.claude_code.current` is 11, an
 entry gives a reason.
 
 G4 Reader (src/common/).
-- ducklake_event_read_verbs.py: `EVENT_READS` holds 17 verbs; `MAX_WINDOW_DAYS = 7` and
-  `MAX_TREE_ROWS = 2000`.
+- ducklake_event_read_verbs.py: `EVENT_READS` held 17 verbs at ea07baa7 and 18 at d44b5b0c (main
+  is still adding verbs); `MAX_WINDOW_DAYS = 7` and `MAX_TREE_ROWS = 2000`.
 - `session_tree_rows` and `telemetry_root_sessions` are verification-only (`agent_facing=False`).
 - `session_tree_rows` returns, per row, every compared column plus `created_timestamp`.
 - ducklake_event_reads.py `compared_columns`: every stored column except `created_timestamp`,
@@ -868,7 +966,7 @@ G9 Governing Decisions (headers in docs/DECISIONS.md):
 | 199 | event journal, derived at read |
 | 207 | grain at write |
 | 210 | rules enforced at write |
-| 216 | one owner per metadata schema |
+| 216 | one owner per DuckLake catalog metadata schema (a Postgres schema; unrelated to the `metadata` column) |
 | 222 | smoke column add |
 | 230 | production telemetry catalog |
 | 236 | production serves no transcript content |
@@ -903,7 +1001,13 @@ EOF
 
 `read_tree` pages through the whole tree; `MAX_TREE_ROWS` is a page size, not a cap on a tree. If
 it raises `TreeMovedError`, re-read that tree once. If it raises again, skip the tree and record
-that in `meta.contract_notes`; a skipped tree still counts toward the 12.
+that in `meta.contract_notes`; a skipped tree still counts toward the 12. If a later window or
+tree read raises any other error:
+- print only its exception class name;
+- keep the counts from the reads that succeeded (CONFIRMED for what they cover);
+- record the error class in `meta.contract_notes`, and continue.
+
+`meta.degraded_empirical` stays false unless no tree was read at all.
 
 Bounds -- do NOT exceed:
 - at most 3 calls to `telemetry_root_sessions`, each window at most 7 UTC days;
@@ -926,6 +1030,7 @@ Sampling plan (the snippet above is the first call):
 
 Privacy -- you may print only:
 - counts and null rates;
+- UTC calendar dates (YYYY-MM-DD) of `session_started_at`;
 - column names and `metadata` key names;
 - values of declared enums (observation_type, event_kind, purpose, origin, outcome, severity,
   output_capture, reasoning_visibility, usage_source, content_omitted_reason, trigger,
@@ -961,7 +1066,7 @@ only). At equal severity, an observed finding outranks a static one.
 - P3 DD-A step 1: `metadata` keys from code.
 - P4 Empirical pass (Section 11) within its bounds, including DD-A step 2. Apply the
   counterfactual to every overlap candidate.
-- P5 DD-B findability probe.
+- P5 DD-B findability probes: DD-B1 (design) first, then DD-B2 (lookup).
 - P6 DD-C evidence for every declared_unwritten field and every merge or retire candidate.
 - P7 Adjudicate C1-C16 and any candidate you add. Rate the rubric.
 - P8 Dedup every finding (Section 13).
@@ -984,7 +1089,7 @@ label, or a Decision whose text orders the specific remedy. A Decision that mere
 area is not a hit; cite it in `roadmap_crossref.note`. `dedup_hit_count` counts hits, not raw
 search matches; record the raw terms in `dedup_search_terms`. A hit leads to the Section 2 table
 (planned-insufficient, planned-unbuilt or rejected_candidates), never to a `novel` finding. A
-finding with no recorded negative search gets HYPOTHESIS in both its `confidence` and its
+finding with no recorded dedup search gets HYPOTHESIS in both its `confidence` and its
 `roadmap_crossref.confidence`.
 
 Owners already known (summaries as read 2026-11-20; re-read the bodies per Section 5 step 3):
@@ -1018,6 +1123,8 @@ Decision-ratified design choices. These are NOT immune, but challenge one only a
 revisit, never as a plain defect. Such a finding uses `change_type: rescope`, names the Decision
 and its reversal condition, and argues why the condition holds (classification per Section 2).
 Each may also be weighed as a cost in Q5 and Q7.
+- The telemetry model is four tables (Decision 95). A Q7(a) answer that proposes changing the
+  split is a Decision 95 revisit.
 - Read-derived fields are declared but not stored (Decision 199; rule `derived-state`).
 - Envelope fields recur on every table by reference (Decision 199).
 - Tables are append-only; nothing is updated in place (Decision 199).
@@ -1067,11 +1174,16 @@ audit:
     - {q: Q7, answers: [{question: "", answer: "", basis: []}]}
   findability_probe:
     mode: subagent|static_estimate
-    items:
+    design_probe: {item: "", answer_given: "", grade: correct|partly|wrong|not_found,
+                   answered_from: contracts|code|both|none, contaminated: true|false,
+                   correct_location: "", files_opened: 0, bytes_read_approx: 0, tool_calls: 0,
+                   confidence: CONFIRMED|HYPOTHESIS, note: ""}
+    lookup_items:
       - {n: 1, item: "", surface: "", answer_given: "", grade: correct|partly|wrong|not_found,
          answered_from: contracts|code|both|none, contaminated: true|false, correct_location: "",
          files_opened: 0, bytes_read_approx: 0, confidence: CONFIRMED|HYPOTHESIS, note: ""}
-    tool_calls_total: 0
+    lookup_tool_calls_total: 0
+    lookup_correct: "<correct> of <valid items 1-6>"
     summary: ""
   per_surface_assessment:
     - {surface: "", maturity: lean|sound|cluttered|tangled, strengths: "", top_gaps: [finding ids]}
@@ -1106,9 +1218,10 @@ audit:
 ```
 
 The `external_checklist` example shows E1; write one entry per property E1-E8. The
-`findability_probe.items` example shows item 1; write one entry per item. Every enum shown as
-`a|b|c` takes exactly one value; a `question` value is one of Q1-Q7 and a `dimension` value one of
-VD1-VD6. `stale_anchors` is an empty list when nothing is stale.
+`findability_probe.lookup_items` example shows item 1; write one entry per lookup item. Every
+enum shown as `a|b|c` takes exactly one value. A finding's `question` is one of Q1-Q7 and its
+`dimension` one of VD1-VD6; a Q7 `answers[].question` is free text. `stale_anchors` is an empty
+list when nothing is stale.
 
 Rules:
 - `rubric_ratings`: one row per (rubric surface, dimension) -- 7 surfaces x 6 dimensions = 42 rows.
@@ -1141,10 +1254,20 @@ Rules:
   - merge -> `unify`; derive_at_read -> `derive`; retire -> `retire`;
   - declare in the `metadata` key list -> `clarify`; declare as a typed column -> `add`;
   - a new write-time rule -> `enforce`; a Decision revisit -> `rescope`;
-  - a lookup or design-path change -> `add` or `clarify`.
-- `surfaces_affected` lists the rubric surfaces a finding bears on. It is the finding's single
-  surface for a single-surface finding, and may be empty for a `design_and_lookup_path` finding.
-- `surfaces_missed` is non-empty if and only if `rating` is missed.
+  - a lookup or design-path change -> `add` or `clarify`;
+  - deliberately storing a derived value (materialization) -> `persist`;
+  - changing a check's or gate's threshold -> `retune_gate`.
+- A hidden key that copies a typed column, or that holds that column's inputs, gets `merge`,
+  with the column in `overlaps_with`. The remedy, which is to stop writing the key, goes in
+  `cost`.
+- `surfaces_affected` lists the rubric surfaces whose own contract text or stored data carries
+  the defect. It is the finding's single surface for a single-surface finding.
+  - A finding that spans `design_and_lookup_path` and rubric surfaces uses
+    `surface: design_and_lookup_path`, and lists in `surfaces_affected` only the rubric surfaces
+    whose own text or data carries part of the defect.
+  - A purely design-path finding has an empty `surfaces_affected`.
+- `surfaces_missed` is non-empty if and only if `rating` is missed. It may name
+  `design_and_lookup_path`, which carries no maturity.
 - `effort`, sized in this repository's units of work:
   - XS: a wording-only contract or doc change, in one PR;
   - S: one PR touching code or one contract, with its test;
@@ -1212,8 +1335,9 @@ prompt's framing does not foreclose it.
 
 1. The base was derived ONCE in Section 5 step 1, and you are on
    `audit/telemetry-field-consolidation-<sha>` created from it. This is a deliberate exception to
-   the harness-assigned session branch: the audit needs a clean two-file diff off the audited
-   base, and `audit/` is a registered extra push destination
+   the harness-assigned session branch and to AGENTS.md's "agents never create their own" branch
+   rule. The operator grants it through this prompt: the audit needs a clean two-file diff off
+   the audited base, and `audit/` is a registered extra push destination
    (docs/contracts/git-ops.yaml `extra_destination_prefixes`). The branch base MUST equal
    `meta.audited_commit`; the branch name carries any `-rN` suffix that step 1 added.
 2. Pre-push gate:
@@ -1258,7 +1382,7 @@ prompt's framing does not foreclose it.
   `audits/telemetry-field-consolidation-<sha>.md`. You do NOT edit any contract, code, Decision,
   roadmap item, skill or plan. You do NOT file or update a recommendation.
 - Warehouse access is read-only, through named verbs, inside the Section 11 bounds. No content
-  reader. The DD-B subagent gets no warehouse access.
+  reader. The DD-B subagents get no warehouse access.
 - This repository is public (Decision 101). Never write any of the following in either
   deliverable or in printed output:
   - an AWS account id, an ARN, a secret or an internal hostname;
