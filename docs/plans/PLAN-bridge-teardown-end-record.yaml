@@ -42,7 +42,7 @@ scope:
   - file: src/persona_backends/litellm_backend.py
     action: Modify
     purpose: >-
-      - run_with_bridge keeps the value go() returned. Once go() has returned (its single end record emitted), only
+      - Add import sys. run_with_bridge keeps the value go() returned. Once go() has returned (its single end record emitted), only
         BridgeTeardownFailed is tolerated (operator choice 2026-11-20, Decision 55): the result is returned unchanged,
         no further record is emitted, and one line "bridge teardown failed after the run ended: <the error's
         class-only message>" goes to stderr through print(..., file=sys.stderr) resolved at call time (so capsys sees
@@ -118,33 +118,45 @@ acceptance_criteria:
 verification_plan:
   - step: 1
     phase: pre-deploy
-    action: The bridge classification and the backend's single end record, through the real fake MCP server.
+    action: The bridge classifies a teardown failure after a normal exit, through the real fake MCP server.
     command: >-
       bin/venv-python -m pytest
       tests/persona_backends/test_mcp_bridge.py::test_teardown_error_after_normal_exit_is_typed
       tests/persona_backends/test_mcp_bridge.py::test_teardown_error_after_body_error_keeps_body_error
-      tests/persona_backends/test_mcp_bridge.py::test_teardown_unclassified_group_after_normal_exit_propagates
+      tests/persona_backends/test_mcp_bridge.py::test_teardown_unclassified_group_after_normal_exit_propagates -q
+    expected: >-
+      Exit 0, every node passes. Red before: the nodes are absent (pytest exits 4). Written first against main's code,
+      test_mcp_bridge.py imports BridgeTeardownFailed at module top, so the whole file fails collection (pytest exits
+      2, the body-error guard included); with the import satisfied, the acceptance node is red (main raises
+      BridgeUnavailable) and the unclassified-group node is red (main converts both groups to BridgeUnavailable).
+    fix_if: >-
+      A BridgeUnavailable, a typed error for an unexpected group, or exception text in the message: fix the bridge,
+      never the wrapper.
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: bridge-teardown-end-record-bridge
+  - step: 2
+    phase: pre-deploy
+    action: The backend keeps go()'s result and the single end record at teardown, through the real fake MCP server.
+    command: >-
+      bin/venv-python -m pytest
       tests/persona_backends/test_litellm_backend.py::test_bridge_teardown_error_after_end_keeps_one_end_record
       tests/persona_backends/test_litellm_backend.py::test_bridge_teardown_error_after_abort_keeps_one_aborted_end
       tests/persona_backends/test_litellm_backend.py::test_bridge_teardown_unexpected_error_after_end_propagates
       tests/persona_backends/test_litellm_backend.py::test_bridge_teardown_cancellation_after_end_propagates -q
     expected: >-
       Exit 0, every node passes. Red before: the nodes are absent (pytest exits 4). Written first against main's code
-      (pytest exits 1, or 2 where collection fails),
-      the two acceptance nodes are red (the bridge raises BridgeUnavailable; the success case raises RunAborted
-      tool_server_unavailable with two end records) and the unclassified-group node is red (main converts
-      both groups to BridgeUnavailable). test_mcp_bridge.py imports BridgeTeardownFailed at module top, so on main
-      that whole file fails collection (its body-error guard included). In test_litellm_backend.py the
-      ExceptionGroup([RuntimeError()]) case of the unexpected-error node is red on main (main aborts with a second end
-      record); its bare RuntimeError case, the abort node and the cancellation node are regression guards already
-      green on main.
+      (pytest exits 1), the acceptance node is red (the success case raises RunAborted tool_server_unavailable with two
+      end records) and the ExceptionGroup([RuntimeError()]) case of the unexpected-error node is red (main aborts with
+      a second end record); its bare RuntimeError case, the abort node and the cancellation node are regression guards
+      already green on main.
     fix_if: >-
-      Two end records, a lost result, exception text on stderr, or a swallowed cancellation: fix the bridge or the
-      backend, never the wrapper.
+      Two end records, a lost result, exception text on stderr, or a swallowed cancellation: fix the backend or the
+      bridge, never the wrapper.
     hermetic: false
     graduation: graduate
-    graduation_check_id: bridge-teardown-end-record
-  - step: 2
+    graduation_check_id: bridge-teardown-end-record-backend
+  - step: 3
     phase: pre-deploy
     action: The rest of the persona backend suite and the import boundary still pass.
     command: bin/venv-python -m pytest tests/persona_backends/ tests/test_run_persona.py -q
@@ -154,7 +166,7 @@ verification_plan:
     graduation: waive
     graduation_waiver_reason: >-
       These are the standing suites; they run in every tier, so a shard would duplicate them.
-  - step: 3
+  - step: 4
     phase: pre-deploy
     action: Pre-handoff full tier on the committed, rebased tree (Decision 163), read through its evidence file.
     command: bin/venv-python -m scripts.validate; bin/venv-python -m scripts.checks.validation_result --verify-head
@@ -165,7 +177,7 @@ verification_plan:
     fix_if: Any failure; fix and re-run both from the start (timeout_disposition blocked).
     hermetic: false
     graduation: not-applicable
-  - step: 4
+  - step: 5
     phase: post-deploy
     action: rec-5402 and rec-5334 are closed by the merge.
     command: >-
@@ -186,12 +198,12 @@ test_obligations:
     red_green_expectation: red before (node absent; on main the error is BridgeUnavailable "could not spawn or start"), green after.
   - source: src/persona_backends/litellm_backend.py
     behavior: A teardown error after go() returned keeps the result and the single end record.
-    verification_step: 1
+    verification_step: 2
     test_selector: tests/persona_backends/test_litellm_backend.py::test_bridge_teardown_error_after_end_keeps_one_end_record
     red_green_expectation: red before (node absent; on main the run raises RunAborted and emits a second end record), green after.
   - source: src/persona_backends/litellm_backend.py
     behavior: A grouped unexpected teardown error after go() returned propagates with the single end record.
-    verification_step: 1
+    verification_step: 2
     test_selector: tests/persona_backends/test_litellm_backend.py::test_bridge_teardown_unexpected_error_after_end_propagates
     red_green_expectation: red before (node absent; on main the grouped case aborts with a second end record), green after.
   - source: src/persona_backends/mcp_bridge.py
@@ -250,6 +262,7 @@ gate_rounds:
   - {gate: plan-critique, round: 5, verdict: PROCEED, blocking: 0, nits: 4}
   - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 2, nits: 5}
   - {gate: plan-critique, round: 7, verdict: REVISE, blocking: 1, nits: 4}
+  - {gate: plan-critique, round: 8, verdict: PROCEED, blocking: 0, nits: 5}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -260,22 +273,23 @@ execution_steps:
   - Write the seven test nodes against main's code; confirm the litellm acceptance node and the grouped-RuntimeError case are red (two end records), test_mcp_bridge.py fails collection on the new import, and the bare-RuntimeError case, the abort node and the cancellation node are green regression guards.
   - Edit mcp_bridge.py (BridgeTeardownFailed and the normal-exit flag), then litellm_backend.py (keep go()'s result; tolerate only BridgeTeardownFailed at teardown; one class-only stderr line).
   - Run bin/venv-python -m scripts.validate --pre and fix; git add the changed files.
-  - Execute Verification Plan steps 1-2. Run each step and loop until it passes; on an unrecoverable failure stop and RCA (Decision 55).
+  - Execute Verification Plan steps 1-3. Run each step and loop until it passes; on an unrecoverable failure stop and RCA (Decision 55).
   - >-
     CLOSURE. Report each outcome separately: readiness, parent-validator evidence, postflight evidence, and the real
     push, PR and merge outcome (implement skill Commit Flows; docs/contracts/git-ops.yaml handoff_sequence).
     - Run bin/venv-python -m scripts.session.github_readiness; report its states independently, and an unknown state
       as unproven, never a pass.
-    - Run /implement's Verification Graduation walk, which writes the registry shard bridge-teardown-end-record. Then
+    - Run /implement's Verification Graduation walk, which writes the registry shards bridge-teardown-end-record-bridge
+      and bridge-teardown-end-record-backend. Then
       set implementation_declared: true in this plan, in the same commit as the code.
     - Commit (fix(bridge-teardown-end-record): ...) with the trailer `Resolves: rec-5402, rec-5334` in the commit body.
     - git fetch origin main && git rebase origin/main.
-    - Run VP step 3 on that committed, rebased tree (the full tier, then --verify-head): the parent-validator evidence.
+    - Run VP step 4 on that committed, rebased tree (the full tier, then --verify-head): the parent-validator evidence.
     - Write /tmp/implementation-retrospective.json with the scripts.session.postflight_evidence.CATEGORIES keys, then
       run bin/venv-python -m scripts.session.postflight --evidence /tmp/implementation-retrospective.json.
     - Push (git push -u origin HEAD as its own call). Open the PR, and report it as opened only with the returned PR
       number. Subscribe to it; never poll.
     - On green CI (event-driven wake), squash-merge with the Resolves trailer in the commit message (2026-11-16 ruling:
-      no operator word needed). Report the merge SHA, then run VP step 4.
+      no operator word needed). Report the merge SHA, then run VP step 5.
     - No roadmap edit (T4.32 c1 stays open).
   - 'Report, as separate facts: readiness, parent-validator evidence, postflight evidence, PR number and merge SHA, VP results, and anything UNPROVEN.'
