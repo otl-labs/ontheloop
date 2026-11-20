@@ -35,6 +35,10 @@ class BridgeUnavailable(BridgeError):
     """The server could not spawn or start, or lacks a named verb."""
 
 
+class BridgeTeardownFailed(BridgeError):
+    """The server session or process failed while the bridge closed after the body exited normally."""
+
+
 class BridgeFailed(BridgeError):
     """The server session failed after it started."""
 
@@ -89,11 +93,30 @@ def _specs(listed: Any, verbs: tuple[str, ...]) -> list[dict[str, Any]]:
     return specs
 
 
+def _leaf_names(exc: BaseException) -> set[str]:
+    if isinstance(exc, BaseExceptionGroup):
+        return {name for inner in exc.exceptions for name in _leaf_names(inner)}
+    return {type(exc).__name__}
+
+
+def _render(exc: BaseException) -> str:
+    if isinstance(exc, BaseExceptionGroup):
+        return f"{type(exc).__name__}[{', '.join(sorted(_leaf_names(exc)))}]"
+    return type(exc).__name__
+
+
+def _is_os_only(exc: BaseException) -> bool:
+    if isinstance(exc, BaseExceptionGroup):
+        return exc.split(OSError)[1] is None
+    return isinstance(exc, OSError)
+
+
 @asynccontextmanager
 async def open_bridge(
     server: StdioServerParameters, verbs: tuple[str, ...], *, errlog: TextIO, startup_timeout: float
 ) -> AsyncIterator[Bridge]:
     recorded: BaseException | None = None
+    exited = False
     try:
         async with stdio_client(server, errlog=errlog) as (read_stream, write_stream):
             async with ClientSession(read_stream, write_stream) as session:
@@ -116,7 +139,12 @@ async def open_bridge(
                 except BaseException as exc:
                     recorded = exc
                     raise
+                exited = True
     except (OSError, BaseExceptionGroup) as exc:
         if recorded is not None:
             raise recorded  # noqa: B904 -- the recorded exception keeps its own __cause__
+        if exited:
+            if not _is_os_only(exc):
+                raise
+            raise BridgeTeardownFailed(f"the server failed during shutdown: {_render(exc)}") from exc
         raise BridgeUnavailable(f"the server could not spawn or start: {type(exc).__name__}") from exc
