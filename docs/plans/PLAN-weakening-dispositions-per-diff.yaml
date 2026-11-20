@@ -1,0 +1,338 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: weakening-dispositions-per-diff
+intent: >-
+  Make the weakening-disposition gate judge every PR that introduces a weakening candidate, not only the PR that flips a
+  plan's implementation_declared, and stop re-matching entries already on the base, so no build escapes the gate by
+  never flipping and a late-closure PR (git-ops.yaml resolves_trailer LATE CLOSURE) no longer fails on its plan's
+  build-time entries (rec-5441).
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-weakening-dispositions-per-diff.yaml
+phase: >-
+  ad_hoc_rec (soft-warn exception category: rec-5441, filed by the rec-5382 planner; no tier_item claimed, so the Tier
+  Item Freshness Gate is skipped). No exit criterion closed. A behaviour-changing Python check with no Lambda-packaged
+  file and no deploy: V2.
+cites: [dec:181, dec:201, dec:226, dec:235, dec:246, dec:254, dec:279]
+scope:
+  - file: scripts/checks/verification/validate_weakening_dispositions.py
+    action: Modify
+    purpose: >-
+      Re-key the gate from the plan flip to the diff. run_check(failed, *, root, base, status_changed, read_base,
+      read_head, head=None) derives plans = _common.plan_paths_from_changed over the status_changed paths with status A,
+      M or ?? that exist at the head (the working tree when head is None, else the head ref); resolve_declared_plans is
+      no longer called by this module. Rules: (1) candidates =
+      find_candidates(status_changed, ...) as today; (2) candidates and no touched plan: if every changed path
+      (any status) starts with tests/, print a NOTE naming rec-4442 and pass (Decision 226 fast lane, report-only);
+      otherwise append one failure naming the candidate keys and the remedy "record each in the build's plan
+      weakening_dispositions in this PR (a revert PR: in the reverted build's plan)"; (3) each candidate must match
+      exactly one entry across the touched plans' weakening_dispositions at head (missing, unknown, weakening and
+      unresolvable-cite rules and messages unchanged; planned-change cites index the touched plans as today); the
+      duplicate rule ("has N recorded entries") applies only to this diff's candidate keys and to new or changed
+      entries, so two touched plans sharing a base-only key with no candidate pass (16 of 461 recorded keys sit in
+      2-5 plans today); (4) stale rule: an entry is checked only when it is new or changed, meaning its mapping is not in that
+      plan's weakening_dispositions at base (net-new plan: every entry is new); such an entry naming no candidate
+      fails as stale, unless every changed path starts with docs/plans/ (a plan or amendment PR may pre-record
+      planned dispositions). Entries already on the base are never re-checked as stale. validate_weakening_dispositions:
+      skip on an unreachable base as today; status_changed = _common.get_status_aware_diff(root); no candidates and
+      no touched plan prints PASS and declares examined(0); candidates and no touched plan (the failure or the
+      tests-only NOTE) declares registry.examined(len(candidates), unit="candidates"), since those candidates were
+      judged; otherwise registry.examined(len(plans), unit="touched_plans"). Batched ranges (Decision 254 cl.1/cl.4): when _common.push_context_base(root) returns
+      a base and base..HEAD holds more than one first-parent commit, each first-parent commit C is judged alone
+      against C^ (its own name-status diff, readers at C^ and C, plan and cite reads at C), so rules written for
+      one PR never mix two merges; run_check therefore takes a head ref (None = working tree) used for every plan and
+      cite read (the review_dispositions vocabulary is still read from the checkout's contract). Range mode prints one
+      line "weakening-dispositions: judged <short sha>" per first-parent commit and declares
+      registry.examined(<commits judged>, unit="first_parent_commits"). The module docstring is rewritten to the new
+      trigger (the "SAME diff ... flips" wording goes), and so is the printed section header "(implement-PR leg,
+      rec-3357)".
+  - file: tests/checks/verification/test_validate_weakening_dispositions_late_closure.py
+    action: Create
+    purpose: >-
+      rec-5441's acceptance file. Real git fixture repos (tmp_path, one base commit, then working-tree edits, built
+      by the tests/fixtures/weakening_dispositions_repo.py helpers, never imported from a test_ module), the contract's review_dispositions written into the fixture, the
+      module-level validate_weakening_dispositions called with root=<fixture>, status_diff_base patched to the base
+      sha and scripts.checks._common.push_context_base patched to None (except the range node), so the file stays
+      hermetic once rec-5107 sets FULL_TIER_PREV. Nodes: test_late_closure_flip_passes (base plan holds one entry for a candidate its build introduced
+      earlier; the diff flips implementation_declared only; red before: stale); test_late_closure_with_registry_shard_passes
+      (same plus an added config/agent/verification_registry/entries/<id>.yaml); test_unflipped_build_without_plan_fails
+      (a src file and a test assertion change, no plan touched; red before: no flip, no-op);
+      test_unflipped_build_missing_entry_fails (plan touched by an unrelated field edit, candidate with no entry;
+      red before); test_unflipped_build_with_entry_passes; test_added_entry_naming_no_candidate_fails (a code diff
+      adds an entry for a key it does not produce); test_plan_only_diff_may_prerecord_entries (a net-new plan with an
+      entry and no other changed file passes); test_base_entries_never_rematched (base holds an entry whose candidate
+      is not in the diff; the diff adds a correct second entry for its own candidate; passes);
+      test_changed_base_entry_naming_no_candidate_fails (a base entry for K whose cite the diff edits, plus a src/
+      file, no candidate K: stale); test_tests_only_planless_diff_is_report_only (passes, the NOTE names rec-4442, examined declared);
+      test_duplicate_entry_across_touched_plans_fails (one candidate key recorded in two touched plans);
+      test_shared_base_key_without_candidate_passes (two touched plans share a base-only key, no candidates);
+      test_push_range_judges_each_merge_alone (push context patched,
+      base..HEAD = a tests-only planless merge then a plan-only pre-record merge: passes, prints two "judged" lines
+      naming both shas and declares examined(2, unit="first_parent_commits"), where one merged diff would fail on
+      both rules).
+  - file: tests/checks/verification/test_validate_weakening_dispositions.py
+    action: Modify
+    purpose: >-
+      Follow run_check's new signature (no resolved= argument; the plan path comes from status_changed) and the
+      dropped resolve_declared_plans seam. TestDispositionsRequired keeps its class name (registry shard
+      weakening-dispositions-recorded pins it); test_stale_entry_fails, which passes status_changed=[] today, gains a
+      non-plan changed path in its fixture so the docs/plans/** exemption does not swallow it, and keeps its
+      assertion. TestImplementLegOnly::test_no_flip_is_noop_even_with_candidates is
+      replaced by a node pinning the new no-plan rule on a non-tests path. Two fixtures change shape, not assertion:
+      test_main_prints_failed_block and test_validate_weakening_dispositions_success_path_on_real_tmp_repo add
+      ("M", <their plan path>) to the patched get_status_aware_diff, since a diff touching no plan is now report-only or
+      examined(0). TestHelpers::test_run_check_skips_entry_with_no_candidate_key, which passes resolved=[plan_rel] and
+      status_changed=[] today, puts the plan path in status_changed so it still reaches the no-key branch. The
+      TestImplementLegOnly class name stays (it keeps test_unreachable_base_skips, and PLAN-test-weakening-surfacing
+      runs ::TestImplementLegOnly). This file is the coverage gate's mirror (map_source_to_test; validate_test_coverage needs 100% from
+      it alone, 165 of 165 statements today), so it also gains one node per new branch: the planless failure through
+      validate_weakening_dispositions, the tests-only NOTE path, the head-ref plan and cite reader, the net-new versus
+      changed-entry stale branch, the scoped duplicate rule, and range mode; every node patches
+      scripts.checks._common.push_context_base (None outside range mode). Its real-git fixture builders move to
+      tests/fixtures/weakening_dispositions_repo.py (shared with the late-closure file), so the file stays at or
+      under 470 of 500 SLOC (376 today) with the mirror path and the registry node_id unchanged; never a budget raise,
+      a package split (map_source_to_test routes a package only via _CONCERN_SPLIT_TEST_PACKAGES, out of scope) or a
+      lowered coverage threshold (Decision 235). Every existing assertion on a rule this plan keeps (missing, duplicate,
+      unknown, weakening, cite resolution, unreachable base) keeps its assertion.
+  - file: tests/fixtures/weakening_dispositions_repo.py
+    action: Create
+    purpose: >-
+      Importable fixture helpers for both test files (tests/fixtures/** is exempt from validate_no_cross_test_imports):
+      init a tmp git repo with the contract's review_dispositions and a base commit, write a plan with
+      weakening_dispositions, write a test file whose diff yields a named candidate, commit and return shas. The
+      helpers the mirror file holds today move here; no assertions live here.
+  - file: scripts/checks/verification/validate_weakening_candidates.py
+    action: Modify
+    purpose: >-
+      Docstring only: "the implement-PR leg that makes recording a disposition mandatory" becomes "the gate that makes
+      recording a disposition mandatory on every diff with candidates". No code change.
+  - file: docs/contracts/implement-scope-boundary.yaml
+    action: Modify
+    purpose: >-
+      Place docs/plans/approved/weakening-dispositions-per-diff.yaml's three blocks: the validate_weakening_dispositions
+      CONTENT row's surface label and note restated for the per-diff trigger and stale rule, the residual row's
+      "mandatory on implement PRs" pointer restated to match, and one semantic_break amendment_log row (exempt from
+      keep_full). Nothing else in the file changes.
+  - file: docs/plans/approved/weakening-dispositions-per-diff.yaml
+    action: Create
+    purpose: Approved-text sidecar binding the contract row wording (Decision 246); approved on the approved-text Environment gate.
+  - file: docs/plans/PLAN-weakening-dispositions-per-diff.yaml
+    action: Create
+    purpose: This plan.
+bundled_recommendations: [rec-5441]
+followon_recs: [rec-5461, rec-5462, rec-5463]
+infrastructure_dependencies: []
+acceptance_criteria:
+  - A diff that only flips a plan's implementation_declared (with or without its graduated registry shards) passes the gate when the plan's entries were recorded before it; PR #2270's failure class is gone.
+  - A diff with weakening candidates that touches no plan fails, unless every changed path is under tests/ (the Decision 226 fast lane stays report-only, rec-4442).
+  - A diff that touches a plan is judged against that plan's entries whether or not it flips implementation_declared; missing, unknown, weakening and unresolvable-cite entries fail exactly as before; a duplicate fails for this diff's candidate keys and new or changed entries.
+  - An entry a diff adds or changes that names no candidate in the diff fails as stale, except on a diff that changes only docs/plans/**; entries already on the base are never re-checked as stale.
+  - implement-scope-boundary.yaml stays at or under 500 effective lines after the blocks are placed.
+  - The implement-scope-boundary.yaml row carries the approved words exactly (validate_merge_step's approved-text leg and validate_approval_routing green), and rec-5441 is closed by the build's merge.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: "rec-5441's acceptance file (red before: the file is absent; with the file and today's module, the late-closure and unflipped-build nodes fail)."
+    command: bin/venv-python -m pytest tests/checks/verification/test_validate_weakening_dispositions_late_closure.py -q
+    expected: exit 0, every node passed, none failed
+    fix_if: a late-closure node reports stale (base entries still re-checked as stale) or an unflipped-build node passes (the flip is still the trigger)
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: weakening-dispositions-per-diff
+  - step: 2
+    phase: pre-deploy
+    action: The existing mirror test and the contract-shape tests.
+    command: bin/venv-python -m pytest tests/checks/verification/test_validate_weakening_dispositions.py tests/checks/verification/test_validate_weakening_candidates.py tests/test_scope_boundary_contract.py -q
+    expected: exit 0, no failures
+    fix_if: an existing node fails on a rule this plan keeps (fix the code, or the fixture where it no longer touches a plan; never the assertion, Decision 235)
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Re-run of standing mirror and contract tests already guarded by weakening-dispositions-recorded and the scope-boundary contract suite; adds no new guard.
+  - step: 3
+    phase: pre-deploy
+    action: >-
+      Real-repo proof of PR #2270's shape: a detached worktree of origin/main with only
+      PLAN-actions-sha-pin-non-codeowners flipped to implementation_declared true, judged by this branch's module with
+      root pointed at the worktree (red before: today's module reports the recorded entry stale). Then the build
+      replays the gate with a scratch script over the last 200 first-parent merges (flip or not, plan touched,
+      candidates, old and new verdict) and puts the table in its report.
+    command: >-
+      W=$(mktemp -d) && git worktree add -q --detach "$W" origin/main
+      && printf 'implementation_declared: true\n' >> "$W/docs/plans/PLAN-actions-sha-pin-non-codeowners.yaml"
+      && bin/venv-python -c "import sys; from pathlib import Path; from scripts.checks.verification.validate_weakening_dispositions import validate_weakening_dispositions as v; f=[]; v(f, root=Path(sys.argv[1])); print('FAILURES', f); sys.exit(1 if f else 0)" "$W";
+      rc=$?; git worktree remove --force "$W"; exit $rc
+    expected: exit 0 and "FAILURES []" (the replay table is reported by the build per execution_steps, not checked by this command)
+    fix_if: >-
+      the worktree run reports a stale entry (base entries still re-checked as stale); a flip merge that passed before fails
+      now (a regression on the gated path). If the plan is already declared on main when the build runs, flip any
+      other built, undeclared plan with recorded entries instead and say which.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A one-time measurement on main's real history and today's plan files; step 1 holds the standing guard for the same property.
+  - step: 4
+    phase: pre-deploy
+    action: The approved words are placed exactly.
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug weakening-dispositions-per-diff --base origin/main
+    expected: "APPROVED-TEXT OK"
+    fix_if: APPROVED-TEXT MISMATCH (re-place the blocks from the sidecar byte for byte; never edit the sidecar in the build)
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Base-relative to origin/main, so it reads the sidecar as already placed once merged; validate_merge_step's approved-text leg is the standing guard.
+  - step: 5
+    phase: pre-deploy
+    action: The contract stays inside its 500-effective-line cap after the blocks are placed (predicted 494 with #2071's row on main).
+    command: >-
+      bin/venv-python -c "from pathlib import Path; from scripts.checks.structural._classify import effective_lines;
+      n=effective_lines(Path('docs/contracts/implement-scope-boundary.yaml').read_text(encoding='utf-8')); print('EFFECTIVE', n); assert n <= 500"
+    expected: exit 0 and EFFECTIVE at most 500
+    fix_if: >-
+      over 500: stop; a compaction outside the bound blocks would fail approved_text verify, so the planner routes a
+      re-approval carrying an amendment_log compaction block (plan amendment), never a raise
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: The structural size gate (validate_structural_size_limits, contracts class) is the standing guard; this step only proves headroom at build time.
+  - step: 6
+    phase: pre-deploy
+    action: >-
+      Fast tier, then the full tier before handoff (handoff_policy): bin/venv-python -m scripts.validate --pre in the
+      foreground (exit 0), then this command as its own backgrounded run with a 2 h limit from the top-level session.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: "--pre exited 0 first; this command exits 0 for HEAD"
+    fix_if: >-
+      a failure in this plan's files is fixed at root and the full tier rerun; a failure only in another project's open
+      red goes to the operator as the implement skill's go/no-go, and without his word the build waits for that red's
+      repair (red-main-recovery.yaml); it never hands off on a non-green full tier by default
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: post-deploy
+    action: Confirm rec-5441 closed after the squash merge (Resolves trailer).
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import make_reader;
+      r=make_reader(profile='agent_platform').named('recs_by_ids', ids='rec-5441')[0]; print(r['status']); assert r['status']=='closed'"
+    expected: rec-5441 status closed
+    fix_if: >-
+      still open after ci.yml's closure job ran: read the job's verdict; if it is out_of_grammar, the acceptance was
+      edited away from the decidable node-id form set 2026-11-20 (restore it and re-run the closure job, never a manual
+      close without a verdict, Decision 201); if it is a failing probe, fix the build
+    hermetic: false
+test_obligations:
+  - source: scripts/checks/verification/validate_weakening_dispositions.py
+    behavior: A flip-only diff whose plan recorded its entries earlier passes; base entries are never re-checked as stale.
+    verification_step: 1
+    test_selector: tests/checks/verification/test_validate_weakening_dispositions_late_closure.py::test_late_closure_flip_passes
+    red_green_expectation: red before (the recorded entry reads stale), green after.
+  - source: scripts/checks/verification/validate_weakening_dispositions.py
+    behavior: A diff with candidates that touches no plan and changes a non-test path fails.
+    verification_step: 1
+    test_selector: tests/checks/verification/test_validate_weakening_dispositions_late_closure.py::test_unflipped_build_without_plan_fails
+    red_green_expectation: red before (no flip, so the gate is a no-op), green after.
+  - source: scripts/checks/verification/validate_weakening_dispositions.py
+    behavior: A diff that touches a plan without flipping it is judged against that plan's entries; a missing entry fails.
+    verification_step: 1
+    test_selector: tests/checks/verification/test_validate_weakening_dispositions_late_closure.py::test_unflipped_build_missing_entry_fails
+    red_green_expectation: red before (no flip, so the gate is a no-op), green after.
+  - source: scripts/checks/verification/validate_weakening_dispositions.py
+    behavior: A base entry whose mapping a code diff changes, naming no candidate in the diff, fails as stale (compared by mapping, not key).
+    verification_step: 1
+    test_selector: tests/checks/verification/test_validate_weakening_dispositions_late_closure.py::test_changed_base_entry_naming_no_candidate_fails
+    red_green_expectation: red before (no flip, so the gate is a no-op), green after.
+  - source: scripts/checks/verification/validate_weakening_dispositions.py
+    behavior: A tests-only diff with no plan stays report-only and names rec-4442.
+    verification_step: 1
+    test_selector: tests/checks/verification/test_validate_weakening_dispositions_late_closure.py::test_tests_only_planless_diff_is_report_only
+    red_green_expectation: red before (today's module prints the no-flip no-op PASS, not the NOTE naming rec-4442), green after.
+  - source: scripts/checks/verification/validate_weakening_dispositions.py
+    behavior: An entry a code diff adds that names no candidate in the diff fails as stale (the named Decision 235 boundary).
+    verification_step: 1
+    test_selector: tests/checks/verification/test_validate_weakening_dispositions_late_closure.py::test_added_entry_naming_no_candidate_fails
+    red_green_expectation: red before (no flip, so the gate is a no-op), green after.
+  - source: scripts/checks/verification/validate_weakening_dispositions.py
+    behavior: A docs/plans/**-only diff may pre-record entries with no candidate.
+    verification_step: 1
+    test_selector: tests/checks/verification/test_validate_weakening_dispositions_late_closure.py::test_plan_only_diff_may_prerecord_entries
+    waiver_reason: Green before and after (today a plan PR flips nothing, so it passes); it pins the plan-PR exemption so the new stale rule cannot swallow it.
+  - source: scripts/checks/verification/validate_weakening_dispositions.py
+    behavior: Two touched plans sharing a base-only key with no candidate pass (duplicate rule scoped to candidates and new entries).
+    verification_step: 1
+    test_selector: tests/checks/verification/test_validate_weakening_dispositions_late_closure.py::test_shared_base_key_without_candidate_passes
+    waiver_reason: Green before and after (no flip today, so no-op); it pins the scoped duplicate rule against a regression to the old all-entries scan.
+  - source: scripts/checks/verification/validate_weakening_dispositions.py
+    behavior: In push context a multi-merge range is judged one first-parent commit at a time.
+    verification_step: 1
+    test_selector: tests/checks/verification/test_validate_weakening_dispositions_late_closure.py::test_push_range_judges_each_merge_alone
+    red_green_expectation: red before (today's module judges base..HEAD as one no-flip diff and prints no "judged" line per sha, so the node's two-line and examined(2) assertions fail), green after.
+  - source: scripts/checks/verification/validate_weakening_candidates.py
+    behavior: Docstring names the per-diff gate.
+    verification_step: 2
+    test_selector: tests/checks/verification/test_validate_weakening_candidates.py
+    waiver_reason: Docstring-only edit with no behaviour; the existing mirror test re-runs to prove nothing moved.
+  - source: docs/contracts/implement-scope-boundary.yaml
+    behavior: The CONTENT rows carry the approved words exactly.
+    verification_step: 4
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug weakening-dispositions-per-diff --base origin/main
+    red_green_expectation: red before (the words are not placed), green after.
+constraints:
+  - Every fail rule the gate has today (missing, unknown, weakening, unresolvable cite) keeps its condition and message; the trigger changes, and the stale and duplicate rules reach only this diff's candidates and new or changed entries (Decision 235 cl.1 loosenings. The stale narrowing was confirmed by the operator on the planning thread's decision card, 2026-11-20 15:00 UTC. The duplicate scoping, and matching against any touched plan rather than only flipped plans (a flip PR that also edits an unrelated plan holding a base entry for K now passes), were confirmed by his reply "approved" on the planning thread, 2026-11-20 17:12 UTC, to the message naming both with the wording approval run. Chat ids stay out of this public repo.)
+  - The diff-with-candidates-and-no-plan rule fails closed; its only exception is a diff whose every changed path is under tests/ (Decision 226 fast lane, rec-4442). No marker, waiver or env switch.
+  - The contract row is placed from the sidecar byte for byte; the build never edits the sidecar (Decision 246). A wording change after approval needs a new approval run.
+  - No edit to git-ops.yaml, _implementation_merge.py, validate_merge_step.py, validate_graduation_completeness.py or red-main-recovery.yaml (rec-5057 and rec-2837 own those files).
+  - The build's own test edits produce weakening candidates; code review records them in this plan's weakening_dispositions in the build PR (planned-change citing test_obligations or acceptance_criteria), which the new gate then judges.
+  - No rescue agents or workaround loops (Decision 55); never skip or loosen a test to get green (Decision 235).
+context:
+  - "Decision-scout round 2 FLAGS_FOUND. CITE: 235 (floor enforcer; the stale-rule narrowing is the named loosening, operator-confirmed), 181 (row note declares the tests-only residual, rec-4442), 226 (fast-lane carve-out), 246 (sidecar approval). WARN 235 resolved by naming the loosening and running the stale rule on every plan-touching diff; WARN 163 resolved by failing closed when no plan is touched. Decisions triaged: 227 of 227. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2 (T2.54, T4.23). Serves: NS.9 3/5."
+  - "Operator choice 2026-11-20 15:00 UTC (decision card): check every PR, fail closed, over re-judging X^..X at late closure and over a PR-to-plan link rec first. Industry-practice consult: project files rec-5441-weakening-late-closure/consult-2/ADVICE.md."
+  - "Measured 2026-11-20 on main 7f2915f3, last 200 first-parent merges: 36 had candidates; 27 flipped a plan (gated); 9 neither flipped nor touched a plan (never gated); 4 of those 9 record no entry in any plan (7f2915f3, 9b549344, 7c0b6766, e8e754f5). Candidate keys repeat across plans (on 6df11959, 16 of 461 keys sit in 2-5 plans), so entries are looked up only in plans the diff touches."
+  - "PR #2270 (late closure, PLAN-actions-sha-pin-non-codeowners, X 875eb075) failed with 'recorded entry ... matches no current candidate (stale)'. rec-5382's backlog was audited over each build merge X^..X: 2 plans record entries that match exactly, 6 have none."
+  - "Planners pre-record entries in plan PRs (PLAN-actions-sha-pin-non-codeowners, PLAN-environment-gates-fail-closed), hence the docs/plans/**-only exemption from the stale rule."
+  - "Manual revert PRs (red-main-recovery.yaml Track B) that delete tests produce candidates; they record retirement entries in the reverted build's plan, which the revert usually touches anyway (a build squash that flipped the flag)."
+  - "Siblings: rec-5057 (approved text at late closure) and rec-2837 (graduation rows on main) share the root cause (checks judged only at the flip); this plan touches none of their files."
+  - "implement-scope-boundary.yaml: 485 of 500 effective lines, 36457 of 49152 bytes; the sidecar adds 8 lines and about 850 bytes (one terse-shaped semantic_break row, exempt from keep_full). PLAN-wording-approval-routing PR 2 (#2071) landed first (2026-11-20) and added its own 2026-11-16 log row, so the dispositions-log block was re-anchored on that row before this plan merged (anchor words only: approved_text record still prints approved=b08b4aa8..., so approval run 44769409245 stands)."
+  - "Scout round 3 NOTE (Decision 254 cl.1/cl.4): the full tier may judge a range of merges once rec-5107 wires FULL_TIER_PREV (ci.yml does not set it yet); per-commit judging in push context keeps the one-PR rules exact. Round 3 CITE unchanged (235, 181, 226, 246); triaged 227 of 227."
+  - "Filed 2026-11-20: rec-5461 (Low, the 4 past builds with unrecorded candidates) and rec-5462 (Low, depends on rec-5441: red-main-recovery.yaml's Track B revert route should say a revert records retirement entries in the reverted build's plan; that file is out of scope here)."
+  - "Declared residual, owned by rec-5463 (Low, filed 2026-11-20): a base entry for key K in a touched plan still satisfies a later candidate K (e.g. a second PR of one plan weakening the same node again). The row's claim still holds (every candidate has a recorded disposition whose cite resolves; it never claims the disposition is fresh or right, Decision 165); one plan is one PR until rec-5411 masks it."
+  - "Decision 235 cl.1: the operator's 2026-11-20 confirmation covered the stale-rule narrowing; the duplicate-rule scoping (critique round 1 B4) and the touched-plans matching scope (critique round 4 N2) were named to him with the wording approval run and confirmed by his reply \"approved\", 2026-11-20 17:12 UTC (planning thread; chat ids stay out of this public repo)."
+  - "In-flight PRs: any open PR with candidates that touches no plan will newly fail on its next CI run after this merges; the coordinator log entry (issue #1963, 2026-11-20T15:12Z) told every project."
+  - "Fast tier: find_candidates already runs on every diff (validate_weakening_candidates, report-only); this gate now also parses on every diff, about the same cost again. pre_globs stays None (always selected)."
+  - "red_overlap at plan write (2026-11-20, main 7f2915f3): clear, no reds. Operator wording approval: approved-text-approval.yml run 44769409245 (tablet-poppy-globe-spruce), approved 2026-11-20."
+  - "Declared breadth (selection_budget --paths, draft scope): 206 selected of 1294, predicted test half 161.7-611.5s against a 611s allowance -> breadth_waived; scope kept as one unit."
+  - "rec-5441's acceptance was updated 2026-11-20 (portal update_rec, read back) to name two nodes of the late-closure file, so lint_acceptance_command(require_decidable=True) returns (True, None) and the Resolves trailer can close it (critique round 3 B1)."
+  - "rec-5107's automated revert-PR opener (Decision 254 cl.3) will produce test-deleting PRs with no disposition; those PRs fail this gate until the opener records retirement entries in the reverted build's plan. rec-5462 carries that note for both the manual Track B route and the opener."
+  - "Decision-scout round 5 FLAGS_FOUND. CITE adds 201 (closure-time acceptance verdict: AC 6, VP 7 fix_if, rec-5441's decidable acceptance). NOTE 235 (duplicate and touched-plans scoping await his word, above). NOTE 181: the row now declares the rec-5463 residual in its own words (wording-check round 3). SPIRIT 226: test-deleting reverts need hand-added retirement entries; rec-5462 raised to Medium 2026-11-20 (portal, read back). Decisions triaged: 227 of 227. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2. Serves: NS.9 3/5."
+  - "Decision-scout round 6 FLAGS_FOUND (main moved: Decision 279 landed and amended 246). CITE adds 279: approval-routing.yaml gates implement-scope-boundary.yaml's invariants key, and a gated change binds the whole file, so one sidecar covering both rows and the log row is required; validate_approval_routing passes the build PR because the CLOSURE step flips this plan, whose base sidecar binds the change. NOTE 235 closed by the recorded confirmations. SPIRIT 226 NOTE stays deferred to rec-5462 (Medium). Decisions triaged: 228 of 228. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2. Serves: NS.9 3/5."
+  - "A sweep or schema-migration PR that rewrites existing weakening_dispositions entries alongside a code change reads them as changed and fails the stale rule; such a PR splits the entry rewrite into a docs/plans/**-only PR first."
+  - "Owning planning thread: 'Fix weakening check for late closure rec-5441' (Agents in GitHub). Plan defects go to the coordinator, which forwards them here."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:26ed28a9e27daec07ebdbd61c8d9b805043455b36d3b00ae100a54c5c2ffb3a8"}  # first approach (X^..X at late closure); superseded by the operator's reframe
+  - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:d2bb153918712ec2170499dd8a39af736c1030c1d0cf0691c9522c3dde6cf708"}  # WARN 235 and WARN 163 folded in (context line 1)
+  - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:e609d25a35cbe40e0475c136dbabc2f1fb1cecf4414dcb94ece589786d811f2a"}  # NOTE Decision 254 (batched full-tier ranges) folded: each first-parent commit judged alone
+  - {gate: wording-check, round: 1, verdict: PASS, digest: 82483060140d0f62d0ad9c2bd1e3427247101b2153142b7f9b3af801ee4b2466, base: 7f2915f3cc96fc8d471181dfd368b8b8e7c5cd8d, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 4, nits: 7}  # all fixed: B1 tier V2; B2 step 4 waive; B3 step 7 effective-line cap; B4 duplicate rule scoped + node; N1 obligations; N2 stale fixture; N3 residual-row block + candidates docstring; N4 rec-5461/5462; N5 step 3 expected; N6 wording + plan_paths_from_changed; N7 roadmap ids
+  - {gate: decision-scout, round: 4, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:16445111ea94229ef6586421e79bd5fa7ae12570a658f041fa9f876ff99ac649"}  # CITE adds 254; NOTE 235 (duplicate scoping confirmation, context) and NOTE 181 (residual owner rec-5463) folded
+  - {gate: wording-check, round: 2, verdict: PASS, digest: b2b11a98096826b12e165297e1bf86a82efbf58eccf80dbf982c72ab4a4280a1, base: 6df1195944e0f5225709110c7f966b435c8051d6, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 8}  # all fixed except N7 (sidecar wording, left as approved): B1 mirror coverage nodes + SLOC; B2 confirmation evidence; N1 fixtures + fix_if; N2 push_context_base patched; N3 range observable; N4 renumber; N5 followon_recs; N6 key count; N8 sweep-PR line
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 2, nits: 4}  # all fixed: B1 rec-5441 acceptance made decidable (portal, read back) + VP 7 fix_if; B2 shared tests/fixtures helper replaces the out-of-scope package fallback; N1 rec-5107 opener noted on rec-5462; N2 helper node + class name; N3 confirmation recorded on arrival; N4 examined(candidates)
+  - {gate: decision-scout, round: 5, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:5645bc16d5ddfd182adf8d8c4f7075e6a1e81a2996f954a93d9bef09f2de6cf4"}  # CITE 201 added; NOTE 181 folded into the sidecar row; SPIRIT 226 rec-5462 raised
+  - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 4}  # all folded: N1 AC wording; N2 touched-plans scope named for confirmation; N3 changed-entry node + two obligations; N4 section header
+  - {gate: wording-check, round: 3, verdict: PASS, digest: ea3b86e3312d0cd9606fb86d3d4266c8e0c92d17b95dc57c0ac508ba626a32fb, base: faa7e36b62ee76c583ad695b4e5cf1948f8e4bc4, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 5, verdict: PROCEED, blocking: 0, nits: 2}  # confirming round after round 4; both nits applied: N1 size figures 493 lines / ~850 bytes; N2 "re-checked as stale" in scope, AC 4, VP fix_ifs and obligation (intent, the scout-hashed summary, left as is)
+  - {gate: wording-check, round: 4, verdict: PASS, digest: 94a4ed37e66167cc51e306a602af9b96ae839118ce4b73fe17c830f0a7e671e6, base: 600e27c40ce36d7a7965af1346339e25ecb35e18, selection: complete}  # re-anchored log block after #2071; approved= unchanged  # pragma: allowlist secret
+  - {gate: decision-scout, round: 6, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:71c35377405735a8b1d30ed57f784737198ff7fa228a14934537df0760d54522"}  # CITE adds 279 (approval routing); NOTE 235 closed; SPIRIT 226 deferred to rec-5462
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "Create tests/checks/verification/test_validate_weakening_dispositions_late_closure.py per its scope row; run step 1 red (late-closure and unflipped-build nodes fail on today's module)."
+  - "Rewrite validate_weakening_dispositions.py per its scope row; update test_validate_weakening_dispositions.py per its scope row. Post: steps 1 and 2 pass."
+  - "Place the sidecar's three blocks in docs/contracts/implement-scope-boundary.yaml, filling {{DATE}} with the build date. Post: step 4 prints APPROVED-TEXT OK."
+  - "Run the step 3 history replay with a scratch script over the last 200 first-parent merges and over 875eb075's late-closure shape; put the table in the report."
+  - Execute Verification Plan -- run each pre-deploy step; loop until pass; on unrecoverable failure stop and RCA (Decision 55)
+  - "CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): run code review in a fresh context and copy its weakening stubs into this plan's weakening_dispositions; set implementation_declared: true; commit; rebase on origin/main; re-run red_overlap; VP 1-6; push; open the PR; subscribe; squash-merge on PROCEED and green CI with `Resolves: rec-5441` in the commit body; report PR number, CI run ids and the read-back merge SHA; VP 7."
+  - "Report: what was implemented, verification results"
+rollback: Revert the build's squash merge; the sidecar and the plan stay, and the contract row returns to the flip-trigger wording with the revert.
