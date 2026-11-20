@@ -31,6 +31,7 @@ from tests.checks.iam_tf._ci_platform_role_iam import (
 from tests.checks.iam_tf._ci_platform_role_iam import (
     ci_platform_role_iam_leaks as _raw_leaks,
 )
+from tests.fixtures.bootstrap_leak_scan import UNSCANNED_BOOTSTRAP_FILES as _UNSCANNED_BOOTSTRAP_FILES
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _BOOTSTRAP_DIR = _REPO_ROOT / "terraform" / "bootstrap"
@@ -50,6 +51,7 @@ _AWS_REGION = "eu-west-2"
 _SCANNED_BOOTSTRAP_FILES = (
     _BOOTSTRAP_DIR / "account_names.tf",
     _BOOTSTRAP_DIR / "agent_ducklake_api.tf",
+    _BOOTSTRAP_DIR / "bootstrap_pr_plan.tf",
     _BOOTSTRAP_DIR / "bootstrap_preview_analyzer.tf",
     _CI_APPLY_FILE,
     _BOOTSTRAP_DIR / "github_ci_apply.tf",
@@ -61,18 +63,6 @@ _SCANNED_BOOTSTRAP_FILES = (
     _BOOTSTRAP_DIR / "telemetry_content_reader.tf",
     _BOOTSTRAP_DIR / "variables.tf",
 )
-_UNSCANNED_BOOTSTRAP_FILES = {
-    "github_ci_apply_boundary.tf": "a ceiling that grants nothing",
-    "agent_session_user.tf": "the session user and its own policies, operator-applied (Decision 256)",
-    "platform_roles.tf": "PlatformDev and PlatformAdmin themselves, operator-applied (Decision 223)",
-    "platform_admin_policies.tf": "PlatformAdmin's own grants, operator-applied (Decision 223)",
-    "platform_admin_data_policies.tf": "PlatformAdmin's own grants, operator-applied (Decision 223)",
-    "platform_dev_policies.tf": "PlatformDev's own grants, operator-applied (Decision 223)",
-    "platform_security_admin_policy.tf": "the detector's, Decision 202",
-    "platform_security_alarms.tf": "the detector's, Decision 202",
-    "platform_security_heartbeat_canary.tf": "the detector's, Decision 202",
-    "platform_security_trail.tf": "the detector's, Decision 202",
-}
 _SCANNED_PERSONAL_GLOB = "*.tf"
 
 _EXPECTED_METADATA_WRITE_RESOURCES = frozenset(
