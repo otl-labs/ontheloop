@@ -20,7 +20,8 @@ agent pays to use the field set correctly (NS8, Section 6), not by how it reads 
 Surfaces (Section 4): the four stored telemetry tables (telemetry_sessions,
 telemetry_observations, telemetry_agents, telemetry_transcripts), their shared envelope, the
 free-form `metadata` field on telemetry_observations, and the read-derived relation
-telemetry_persona_findings. Questions (full text in Section 7):
+telemetry_persona_findings. Findings may also land on the design-and-lookup path that agents use
+to find these fields (Section 4). Questions (full text in Section 7):
 - Q1: overlap among written fields
 - Q2: declared-but-unwritten fields
 - Q3: facts stored but undeclared
@@ -32,9 +33,10 @@ telemetry_persona_findings. Questions (full text in Section 7):
 Deliverables: `audits/telemetry-field-consolidation-<sha>.yaml` and
 `audits/telemetry-field-consolidation-<sha>.md` (`<sha>` per Section 5). These two are the ONLY
 files you create or modify in the repository tree. Regenerating gitignored local caches per
-Section 5 is expected and is not a breach; never commit them. You draft; the human disposes. You
-change no contract, code, Decision, roadmap item, skill or recommendation, and you file no
-recommendation.
+Section 5 is expected and is not a breach; never commit them. Keep intermediate tables (the field
+table, key census, counterfactual counts) in your session scratchpad or /tmp, never in the
+repository. You draft; the human disposes. You change no contract, code, Decision, roadmap item,
+skill or recommendation, and you file no recommendation.
 
 ## 2. CANDIDATE OBSERVATIONS vs VERDICTS -- THE EPISTEMIC CONTRACT
 
@@ -42,18 +44,31 @@ This prompt hands you FACTS (Section 10) and CANDIDATE hypotheses (below), never
 NO CANDIDATE IS A REAL DEFECT UNTIL YOU TRACE IT. A run that merely confirms the candidates below
 has failed. "The field set is fine as it is" is a full-credit outcome if you argue it.
 
-Adjudicate each candidate, and each candidate you add, to exactly one outcome:
-- CONFIRMED defect with no owner -> `findings`, `roadmap_crossref.classification: novel`.
-- Owned by an open recommendation, an open roadmap criterion or an approved plan, but the owner's
-  remedy is insufficient or not yet built -> `findings`, classification `planned-insufficient` or
-  `planned-unbuilt`. Put the extension you propose in `proposed_change`.
-- Owned, and fully covered by the owner's remedy -> `rejected_candidates`, naming the owner.
-- Not a defect -> `rejected_candidates`, naming the design reason or the compensating control
-  (see `control_property_match`, Section 14).
+Adjudicate each candidate, and each candidate you add, to exactly one row of this table. An
+"owner" is an open recommendation, an open roadmap item or criterion, an approved plan in
+`docs/plans/`, or the `held:feedback-loop-gate` label (see the note after the table).
+
+| Situation after you trace it | Goes to | `roadmap_crossref.classification` |
+|---|---|---|
+| A real defect with no owner | `findings` | `novel` |
+| A real defect whose owner's remedy is insufficient (it misses part of the gap, or fixes it the wrong way) | `findings` | `planned-insufficient` |
+| A real defect whose owner's remedy is sufficient but not yet built, AND the gap is material to this audit's change plan (a field verdict, a Q6 timing or a batching choice depends on it) | `findings` | `planned-unbuilt` |
+| A real defect whose owner's remedy is sufficient (built or not), with nothing material to add | `rejected_candidates`, naming the owner | -- |
+| Not a defect | `rejected_candidates`, naming the design reason or the compensating control (`control_property_match`, Section 14) | -- |
+
+Notes on the table:
+- A field whose only owner is the `held:feedback-loop-gate` label has an owner with no stated
+  remedy. Classify a real defect on it `planned-insufficient`, with `item_ids` including
+  `held:feedback-loop-gate` and rec-4606 (which owns the hold's in-repo record).
+- A finding that challenges a Decision-ratified design choice (Section 13) is a Decision revisit.
+  Classify it `novel` unless an owner already proposes the revisit; `item_ids` names the Decision
+  as `Decision NNN`.
 
 Coverage rule: every id C1-C16 appears exactly once, either in one finding's `candidate_ids` or as
-one `rejected_candidates[].candidate`. One finding may cover several candidates. Number any
-candidates you add C17 onward; the same rule applies to them.
+one `rejected_candidates[].candidate`. One finding may cover several candidates. When parts of one
+candidate adjudicate differently, split it into C1a, C1b, ...: each part then appears exactly
+once, and the parent counts as covered when all its parts are. Number any candidates you add C17
+onward; the same rule applies to them.
 
 Candidates. Anchors were taken at compose time; re-derive them per Section 4.
 
@@ -61,7 +76,8 @@ Candidates. Anchors were taken at compose time; re-derive them per Section 4.
   - observations `model`, written on model_call points and on tool_call open rows (observations.py
     `_model`);
   - observations `requested_model` (model_call);
-  - agents `model` (sessions.py `_agent_row`, via `first_model`);
+  - agents `model`, via `first_model` in sessions.py `_agent_row` for sub-agent runs and in
+    host_run.py `top_level_agent_rows` for top-level runs;
   - transcripts `model`, the producing message's model; its semantics say "mirroring
     telemetry_observations.model";
   - sessions `model_primary`, set in sessions.py `build_sessions` via `first_model` to the model of
@@ -150,6 +166,13 @@ Candidates. Anchors were taken at compose time; re-derive them per Section 4.
   and `duration_seconds` appear on several contracts, for different entities or with different
   value lists. Conversely, one fact can sit under a generic column qualified by a discriminator
   value (`purpose`, `observation_type`, `event_kind`).
+- sessions `workflow` is a workflow LABEL, not a skill name. sessions.py `_workflow` uses the
+  root's first-prompt command tag when it is a known workflow; otherwise it uses the first Skill
+  call mapped through the closed `WORKFLOW_SKILLS` map (which renames, for example
+  planning -> plan); otherwise `claude_code` or `subagent`. agents `workflow_run_id` is a GitHub
+  Actions run id, unrelated to sessions `workflow`.
+- The `metadata` key `agent_id` (a harness agent id on a tool_call close row) is not agents
+  `agent_run_id` (the run's identity key) and not agents `agent_name` (the spawn label).
 - `external_ref` and `entity_ref` are both record references. The envelope's `external_ref`
   description says "Not a caller-facing FK -- entity_ref is the field a row uses to participate
   as (or reference) an entity/FK key".
@@ -159,7 +182,8 @@ Candidates. Anchors were taken at compose time; re-derive them per Section 4.
 - The name `input_sha256` occurs in src/persona_backends/events.py with an unrelated meaning.
   rec-5440 also uses it for a proposed column that was never built.
 - `exit_code` has two meanings. The declared column is a model_call process exit code; the
-  `metadata` key is a hook's exit code on a process_event row.
+  `metadata` key is a hook's exit code on a process_event row. In `field_verdicts` the key is
+  `metadata.exit_code`, the column `exit_code`.
 - A `metadata` key being present is not the same as it holding a value. The producer writes
   null-valued keys, so count NON-NULL values per key, never key presence alone.
 - "Retire" has two mechanisms in this repository's own text:
@@ -170,6 +194,9 @@ Candidates. Anchors were taken at compose time; re-derive them per Section 4.
   no preferred mechanism. Weigh both per field (DD-C).
 - `held:feedback-loop-gate` is an owner label checked by a regex. It is not a Decision and confers
   no immunity: every declared field is adjudicated.
+- The envelope's and the identity-key contracts' entries sit under their top-level `fields:` key,
+  although the table contracts' `$ref` fragments read `#/contract/fields/<name>`. Read them with
+  `yaml.safe_load(...)["fields"]`.
 - The reader's Class B contract (docs/contracts/ducklake_telemetry_reader.yaml) and the reader
   SQL are a second place a `metadata` key can be named. They are context, not audit surfaces.
 - The ops_* tables (ops_recommendations, ops_decisions, ops_priority_queue and others) are OUT of
@@ -179,25 +206,37 @@ Candidates. Anchors were taken at compose time; re-derive them per Section 4.
 
 ## 4. SCOPE
 
-| Surface name (use these strings) | Source of truth | State |
-|---|---|---|
-| telemetry_sessions | docs/contracts/telemetry_sessions.yaml | built, in production |
-| telemetry_observations | docs/contracts/telemetry_observations.yaml (all fields except `metadata`) | built, in production |
-| observations_metadata | telemetry_observations.yaml `fields.metadata`, plus every key a producer writes into it | built, in production |
-| telemetry_agents | docs/contracts/telemetry_agents.yaml | built, in production |
-| telemetry_transcripts | docs/contracts/telemetry_transcripts.yaml | built, in production |
-| envelope | docs/contracts/telemetry-event-envelope.yaml `contract.fields` | built |
-| persona_findings | docs/contracts/telemetry_persona_findings.yaml | read-derived, status draft |
+| Surface name (use these strings) | Source of truth | State | Rubric and maturity |
+|---|---|---|---|
+| telemetry_sessions | docs/contracts/telemetry_sessions.yaml | built, in production | yes |
+| telemetry_observations | docs/contracts/telemetry_observations.yaml (all fields except `metadata`) | built, in production | yes |
+| observations_metadata | telemetry_observations.yaml `fields.metadata`, plus every key a producer writes into it | built, in production | yes |
+| telemetry_agents | docs/contracts/telemetry_agents.yaml | built, in production | yes |
+| telemetry_transcripts | docs/contracts/telemetry_transcripts.yaml | built, in production | yes |
+| envelope | docs/contracts/telemetry-event-envelope.yaml (top-level `fields`) | built | yes |
+| persona_findings | docs/contracts/telemetry_persona_findings.yaml | read-derived, status draft | yes |
+| design_and_lookup_path | see below | mixed | findings only: no rubric rows, no maturity |
 
-A finding whose subject spans surfaces uses `surface: shared`.
+`design_and_lookup_path` is a findings-only surface for gaps in how an agent finds or designs
+fields. It covers:
+- data-modeling-standard.yaml `design_time_walk`;
+- `_joins.yaml`;
+- telemetry-lexicon.yaml;
+- the reader's describe output;
+- the planning skill's "Data-Model Assessment" section (.claude/skills/planning/SKILL.md).
+
+Findings that extend rec-5440, rec-5438 or rec-5439 normally land here. You may assess these files
+and propose changes to them; you edit none of them.
+
+A finding whose subject spans several of the first seven surfaces uses `surface: shared` and lists
+them in `surfaces_affected`.
 
 Context only (read; do not audit):
 - the producers: src/turn_capture/, plus any other producer registered in
   config/telemetry/parser_versions.yaml at the audited commit;
 - the reader: src/common/ducklake_event_read_verbs.py, ducklake_event_read_sql.py and
   ducklake_event_reads.py;
-- docs/contracts/_joins.yaml, docs/contracts/telemetry-lexicon.yaml,
-  docs/contracts/data-modeling-standard.yaml and docs/contracts/ducklake_telemetry_reader.yaml;
+- docs/contracts/ducklake_telemetry_reader.yaml;
 - scripts/checks/contracts/validate_telemetry_field_realization.py;
 - config/structural_size_budgets.yaml;
 - AGENTS.md section "Agent-First Repository".
@@ -223,6 +262,34 @@ found in code or in rows. No metadata key has a contract field of its own. Wheth
 entry's semantics text or another contract names a key goes in that row's `evidence`, not in its
 kind. Note that agents `agent_type` takes its `$ref` from source-lineage.yaml (a registry key), so
 it is stored_written under this rule.
+
+This classifier implements the rule; it ran at compose time:
+
+```
+bin/venv-python - <<'EOF'
+import yaml
+IDK = {"telemetry-event-envelope.yaml", "tenant-id.yaml", "project-id.yaml", "session-id.yaml",
+       "observation-id.yaml", "parent-observation-id.yaml"}
+for t in ["telemetry_sessions", "telemetry_observations", "telemetry_agents", "telemetry_transcripts",
+          "telemetry_persona_findings"]:
+    d = yaml.safe_load(open(f"docs/contracts/{t}.yaml"))
+    real = d.get("realization") or {}
+    wb = set((real.get("produced") or {}).get("write_boundary", []))
+    unp = {n: o for o, ns in (real.get("unproduced") or {}).items() for n in ns}
+    for name, spec in d["fields"].items():
+        spec = spec or {}
+        ref = str(spec.get("$ref", "")).split("#")[0]
+        if (spec.get("derivation") or {}).get("timing") == "read":
+            kind = "read_derived"
+        elif name in wb or ref in IDK:
+            kind = "bookkeeping"
+        elif name in unp:
+            kind = "declared_unwritten"
+        else:
+            kind = "stored_written"
+        print(t, name, kind, unp.get(name, "-"))
+EOF
+```
 
 Compose-time snapshot at commit ea07baa7 (bookkeeping / stored_written / declared_unwritten /
 read_derived):
@@ -272,6 +339,8 @@ Run these first. NEVER abort on a failure -- take the named degraded path.
      only. The filenames keep `<sha>`.
    - IF the fetch fails: use `git rev-parse --short HEAD`, branch off `HEAD` instead, and record
      "base is local HEAD" in `meta.contract_notes`.
+   - Run `git rev-parse --is-shallow-repository`. If it prints `true`, record that in
+     `meta.contract_notes`; DD-C step (iii) is then inconclusive for every field.
 2. Run `bin/venv-python -m scripts.session.preflight --roadmap-detail full`. It writes
    `logs/.preflight-report.json` (gitignored; expected). Recommendations have NO local cache in
    this repository. IF preflight fails: record the error class in `meta.contract_notes` and
@@ -291,11 +360,12 @@ Run these first. NEVER abort on a failure -- take the named degraded path.
      ```
 
      A `mcp__ducklake-reads__recs_by_ids` tool, if your session has one, is equivalent.
-   - IF either path fails:
+   - Keep whatever loads. IF the search path fails:
      - set `meta.degraded_dedup = true`;
      - set every `roadmap_crossref.confidence` to HYPOTHESIS and `dedup_hit_count` to null;
-     - dedup against `docs/DECISIONS.md` and `docs/ROADMAP-PLATFORM.yaml` only;
-     - use the rec summaries in Section 13 as the only rec content.
+     - keep searching `docs/DECISIONS.md`, `docs/ROADMAP-PLATFORM.yaml` and `docs/plans/`.
+   - IF the body path fails: use the rec summaries in Section 13 as the rec content, and mark
+     dependent classifications HYPOTHESIS.
 4. Roadmap parse check:
    `bin/venv-python -c "import yaml; d=yaml.safe_load(open('docs/ROADMAP-PLATFORM.yaml')); print(len(d['tier_items']))"`.
    IF it errors, record that in `meta.contract_notes` and read the YAML as text.
@@ -310,7 +380,8 @@ Run these first. NEVER abort on a failure -- take the named degraded path.
    practice: the OpenTelemetry semantic-convention authoring guidance and GenAI conventions, the
    Open Data Contract Standard property fields, and Langfuse's observation data model.
    - Record each URL in the `evidence` field that uses it.
-   - Label anything answered from memory "recalled, unverified" and mark it HYPOTHESIS.
+   - Label anything answered from memory "recalled, unverified" and give that checklist row
+     `confidence: HYPOTHESIS`.
    - IF web access is unavailable: set `meta.web_unavailable = true` and proceed from Section 10's
      compose-time quotes plus your own knowledge, labelled as above.
 7. Subagent capability for DD-B (Section 9): check whether your harness offers a tool that starts
@@ -331,7 +402,7 @@ not absolute: argue them; do not pattern-match them.
 - NS3 Stored means declared. Every stored fact has a contract entry the writer can enforce
   (Decision 210).
 - NS4 Findable by meaning. An agent asking for a fact in plain words locates where it lives and
-  reads it correctly.
+  reads it correctly; an agent designing a change checks first whether the fact already exists.
 - NS5 Declared means live or owned. An unwritten field has a live owner and a reason to stay.
 - NS6 New facts get typed columns, not new `metadata` keys. The observations `metadata` entry
   names promoted fields that "are NOT in this bag".
@@ -351,31 +422,41 @@ not absolute: argue them; do not pattern-match them.
 
 ## 7. THE QUESTIONS
 
+Where a verdict below has thresholds, apply them. Where it says "your judgment", choose the value
+and give its basis in `prose`.
+
 - Q1 Overlap among written fields. For every `stored_written` field: is it independently
   necessary, a copy of another stored field, or computable from other stored fields (apply the
-  Section 11 counterfactual)? Verdict: lean | some_redundancy | substantial_redundancy.
+  Section 11 counterfactual)? Verdict, by the number of stored_written fields you give `merge` or
+  `derive_at_read`: lean (0) | some_redundancy (1-4) | substantial_redundancy (5 or more).
 - Q2 Unwritten fields. For every `declared_unwritten` field: should it be produced, kept reserved
-  under a live owner, or retired -- and by which mechanism (DD-C)? No field is exempt. Verdict:
-  justified | partly_justified | unjustified.
+  under a live owner, or retired -- and by which mechanism (DD-C)? No field is exempt. Verdict, by
+  the share of declared_unwritten fields you give `retire`, or that have no live owner:
+  justified (none) | partly_justified (some, under half) | unjustified (half or more).
 - Q3 Undeclared facts. Which keys does each registered producer write into `metadata` (DD-A)?
   Which carry a fact no contract field declares; which duplicate a declared column or a typed
   column's inputs; which does any code read? `metadata` is the only JSON-carrying column
   (scripts/telemetry_verify/compare.py `JSON_COLUMNS`); confirm that, and name any other
-  free-form text column that carries structured facts. Verdict: declared | partly_declared |
-  undeclared.
-- Q4 Findability. Which stored facts would an agent fail to find, or find wrongly, from the
-  contracts alone? Consider:
+  free-form text column that carries structured facts. Verdict, by the share of hidden_key rows
+  you give `declare`: declared (none) | partly_declared (some, under half) | undeclared (half or
+  more).
+- Q4 Findability. Which stored facts would an agent fail to find, or find wrongly, from what it
+  reads in this repository (contracts first, then code)? Consider:
   - a generic column qualified by a discriminator value;
   - a link not declared in `_joins.yaml`;
   - like facts placed on different tables;
-  - a fact held only in `metadata` or only in transcript content.
+  - a fact held only in `metadata` or only in transcript content;
+  - a design step that never asks whether a fact exists.
 
-  Measure this with DD-B, and assess rec-5440, rec-5438 and rec-5439 for sufficiency. Verdict:
-  findable | partly_findable | not_findable.
+  Measure this with DD-B, and assess rec-5440, rec-5438 and rec-5439 for sufficiency. Verdict,
+  from DD-B's seven non-control items: findable (6-7 graded correct) | partly_findable (3-5) |
+  not_findable (0-2). If either control item is not graded correct, say so in `prose`, and treat
+  the probe as weak evidence.
 - Q5 Size against practice. Is this field set lean, proportionate or excessive for agent and
   LLM-call telemetry read by agents? Assess the EXTERNAL CHECKLIST property by property, rating
   each met | partial | missed with evidence, AND judging for each whether its rationale transfers
-  to an agent reader (yes | partly | no):
+  to an agent reader (yes | partly | no). A property is `missed` if it is missed on at least one
+  surface; list those surfaces in `surfaces_missed`.
   - E1 One enforced specification for every field (schema-registry practice).
   - E2 An explicit reuse-before-create rule for new fields. OpenTelemetry "How to write semantic
     conventions", section "Defining attributes": "Reuse existing attributes when possible."
@@ -390,24 +471,24 @@ not absolute: argue them; do not pattern-match them.
   - E8 Unused declared fields are pruned or marked deprecated (ODCS property field `deprecated`).
 
   You may also compare coverage with the OpenTelemetry GenAI conventions and Langfuse; label
-  anything recalled. Verdict: lean | proportionate | excessive.
+  anything recalled. Verdict (your judgment, argued under NS8): lean | proportionate | excessive.
 - Q6 Cost and timing. For each merge, retire, derive_at_read and declare verdict, cover four
-  things:
-  - what the change costs here (Section 10, G8 and G9);
+  things in that row's `cost`:
+  - what the change costs here (Section 10, G7 and G8);
   - which stored history it affects;
-  - whether it has ever held a value (DD-C);
-  - whether to do it alone now, batch it with the next column change on that table, or leave it.
+  - whether it has ever held a value (`ever_non_null`, DD-C);
+  - for a declare verdict, the bytes it adds to the target contract, and whether they fit that
+    contract's byte headroom or need compaction or a Decision 275 raise.
 
-  Set `timing` on each such field_verdicts row. The Q6 verdict is the timing you recommend for
-  the highest-leverage change set as a whole: consolidate_now | batch_with_next_column_change |
-  leave.
+  Then set `timing` on each such row: do it alone now, batch it with the next column change on
+  that table, or leave it. The Q6 verdict is the timing you recommend for the highest-leverage
+  change set as a whole: consolidate_now | batch_with_next_column_change | leave.
 - Q7 Questions the requester did not think to ask. Answer AND extend these seeds:
   - (a) Is the four-table split itself a cause of cross-table copies?
   - (b) Should a read-derived relation carry a table-shaped contract?
   - (c) Do rec-4701, rec-4704, rec-5079 and rec-5250 ask for facts already stored or derivable?
     rec-4701 and rec-5079 already carry 2026-11-20 rulings of "no new column"; test those rulings'
-    premises. Note that sessions `workflow` already records the first workflow-skill name
-    (sessions.py `_workflow`, `_skill_workflow`).
+    premises.
   - (d) What should one line of a "fact index" contain, keyed by fact rather than column? Compare
     rec-5438's planned row ("one row per table.column and discriminator value").
   - (e) Does writing null-valued `metadata` keys cost an agent reader or a query anything?
@@ -415,12 +496,14 @@ not absolute: argue them; do not pattern-match them.
     What is missing?
   - (g) Which practices in Q5 or Section 6 do NOT transfer to an agent reader, and what
     agent-specific practice, if any, replaces them?
+  - (h) Where do the contracts' bytes go (Section 10, G7), and is per-field prose -- amendment
+    logs, semantics, governance notes -- rather than field count the dominant cost an agent pays?
 
 ## 8. RUBRIC
 
-Rate each Section 4 surface on each dimension: strong | adequate | weak | absent | n/a. n/a is
-correct and costless where a dimension does not structurally apply (for example VD5 on
-persona_findings). Never manufacture a rating or a finding to fill a cell.
+Rate each of the seven rubric surfaces (Section 4) on each dimension: strong | adequate | weak |
+absent | n/a. n/a is correct and costless where a dimension does not structurally apply (for
+example VD5 on persona_findings). Never manufacture a rating or a finding to fill a cell.
 
 - VD1 Necessity -- each stored field is needed by a reader, a rule or an identity (Q1, Q2).
 - VD2 Non-redundancy -- no fact is stored twice or beside its own inputs without a declared reason
@@ -448,62 +531,87 @@ DD-A Metadata key census (feeds Q1, Q3, C5-C7, C13, C16).
    - whether any code reads it. Search `json_extract` and `metadata` reads under src/ and scripts/;
      at compose time only `attribution_mcp_server` was found read;
    - whether the `metadata` entry's semantics, the reader contract or an open rec names it.
-4. Each key gets one field_verdicts row (kind `hidden_key`).
+4. Each distinct key name gets exactly one field_verdicts row: `table: telemetry_observations`,
+   `field: metadata.<key>`, `kind: hidden_key`. The row types that carry the key go in `evidence`.
 
 DD-B Agent findability probe (feeds Q4, Q5, Q7, VD4; operationalises NS8).
-- Dispatch exactly ONE fresh subagent with no shared context. Give it repository read access only.
-  Forbid it: the telemetry warehouse, the web, this prompt file, the `audits/` directory, and
-  `logs/`.
-- Give it the eight questions below verbatim, in plain words. You may replace at most two with
-  questions your own findings make more decisive, keeping them in plain words with no table,
-  column or key names. Never pass it the answer key.
-- Ask it, for each question, where the fact is stored: table and column; or table, `metadata` key
-  and discriminator value; or "derived at read by <verb>"; or "not stored". Also ask for the
-  searches it ran, the files it opened, approximate bytes read, and its total tool calls. Cap its
-  report at about 1,200 words.
-- Grade each answer against your own field table as correct | partly | wrong | not_found.
-- Record everything in `findability_probe`.
-- Bounds: one subagent, at most eight questions, no re-dispatch.
-- Degraded path (`meta.degraded_probe = true`): for each question, estimate statically the
-  minimal read path an agent would take with grep-first search (files, bytes, likely wrong turns);
-  mark the VD4 ratings and dependent findings HYPOTHESIS.
+- Dispatch exactly ONE fresh subagent with no shared context. Give it read access to the
+  repository, which is what a planning agent has. Forbid it: the telemetry warehouse, the web,
+  this prompt file, the `audits/` directory, and `logs/`.
+- Give it the nine items below verbatim, in plain words. You may replace at most two of items 1-6
+  with questions your own findings make more decisive, keeping them in plain words with no table,
+  column or key names. Items 7-9 are fixed. Never pass it the answer key.
+- Ask it, for items 1-8: where the fact is stored (table and column; or table, `metadata` key and
+  discriminator value; or "derived at read by <verb>"; or "not stored"). For item 9, ask for the
+  storage change it would make. For every item, ask for the searches it ran, the files it opened,
+  approximate bytes read, whether the answer came from contracts, code or both, and its total
+  tool calls. Cap its report at about 1,200 words.
+- Grading:
+  - correct: names every stored location the verified key lists, with the discriminator value or
+    link where the key has one. For item 9: recognises that the fact is already stored and
+    proposes no new stored field.
+  - partly: names a location that holds the fact, but misses a qualifier, the link, or a second
+    location the key lists.
+  - wrong: names a location that does not hold the fact, or says "not stored" for a stored fact.
+    For item 9: proposes a new column or key for a stored fact.
+  - not_found: gives no location.
 
-The eight questions:
+  Record each grade and `answered_from` in `findability_probe`.
+- Bounds: one subagent, nine items, no re-dispatch. If its report is empty, truncated or over the
+  cap, grade whatever it answered, grade the rest `not_found`, and note it in
+  `findability_probe.summary`.
+- Degraded path (`meta.degraded_probe = true`, `findability_probe.mode: static_estimate`): for each
+  item, estimate statically the read path a grep-first agent would take (files, bytes, likely
+  wrong turns). Grade each by the same criteria with `confidence: HYPOTHESIS`, and mark the VD4
+  ratings and dependent findings HYPOTHESIS.
+
+The nine items:
 1. "Where is the SHA-256 of the exact input a tool call was given?"
 2. "Where is the name of the skill a Skill tool call invoked?"
 3. "Where is the exit code of a hook run?"
 4. "Where are the model that actually served an LLM call and the model that was requested?"
-5. "How would you tell that a tool returned byte-identical output twice in one session?"
-6. "Where is the GitHub Actions run id of an agent run hosted in CI?"
-7. "Where are an LLM call's cache-write tokens split by cache lifetime?"
-8. "Where is the hash of the persona definition a verdict-persona run loaded?"
+5. "Where is the GitHub Actions run id of an agent run hosted in CI?"
+6. "Where is the hash of the persona definition a verdict-persona run loaded?"
+7. (control) "Where is the number of output tokens an LLM call used?"
+8. (control) "Where is the git branch a session ran on?"
+9. (design) "You are planning a change that needs, for every tool call, a digest of the tool's
+   output, so that identical repeated outputs can be counted. What storage change would you make?"
 
-Compose-time answer key, for grading only. Verify each answer before grading; never give it to
-the subagent.
+Compose-time answer key, for grading only. Verify each item yourself before grading; Q7(c) asks
+you to test the premises of items 1 and 2.
 1. transcripts `content_sha256` on the `purpose` tool_input row, linked to the tool_call by the
    `external_ref` prefix (C10).
-2. Only inside the tool_input transcript content, which production does not serve. sessions
-   `workflow` holds the first workflow-skill name of a session.
+2. Only inside the tool_input transcript content, which the production reader does not serve.
+   sessions `workflow` holds a mapped workflow label for some skills (Section 3), not the skill
+   name.
 3. observations `metadata.exit_code` on hook process_event rows. The `exit_code` column is
    unwritten.
 4. observations `model` and `requested_model` on model_call rows.
-5. Equal observations `output_sha256` on tool_call close rows in one session.
-6. agents `workflow_run_id`, also embedded in `host_run_ref`.
-7. observations `cache_creation_1h_tokens` and `cache_creation_5m_tokens`.
-8. agents `definition_sha256`.
+5. agents `workflow_run_id`, also embedded in `host_run_ref`.
+6. agents `definition_sha256`.
+7. observations `tokens_output` on model_call rows.
+8. sessions `branch`.
+9. Already stored: observations `output_sha256` (with `output_bytes`) on tool_call close rows. No
+   new stored field is needed; rec-5250 counts re-fetches at read.
 
 DD-C Retire and merge evidence (feeds Q2, Q6). For each declared_unwritten field and each field
 you consider for merge or retire, determine `ever_non_null` from:
 - (i) its `populated_by` and `amendment_log`;
 - (ii) parser_versions.yaml history reasons that name it;
-- (iii) `git log -S '<field name>' --oneline -- src/ scripts/telemetry_capture` (at most one such
-  search per field) for any producer that ever wrote it;
+- (iii) at most two pickaxe searches per field, `git log -S '<name>=' --oneline -- src/
+  scripts/telemetry_capture` and `git log -S '"<name>"' --oneline -- src/ scripts/telemetry_capture`,
+  looking for a producer that ever wrote it. For generic names (model, status, provider, attempt,
+  version, trigger, error, name), and whenever the clone is shallow, step (iii) is inconclusive
+  unless a hit is in a telemetry row builder;
 - (iv) the realization check, which refuses an unproduced field that is non-null in any golden
   row (rule R5);
 - (v) sampled rows across parser versions.
 
-Set `ever_non_null: no` only when (i)-(iv) are all negative and (v) found no value. Set `yes`
-when any source shows a value. Otherwise set `unknown`. Sampled absence alone is `unknown`.
+Set `ever_non_null`:
+- `yes` when any source shows a value;
+- `no` only when (i), (ii) and (iv) show no producer, (iii) is negative or inconclusive, and (v)
+  found no value;
+- `unknown` otherwise. Sampled absence alone is `unknown`.
 
 Then weigh the operator's stated factors for `retire_mode`:
 - a column that never held a value and is redundant or unneeded has little reason to survive
@@ -548,12 +656,12 @@ G1 Contracts (docs/contracts/). Line numbers are hints.
   - `fields.observation_id.governance_notes_local` names each purpose's node: the turn for
     prompt and system, the model_call for thinking, response and tool_input, the tool_call for
     tool_result;
-  - `fields.purpose`, `fields.content_omitted_reason`, `fields.content_sha256`,
-    `fields.content_truncated`.
-- telemetry_persona_findings.yaml: header comment lines 1-3 say "no physical table holds it"; it
-  has no `realization` block.
+  - `fields.purpose`, `fields.content_omitted_reason` (withheld_by_policy cites Decision 238
+    cl.1), `fields.content_sha256`, `fields.content_truncated`.
+- telemetry_persona_findings.yaml: the header comment (lines 2-4) says "no physical table holds
+  it"; it has no `realization` block.
 - telemetry-event-envelope.yaml:
-  - `contract.fields` holds 11 entries;
+  - its top-level `fields` holds 11 entries;
   - the `external_ref` description holds "Not a caller-facing FK";
   - R7 states a replayable producer's bump obligation: re-parse the whole root tree from the
     start.
@@ -583,7 +691,8 @@ G3 Producer (src/turn_capture/).
   `_turn_open_row`, `_turn_close_rows`, `_turn_rows`, `_hook_row` (sets `severity` from the exit
   code: 2 -> error, 0 or none -> info, otherwise warning).
 - gate_events.py `_metadata`; hook_denials.py (process_event metadata).
-- sessions.py: `first_model`, `_workflow`, `_skill_workflow`, `build_sessions`, `_agent_row`.
+- sessions.py: `first_model`, `_workflow`, `_skill_workflow`, `WORKFLOW_SKILLS`, `build_sessions`,
+  `_agent_row`.
 - host_run.py `top_level_agent_rows`.
 - transcripts.py: the module docstring ("Content is scrubbed BEFORE content_sha256"),
   `canonical_json`, and `_row` (withheld branch, oversize branch, digest of the stored payload).
@@ -658,13 +767,23 @@ G7 Size facts. In-scope contract bytes:
 | transcripts | 33,549 |
 | persona_findings | 16,025 |
 
-That is about 276 KB in total. In config/structural_size_budgets.yaml, the contracts class has
-`limit: 500` effective lines and `max_bytes: 49152`, and its `actual_purpose` reads "the densest
-agent-consumed field semantics in the repository". `byte_budgets` grandfathers the envelope,
-observations and sessions at exactly the sizes above; per that file's comment, the roster
-"Ratchets DOWN only", and a raise needs a Decision (Decision 275). So the envelope, observations
-and sessions have zero byte headroom, and agents has 257 bytes below `max_bytes`. Adding a
-declaration costs bytes; removing one frees them.
+That is about 276 KB in total.
+
+Compose-time line-attributed breakdown across the six contracts (recompute before relying on a
+figure):
+- Field entries hold about 192 KB. Within them: `amendment_log` 62 KB, `semantics` 47 KB,
+  `description` 21 KB, `governance_notes_local` 16 KB, `derivation` 12 KB, `populated_by` 11 KB,
+  `dq_intent` 8 KB, `$ref` 4 KB.
+- Top-level `governance_notes` hold about 36 KB (22 KB of it in the envelope).
+- Top-level `amendment_log` blocks hold about 28 KB.
+
+Budgets: in config/structural_size_budgets.yaml, the contracts class has `limit: 500` effective
+lines and `max_bytes: 49152`, and its `actual_purpose` reads "the densest agent-consumed field
+semantics in the repository". `byte_budgets` grandfathers the envelope, observations and sessions
+at exactly the sizes above; per that file's comment, the roster "Ratchets DOWN only", and a raise
+needs a Decision (Decision 275). So the envelope, observations and sessions have zero byte
+headroom, and agents has 257 bytes below `max_bytes`. Adding a declaration costs bytes; removing
+one frees them.
 
 G8 Cost chain of a column change:
 - Wording of a Class A semantic change is approved by the operator on GitHub (workflow
@@ -679,7 +798,8 @@ G8 Cost chain of a column change:
 - Decision 216's telemetry-schema-churn reversal condition fired on 2026-11-16; rec-5214 owns the
   cl.3 re-decision.
 - Per rec-4599, there is no removal change class: dropping a column needs a contract_version bump
-  plus DDL plus a migration Decision. Dropping loses the stored values.
+  plus DDL plus a migration Decision. That a drop discards the column's stored values is an
+  inference from Decision 199's append-only model; verify it before relying on it.
 
 G9 Governing Decisions (headers in docs/DECISIONS.md):
 
@@ -693,6 +813,7 @@ G9 Governing Decisions (headers in docs/DECISIONS.md):
 | 222 | smoke column add |
 | 230 | production telemetry catalog |
 | 236 | production serves no transcript content |
+| 238 | withheld content policy (its cl.1) |
 | 239 | masked content reader |
 | 246 | wording approved on GitHub |
 | 275 | contract byte budget |
@@ -721,14 +842,23 @@ print(len(roots), {t: len(v) for t, v in rows.items()})
 EOF
 ```
 
+`read_tree` pages through the whole tree; `MAX_TREE_ROWS` is a page size, not a cap on a tree. If
+it raises `TreeMovedError`, re-read that tree once. If it raises again, skip the tree and record
+that in `meta.contract_notes`; a skipped tree still counts toward the 12.
+
 Bounds -- do NOT exceed:
 - at most 3 calls to `telemetry_root_sessions`, each window at most 7 UTC days;
 - at most 12 trees read in total.
 
-Choose three windows: the oldest that returns rows (2026-10-20..2026-10-26 did at compose time),
-a middle one, and the latest. Take trees from at least 3 distinct days and at least 3 parser
-versions. Include a top-level CI run tree (a root whose `host_run_ref` is non-null) if any window
-returns one, and a `litellm` or `ci_annotate` tree if those producers are registered.
+Sampling plan:
+- Windows: first call 2026-10-20..2026-10-26 (it returned rows at compose time). If it returns
+  none, make the second call 2026-10-27..2026-11-02. Use the remaining call or calls for a middle
+  window and the latest window.
+- Take trees from at least 3 distinct days and as many parser versions as the windows offer. If
+  fewer than 3 parser versions appear, record what you sampled in `meta.parser_versions_sampled`
+  and proceed.
+- Include a top-level CI run tree (a root whose `host_run_ref` is non-null) if any window returns
+  one, and a `litellm` or `ci_annotate` tree if those producers are registered.
 
 Privacy -- you may print only:
 - counts and null rates;
@@ -760,8 +890,8 @@ only). At equal severity, an observed finding outranks a static one.
 
 ## 12. METHOD
 
-- P1 Read the six in-scope contracts' field entries and realization blocks. Build the field table
-  with each field's kind (Section 4 rule) and fill `meta.field_counts`.
+- P1 Run the Section 4 classifier, read the in-scope contracts' field entries and realization
+  blocks, and fill `meta.field_counts`.
 - P2 Trace each stored_written field to the producer code that sets it, and each read_derived
   field to its verb.
 - P3 DD-A step 1: `metadata` keys from code.
@@ -783,9 +913,11 @@ hit count on the finding:
 - `scripts.recs_related --terms`;
 - the approved plans in `docs/plans/` named in Section 4.
 
-A hit means a sufficiency assessment (planned-insufficient or planned-unbuilt) or a
-`rejected_candidates` entry, never a fresh discovery. A finding with no recorded negative search
-is HYPOTHESIS.
+A hit is an owning item -- a Decision, a roadmap item or criterion, an open recommendation, or an
+approved plan -- whose stated scope covers the finding's subject. `dedup_hit_count` counts owning
+items, not raw search matches; record the raw terms in `dedup_search_terms`. A hit leads to the
+Section 2 table (planned-insufficient, planned-unbuilt or rejected_candidates), never to a fresh
+`novel` discovery. A finding with no recorded negative search is HYPOTHESIS.
 
 Owners already known (summaries as read 2026-11-20; re-read the bodies per Section 5 step 3):
 
@@ -816,16 +948,16 @@ Data estate inventory -- this audit may reuse and extend these:
 
 Decision-ratified design choices. These are NOT immune, but challenge one only as a Decision
 revisit, never as a plain defect. Such a finding uses `change_type: rescope`, names the Decision
-and its reversal condition, and argues why the condition holds. Each may also be weighed as a
-cost in Q5 and Q7.
+and its reversal condition, and argues why the condition holds (classification per Section 2).
+Each may also be weighed as a cost in Q5 and Q7.
 - Read-derived fields are declared but not stored (Decision 199; rule `derived-state`).
 - Envelope fields recur on every table by reference (Decision 199).
 - Tables are append-only; nothing is updated in place (Decision 199).
 - `producer`, `event_id` and `parser_version` form the grain key (Decision 207).
 - The ordinary reader serves no transcript content (Decision 236); text is read masked
   (Decision 239).
-- A withheld row stores the empty-string digest (telemetry_transcripts.yaml `content_sha256`,
-  write-enforced).
+- A withheld row stores the empty-string digest (Decision 238 cl.1 sets the withheld policy;
+  telemetry_transcripts.yaml `content_sha256` write-enforces the digest).
 
 ## 14. OUTPUT
 
@@ -839,7 +971,8 @@ audit:
     model: <your self-reported model name, free text>
     methodology_version: 1
     scope_surfaces: [telemetry_sessions, telemetry_observations, observations_metadata,
-                     telemetry_agents, telemetry_transcripts, envelope, persona_findings]
+                     telemetry_agents, telemetry_transcripts, envelope, persona_findings,
+                     design_and_lookup_path]
     producers_registered: []
     field_counts: {bookkeeping: 0, stored_written: 0, declared_unwritten: 0, read_derived: 0,
                    hidden_key: 0}
@@ -851,7 +984,7 @@ audit:
     days_sampled: []
     parser_versions_sampled: []
     contract_notes: ""
-    stale_anchors: []
+    stale_anchors: [{anchor: "", prompt_value: "", found_value: ""}]
   question_answers:
     - {q: Q1, verdict: lean|some_redundancy|substantial_redundancy, basis: [finding ids], prose: ""}
     - {q: Q2, verdict: justified|partly_justified|unjustified, basis: [], prose: ""}
@@ -860,14 +993,15 @@ audit:
     - {q: Q5, verdict: lean|proportionate|excessive, basis: [], prose: "",
        external_checklist:
          - {property: E1, rating: met|partial|missed, transfers_to_agent_reader: yes|partly|no,
-            surfaces_missed: [], evidence: ""}}
+            surfaces_missed: [], evidence: "", confidence: CONFIRMED|HYPOTHESIS}}
     - {q: Q6, verdict: consolidate_now|batch_with_next_column_change|leave, basis: [], prose: ""}
     - {q: Q7, answers: [{question: "", answer: "", basis: []}]}
   findability_probe:
-    dispatched: true
-    questions:
-      - {n: 1, question: "", answer_given: "", grade: correct|partly|wrong|not_found,
-         correct_location: "", files_opened: 0, bytes_read_approx: 0, note: ""}
+    mode: subagent|static_estimate
+    items:
+      - {n: 1, item: "", answer_given: "", grade: correct|partly|wrong|not_found,
+         answered_from: contracts|code|both|none, correct_location: "", files_opened: 0,
+         bytes_read_approx: 0, confidence: CONFIRMED|HYPOTHESIS, note: ""}
     tool_calls_total: 0
     summary: ""
   per_surface_assessment:
@@ -877,16 +1011,17 @@ audit:
   field_verdicts:
     - {table: "", field: "", kind: bookkeeping|stored_written|declared_unwritten|read_derived|hidden_key,
        verdict: keep|merge|derive_at_read|reserve|retire|declare, overlaps_with: ["table.field"],
-       ever_non_null: yes|no|unknown, retire_mode: drop_column|unproduced_forever|stop_writing|n/a,
+       ever_non_null: yes|no|unknown|n/a, retire_mode: drop_column|unproduced_forever|stop_writing|n/a,
        timing: consolidate_now|batch_with_next_column_change|leave|n/a,
        evidence: "", cost: "", finding: <finding id or null>, confidence: CONFIRMED|HYPOTHESIS}
   findings:
-    - {id: TFC-01, surface: <a Section 4 surface name or shared>, question: Q1, dimension: VD1,
-       candidate_ids: [], title: "", evidence: "", evidence_kind: static|observed,
-       current_behavior: "", ideal_behavior: "", gap: "", compensating_controls_considered: "",
-       change_type: add|rescope|enforce|unify|persist|clarify|retune_gate, proposed_change: "",
-       acceptance: "", severity: critical|high|medium|low, severity_rationale: "",
-       confidence: CONFIRMED|HYPOTHESIS,
+    - {id: TFC-01, surface: <a Section 4 surface name, or shared>, surfaces_affected: [],
+       question: Q1, dimension: VD1, candidate_ids: [], title: "", evidence: "",
+       evidence_kind: static|observed, current_behavior: "", ideal_behavior: "", gap: "",
+       compensating_controls_considered: "",
+       change_type: add|derive|retire|unify|clarify|enforce|rescope|persist|retune_gate,
+       proposed_change: "", acceptance: "", severity: critical|high|medium|low,
+       severity_rationale: "", confidence: CONFIRMED|HYPOTHESIS,
        roadmap_crossref: {classification: novel|planned-insufficient|planned-unbuilt, item_ids: [],
                           dedup_search_terms: [], dedup_hit_count: 0, confidence: CONFIRMED|HYPOTHESIS,
                           note: ""},
@@ -898,29 +1033,48 @@ audit:
   summary: {total_findings: 0, novel_count: 0, planned_insufficient_count: 0,
             planned_unbuilt_count: 0, fields_keep: 0, fields_merge: 0, fields_derive_at_read: 0,
             fields_reserve: 0, fields_retire: 0, fields_declare: 0, top_improvements: [finding ids],
-            highest_leverage_change: <finding id>, maturity_by_surface: {<surface>: <level>}}
+            highest_leverage_change: <finding id or null>, maturity_by_surface: {<surface>: <level>}}
 ```
 
-The `external_checklist` example shows E1. Write one entry per property E1-E8. Every enum shown
-as `a|b|c` takes exactly one value; a `question` or `dimension` value is one of Q1-Q7 or VD1-VD6.
+The `external_checklist` example shows E1; write one entry per property E1-E8. The
+`findability_probe.items` example shows item 1; write one entry per item. Every enum shown as
+`a|b|c` takes exactly one value; a `question` value is one of Q1-Q7 and a `dimension` value one of
+VD1-VD6. `stale_anchors` is an empty list when nothing is stale.
 
 Rules:
+- `rubric_ratings`: one row per (rubric surface, dimension) -- 7 surfaces x 6 dimensions = 42 rows.
+  `design_and_lookup_path` gets no rubric row and no `per_surface_assessment` row.
 - `field_verdicts` rows:
-  - one row for EVERY stored_written field, EVERY declared_unwritten field and EVERY hidden_key
-    you find; bookkeeping and read_derived fields get a row only when a finding concerns them.
+  - one row for EVERY stored_written field and EVERY declared_unwritten field (one per table and
+    field name), and one per distinct hidden_key (DD-A step 4). Bookkeeping and read_derived
+    fields get a row only when a finding concerns them, one per table and field.
   - Verdict meanings:
     - keep: needed as is;
     - merge: fold into `overlaps_with`;
     - derive_at_read: stop storing it and compute it in a verb;
-    - reserve: unwritten, keep it, and name the live owner in `evidence`;
-    - retire: stop declaring or writing it;
+    - reserve: unwritten; keep it, because it should be produced. Name in `evidence` the live
+      owner expected to produce it. If no live owner exists, write "no live owner" and cover the
+      gap with a finding;
+    - retire: no longer a live field and not expected to be produced. `retire_mode` says how:
+      `drop_column` (remove the declaration and the physical column), `unproduced_forever` (keep
+      the declaration and column as history, never produced), or `stop_writing` (a hidden key the
+      producer stops writing);
     - declare: a hidden_key that should be declared, either in the `metadata` entry's key list or
       as a typed column (say which in `cost`).
-  - `cost`, `timing` and `ever_non_null` are required whenever `verdict` is merge,
-    derive_at_read, retire or declare. `retire_mode` is required when `verdict` is retire, and is
-    `n/a` otherwise. `timing` is `n/a` for keep and reserve.
-- `surfaces_missed` is non-empty if and only if `rating` is missed. It names the Section 4
-  surfaces where the property is missed.
+  - `ever_non_null` is required (not `n/a`) on every declared_unwritten row and whenever `verdict`
+    is merge, derive_at_read, retire or declare. `cost` and `timing` are required whenever
+    `verdict` is merge, derive_at_read, retire or declare; `timing` is `n/a` otherwise.
+    `retire_mode` is required when `verdict` is retire and is `n/a` otherwise.
+- `change_type` mapping:
+  - merge -> `unify`; derive_at_read -> `derive`; retire -> `retire`;
+  - declare in the `metadata` key list -> `clarify`; declare as a typed column -> `add`;
+  - a new write-time rule -> `enforce`; a Decision revisit -> `rescope`;
+  - a lookup or design-path change -> `add` or `clarify`.
+- `surfaces_affected` lists the rubric surfaces a finding bears on. It is the finding's single
+  surface for a single-surface finding, and may be empty for a `design_and_lookup_path` finding.
+- `surfaces_missed` is non-empty if and only if `rating` is missed.
+- Length caps: each `evidence`, `cost`, `note` and `why_dismissed` string is at most 300
+  characters; each `prose` and Q7 `answer` is at most 250 words.
 - COUNTING INVARIANT:
   - `findings[]` is the SOLE enumerated list;
   - `total_findings = len(findings) = novel_count + planned_insufficient_count +
@@ -928,7 +1082,8 @@ Rules:
   - fully covered candidates live in `rejected_candidates`, NOT in findings;
   - `rubric_ratings`, `question_answers`, `findability_probe` and `field_verdicts` are systems of
     record referenced FROM findings, never re-counted;
-  - `top_improvements` and `highest_leverage_change` MUST be finding ids;
+  - `top_improvements` and `highest_leverage_change` MUST be finding ids; with zero findings they
+    are `[]` and `null`;
   - the six `fields_*` counts sum to `len(field_verdicts)`.
 
   Also meet the C1-C16 coverage rule (Section 2).
@@ -943,8 +1098,10 @@ reader who has not seen the YAML.
 1. If `meta.degraded_empirical` is true, open with that fact.
 2. Lead with the answer to "is the field set excessive?" under NS8: what an agent pays, not how
    many columns there are.
-3. Then give a table of every merge, retire, derive_at_read and declare verdict, with its cost,
-   timing, `ever_non_null` and `retire_mode`.
+3. Then give a table of the merge, retire, derive_at_read and declare verdicts, with cost, timing,
+   `ever_non_null` and `retire_mode`. Group rows that share table, verdict, timing and cost into
+   one line naming their fields. If the report would still exceed the cap, list the
+   highest-leverage rows and state that the YAML holds the rest.
 4. Then the findability probe's result in two or three sentences.
 5. Then what you sampled and what you could not check.
 
@@ -963,9 +1120,10 @@ Assign severity AFTER judgment, by defect class, never from this prompt's framin
 A compensating control lowers severity only if it PROPERTY-MATCHES: it exercises the same property
 and would fail if the defect were real.
 
-Maturity per surface is computed LAST, top-down; the first match wins:
-- lean: 0 open critical or high findings on that surface, AND the surface appears in no
-  `surfaces_missed` list in Q5's `external_checklist`;
+Maturity is computed LAST for each of the seven rubric surfaces. A finding counts against every
+surface in its `surfaces_affected`. Evaluate top-down; the first match wins:
+- lean: 0 open critical or high findings counted against the surface, AND the surface appears in
+  no `surfaces_missed` list in Q5's `external_checklist`;
 - sound: 0 critical AND at most 1 high;
 - cluttered: at most 1 critical;
 - tangled: otherwise.
@@ -994,8 +1152,10 @@ prompt's framing does not foreclose it.
    your harness instructs for commits.
    - Commit with the session's configured identity and signing: do not override the author, do not
      disable or force signing, do not amend.
-   - If a pre-commit hook rejects the commit, fix the cause inside your two deliverables and commit
-     again; never bypass the hook.
+   - If a pre-commit hook rejects the commit for a cause inside your two deliverables, fix it there
+     and commit again. If the cause is outside them (the branch, the environment, an unrelated
+     hook), do not bypass the hook: end the turn with a final message naming the hook, the error,
+     the branch and the `summary:` block.
 4. Run `git push -u origin HEAD` as a tool call on its own, with no pipe, redirect or second
    command (a repo hook rejects other forms). On a network error, retry up to 4 times with whatever
    backoff your harness allows. IF the push still fails, or fails for a non-network reason: do not
