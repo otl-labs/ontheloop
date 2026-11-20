@@ -268,7 +268,7 @@ def _class_row_defects(row: dict, ctx: dict[str, Any]) -> list[str]:
     return defects
 
 
-def _exception_defects(row: Any, class_ids: set[str]) -> list[str]:
+def _exception_defects(row: Any, class_ids: set[Any]) -> list[str]:
     tag = f"exception {row.get('id') if isinstance(row, dict) else row!r}"
     if missing := _missing(row, EXCEPTION_FIELDS):
         return [f"{tag}: missing {', '.join(missing)}"]
@@ -332,7 +332,7 @@ def read_owner_defects(census: dict[str, Any], root: Path, reader: Any, fetch: C
     for row in census.get("rows") or []:
         if not isinstance(row, dict) or row.get("disposition") == "clean" or not _REC.fullmatch(str(row.get("owner"))):
             continue
-        result = members.get(row.get("query"))
+        result = members.get(str(row.get("query")))
         standing = row.get("query") is None or isinstance(result, Unreadable) or bool(result)
         owners[row["owner"]] = owners.get(row["owner"], False) or standing
     candidates = members["consolidation_candidates"]

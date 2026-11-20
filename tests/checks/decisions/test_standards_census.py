@@ -85,7 +85,7 @@ def root(tmp_path: Path) -> Path:
         yaml.safe_dump(
             {
                 "size_governance": {
-                    "per_entry_size_norm": {"cap_bytes": 6144},
+                    "per_entry_size_norm": {"cap_bytes": 5000},
                     "measured_size_norm": {"cap_bytes": 300},
                     "options_considered": {"marker": "**Options considered:**", "cap_bytes": 1024},
                 }
