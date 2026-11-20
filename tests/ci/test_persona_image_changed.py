@@ -108,7 +108,8 @@ def test_ci_step_shape() -> None:
     fast = next(i for i, n in enumerate(names) if n.startswith("Validate fast tier"))
     decide_i = names.index("Persona image inputs changed?")
     suite_i = names.index("Persona image conformance (local_container suite)")
-    assert fast < decide_i < suite_i < names.index("Upload affected-set selection manifest") == len(steps) - 1
+    pin_i = names.index("Persona image pin verification")
+    assert fast < decide_i < suite_i < pin_i < names.index("Upload affected-set selection manifest") == len(steps) - 1
     for step in (steps[decide_i], steps[suite_i]):
         assert "continue-on-error" not in step
     suite = steps[suite_i]
@@ -116,4 +117,4 @@ def test_ci_step_shape() -> None:
     assert "no:randomly" not in suite["run"]
     assert "run_persona" not in suite["run"] and "persona_compute_host" not in suite["run"]
     assert "env" not in suite
-    assert job["timeout-minutes"] == 45
+    assert job["timeout-minutes"] == 50

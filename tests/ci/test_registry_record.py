@@ -115,3 +115,66 @@ def test_headers_are_unredirected_and_image_must_be_a_bare_ghcr_name() -> None:
     for bad in (f"{IMAGE}:main", "docker.io/x/y", f"{IMAGE}@sha256:{'a' * 64}"):
         with pytest.raises(rr.RecordError):
             rr.repository(bad)
+
+
+class HeaderResp(Resp):
+    def __init__(self, body: Any, headers: dict[str, str]) -> None:
+        super().__init__(body)
+        self.headers = headers
+
+
+def _digest_of(body: Any) -> str:
+    import hashlib
+
+    return "sha256:" + hashlib.sha256(json.dumps(body).encode()).hexdigest()
+
+
+MANIFEST = {"mediaType": rr.OCI_MANIFEST, "config": {"digest": CONFIG_DIGEST}}
+
+
+def _header_opener(header: str | None) -> Opener:
+    class Wrapped(Opener):
+        def __call__(self, request: Any, timeout: int = 0) -> Resp:
+            resp = super().__call__(request, timeout)
+            if "/manifests/" in request.full_url and header is not None:
+                return HeaderResp(MANIFEST, {"Docker-Content-Digest": header})
+            return resp
+
+    table = routes()
+    table["/manifests/sha256:"] = MANIFEST
+    return Wrapped(table)
+
+
+@pytest.mark.parametrize("reference", ["main", _digest_of(MANIFEST)])
+def test_read_image_returns_digest_and_label_by_tag_and_by_digest(reference: str) -> None:
+    record = rr.read_image(IMAGE, reference, token=None, opener=_header_opener(_digest_of(MANIFEST)))
+    assert record == rr.ImageRecord(digest=_digest_of(MANIFEST), revision=SHA)
+
+
+def test_read_image_digest_header_disagreeing_with_bytes_is_a_record_error() -> None:
+    with pytest.raises(rr.RecordError) as err:
+        rr.read_image(IMAGE, "main", token=None, opener=_header_opener("sha256:" + "d" * 64))
+    assert not isinstance(err.value, rr.RecordAbsent)
+
+
+def test_read_image_requested_digest_disagreeing_with_bytes_is_a_record_error() -> None:
+    with pytest.raises(rr.RecordError) as err:
+        rr.read_image(IMAGE, "sha256:" + "e" * 64, token=None, opener=_header_opener(_digest_of(MANIFEST)))
+    assert not isinstance(err.value, rr.RecordAbsent)
+
+
+@pytest.mark.parametrize("code", ["NAME_UNKNOWN", "MANIFEST_UNKNOWN", "DENIED"])
+def test_read_image_absence_raises_record_absent_with_the_code(code: str) -> None:
+    opener = Opener({"/token": {"token": "t"}, "/manifests/main": lambda: http_error(404, code)})
+    with pytest.raises(rr.RecordAbsent) as err:
+        rr.read_image(IMAGE, "main", token=None, opener=opener)
+    assert err.value.code == code
+
+
+def test_read_record_returns_none_only_on_record_absent() -> None:
+    denied = Opener({"/token": {"token": "t"}, "/manifests/main": lambda: http_error(401, "DENIED")})
+    with pytest.raises(rr.RecordAbsent):
+        rr.read_record(IMAGE, token=None, opener=denied)
+    other = Opener({"/token": {"token": "t"}, "/manifests/main": lambda: http_error(500, "UNAVAILABLE")})
+    with pytest.raises(rr.RecordError):
+        rr.read_record(IMAGE, token=None, opener=other)

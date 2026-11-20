@@ -10,11 +10,13 @@ explicit absent-package answer raises RecordError, so a caller fails closed and 
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 REGISTRY = "ghcr.io"
@@ -33,6 +35,20 @@ Opener = Callable[..., Any]
 
 class RecordError(RuntimeError):
     """The registry record could not be read or is not the expected shape; callers fail closed."""
+
+
+class RecordAbsent(RecordError):
+    """The registry explicitly answered that the package, tag or digest does not exist (or DENIED); carries the code."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class ImageRecord:
+    digest: str
+    revision: Optional[str]
 
 
 class RegistryAnswer(RecordError):
@@ -58,21 +74,24 @@ def _error_code(exc: urllib.error.HTTPError) -> str:
         return ""
 
 
-def _get(url: str, headers: dict[str, str], opener: Opener) -> bytes:
+def _get_response(url: str, headers: dict[str, str], opener: Opener) -> tuple[bytes, Any]:
     request = urllib.request.Request(url)  # noqa: S310
     for name, value in headers.items():
         request.add_unredirected_header(name, value)
     try:
         with opener(request, timeout=TIMEOUT) as resp:
-            return resp.read()
+            return resp.read(), getattr(resp, "headers", None)
     except urllib.error.HTTPError as exc:
         raise RegistryAnswer(exc.code, _error_code(exc), url) from exc
     except (urllib.error.URLError, OSError, ValueError) as exc:
         raise RecordError(f"registry read failed for {url}: {exc}") from exc
 
 
-def _json(url: str, headers: dict[str, str], opener: Opener) -> dict[str, Any]:
-    raw = _get(url, headers, opener)
+def _get(url: str, headers: dict[str, str], opener: Opener) -> bytes:
+    return _get_response(url, headers, opener)[0]
+
+
+def _decode(raw: bytes, url: str) -> dict[str, Any]:
     try:
         doc = json.loads(raw.decode("utf-8"))
     except ValueError as exc:
@@ -80,6 +99,10 @@ def _json(url: str, headers: dict[str, str], opener: Opener) -> dict[str, Any]:
     if not isinstance(doc, dict):
         raise RecordError(f"registry body for {url} is not an object")
     return doc
+
+
+def _json(url: str, headers: dict[str, str], opener: Opener) -> dict[str, Any]:
+    return _decode(_get(url, headers, opener), url)
 
 
 def pull_token(image: str, token: Optional[str], opener: Opener = urllib.request.urlopen) -> str:
@@ -122,6 +145,33 @@ def revision_label(config: dict[str, Any]) -> Optional[str]:
     return value if isinstance(value, str) and value else None
 
 
+def read_image(
+    image: str,
+    reference: str,
+    *,
+    token: Optional[str],
+    opener: Opener = urllib.request.urlopen,
+) -> ImageRecord:
+    """One image manifest's registry digest and revision label, by tag or sha256 digest; absence raises RecordAbsent."""
+    try:
+        bearer = pull_token(image, token, opener)
+        url = f"https://{REGISTRY}/v2/{repository(image)}/manifests/{reference}"
+        raw, headers = _get_response(url, {"Authorization": f"Bearer {bearer}", "Accept": ACCEPT}, opener)
+        manifest = single_manifest(_decode(raw, url))
+        config = fetch_config(image, manifest["config"]["digest"], bearer, opener)
+    except RegistryAnswer as answer:
+        if answer.code in _ABSENT_CODES or answer.code == "DENIED":
+            raise RecordAbsent(answer.code, str(answer)) from answer
+        raise
+    computed = "sha256:" + hashlib.sha256(raw).hexdigest()
+    header = headers.get("Docker-Content-Digest") if headers is not None else None
+    if header is not None and header != computed:
+        raise RecordError(f"registry digest header {header} differs from the manifest bytes {computed}")
+    if reference.startswith("sha256:") and reference != computed:
+        raise RecordError(f"manifest bytes hash to {computed}, not the requested {reference}")
+    return ImageRecord(digest=computed, revision=revision_label(config))
+
+
 def read_record(
     image: str,
     *,
@@ -131,11 +181,8 @@ def read_record(
 ) -> Optional[str]:
     """The main tag's revision label; None only for an explicit absent answer (or DENIED under first_publish)."""
     try:
-        bearer = pull_token(image, token, opener)
-        manifest = fetch_manifest(image, "main", bearer, opener)
-        config = fetch_config(image, manifest["config"]["digest"], bearer, opener)
-    except RegistryAnswer as answer:
-        if answer.code in _ABSENT_CODES or (first_publish and answer.code == "DENIED"):
+        return read_image(image, "main", token=token, opener=opener).revision
+    except RecordAbsent as absent:
+        if absent.code in _ABSENT_CODES or (first_publish and absent.code == "DENIED"):
             return None
         raise
-    return revision_label(config)
