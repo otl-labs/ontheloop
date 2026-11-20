@@ -33,8 +33,10 @@ scope:
         RuntimeError leaf, or a non-Exception leaf such as KeyboardInterrupt) is re-raised unchanged, so an
         unexpected defect stays loud whether bare or grouped (the operator's narrowing, critique r5 N1); else (no
         normal exit) BridgeUnavailable as today (spawn and startup failures keep their meaning).
-      - The BridgeTeardownFailed message names classes only, leaf classes included, e.g. "the server failed during
-        shutdown: ExceptionGroup[OSError]" (Decision 101 clause (d)).
+      - The BridgeTeardownFailed message names classes only (Decision 101 clause (d)): "the server failed during
+        shutdown: <rendering>", where a bare error renders as its class name and a group as its class name followed by
+        its leaf class names in [], flattened through nested groups, de-duplicated and sorted, comma-separated (e.g.
+        OSError; ExceptionGroup[OSError]; ExceptionGroup[BrokenPipeError, OSError]).
       - No other exception class is caught or converted; cancellation and KeyboardInterrupt still propagate, bare or
         grouped.
   - file: src/persona_backends/litellm_backend.py
@@ -49,7 +51,9 @@ scope:
         (no abort, no second end), so an unexpected defect stays loud while the events file keeps its single end. At
         the CLI that path is a traceback and exit 1 with the result dropped: rec-5334's "must not discard the result"
         holds for the classified teardown failures only, by the operator's narrowing.
-      - Shape (keeps 100 percent per-file coverage): bind result = await self.go() inside the async with, return it
+      - Shape (keeps 100 percent per-file coverage): initialise result = None before the try (type checkers then see
+        it bound; it is always go()'s value when BridgeTeardownFailed fires, since the bridge raises that only after a
+        normal body exit), bind result = await self.go() inside the async with, return it
         after; add one except mcp_bridge.BridgeTeardownFailed that writes the stderr line and returns the bound
         result. No go()-returned guard in the BridgeTimeout or BridgeUnavailable handlers and no __cause__-is-None
         branch: after a normal exit the new bridge raises neither, and BridgeTeardownFailed is always raised from its
@@ -126,9 +130,11 @@ verification_plan:
       Exit 0, every node passes. Red before: the nodes are absent (pytest exits 4). Written first against main's code,
       the two acceptance nodes are red (the bridge raises BridgeUnavailable; the success case raises RunAborted
       tool_server_unavailable with two end records) and the unclassified-group node is red (main converts
-      both groups to BridgeUnavailable). test_mcp_bridge.py imports BridgeTeardownFailed at module top, so on main that whole file
-      fails collection (its body-error guard included); the three other test_litellm_backend.py nodes are regression
-      guards already green on main.
+      both groups to BridgeUnavailable). test_mcp_bridge.py imports BridgeTeardownFailed at module top, so on main
+      that whole file fails collection (its body-error guard included). In test_litellm_backend.py the
+      ExceptionGroup([RuntimeError()]) case of the unexpected-error node is red on main (main aborts with a second end
+      record); its bare RuntimeError case, the abort node and the cancellation node are regression guards already
+      green on main.
     fix_if: >-
       Two end records, a lost result, exception text on stderr, or a swallowed cancellation: fix the bridge or the
       backend, never the wrapper.
@@ -180,6 +186,11 @@ test_obligations:
     verification_step: 1
     test_selector: tests/persona_backends/test_litellm_backend.py::test_bridge_teardown_error_after_end_keeps_one_end_record
     red_green_expectation: red before (node absent; on main the run raises RunAborted and emits a second end record), green after.
+  - source: src/persona_backends/litellm_backend.py
+    behavior: A grouped unexpected teardown error after go() returned propagates with the single end record.
+    verification_step: 1
+    test_selector: tests/persona_backends/test_litellm_backend.py::test_bridge_teardown_unexpected_error_after_end_propagates
+    red_green_expectation: red before (node absent; on main the grouped case aborts with a second end record), green after.
   - source: src/persona_backends/mcp_bridge.py
     behavior: A teardown group with a non-OSError leaf after a normal exit propagates unchanged.
     verification_step: 1
@@ -234,6 +245,7 @@ gate_rounds:
   - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: "v1:a0d55e738a080f44c2ed614e5290416280331ccb2d6d6c36f6bd6c4951466329"}
   - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 2}
   - {gate: plan-critique, round: 5, verdict: PROCEED, blocking: 0, nits: 4}
+  - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 2, nits: 5}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -241,9 +253,25 @@ pre_implementation_checklist:
   - All files in scope located and readable; telemetry-event-envelope.yaml LL-3 read
   - Acceptance criteria understood and verifiable
 execution_steps:
-  - Write the seven test nodes against main's code; confirm the litellm acceptance node is red (two end records), test_mcp_bridge.py fails collection on the new import, and the three other litellm nodes are green regression guards.
+  - Write the seven test nodes against main's code; confirm the litellm acceptance node and the grouped-RuntimeError case are red (two end records), test_mcp_bridge.py fails collection on the new import, and the bare-RuntimeError case, the abort node and the cancellation node are green regression guards.
   - Edit mcp_bridge.py (BridgeTeardownFailed and the normal-exit flag), then litellm_backend.py (keep go()'s result; tolerate only BridgeTeardownFailed at teardown; one class-only stderr line).
   - Run bin/venv-python -m scripts.validate --pre and fix; git add the changed files.
-  - Execute Verification Plan steps 1-3. Run each step and loop until it passes; on an unrecoverable failure stop and RCA (Decision 55).
-  - 'Squash-merge with "Resolves: rec-5402, rec-5334" in the commit body; then VP 4.'
-  - 'Report, as separate facts: readiness, PR number and merge SHA, VP results, and anything UNPROVEN.'
+  - Execute Verification Plan steps 1-2. Run each step and loop until it passes; on an unrecoverable failure stop and RCA (Decision 55).
+  - >-
+    CLOSURE. Report each outcome separately: readiness, parent-validator evidence, postflight evidence, and the real
+    push, PR and merge outcome (implement skill Commit Flows; docs/contracts/git-ops.yaml handoff_sequence).
+    - Run bin/venv-python -m scripts.session.github_readiness; report its states independently, and an unknown state
+      as unproven, never a pass.
+    - Run /implement's Verification Graduation walk, which writes the registry shard bridge-teardown-end-record. Then
+      set implementation_declared: true in this plan, in the same commit as the code.
+    - Commit (fix(bridge-teardown-end-record): ...) with the trailer `Resolves: rec-5402, rec-5334` in the commit body.
+    - git fetch origin main && git rebase origin/main.
+    - Run VP step 3 on that committed, rebased tree (the full tier, then --verify-head): the parent-validator evidence.
+    - Write /tmp/implementation-retrospective.json with the scripts.session.postflight_evidence.CATEGORIES keys, then
+      run bin/venv-python -m scripts.session.postflight --evidence /tmp/implementation-retrospective.json.
+    - Push (git push -u origin HEAD as its own call). Open the PR, and report it as opened only with the returned PR
+      number. Subscribe to it; never poll.
+    - On green CI (event-driven wake), squash-merge with the Resolves trailer in the commit message (2026-11-16 ruling:
+      no operator word needed). Report the merge SHA, then run VP step 4.
+    - No roadmap edit (T4.32 c1 stays open).
+  - 'Report, as separate facts: readiness, parent-validator evidence, postflight evidence, PR number and merge SHA, VP results, and anything UNPROVEN.'
