@@ -191,9 +191,11 @@ def update(root: Path, *, run: Runner = _run, reader: Reader = rr.read_image) ->
     candidate = ImagePin(pin.image, record.digest, record.revision, pin.dockerfile, pin.files, pin.copy, pin.consumers)
     check_rules(candidate, base_pin, base, root, run=run, reader=reader)
     for key, value in (("digest", record.digest), ("source_commit", record.revision)):
-        text, count = re.subn(rf"^{key}:.*$", lambda _m, k=key, v=value: _line(k, v), text, count=1, flags=re.MULTILINE)
-        if count != 1:
+        replacement = _line(key, str(value))
+        pattern = re.compile(rf"^{key}:.*$", re.MULTILINE)
+        if not pattern.search(text):
             raise PinError("a", f"no top-level {key} line to rewrite")
+        text = pattern.sub(lambda _match: replacement, text, count=1)
     path.write_text(text, encoding="utf-8")
     return f"{PREFIX} updated digest={record.digest} source_commit={record.revision}"
 

@@ -61,7 +61,8 @@ class Repo:
 
 class Gh:
     def __init__(self, code: int = 0) -> None:
-        self.code, self.calls = code, []
+        self.code = code
+        self.calls: list[list[str]] = []
 
     def __call__(self, argv: list[str], **kw: Any) -> Any:
         if argv[0] == "gh":
@@ -72,7 +73,8 @@ class Gh:
 
 class Reader:
     def __init__(self, revision: str | None, digest: str = D2, fail: Exception | None = None) -> None:
-        self.revision, self.digest, self.fail, self.calls = revision, digest, fail, []
+        self.revision, self.digest, self.fail = revision, digest, fail
+        self.calls: list[tuple[str, str, Any]] = []
 
     def __call__(self, image: str, reference: str, *, token: Any) -> rr.ImageRecord:
         self.calls.append((image, reference, token))
