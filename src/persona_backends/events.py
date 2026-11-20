@@ -1,6 +1,12 @@
 """Run record types for the litellm persona backend: plain dicts, written atomically to one events file.
 
-No telemetry row shape lives here; the producer plan (rec-4028) maps this file (Decision 221 cl.7).
+No telemetry row shape lives here; the producer plan (rec-5396) maps this file (Decision 221 cl.7). Declared losses this
+file cannot hold: a run killed before its header is written (during MCP bridge startup) leaves no events file; a
+warehouse_read run refused for want of an MCP server leaves none either (no call is made); and any process exit before a
+turn record lands (runner lost, job timeout, an OSError from write_atomic) loses that turn's attempts (LL-3 prefix rule).
+The header is written once and is final at its first write, so a partial file is a prefix of the final one. A cold-start
+probe's attempt entry (raised or cancelled) carries attempt 0, a value no call takes (a call's per-role counter starts at
+1); an asserted probe stays a probe_record whose CallRecord carries attempt 1.
 """
 
 from __future__ import annotations
@@ -8,8 +14,20 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+
+@dataclass
+class Capture:
+    """Filled by the transport (duck typed; this package imports nothing under scripts) so a deadline loses no attempt."""
+
+    filled: bool = False
+    attempts: list[Any] = field(default_factory=list)
+    in_flight: Any = None
+    record: Any = None
+    probe_record: Any = None
 
 
 def canonical_json(value: Any) -> str:
@@ -34,7 +52,7 @@ def header(
     tools_sha256: str | None = None,
 ) -> dict[str, Any]:
     return {
-        "schema": 1,
+        "schema": 2,
         "backend": "litellm",
         "contract_path": contract_path,
         "persona": persona,
@@ -57,6 +75,10 @@ def attempt_dict(attempt: Any) -> dict[str, Any]:
         "billing_shape": attempt.billing_shape,
         "started_at_ms": attempt.started_at_ms,
     }
+
+
+def cancelled_dict(in_flight: Any, latency_ms: int) -> dict[str, Any]:
+    return {**attempt_dict(in_flight), "outcome": "cancelled", "latency_ms": latency_ms}
 
 
 def turn_record(

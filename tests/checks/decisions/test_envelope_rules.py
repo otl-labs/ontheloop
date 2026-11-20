@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from scripts.checks.decisions import envelope_rules as r
 
 _ROUTING = {"numbered_decision": "A commitment.", "operational_fact": "A statement. Never a numbered Decision."}
@@ -123,3 +125,105 @@ class TestPlaceholderDiagnostics:
     def test_placeholder_tokens_are_neutralised_before_the_shape_is_judged(self) -> None:
         block = '## Decision {{N}}: T\n\n```yaml\nnumber: {{N}}\ndecided_date: "{{DATE}}"\nkind: direction\n```\n'
         assert "kind" in r.malformed_envelope_detail(block, placeholder=True)
+
+
+_KEY = "docs/contracts/x.yaml#a.b"
+_RULES = ["contract_amendment", "operator_approval"]
+
+
+def _item(**over: object) -> dict:
+    return {"key": _KEY, "change_rule": "contract_amendment", "bounds": {"min": 1, "max": 2}, **over}
+
+
+class TestDelegatedKeyHelpers:
+    @pytest.mark.parametrize("key", [_KEY, "a/b.yml#one", "config/c.yaml#a.b-c_d"])
+    def test_a_well_formed_key_splits(self, key: str) -> None:
+        path, dotted = r.split_delegated_key(key) or ("", "")
+        assert f"{path}#{dotted}" == key
+
+    @pytest.mark.parametrize("key", ["x.yaml", "x.json#a", "x.yaml#", "x.yaml#a..b", "x y.yaml#a", 5, None])
+    def test_a_malformed_key_does_not(self, key: object) -> None:
+        assert r.split_delegated_key(key) is None
+
+    def test_dotted_value_walks_a_mapping(self) -> None:
+        parsed = {"a": {"b": 3, "c": {"d": None}}}
+        assert r.dotted_value(parsed, "a.b") == (True, 3)
+        assert r.dotted_value(parsed, "a.c.d") == (True, None)
+        assert r.dotted_value(parsed, "a.x") == (False, None)
+        assert r.dotted_value(parsed, "a.b.c") == (False, None)
+        assert r.dotted_value(None, "a") == (False, None)
+
+
+class TestDelegatesIssues:
+    def _issues(self, delegates: object, resolves: bool = True) -> list[str]:
+        return r.delegates_issues({"delegates": delegates}, _RULES, lambda _k: resolves)
+
+    def test_absent_field_is_clean(self) -> None:
+        assert r.delegates_issues({}, _RULES, lambda _k: False) == []
+
+    @pytest.mark.parametrize("bounds", [{"min": 1, "max": 2}, {"one_of": ["a"]}, {"text": "a one-line rule"}])
+    def test_each_bounds_shape_passes(self, bounds: dict) -> None:
+        assert self._issues([_item(bounds=bounds)]) == []
+
+    @pytest.mark.parametrize("delegates", [None, [], "x", {}])
+    def test_not_a_non_empty_list_fails(self, delegates: object) -> None:
+        assert "non-empty list" in self._issues(delegates)[0]
+
+    @pytest.mark.parametrize("item", ["x", {"key": _KEY}, {**_item(), "extra": 1}])
+    def test_an_item_with_the_wrong_keys_fails(self, item: object) -> None:
+        assert "exactly key, change_rule and bounds" in self._issues([item])[0]
+
+    def test_a_malformed_key_an_unresolved_key_and_a_bad_rule_each_fail(self) -> None:
+        assert "does not match" in self._issues([_item(key="nope")])[0]
+        assert "does not resolve" in self._issues([_item()], resolves=False)[0]
+        assert "change_rule" in self._issues([_item(change_rule="vibes")])[0]
+
+    @pytest.mark.parametrize(
+        "bounds",
+        [
+            "x",
+            {},
+            {"min": 1},
+            {"min": 3, "max": 2},
+            {"min": True, "max": 2},
+            {"min": "1", "max": 2},
+            {"one_of": []},
+            {"one_of": "ab"},
+            {"text": ""},
+            {"text": "two\nlines"},
+            {"text": 5},
+            {"min": 1, "max": 2, "text": "x"},
+        ],
+    )
+    def test_malformed_bounds_fail(self, bounds: object) -> None:
+        assert "bounds" in self._issues([_item(bounds=bounds)])[0]
+
+
+class TestPlanField:
+    def test_absent_and_well_formed_are_clean(self) -> None:
+        assert r.plan_issues({}) == [] and r.plan_issues({"plan": "a-b1"}) == []
+        assert r.plan_warnings({}, lambda _s: False) == []
+
+    @pytest.mark.parametrize("slug", ["", "-a", "A", "a b", 5])
+    def test_a_non_slug_fails_and_does_not_warn(self, slug: object) -> None:
+        assert "slug" in r.plan_issues({"plan": slug})[0]
+        assert r.plan_warnings({"plan": slug}, lambda _s: False) == []
+
+    def test_an_unknown_plan_warns_and_a_known_one_does_not(self) -> None:
+        assert "has no docs/plans/PLAN-gone.yaml" in r.plan_warnings({"plan": "gone"}, lambda _s: False)[0]
+        assert r.plan_warnings({"plan": "here"}, lambda _s: True) == []
+
+
+class TestShapeDetailNamesNewFields:
+    def test_delegates_and_plan_shapes_are_named(self) -> None:
+        assert "delegates" in r._shape_detail({"delegates": "x"})
+        assert "plan" in r._shape_detail({"plan": 3})
+
+
+class TestAmendedNumbers:
+    def test_amends_and_supersedes_are_united(self) -> None:
+        assert r.amended_numbers({"amends": [1, 2], "supersedes": [3]}) == {1, 2, 3}
+
+    @pytest.mark.parametrize("envelope", [{}, {"amends": 5}, {"amends": "12"}, {"amends": [True, "x", None]}])
+    def test_malformed_values_contribute_nothing(self, envelope: dict) -> None:
+        assert r.amended_numbers(envelope) == set()

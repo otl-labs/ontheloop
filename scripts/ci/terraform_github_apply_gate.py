@@ -82,6 +82,11 @@ ALLOWLIST = {
         "branch_pattern": a.get("branch_pattern"),
     },
     RULESET: lambda a: {"enforcement": a.get("enforcement")},
+    "github_actions_repository_permissions": lambda a: {
+        "enabled": a.get("enabled"),
+        "allowed_actions": a.get("allowed_actions"),
+        "sha_pinning_required": a.get("sha_pinning_required"),
+    },
 }
 
 

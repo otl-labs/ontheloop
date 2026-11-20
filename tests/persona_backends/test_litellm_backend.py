@@ -440,4 +440,125 @@ def test_header_tools_sha256_covers_bridge_specs(tmp_path):
     _, events = _warehouse(tmp_path, t, on_event=seen.append)
     assert events[0]["tools_sha256"] == ev.tools_sha256(t.calls[0]["tools"])
     heads = [e for e in seen if "schema" in e]
-    assert len(heads) == 2 and heads[-1]["tools_sha256"] == events[0]["tools_sha256"]
+    assert len(heads) == 1 and heads[0] is events[0] and seen == events
+
+
+def test_first_written_header_is_final(tmp_path):
+    seen = []
+    _, events = _warehouse(tmp_path, [final()], on_event=seen.append)
+    assert seen[0] is events[0] and "schema" in seen[0] and sum("schema" in e for e in seen) == 1
+    assert seen[0]["schema"] == 2 and seen[0]["tools_sha256"] is not None
+
+
+def _head_then_end(events):
+    assert ["schema" in e for e in events[:1]] == [True] and "outcome" in events[-1] and len(events) == 2
+
+
+def test_early_exits_write_header_then_end(tmp_path):
+    result, events = drive(T([]), {"change_id": "c1", "head_sha": fakes.SHA})
+    assert result["failure"] == "input_incomplete"
+    _head_then_end(events)
+
+    def factory():
+        raise ImportError("no mcp")
+
+    with pytest.raises(RunAborted) as info:
+        drive(T([]), contract=_contract(tmp_path), mcp_server=factory)
+    _head_then_end(info.value.events)
+    _, events = _warehouse(tmp_path, [final()], mode="hang", contract=_contract(tmp_path, seconds=1))
+    _head_then_end(events)
+
+
+def _fill_cut(monkeypatch, *, finish_first=False):
+    real = asyncio.wait_for
+
+    async def short(coro, _limit):
+        if finish_first:
+            await coro
+            raise asyncio.TimeoutError
+        return await real(coro, 0.01)
+
+    monkeypatch.setattr(asyncio, "wait_for", short)
+
+
+def _cut_turn(script, monkeypatch, **kw):
+    _fill_cut(monkeypatch, **kw)
+    result, events = drive(fakes.CapturingTransport(script), clock=fakes.FakeClock())
+    assert result["failure"] == "budget_exhausted"
+    turns = [e for e in events if "turn" in e]
+    return turns[0], events[-1], events
+
+
+def _flight(role="primary", n=3):
+    return dataclasses.replace(attempt(role, "cancelled", n), latency_ms=0)
+
+
+def test_deadline_mid_call_records_cancelled_in_flight(monkeypatch):
+    fill = fakes.Fill((attempt(outcome="outage"), attempt(outcome="outage", n=2)), _flight())
+    turn, end, _ = _cut_turn([fill], monkeypatch)
+    assert [(a["attempt"], a["outcome"]) for a in turn["attempts"]] == [(1, "outage"), (2, "outage"), (3, "cancelled")]
+    last = turn["attempts"][-1]
+    assert (last["provider"], last["billing_shape"], last["started_at_ms"]) == ("p", "b", 1000) and last["latency_ms"] >= 0
+    assert turn["attempts_known"] is True and turn["role"] == "primary" and turn["failed_over"] is False
+    assert end["turns_used"] == 3 and turn["probe_turn"] == 0
+
+
+def test_deadline_in_backoff_adds_no_entry(monkeypatch):
+    turn, end, _ = _cut_turn([fakes.Fill((attempt(outcome="outage"),))], monkeypatch)
+    assert [a["outcome"] for a in turn["attempts"]] == ["outage"] and end["turns_used"] == 1
+
+
+def test_deadline_after_asserted_probe_keeps_probe_record(monkeypatch):
+    probe = fakes.record(FB)
+    fill = fakes.Fill((attempt(outcome="outage"), attempt(outcome="outage", n=2)), _flight(FB, 1), None, probe)
+    turn, end, _ = _cut_turn([fill], monkeypatch)
+    assert turn["probe_record"] == dataclasses.asdict(probe) and turn["probe_turn"] == 1
+    assert turn["attempts"][-1]["outcome"] == "cancelled" and turn["attempts"][-1]["role"] == FB
+    assert turn["role"] == FB and turn["failed_over"] is True and end["turns_used"] == 4
+
+
+def test_deadline_during_probe_records_cancelled_probe_entry(monkeypatch):
+    fill = fakes.Fill((attempt(outcome="outage"), attempt(outcome="outage", n=2)), _flight(FB, 0))
+    turn, end, _ = _cut_turn([fill], monkeypatch)
+    last = turn["attempts"][-1]
+    assert (last["role"], last["attempt"], last["outcome"]) == (FB, 0, "cancelled")
+    assert turn["role"] == "primary" and turn["failed_over"] is False and turn["probe_turn"] == 0
+    assert end["turns_used"] == 3
+
+
+def test_deadline_on_fallback_turn_keeps_starting_role(monkeypatch):
+    failed = dataclasses.replace(
+        tool(READ), attempts=(attempt(outcome="outage"), attempt(outcome="outage", n=2), attempt(FB)), failed_over=True
+    )
+    _fill_cut(monkeypatch)
+    _, events = drive(fakes.CapturingTransport([failed, fakes.Fill((), _flight(FB, 1))]), clock=fakes.FakeClock())
+    turn = [e for e in events if "turn" in e][-1]
+    assert turn["role"] == FB and turn["failed_over"] is False and turn["probe_turn"] == 0
+    assert turn["attempts"][-1]["outcome"] == "cancelled"
+
+
+def test_deadline_after_returned_call_keeps_its_record(monkeypatch):
+    done = fakes.Fill((attempt(),), None, fakes.record(), None, final())
+    turn, _, _ = _cut_turn([done], monkeypatch, finish_first=True)
+    assert [a["outcome"] for a in turn["attempts"]] == ["ok"] and turn["record"] == dataclasses.asdict(fakes.record())
+
+
+def test_deadline_with_unfilled_capture_keeps_unknown(monkeypatch):
+    async def blind(*_a, **_k):
+        await asyncio.sleep(10)
+
+    _fill_cut(monkeypatch)
+    _, events = drive(blind, clock=fakes.FakeClock())
+    turn = [e for e in events if "turn" in e][0]
+    assert turn["attempts"] == [] and turn["attempts_known"] is False and events[-1]["turns_used"] == 5
+
+
+def test_fallback_unavailable_lands_primary_and_probe_attempts():
+    probe = attempt(FB, "outage", 0)
+    t = T([error("fallback_unavailable", (attempt(outcome="outage"), attempt(outcome="outage", n=2), probe))])
+    with pytest.raises(RunAborted) as info:
+        drive(t)
+    turn = [e for e in info.value.events if "turn" in e][0]
+    assert [a["attempt"] for a in turn["attempts"]] == [1, 2, 0] and turn["attempts_known"] is True
+    assert turn["role"] == "primary" and turn["failed_over"] is False and turn["probe_turn"] == 0
+    assert info.value.events[-1]["turns_used"] == 3

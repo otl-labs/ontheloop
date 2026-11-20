@@ -7,8 +7,8 @@ computed inline rather than via an aggregator; (b) each of the four jobs' artifa
 (c) write-convergence-record's default/branch-ordering/read-back contract, and that all four
 call sites pass the input; (d) the Reconcile dispatch-ref side-checkout wiring (ordering, `uses`,
 working-directory, and that the side-checkout carries no RED_SHA ref); (e) Decision 154's
-presence in docs/DECISIONS.md WITH its reversal conditions, scoped to that decision's own block
-(the phrase "Decision 154" appears dozens of times elsewhere in the file, so an unscoped
+compacted stub and its superseder's reversal conditions in docs/DECISIONS.md, each scoped to
+its own block (the phrase "Decision 154" appears dozens of times elsewhere in the file, so an unscoped
 file-wide grep would pass before any work is done).
 """
 
@@ -185,14 +185,15 @@ def test_dispatch_ref_side_checkout_wiring() -> None:
 
 def test_decision_154_present_with_reversal_conditions() -> None:
     content = DECISIONS_MD.read_text(encoding="utf-8")
-    header_match = re.search(r"^## Decision 154:.*$", content, re.MULTILINE)
-    assert header_match, "Decision 154 header not found in docs/DECISIONS.md"
-
-    next_header_match = re.search(r"^## Decision \d+:", content[header_match.end() :], re.MULTILINE)
-    block_end = header_match.end() + next_header_match.start() if next_header_match else len(content)
-    block = content[header_match.start() : block_end]
-
-    assert re.search(r"reversal conditions", block, re.IGNORECASE), (
-        "Decision 154's own block does not contain its reversal conditions -- a narrowing of the sole "
-        "hard block with no recorded reversal conditions is an unreviewable standing commitment (Decision 150)"
-    )
+    stub_match = re.search(r"^## Decision 154:.*?(?=^## Decision \d+:)", content, re.MULTILINE | re.DOTALL)
+    assert stub_match, "Decision 154 header not found in docs/DECISIONS.md"
+    superseder = re.search(r"\*\*Superseded by: Decision (\d+)\*\*", stub_match.group(0))
+    assert superseder, "Decision 154 must be a compacted stub naming its superseder"
+    number = superseder.group(1)
+    entry_match = re.search(rf"^## Decision {number}:.*?(?=^## Decision \d+:)", content, re.MULTILINE | re.DOTALL)
+    assert entry_match, f"Decision {number} not found in docs/DECISIONS.md"
+    entry = entry_match.group(0)
+    assert "```yaml reversal-conditions" in entry, f"Decision {number} has no reversal-conditions stanza"
+    stanza = entry[entry.index("```yaml reversal-conditions") :]
+    for condition in ("marker-hid-mutation", "ci-rca-independence-lapses", "markers-unactioned"):
+        assert f"id: {condition}" in stanza, f"Decision 154's reversal condition {condition} is not live in Decision {number}"
