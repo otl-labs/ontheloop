@@ -14,6 +14,7 @@ from unittest import mock
 import pytest
 
 from scripts import verification_graduation as vg
+from scripts.checks.verification import _graduation_git as _gg
 
 from .conftest import _commit_all, _git, _init_repo
 
@@ -283,14 +284,13 @@ class TestLoaderEdgeCases:
         (entries_dir / "b-check.yaml").write_text("check_id: b-check\n", encoding="utf-8")
         sha = _commit_all(repo, "two shards")
 
-        real_run_git = vg._run_git
+        real_read = _gg.read_blobs_at_ref
 
-        def fake_run_git(args, cwd):
-            if args[:1] == ["show"] and "a-check.yaml" in args[1]:
-                return subprocess.CompletedProcess(args=["git", *args], returncode=1, stdout="", stderr="simulated failure")
-            return real_run_git(args, cwd)
+        def fake_read(ref, paths, root):
+            blobs = real_read(ref, paths, root)
+            return {p: t for p, t in blobs.items() if "a-check.yaml" not in p}
 
-        with mock.patch.object(vg, "_run_git", fake_run_git):
+        with mock.patch.object(_gg, "read_blobs_at_ref", fake_read):
             rows = vg.entries_at_ref(sha, repo_root=repo)
         assert rows is not None
         assert [r["check_id"] for r in rows] == ["b-check"]
@@ -329,3 +329,17 @@ class TestLoaderEdgeCases:
             rows = vg.entries_at_ref(sha, repo_root=repo)
         assert rows is not None
         assert [r["check_id"] for r in rows] == ["legacy-check"]
+
+
+class TestLoadersParseThroughFastLoader:
+    def test_both_loaders_use_parse_yaml(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        _init_repo(repo)
+        entries_dir = repo / "config" / "agent" / "verification_registry" / "entries"
+        entries_dir.mkdir(parents=True)
+        (entries_dir / "a-check.yaml").write_text("check_id: a-check\n", encoding="utf-8")
+        sha = _commit_all(repo, "one shard")
+        with mock.patch.object(vg, "parse_yaml", wraps=vg.parse_yaml) as spy:
+            assert [r["check_id"] for r in vg.load_entries(repo_root=repo)] == ["a-check"]
+            assert [r["check_id"] for r in vg.entries_at_ref(sha, repo_root=repo) or []] == ["a-check"]
+        assert spy.call_count == 2

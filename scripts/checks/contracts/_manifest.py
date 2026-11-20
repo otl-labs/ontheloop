@@ -17,6 +17,7 @@ ENTRIES: tuple[Entry, ...] = (
         pre_globs=(
             ".claude/skills/**",
             "docs/contracts/instruction-architecture.yaml",
+            "scripts/contract_rules.py",
             "scripts/prompt_compliance.py",
             "logs/.retro-lite-log.jsonl",
             "logs/.execution-state.json",
@@ -34,6 +35,7 @@ ENTRIES: tuple[Entry, ...] = (
         pre=True,
         pre_globs=(
             "docs/contracts/instruction-architecture.yaml",
+            "scripts/contract_rules.py",
             "scripts/prompt_compliance.py",
             "CLAUDE.md",
             "**/CLAUDE.md",
