@@ -1,0 +1,557 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: litellm-telemetry-producer
+intent: >-
+  Solves rec-5396, the producer half of superseded rec-4028. PLAN-litellm-producer-envelope put the rules in
+  docs/contracts/telemetry-event-envelope.yaml (LL-1..LL-5, the sole-producer session_started_at pin) and
+  PLAN-litellm-attempt-capture (#2262) made the run_persona events file (schema 2) hold every billed call. This plan
+  builds the pure litellm producer: one events file plus the run's host-run sidecar map to Decision 199 rows (one root
+  session, one top-level agent run, one model_call row per provider attempt, a lost call a zero-token row with a declared
+  loss marker), written to a rows file by an entry script that sends nothing. It registers the producer as parser_version
+  1 with a golden corpus, and the three row contracts, ports.yaml and executor-personas.yaml credit it. Serves NS.6:
+  verdict persona runs on GitHub are measurable from their first run, including the calls a deadline cut short.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-litellm-telemetry-producer.yaml
+phase: >-
+  T4.32 c1 (telemetry leg, part; rec-5396); closes no criterion. PLAN-litellm-attempt-capture is built (#2262, 920d18ad).
+  src/turn_capture is inert content of the data-pipeline bundle; compute_affected_artifacts over the scope returns {}
+  and no row is sent, so nothing deploys (V2; VP 4 proves no deploy trigger).
+closes_criteria: []
+cites: [dec:199, dec:206, dec:210, dec:212, dec:228, dec:234, dec:235, dec:240, dec:246, dec:263, dec:275]
+scope:
+  # ---------------------------------------------- PR 1: the producer, its registration, corpus and contract bookkeeping
+  - file: src/turn_capture/refs.py
+    action: Modify
+    purpose: >-
+      PR 1. litellm_root_ref(host_run_ref) -> 'litellm:<host_run_ref>' and litellm_call_ref(session_ref, turn, position)
+      -> '<session_ref>/call/<turn>/<position>' (position an int from 1 or the string probe). Every other litellm ref
+      is composed from the existing builders: the run ref '<session ref>/run' (a new litellm_run_ref), the open markers
+      with session_marker_ref, the end close refs with role_ref('<session ref>/end', 0, 'close' or 'run_close'), a
+      provider-id model_call with model_call_ref. The module stays the only place a ref is composed.
+  - file: src/turn_capture/litellm_producer.py
+    action: Create
+    purpose: >-
+      PR 1. Pure mapper, stdlib plus src/turn_capture only (refs, host_run, observations.OBSERVATION_COLUMNS,
+      sessions.SESSION_COLUMNS, AGENT_COLUMNS and agent_row_base, transcripts.Ctx); never imported by
+      scripts/run_persona.py or src/persona_backends. PARSER_VERSION 1, PRODUCER "litellm", PRODUCER_VERSION
+      "litellm-1". map_run(events: dict, host_run: bytes | None) -> Mapped | Deferred | Refused, where Mapped holds
+      batches (observations, agents, then sessions last, LL-3) and diagnostics (a Counter). The rules, named in the module
+      docstring as LM-1..LM-8:
+      - Ref columns on every row (src/telemetry/identity.py KEY_PLANS): session_ref is the root session ref on every
+        observation and agent row; parent_observation_ref is NULL on model_call rows; observation_ref is NULL on agent
+        rows; parent_session_ref is NULL on session rows.
+      - LM-1 input: header.schema other than 2 is Refused; a header without an integer started_at_ms, or a sidecar that
+        parse_host_run rejects or that is absent, is Deferred (LL-1, the pin rule). session_started_at is the pin, from
+        started_at_ms as UTC; every event_timestamp comes from the same clock.
+      - LM-2 session (telemetry_sessions, entity_ref litellm_root_ref(render_host_run_ref(host))): the open row at the
+        pin, external_ref '<ref>#0/open', source_ordinal 0, workflow = host.agent, execution_attempt =
+        int(host.run_attempt). When the end record exists, one close row at end.ended_at_ms, external_ref
+        '<ref>/end#0/close', outcome success when end.outcome is success, else failed, failure_reason end.failure or
+        end.error (NULL on success). No resume, compact or turn rows (LL-3).
+      - LM-3 top-level run (telemetry_agents, entity_ref '<session ref>/run'): agent_type host.agent, version
+        str(header.contract_version), trigger host.event_name, workflow_run_id host.run_id, host_run_ref
+        render_host_run_ref(host), definition_sha256 header.rendered_prompt_sha256, on both rows. The open row at the pin
+        ('<session ref>/run#0/open', source_ordinal 0) reads no turn record (LL-3), so its model is NULL. The close row
+        ('<session ref>/end#0/run_close', from the end record) takes model from the last turn record that carries a
+        record (its model, else its requested_model), outcome success | timeout (end.failure budget_exhausted) | failed
+        (any other failure, and every aborted end), error NULL on success, else end.error or end.failure.
+      - LM-4 model_call rows (telemetry_observations, observation_type model_call, event_kind point, persona_backend
+        litellm, session_ref the root session ref, no parent observation). Walk the turn records in order and each turn's attempts in order, position n from
+        1. An ok entry maps the turn's record; any other entry is a loss row from the entry. A turn's probe_record maps
+        one row placed just before the turn's first entry whose role is warm_fetched_escape_hatch with attempt 1 or
+        more, else after its entries. A turn with attempts_known false maps no row and counts diagnostics
+        attempts_unknown (a transport that filled no capture; never a guessed row). An ok entry whose turn has no record
+        maps no row and counts diagnostics ok_without_record.
+      - LM-5 refs (LL-2): a record with a response_id takes entity_ref <response_id> and external_ref
+        model_call_ref(response_id); every other row takes entity_ref litellm_call_ref(session ref, turn, n), or
+        position probe for the probe record, and external_ref '<entity_ref>/model_call'.
+      - LM-6 columns of a record row: name the record's role (cold_start_probe for the probe record), outcome success,
+        model record.model else record.requested_model, requested_model, provider, billing_shape, reasoning_effort, the
+        four token classes, reasoning_tokens, cache_creation_1h_tokens and cache_creation_5m_tokens from the record,
+        attempt record.attempt (NULL for the probe record), usage_final true exactly when record.usage_absent is empty
+        (false otherwise: the zero-filled classes are a lower bound, inference-provider.yaml missing_usage; a unit node
+        covers it), usage_source record, event_timestamp
+        responded_at_ms, else started_at_ms plus latency_ms, else the turn's ended_at_ms. reasoning_visibility from the
+        turn's message (a probe record has none): thinking_blocks with non-empty thinking -> summarized; thinking_blocks
+        only redacted -> redacted; non-empty reasoning_content -> full; else reasoning_tokens above 0 -> omitted; else
+        none; a none row's reasoning_tokens is NULL or 0 as the record has it.
+      - LM-7 loss rows (LL-4): an entry with outcome cancelled -> outcome interrupted, metadata {"loss": "cancelled"};
+        any other non-ok outcome (an outage, credit_exhausted, provider_error, malformed_output, empty_output) ->
+        outcome error, metadata {"error": <entry outcome>, "loss": "usage_not_recorded"}. Both: the four token classes
+        0, reasoning_tokens NULL, reasoning_visibility none, usage_final false, usage_source NULL, model and
+        requested_model the entry's model, provider and billing_shape the entry's, reasoning_effort NULL, attempt the
+        entry's attempt when 1 or more (a probe entry's 0 is never written: NULL), name the entry's role,
+        event_timestamp the entry's started_at_ms plus latency_ms (the turn's started_at_ms when the entry has none).
+        No new accepted value is emitted.
+      - LM-8 ordering and HALT: source_ordinal 0 for the two open rows, 1..N for model_call rows in walk order, N+1 for
+        both close rows. A row whose event_timestamp is before the pin raises ProducerHalt (no rows). Every column is a
+        pure function of the two inputs (LL-3), so a prefix file (no end record) maps to the open rows and its
+        model_calls, which equal the final file's rows for those turns.
+      The producer builds transcripts.Ctx for agent_row_base with the record's billing_shape and full_output_cap_bytes 0
+      (an int; litellm writes no output capture). Stays under 500 SLOC (Decision 128); if it would cross, split into a src/turn_capture/litellm/ facade package.
+  - file: scripts/personas/telemetry_rows.py
+    action: Create
+    purpose: >-
+      PR 1. Entry point: bin/venv-python -m scripts.personas.telemetry_rows --events PATH --host-run PATH --out PATH.
+      Reads the events JSON and the sidecar bytes (a missing sidecar file is None), calls map_run, and on Mapped writes
+      the rows file atomically (tmp then os.replace): {"producer", "parser_version", "producer_version", "batches":
+      [{"table", "rows"}], "diagnostics"}, timestamps as UTC ISO-8601 millisecond strings ending in Z. Exit 0 written;
+      2 refused (unreadable events JSON, a schema other than 2); 3 deferred (no rows file is written, one stderr line
+      naming the reason); 4 producer HALT. It sends nothing and imports no writer, AWS or network module.
+  - file: tests/turn_capture/test_litellm_producer.py
+    action: Create
+    purpose: >-
+      PR 1. rec-5396's acceptance nodes test_failed_attempt_emits_row (every failed, malformed and empty attempt gets its
+      zero-token row with outcome error and loss usage_not_recorded), test_reasoning_visibility_matrix (the LM-6 order
+      over message shapes: thinking text, redacted only, reasoning_content, tokens only, nothing, a probe record) and
+      test_rows_pass_kernel (every golden case's batches pass src/telemetry prepare_batch with the live specs, as
+      tests/turn_capture/test_record_turn.py::test_every_emitted_row_passes_kernel_rules does). Plus one node per rule:
+      LM-1 refused schema, deferred sidecar and deferred pin; test_imports_stay_inside_turn_capture (the module's own direct
+      imports, read from its AST, are stdlib plus src.turn_capture only; and, in a -I subprocess, importing it loads none
+      of src.telemetry.append, src.telemetry.gate, src.telemetry_client, boto3, botocore, urllib.request, http.client, ssl
+      or socket (urllib.parse, src.sensitive_values and src.telemetry.timestamps are reached legitimately through
+      provenance.py, pathlib, scrub.py and transcript.py); LM-2/LM-3 outcome tables (success, budget_exhausted ->
+      timeout and failed, other failure, aborted); LM-4 probe placement and attempts_unknown; LM-5 both ref forms; LM-7
+      cancelled row; LM-8 the prefix rule (a partial file's rows are a subset of the final file's) and the HALT;
+      test_cases_match_builders (every golden case regenerates from its builder) and test_golden_rows (each case's
+      normalised rows equal its expected_rows). End to end: each golden builder runs the real backend
+      (src/persona_backends/litellm_backend.py) with a fake transport and the real events sink, then this producer.
+  - file: tests/fixtures/turn_capture_litellm_cases.py
+    action: Create
+    purpose: >-
+      PR 1. LITELLM_BUILDERS: one builder per golden case that runs the real backend with a scripted fake transport
+      (tests/persona_backends/fakes.py) and a hand-built host-run sidecar (kind gha, retry_ordinal 1, agent a
+      registered source_registry key, event_name workflow_run), fixed clocks, and returns {"events.json",
+      "host-run.json"} bodies. Builders construct their own CallRecord and Attempt values (fakes.record() and attempt()
+      use epoch-ms 1000 times that HALT against the pin, and provider "p" and billing_shape "b" that fail accepted
+      values); the events sink is scripts/run_persona.py's own events writer (_EventsFile, or write_atomic), and the
+      deadline builder shortens asyncio.wait_for as tests/persona_backends/test_litellm_backend.py does.
+      Also LITELLM_GOLDEN_DIR, litellm_case_names() and load_litellm_case(name), the litellm twins of
+      turn_capture_corpus.case_names and load_case. No test_ prefix (the cross-test import guard).
+  - file: tests/fixtures/turn_capture/golden/litellm/index.json
+    action: Create
+    purpose: >-
+      PR 1. The litellm golden_index: the claude_code index's purpose text and case-file shape, normalised_out equal to
+      the claude_code index's ([created_timestamp, producer_version, content_sha256, output_sha256]) so
+      turn_capture_corpus.normalise serves both corpora unchanged (a node asserts the two sets are equal), cases in this
+      order: single_call.json, anthropic_thinking.json,
+      fail_over_probe.json, deadline_cancelled.json, repair_loss_markers.json, aborted_transport.json,
+      partial_no_end.json.
+  - file: tests/fixtures/turn_capture/golden/litellm/single_call.json
+    action: Create
+    purpose: PR 1. One terminal_valid turn, a DeepSeek-shaped record with a response id and reasoning_content (full).
+  - file: tests/fixtures/turn_capture/golden/litellm/anthropic_thinking.json
+    action: Create
+    purpose: >-
+      PR 1. An Anthropic-shaped record: thinking_blocks (summarized), cache_creation_1h_tokens and
+      cache_creation_5m_tokens set, reasoning_effort set; a tool turn then a terminal_valid turn.
+  - file: tests/fixtures/turn_capture/golden/litellm/fail_over_probe.json
+    action: Create
+    purpose: PR 1. Two primary outages, an asserted fresh probe record without a response id, then the fallback call.
+  - file: tests/fixtures/turn_capture/golden/litellm/deadline_cancelled.json
+    action: Create
+    purpose: >-
+      PR 1. A call cancelled in flight at the deadline (interrupted, loss cancelled); end failure budget_exhausted
+      (session failed, run timeout).
+  - file: tests/fixtures/turn_capture/golden/litellm/repair_loss_markers.json
+    action: Create
+    purpose: PR 1. malformed_output and empty_output attempts (error, loss usage_not_recorded), then a valid answer.
+  - file: tests/fixtures/turn_capture/golden/litellm/aborted_transport.json
+    action: Create
+    purpose: PR 1. A run aborted on transport_exception (no turn record for that turn; session failed, run failed with that error).
+  - file: tests/fixtures/turn_capture/golden/litellm/partial_no_end.json
+    action: Create
+    purpose: PR 1. A prefix of a two-turn run with no end record (open rows and model_calls, no close).
+  - file: tests/personas/test_telemetry_rows.py
+    action: Create
+    purpose: >-
+      PR 1. Entry exit codes 0, 2, 3 and 4; the rows file is written atomically and only on exit 0 (a deferred or halted
+      run leaves no file and no tmp); the written batches equal map_run's; the module's direct imports (AST) name no
+      writer, boto3, botocore, urllib.request, http.client, ssl or socket module.
+  - file: tests/turn_capture/test_refs.py
+    action: Modify
+    purpose: PR 1. litellm_root_ref, litellm_run_ref and litellm_call_ref (int and probe positions).
+  - file: config/telemetry/parser_versions.yaml
+    action: Modify
+    purpose: >-
+      PR 1. producers.litellm: golden_index tests/fixtures/turn_capture/golden/litellm/index.json, current 1, history
+      [{version: 1, date (build date), golden_digest (tests/fixtures/turn_capture_corpus.golden_digest over the litellm
+      index), reason}]. No signature_prefixes and no full_output_cap_bytes. claude_code's entry is unchanged and stays
+      first (R8's prefix order).
+  - file: tests/telemetry/test_parser_version_registry.py
+    action: Modify
+    purpose: >-
+      PR 1. registry_problems and the live checks run for every registered producer (each producer's code constant, its
+      own golden index and digest). signature_prefixes is required exactly when the producer's golden corpus holds a
+      process_event row, and forbidden otherwise; new node test_producer_without_process_events_declares_no_prefixes.
+      CASES and test_cases_match_index are unchanged (claude_code's corpus). A new literal tuple LITELLM_CASES (the
+      seven basenames, in index order) and a new node test_litellm_cases_match_index assert the same three facts against
+      golden/litellm/index.json and its directory glob. test_signature_prefixes_are_required_and_validated_on_the_current_version
+      keeps every assertion (its synthetic producer has process_event rows).
+  - file: docs/contracts/telemetry_observations.yaml
+    action: Modify
+    purpose: >-
+      PR 1 bookkeeping, never sidecar words (execution step 3 gives the exact text): realization produced.litellm; attempt,
+      provider and persona_backend leave unproduced; the shared fields' populated_by begin "the claude_code and litellm
+      producers" (R8); the header comment that repeats governance_notes becomes a pointer to it; billing_shape's two-line
+      populated_by joined onto one line (whitespace only). PR 2: sidecar blocks obs-metadata-loss, obs-metadata-log and
+      nine obs-log-compact-* blocks (semantic_break false top-level rows made terse, Decision 275 relief 1).
+  - file: docs/contracts/telemetry_sessions.yaml
+    action: Modify
+    purpose: PR 1 bookkeeping only (realization produced.litellm, R8 populated_by prefixes, the header comment becomes a pointer).
+  - file: docs/contracts/telemetry_agents.yaml
+    action: Modify
+    purpose: >-
+      PR 1 bookkeeping: realization produced.litellm, R8 populated_by prefixes (workflow_run_id and host_run_ref keep the
+      phrase "claude_code producer from parser_version 8" in parentheses), the header comment becomes a pointer. PR 2:
+      sidecar blocks agt-host-run-ref, agt-host-run-ref-log, agt-top-level-close-ref, agt-one-run-per,
+      agt-log-compact-1030, agt-log-compact-1029-prose and agt-log-compact-1029-field-add.
+  # ---------------------------------------------- PR 2: the approved words (docs/plans/approved/litellm-telemetry-producer.yaml)
+  - file: docs/contracts/ports.yaml
+    action: Modify
+    purpose: >-
+      PR 2: sidecar blocks ports-log (a new amendment_log entry),
+      ports-litellm-adapter, ports-pc12-pc13 and ports-sa14 verbatim. The litellm run_persona adapter becomes implemented at src/persona_backends/; PC-12 and
+      SA-14 are shortened by citation (Decision 275 relief 2); PC-13 (open, owner rec-5437) records the gha-only
+      telemetry root (Decision 212 clause 3).
+  - file: docs/contracts/executor-personas.yaml
+    action: Modify
+    purpose: PR 2. Sidecar blocks exp-events-text and exp-log (a new amendment_log entry) verbatim.
+  - file: docs/plans/approved/litellm-telemetry-producer.yaml
+    action: Create
+    purpose: >-
+      Plan PR (this one), never the build: the approved-text sidecar (Decision 246), twenty-four blocks. PR 2 places them
+      word for word.
+implementation_declared: false
+bundled_recommendations: [rec-5396]
+followon_recs: [rec-5437]
+infrastructure_dependencies: []
+acceptance_criteria:
+  - >-
+    One events file (schema 2) and its host-run sidecar map to one root session, one top-level run (open, and a close
+    from the end record) and one model_call row per provider attempt in send order, the probe record included; every
+    column is a pure function of the two files, so a prefix file's rows are a subset of the final file's.
+  - >-
+    A cancelled attempt is a zero-token row with outcome interrupted and metadata loss cancelled; a failed, malformed or
+    empty attempt is a zero-token row with outcome error and loss usage_not_recorded; both usage_final false and
+    usage_source NULL; no new accepted value is emitted (rec-5396's test_failed_attempt_emits_row).
+  - >-
+    A schema other than 2 is refused; a missing or invalid sidecar, or a header without started_at_ms, defers and
+    writes nothing; a row before the pin halts and writes nothing.
+  - >-
+    The producer is registered as litellm parser_version 1 with its golden digest; validate_telemetry_field_realization
+    passes R1-R8 with produced.litellm in all three row contracts; every golden case's rows pass the kernel
+    (test_rows_pass_kernel).
+  - >-
+    The sidecar's twenty-four blocks are placed word for word by PR 2 (approved_text verify), and every edited contract stays
+    within its Decision 275 byte budget and the 500 effective-line cap.
+  - The producer and the entry are never imported by scripts/run_persona.py; nothing sends a row.
+  - rec-5396 is closed by PR 2's Resolves trailer, and its acceptance command passes on main (VP 7).
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: PR 1. The producer rules, the acceptance nodes, the golden corpus and the entry.
+    command: >-
+      bin/venv-python -m pytest tests/turn_capture/test_litellm_producer.py tests/personas/test_telemetry_rows.py
+      tests/turn_capture/test_refs.py tests/turn_capture/test_litellm_usage.py::test_usage_mapping_conformance -q
+    expected: >-
+      Exit 0, every node passes. Red before: the two new test files are absent (pytest exits 4).
+    fix_if: >-
+      A guessed row for an unknown attempt list, a loss row with tokens, or a prefix row that differs from the final
+      file's: fix the producer, never the corpus.
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: litellm-telemetry-producer-rules
+  - step: 2
+    phase: pre-deploy
+    action: PR 1. Registration and realization.
+    command: >-
+      bin/venv-python -m pytest tests/telemetry/test_parser_version_registry.py
+      tests/checks/contracts/test_validate_telemetry_field_realization.py -q
+    expected: >-
+      Exit 0. The registry checks run for claude_code and litellm, and the realization check's live-repository node
+      passes (R2 litellm registered, R4 every credited field non-null in the litellm corpus, R5, R6, R8).
+    fix_if: >-
+      R4: add a golden case that carries the column, never drop the credit without a STOP. R6: credit the column or stop
+      emitting it, per the scope's lists.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Both files are standing tests in every tier that reads the registry or the row contracts.
+  - step: 3
+    phase: pre-deploy
+    action: PR 1. Import boundaries. run_persona's closure is unchanged and the producer imports nothing outside stdlib and src/turn_capture.
+    command: >-
+      bin/venv-python -m pytest tests/turn_capture/test_litellm_usage.py::test_run_persona_closure_adds_only_litellm_usage
+      tests/persona_backends/test_package_boundary.py tests/turn_capture/test_package_boundary.py -q &&
+      bin/venv-python -m scripts.import_governance --check-contracts
+    expected: Exit 0 from both; import-linter reports 0 contracts broken.
+    fix_if: An import of the producer from run_persona or src/persona_backends; keep the producer standalone.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      The closure and boundary tests run in every fast tier and the import-linter run is a registered check, so a shard
+      would duplicate them.
+  - step: 4
+    phase: pre-deploy
+    action: >-
+      PR 1 and PR 2. No Lambda artifact bundles a changed path, and no PROD or DuckLake deploy channel watches one
+      (Decision 249 clause 2).
+    command: >-
+      bin/venv-python -c "import subprocess;from scripts.convergence_health.code_drift import PROD_SOURCE_PATHSPECS as P,DUCKLAKE_SOURCE_PATHSPECS as D;from scripts.lambda_manifest import compute_affected_artifacts as ca;import fnmatch;run=lambda a:subprocess.run(a,capture_output=True,text=True,check=True).stdout.split();mb=subprocess.run(['git','merge-base','HEAD','origin/main'],capture_output=True,text=True,check=True).stdout.strip();ch=sorted(set(run(['git','diff','--name-only',mb]))|set(run(['git','ls-files','--others','--exclude-standard'])));hit=lambda f,g:f==g or f.startswith(g.rstrip('/')+'/') or fnmatch.fnmatch(f,g);hits=sorted({f for f in ch for g in P+D if hit(f,g)});aff=ca(ch);print('changed',len(ch),'hits',hits,'affected',aff);assert ch;assert not hits and not aff;print('NO_DEPLOY_TRIGGER_OK')"
+    expected: >-
+      Exit 0. No changed path matches a PROD_SOURCE_PATHSPECS or DUCKLAKE_SOURCE_PATHSPECS entry, affected is empty, and
+      the last line is NO_DEPLOY_TRIGGER_OK.
+    fix_if: An artifact is affected; STOP to this planning thread, never deploy from this plan.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: It reads this branch's transient diff against the merge-base, which is empty on main.
+  - step: 5
+    phase: pre-deploy
+    action: >-
+      PR 2. The approved words are placed word for word, the byte and line budgets hold, and the contract checks pass.
+    command: >-
+      bin/venv-python -m scripts.roadmap.approved_text verify --slug litellm-telemetry-producer && bin/venv-python -m
+      pytest tests/checks/contracts/test_validate_ports_contract.py tests/checks/contracts/test_ports_verdict_chain_records.py
+      tests/checks/contracts/test_persona_image_channel.py tests/telemetry/test_capture_v8_contract_notes.py
+      tests/telemetry/test_contract_amendments.py tests/telemetry/test_retire_session_cli_contract_notes.py -q
+    expected: >-
+      Prints the approved-text OK line, then exit 0 from pytest. Each of telemetry_observations, telemetry_sessions,
+      telemetry_agents and ports.yaml is within its byte budget (validate_structural_size_budgets, run by VP 6).
+    fix_if: >-
+      A before-block not found (main moved under a block): STOP to this planning thread for a sidecar amendment, never
+      re-word a block.
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: pre-deploy
+    action: Pre-handoff full tier on each PR's committed, rebased tree (Decision 163), read through its evidence file.
+    command: bin/venv-python -m scripts.validate; bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: >-
+      Start the full tier backgrounded with a 2 h limit from the top-level session (AGENTS.md), then read the verdict
+      with --verify-head, never a pipe's exit status. It reports the full tier passed on HEAD's tree, including
+      validate_contract_drift (category 6, retention) and the structural size budgets.
+    fix_if: Any failure; fix and re-run both from the start (timeout_disposition blocked).
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: post-deploy
+    action: rec-5396's acceptance holds on main after PR 2 merges, and the rec is closed.
+    command: >-
+      bin/venv-python -m pytest tests/turn_capture/test_litellm_producer.py::test_failed_attempt_emits_row
+      tests/turn_capture/test_litellm_producer.py::test_reasoning_visibility_matrix
+      tests/turn_capture/test_litellm_usage.py::test_usage_mapping_conformance
+      tests/turn_capture/test_litellm_producer.py::test_rows_pass_kernel -q && grep -q 'litellm:'
+      config/telemetry/parser_versions.yaml && AWS_PROFILE=agent_platform bin/venv-python -c "from
+      src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader; r,_=fetch_recs_by_ids(make_reader(),['rec-5396']);
+      print(r[0]['status']); assert r[0]['status']=='closed'"
+    expected: Exit 0, then prints closed.
+    fix_if: An open rec means the Resolves trailer was missing; close it through the portal with the merge SHA as evidence.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: src/turn_capture/litellm_producer.py
+    behavior: A failed, malformed or empty attempt is a zero-token error row with loss usage_not_recorded (LM-7).
+    verification_step: 1
+    test_selector: tests/turn_capture/test_litellm_producer.py::test_failed_attempt_emits_row
+    red_green_expectation: red before (module and node absent), green after.
+  - source: src/turn_capture/litellm_producer.py
+    behavior: reasoning_visibility follows the LM-6 order over the message shapes.
+    verification_step: 1
+    test_selector: tests/turn_capture/test_litellm_producer.py::test_reasoning_visibility_matrix
+    red_green_expectation: red before (module and node absent), green after.
+  - source: src/turn_capture/litellm_producer.py
+    behavior: Every golden case's batches pass the kernel's prepare_batch.
+    verification_step: 1
+    test_selector: tests/turn_capture/test_litellm_producer.py::test_rows_pass_kernel
+    red_green_expectation: red before (module and node absent), green after.
+  - source: scripts/personas/telemetry_rows.py
+    behavior: Exit codes 0, 2, 3 and 4, and the rows file written atomically only on exit 0.
+    verification_step: 1
+    test_selector: tests/personas/test_telemetry_rows.py
+    red_green_expectation: red before (module and test file absent), green after.
+  - source: src/turn_capture/refs.py
+    behavior: The litellm root, run and call refs.
+    verification_step: 1
+    test_selector: tests/turn_capture/test_refs.py
+    red_green_expectation: red before (the three builders absent, so the new nodes fail with AttributeError), green after.
+  - source: config/telemetry/parser_versions.yaml
+    behavior: litellm is registered at 1 with its corpus digest, and declares no signature_prefixes (no process_event rows).
+    verification_step: 2
+    test_selector: tests/telemetry/test_parser_version_registry.py::test_producer_without_process_events_declares_no_prefixes
+    red_green_expectation: red before (node absent), green after.
+  - source: src/turn_capture/litellm_producer.py
+    behavior: A record with usage_absent non-empty maps usage_final false; an empty usage_absent maps true (LM-6).
+    verification_step: 1
+    test_selector: tests/turn_capture/test_litellm_producer.py::test_usage_final_follows_usage_absent
+    red_green_expectation: red before (module and node absent), green after.
+  - source: tests/fixtures/turn_capture/golden/litellm/index.json
+    behavior: LITELLM_CASES equals the litellm index's cases and its directory's case files, and its normalised_out equals claude_code's.
+    verification_step: 2
+    test_selector: tests/telemetry/test_parser_version_registry.py::test_litellm_cases_match_index
+    red_green_expectation: red before (node absent), green after.
+weakening_dispositions:
+  - candidate: "[assertion-changed] tests/telemetry/test_parser_version_registry.py::registry_problems"
+    disposition: planned-change
+    cite: "test_obligations[5]"
+constraints:
+  - >-
+    Two build PRs. PR 1: every scope row marked PR 1, with implementation_declared left false. PR 2: the sidecar's blocks
+    verbatim, implementation_declared true in this plan in the same commit, and the Resolves trailer. PR 2 starts after
+    PR 1 merges; if any block's before-text is then not on main exactly once, STOP to this planning thread.
+  - >-
+    No telemetry row is sent, no writer, AWS or network call, no workflow change and no sidecar writer (the T8
+    fixture-run plan owns the run_persona host-run sidecar and its ordinal; consult s4). No edit to
+    scripts/run_persona.py, src/persona_backends, the envelope contract or field_semantics.yaml.
+  - >-
+    The approved LL-1..LL-5 words and the session_started_at pin (telemetry-event-envelope.yaml) are the
+    specification; where the LM rules and they differ, STOP to this planning thread.
+  - >-
+    Contract bytes (Decision 275): the edits are paid for by compacting top-level semantic_break false amendment_log
+    rows to terse rows (relief 1) and by citation (relief 2) only, never a raise; field-level rows, semantic_break true
+    rows and the telemetry_observations 2026-10-17 row (a test reads its migration_story) stay as they are (Decisions
+    240 clause 4, 275 clause 4). Measured on main deeb0b5d (#2220 merged): PR 1 leaves telemetry_observations 56347 of
+    56369 bytes (497 effective lines), telemetry_sessions 67440 of 67824 (499), telemetry_agents 48758 of 49152 (485);
+    PR 2 leaves them at 56104 (498), 67440 (499) and 48534 (486), ports.yaml at 50146 of 50251 (497) and
+    executor-personas.yaml at 21808 (267). The sidecar alone on main (the wording check's tree, with the whitespace
+    join) fits too: 56120, 48671 and 50146.
+    tests/telemetry/test_retire_session_cli_contract_notes.py pins telemetry_observations at 498 effective lines or
+    fewer: keep it.
+  - >-
+    Every module stays under 500 SLOC (Decision 128); split into a facade package, never raise. Tests find contract rows
+    by content, never by position.
+  - No rescue agents or workaround loops (Decision 55); never skip, disable or quarantine a test (Decision 235).
+context:
+  - >-
+    Scout r1 (2026-11-19): FLAGS_FOUND; adopted: byte relief by top-level compaction and citation only (Decisions 240,
+    275); PC-13 records the GitHub-only root, owned by rec-5437 (filed 2026-11-20, depends on rec-5396).
+  - >-
+    Scout r2 (2026-11-20, plan and sidecar): FLAGS_FOUND. Decisions triaged: 227 of 227. Roadmap items intersected: 9;
+    CONFLICT: 0; RELATED: 7. Serves: NS.6 4/5. All adopted: no semantic_break true row is compacted (Decision 275 cl.4;
+    sessions needs no relief); the obs 2026-10-17 row is untouched (Decision 240); the signature_prefixes condition is a
+    planned change in weakening_dispositions (claude_code and the synthetic case keep every assertion; the new leg is
+    stricter; Decision 235); every compaction is a sidecar block and PR 1 keeps only mechanical credit, header pointers
+    and a whitespace join (Decision 246; coordinator.yaml pointer carve-out); PC-13 stays open under rec-5437 (NS.1);
+    SA-14 cites the egress sidecar file. T3.22:c1 is met in part (litellm registered) and stays open.
+    Scout r3 (2026-11-20): FLAGS_FOUND, two NOTEs, both adopted: the disposition cite is test_obligations[5]; step 3
+    states (a)-(c) are provenance and pointer swaps. Decisions triaged: 227 of 227. Roadmap items intersected: 9;
+    CONFLICT: 0; RELATED: 7. Serves: NS.6 4/5.
+  - >-
+    Sign-off: operator "write the plan" 2026-11-20 11:44 UTC on
+    /mnt/project-files/run-persona-backend/PRESENTATION-plan-rec5396.md, read (and told so) as approving the build's
+    edits to the Feedback Loop files listed there. Design: /mnt/project-files/run-persona-backend/plan3b2-advisor-brief/
+    ADVICE.md sections 2-4 (no new accepted value, so no writer deploy; host_run_ref ordinal as a stated limit; the
+    host-run sidecar writer is the T8 fixture-run plan's).
+  - >-
+    Two PRs: the realization check (R2, R4, R6, R8) couples registry, corpus and realization lines (PR 1); the wording
+    check runs the fast tier with only the sidecar placed, where produced.litellm would fail R2, so the words that carry
+    meaning are the sidecar, placed by PR 2 (PLAN-persona-run-identity-producer precedent).
+  - >-
+    Overlaps: #2220 (shell-deny) merged as d8f85f50 and every block is written after it; wording check r1 (base
+    860821dc) failed only on its test_ports_records_the_persona_image_row. Feedback Loop rec-5270 edits the sessions
+    realization line and parser_versions.yaml: #1963 entry 2026-11-20 11:50 UTC set the default order (this PR 1 first);
+    no answer. rec-5388 and rec-5385 land before any litellm row is sent (gates the egress plan, not this one).
+  - >-
+    Residuals: the provider description's legacy examples are left (no accepted_values rule); reasoning_visibility over
+    live provider messages is UNPROVEN until the T8 fixture run; a run without a host-run sidecar DEFERS (LL-1). After
+    the R8 swap, sessions.outcome ("derived from the transcript at each finalization") and observations.outcome ("at
+    close for span-shaped kinds") describe the claude_code path only, and run_shapes.top_level's close is "timed and
+    outcome-ed like" the session close while LM-3 gives a litellm run timeout under a failed session; left to a later
+    prose pass, no byte room now. The weakening_dispositions entry is for PR 1's code review; PR 2 resets it (step 5).
+    Critique r1 and r2 (2026-11-20): REVISE; B2-B7 and nits adopted in the text; B1 is the wording-check row.
+  - >-
+    selection_budget 2026-11-20: 100 of 1291, 178-624 s, breadth_waived (two PRs). red_overlap clear. closes_criteria
+    empty (part of T4.32 c1). Kept shards, node ids unchanged: telemetry-parser-version-registry,
+    parser-v3-declared-prefixes-match-corpus, telemetry-parser-cap-agreement, turn-capture-golden-corpus.
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:8573d22c679b13c1df7d25cf96e284b9b5105c185574bb10dfa5227f3fdee5e0"}
+  - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:b1cd298e2144897d7b107e5ea29817b9edf9c1f63f04a84dabc9559b53e12e27"}
+  - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:9e2cb0726554c8ce139e608c3a9a97d382b0781ac6c38288c29f767dd6322ab9"}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 6, nits: 11}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 4}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 2}
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 2}
+  - {gate: wording-check, round: 1, verdict: FAIL, digest: 761ff64379625c9572b167a94c9688f8e40009aad5494a039be9da1ba377a0c4, base: 860821dcd9d4960ad269c035f451cc0a8a185432, selection: complete}  # pragma: allowlist secret
+  - {gate: wording-check, round: 2, verdict: PASS, digest: 8530356fc12a6a45daa7b32ae1920a8dda44e13262081a9787d4e699e37e6db7, base: deeb0b5d028e29d30a66ab17d231f275a8274137, selection: complete}  # pragma: allowlist secret
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Only the plan-cited decision sections
+  - telemetry-event-envelope.yaml LL-1..LL-5 and the session_started_at pin read; src/persona_backends/events.py read
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - >-
+    PR 1. Read src/persona_backends/events.py, litellm_backend.py, scripts/llm/litellm_wire.py (CallRecord, Attempt),
+    src/turn_capture/host_run.py, refs.py, observations.py, sessions.py, record_turn.py,
+    tests/fixtures/turn_capture_corpus.py, tests/telemetry/test_parser_version_registry.py and the envelope's LL lines.
+  - >-
+    PR 1. Write the refs nodes and the producer and entry tests red; add the refs builders; write litellm_producer.py
+    (LM-1..LM-8 in its docstring) and scripts/personas/telemetry_rows.py; write the builders and generate the seven
+    golden cases (expected_rows from the producer, then read every row by eye against the LM rules before committing).
+  - >-
+    PR 1. Contract bookkeeping, exactly: (a) in each of the three row contracts' realization block, append to produced
+    the key litellm with these lists, in this order, keeping produced and unproduced each one flow-mapping line (a
+    reflow crosses telemetry_sessions' 500-line cap). telemetry_observations: event_kind, event_timestamp,
+    session_started_at, source_ordinal, external_ref, entity_ref, producer, producer_version, parser_version,
+    observation_type, name, outcome, model, tokens_input, tokens_output, tokens_cache_read, tokens_cache_creation,
+    attempt, provider, persona_backend, billing_shape, reasoning_visibility, reasoning_tokens, usage_final,
+    usage_source, requested_model, reasoning_effort, cache_creation_1h_tokens, cache_creation_5m_tokens, metadata; its
+    unproduced becomes {held:feedback-loop-gate: [rec_id], T4.32:c1: [exit_code], rec-4600: [cost_usd_reported,
+    acceptance_passed, time_lost_seconds]}. telemetry_sessions: event_kind, event_timestamp, session_started_at,
+    source_ordinal, external_ref, entity_ref, producer, producer_version, parser_version, workflow, outcome,
+    execution_attempt, failure_reason. telemetry_agents: event_kind, event_timestamp, session_started_at,
+    source_ordinal, external_ref, entity_ref, producer, producer_version, parser_version, agent_type, model, version,
+    trigger, outcome, error, workflow_run_id, host_run_ref, definition_sha256. (b) In the populated_by of every field
+    in those lists that names the claude_code producer, replace the leading "the claude_code producer" with "the
+    claude_code and litellm producers" (R8); in telemetry_agents workflow_run_id and host_run_ref the result then reads
+    "the claude_code and litellm producers (claude_code producer from parser_version 8), ...", and definition_sha256's
+    whole populated_by becomes "the claude_code and litellm producers. claude_code from parser_version 11, on a verdict
+    persona's sub-agent run (its open and close rows; src/turn_capture/persona_identity.py and record_turn.py), NULL on
+    every other claude_code run; litellm on its top-level run (open and close), from the events header's
+    rendered_prompt_sha256." attempt, provider and
+    persona_backend's populated_by becomes "the litellm producer, at the model_call point event." (a) and (b) are
+    provenance credit that validate_telemetry_field_realization R2 and R8 require word for word once litellm is
+    registered; they name the writer and change no field's meaning (coordinator.yaml: a meaning-free pointer or
+    provenance swap needs no word). (c) Pointer swaps
+    and whitespace (coordinator.yaml: a meaning-free pointer or provenance swap needs no word; Decision 275 relief 2):
+    replace each row contract's header comment block (the lines between "---" and the first key) with a pointer.
+    telemetry_observations: "# Class A data contract: telemetry_observations, node table (Decision 95 cl.2, Decision
+    199); CD.25 (T0.12.6)." then "# Rules: governance_notes." telemetry_sessions: "# Class A data contract:
+    telemetry_sessions, the trace root table (Decision 95 clause 1) as an event journal" then "# (Decision 199);
+    ratified under CD.25 (T0.12.6). Rules: governance_notes." telemetry_agents: "# Class A data contract:
+    telemetry_agents, the agent run surface (telemetry-lexicon.yaml) as an event journal" then "# (Decision 199);
+    ratified under CD.25 (T0.12.6). Run shapes: run_shapes; rules: governance_notes." Join billing_shape's two-line
+    populated_by ("(T3.20 turn" / "capture, a scheduled agent)") onto one line. No amendment_log row is compacted or
+    added in PR 1: every compaction is a sidecar block placed by PR 2.
+  - >-
+    PR 1. Register litellm in config/telemetry/parser_versions.yaml with the golden digest, extend the registry test.
+    The golden files carry 64-hex digests, so detect-secrets needs a .secrets.baseline regeneration: the
+    secrets_baseline_regeneration row sanctions it once those files are baseline keys. Run bin/venv-python -m
+    scripts.validate --pre and fix; execute VP steps 1-4; commit; run VP 6 on the committed, rebased tree; run
+    bin/venv-python -m scripts.session.github_readiness and report its states; push, open PR 1, subscribe, and
+    squash-merge on green (no Resolves trailer; no implementation_declared flip).
+  - >-
+    PR 2 and CLOSURE, one sequence, one commit, after PR 1 has merged (branch from main). Report each outcome
+    separately: readiness, parent-validator evidence, postflight evidence, and the real push, PR and merge outcome
+    (implement skill Commit Flows; docs/contracts/git-ops.yaml handoff_sequence).
+    - Place docs/plans/approved/litellm-telemetry-producer.yaml's twenty-four blocks verbatim, {{DATE}} filled with the
+      build date, and set implementation_declared: true in this plan.
+    - Run /implement's Verification Graduation walk, which writes the registry shard litellm-telemetry-producer-rules.
+    - Replace weakening_dispositions in this plan with bin/venv-python -m
+      scripts.checks.verification.validate_weakening_candidates' output on the PR 2 tree (expected empty: PR 2 changes no
+      test file, so PR 1's registry_problems entry would read stale; PLAN-persona-run-identity-producer precedent). If the
+      output is not empty, fill each stub's disposition and cite by code review; never copy a placeholder.
+    - Make the one commit (feat(litellm-telemetry-producer): ...) with the trailer `Resolves: rec-5396` in its body.
+    - Execute VP 5 and VP 4, then VP 6 on that committed, rebased tree (its --verify-head evidence names the pushed HEAD).
+    - Run bin/venv-python -m scripts.session.github_readiness; report its states independently, and an unknown state
+      as unproven, never a pass.
+    - Write /tmp/implementation-retrospective.json with the scripts.session.postflight_evidence.CATEGORIES keys, then
+      run bin/venv-python -m scripts.session.postflight --evidence /tmp/implementation-retrospective.json.
+    - Push (git push -u origin HEAD as its own call). Open the PR, and report it as opened only with the returned PR
+      number. Subscribe to it; never poll.
+    - On green CI (event-driven wake), squash-merge with the Resolves trailer in the commit message (2026-11-16 ruling:
+      no operator word needed). Report the merge SHA, then run VP step 7.
+    - No roadmap edit (T4.32 c1 stays open).
+  - 'Report, as separate facts: readiness, parent-validator evidence, postflight evidence, both PR numbers and merge SHAs, VP results, and anything UNPROVEN.'
