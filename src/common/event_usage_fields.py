@@ -1,5 +1,5 @@
 """Derived output columns of the usage verbs (model_usage_rollup, tool_use_rollup, session_startup_baseline,
-session_tree_rollup), in SQL order.
+session_tree_rollup, friction_signature_counts), in SQL order.
 
 Pure data, no imports; the response stamps are appended by src.common.ducklake_reader_client.VERB_FIELDS.
 """
@@ -79,4 +79,23 @@ STARTUP_BASELINE_FIELDS = (
     "cache_creation_5m_tokens",
     "tokens_output",
     "usage_missing",
+)
+
+FRICTION_SIGNATURE_FIELDS = (
+    "root_session_id",
+    "harness_session_key",
+    "branch",
+    "session_started_at",
+    "roots_in_tree",
+    "workflow",
+    "observation_type",
+    "signature",
+    "disposition",
+    "rule_id",
+    "label",
+    "class",
+    "generic",
+    "fact_count",
+    "session_count",
+    "classifier_version",
 )

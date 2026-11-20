@@ -9,6 +9,7 @@ from pathlib import Path
 import yaml
 
 from scripts.checks import _common
+from scripts.contract_rules import parse_yaml
 
 _CONTRACTS_TREE_SPEC = "docs/contracts"
 
@@ -120,7 +121,7 @@ def baseline_class_d_envelopes(root: Path, merge_base: str, candidate_paths: set
         if text is None:
             continue
         try:
-            data = yaml.safe_load(text)
+            data = parse_yaml(text)
         except yaml.YAMLError:
             continue
         if not isinstance(data, dict):

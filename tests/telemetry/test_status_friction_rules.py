@@ -10,11 +10,13 @@ from typing import Any
 import pytest
 
 from scripts.telemetry_verify import derive
-from src.common import ducklake_event_read_sql as sql
-from src.common.ducklake_event_read_verbs import FRICTION_RULES
+from src.common.ducklake_event_read_verbs import FRICTION_CTES, FRICTION_RULES
 
 _STAMP = "2026-09-25T10:00:00+00:00"
-_RULES_DIGESTS = {2: "1b7014d3626527369a6e48ac54ff413b3080585ced3e8d3ea0aa664b1b415b93"}  # pragma: allowlist secret
+_RULES_DIGESTS = {
+    2: "1b7014d3626527369a6e48ac54ff413b3080585ced3e8d3ea0aa664b1b415b93",  # pragma: allowlist secret
+    3: "6e464c7f4fc3ed25d23e5620d9b040cd663a017d680898ffc8f62181074c74c3",  # pragma: allowlist secret
+}
 
 
 def _event(obs_id: str, name: str, severity: str, t: int) -> dict[str, Any]:
@@ -64,8 +66,8 @@ def test_rule_precedence_exact_prefix_generic(monkeypatch: pytest.MonkeyPatch) -
     assert _facts(_event("e1", "status:x.failed", "error", 1))[0][1] == "exact_label"
     assert _facts(_event("e2", "status:y.failed", "error", 1))[0][1] == "prefix_label"
     assert _facts(_event("e3", "other", "error", 1))[0][1] == "generic_label"
-    assert "starts_with" in sql.FRICTION_CTES
-    assert " LIKE " not in sql.FRICTION_CTES
+    assert "starts_with" in FRICTION_CTES
+    assert " LIKE " not in FRICTION_CTES
 
 
 def test_rules_set_at_most_one_signature_form() -> None:
