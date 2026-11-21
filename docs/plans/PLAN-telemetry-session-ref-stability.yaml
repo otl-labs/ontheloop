@@ -1,0 +1,336 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: telemetry-session-ref-stability
+intent: >-
+  Solves rec-5477. Envelope rule R10 (telemetry-event-envelope.yaml, parser_version description) guards a syntactic
+  proxy, "a change to ANY session entity_ref grammar", where the property it protects is that a stored session is
+  never re-keyed (a re-keyed session escapes R5a retirement, Decision 199 cl.3 identity). This plan restates R10 as that
+  invariant, keeps the first-grammar carve-out only as a corollary of it, deletes LL-1's "declaring one later is an
+  R10 change", and makes the rule mechanical: a new fast-tier test asserts that every session a golden case produced
+  at the merge-base is still produced under the same ref and session id, that no two producers mint
+  the same session root, and that registered host_run_ref prefixes are append-only. Serves NS.6 (session evidence cannot silently
+  double count) and unblocks rec-5437 (non-GitHub persona hosts) with no exemption.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-telemetry-session-ref-stability.yaml
+phase: >-
+  T3.22 (producer onboarding; rec-5477), cited for context only: a rec-driven slice that closes no criterion. Contract words and test code only: no producer code,
+  row, writer, Lambda or workflow changes, so nothing deploys (V2).
+closes_criteria: []
+cites: [dec:167, dec:199, dec:210, dec:235, dec:246, dec:275, dec:279]
+scope:
+  - file: tests/telemetry/test_session_ref_stability.py
+    action: Create
+    purpose: >-
+      The R10 check, three legs, each with a synthetic red case beside its live case. Corpora: claude_code
+      tests/fixtures/turn_capture/golden/ (case_names, load_case in tests/fixtures/turn_capture_corpus.py) and litellm
+      tests/fixtures/turn_capture/golden/litellm/ (litellm_case_names, load_litellm_case in
+      tests/fixtures/turn_capture_litellm_cases.py); every producer in config/telemetry/parser_versions.yaml must map
+      to a corpus and a role here, else the test fails (a new producer declares both). The maps pre-declare
+      ci_annotate (annotates claude_code; corpus tests/fixtures/merge_annotate/golden/index.json, quoted as a literal,
+      PLAN-merge-annotate-producer, rec-5270): a mapped producer not yet in parser_versions.yaml contributes nothing
+      (a loop continue, never pytest.skip), an absent corpus index at the base contributes no base pairs, and an absent
+      id column reads as None when pairs are built, so neither build order breaks. Each map path must equal that
+      producer's golden_index in parser_versions.yaml, and a registered producer whose HEAD index is absent fails.
+      Session pairs: read per table from src/telemetry/identity.py KEY_PLANS, never hard-coded: each (ref, id) pair
+      whose KeyPlan domain_tag is telemetry_sessions:session_id, i.e. (entity_ref, session_id) and (parent_session_ref,
+      parent_session_id) on telemetry_sessions, and (session_ref, session_id) on the other tables; a None ref is skipped.
+      (a) test_golden_sessions_keep_their_refs: for each producer and each golden case present at the merge-base with
+      origin/main (git show <base>:<path>), the set of session pairs over the case's committed expected_rows at the
+      base is a subset of the set at HEAD, so no session a stored input produced disappears or changes id. A new case,
+      or a new session in an old case, passes. A base case renamed or deleted at HEAD fails by design: retiring a
+      golden input is itself a change to stored evidence and edits this test under the weakening gate. No override marker: a real R10 change edits this test in its own Decision-gated PR (Decision 235). Base
+      unreadable: pytest.fail when CI is set, else pytest.skip("env: origin/main unreadable locally") -- the env: label
+      validate_test_skip_citations requires (Decision 181 CONTENT surface). Legs (a) and (c) share this base-read
+      rule.
+      (b) test_root_refs_are_disjoint_across_minters: a producer-role map names each producer either a minter
+      with its root form or an annotator of a named minter (Decision 199 cl.3; telemetry_sessions.yaml's annotate row: a producer that annotates another
+      producer's session, such as ci_annotate, writes under that session's ref). Minter forms: claude_code a UUID root
+      with an optional ':<agent id>' sub-agent suffix; litellm 'litellm:' plus a full match of the alternatives in
+      telemetry_agents.yaml fields.host_run_ref.dq_intent.pattern (read from the contract, never copied). Over the
+      session-pair refs, each minter's golden refs match its own form and no other minter's; an annotator's refs match
+      its named minter's form; no two minter forms both match any golden ref. A producer in parser_versions.yaml
+      absent from the map fails the leg (a new producer declares its role).
+      (c) test_host_run_ref_prefixes_are_append_only: each alternative of that pattern at the merge-base is present
+      verbatim at HEAD (split on the top-level '|' inside the outer group), and each HEAD alternative's literal tag
+      before its first ':' is a lowercase literal ([a-z]+) and unique, so a new alternative cannot overlap a registered
+      prefix. Its failure message states the rule: a whole registered alternative never changes, character class
+      included.
+      The module quotes config/telemetry/parser_versions.yaml, docs/contracts/telemetry_agents.yaml (leg (c) compares a
+      file with itself on main, so it acts only when --pre selects it on a PR) and the golden index.json paths as
+      literal strings:
+      an index edit selects it directly, and a case-file edit selects it through parser_versions.yaml, which the
+      registry test's golden_digest forces to change with any expected_rows edit. Leg (a)'s failure message says
+      "no stored session disappears or is re-keyed" so a fix that drops a spurious session sees the rule it trips. Its docstring
+      names docs/contracts/telemetry_sessions.yaml's entity_ref grammar (governance_notes_local, the
+      '<sessionId>:<agentId>' form) as the source leg (b)'s claude_code form restates, and rec-4419 (T3.22:c3) as the
+      owner of moving that form to the writer. Leg (b)'s docstring says a minter is what envelope R10 calls a root ref's
+      originator (a ref maker, never an id: Decision 199's 2026-10-24 update) and that an annotator originates none.
+      Leg (b)'s synthetic cases include two annotator cases: refs matching the
+      named minter's form pass, refs matching no form fail. Reads files and runs git only; no network, no producer call; well under 2 s.
+  - file: tests/telemetry/test_litellm_producer_envelope_notes.py
+    action: Modify
+    purpose: >-
+      Sidecar block test-new-pins only, so the pins and the words they guard are approved and placed together. It
+      ADDS two functions and changes no existing node (the weakening gate flags any changed assertion):
+      test_r10_is_stated_on_stored_session_refs asserts the restated R10's four tokens in the parser_version
+      description, and test_ll1_names_no_r10_change asserts the LITELLM line holds "Its root composes the host_run_ref
+      registry" and not "declaring one later is an R10 change". The existing pins still pass: the first-grammar
+      sentence stays in R10 as a corollary and LL-1 keeps "outside R10".
+  - file: docs/contracts/telemetry-event-envelope.yaml
+    action: Modify
+    purpose: >-
+      Sidecar blocks env-r10, env-ll1, env-log, env-compact-0925a, env-compact-0925b, env-compact-1015 and env-ll-events
+      only (Decision 246): R10 restated, LL-1's R10 sentence replaced, one terse semantic_break true row on
+      fields.parser_version.amendment_log (validate_contract_drift category 6 requires a field-level row when a
+      field's description changes; it also names LL-1), three semantic_break false top-level rows (2026-09-25 x2,
+      2026-10-15) compacted and the events.py parenthetical cited out to pay the bytes (Decision 275 cl.3-4). Cap
+      53867; 53841 -> 53859 on main ba54da0d (unchanged at 2faa7054).
+  - file: docs/contracts/telemetry_agents.yaml
+    action: Modify
+    purpose: >-
+      Sidecar blocks agt-prefix and agt-log only: host_run_ref semantics adds "a registered prefix never changes
+      (envelope R10)", and one terse semantic_break true row on fields.host_run_ref.amendment_log (category 6). 48534
+      -> 48781 of 49152 on ba54da0d.
+  - file: docs/plans/approved/telemetry-session-ref-stability.yaml
+    action: Create
+    purpose: >-
+      Plan PR only, never the build: the approved-text sidecar (Decision 246), ten blocks (nine contract, one test).
+      It is notice class on the approval-routing map (Decision 279), and its approval run is what binds the narrowed
+      R10 gate words. Neither contract is gated on approval_routing at ba54da0d, but validate_merge_step requires the
+      approval run before the build can merge, so the run is a plan-PR obligation.
+implementation_declared: false
+bundled_recommendations:
+  - rec-5477
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - The restated R10, LL-1 and host_run_ref words are on main exactly as the sidecar's blocks (approved_text verify).
+  - test_session_ref_stability.py's three legs pass on main and each synthetic red case fails its leg.
+  - rec-5477's acceptance command exits 0 on main and the rec is closed by the merge's Resolves trailer.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The R10 check's three legs and their red cases.
+    command: bin/venv-python -m pytest tests/telemetry/test_session_ref_stability.py -q
+    expected: 'Exit 0, every node passes. Red before: the file is absent (pytest exits 4).'
+    fix_if: 'A live leg fails on main: a golden session moved or a prefix changed; STOP to this planning thread, never edit a golden case to pass.'
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: The module is itself the standing check and runs in every tier that selects tests/telemetry, so a graduated shard would duplicate it.
+  - step: 2
+    phase: pre-deploy
+    action: The approved words are placed word for word, and the pinned contract tests and size limits hold.
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug telemetry-session-ref-stability && bin/venv-python -c "from scripts.checks.contracts.validate_contract_drift import validate_contract_drift as v; f=[]; v(f); assert not f, f" && bin/venv-python -m pytest tests/telemetry/test_litellm_producer_envelope_notes.py tests/telemetry/test_litellm_producer_contract_notes.py tests/telemetry/test_contract_amendments.py tests/telemetry/test_parser_version_registry.py -q
+    expected: Prints the approved-text OK line, the contract drift gate passes on the committed diff (run after the commit), then exit 0 from pytest.
+    fix_if: 'A before-block not found on main (main moved under it): STOP to this planning thread for a sidecar amendment, never re-word in the build.'
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: approved_text verify is the merge-step check and the pytest files are standing tests in every tier that reads the envelope.
+  - step: 3
+    phase: pre-deploy
+    action: Pre-handoff full tier on the committed, rebased tree (Decision 163), read through its evidence file.
+    command: bin/venv-python -m scripts.validate; bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: Start the full tier backgrounded with a 2 h limit from the top-level session (AGENTS.md), then read the verdict with --verify-head, never a pipe's exit status. It reports the full tier passed on HEAD's tree, including validate_contract_drift and the structural size budgets.
+    fix_if: >-
+      Any failure; fix and re-run both from the start (timeout_disposition blocked). A byte or line cap exceeded after a
+      rebase, or a before-block moved: STOP to this planning thread for a sidecar amendment; the build never re-words
+      or compacts further.
+    hermetic: false
+    graduation: not-applicable
+  - step: 4
+    phase: post-deploy
+    action: rec-5477's acceptance holds on main after the merge, and the rec is closed.
+    command: bin/venv-python -m pytest tests/telemetry/test_session_ref_stability.py::test_golden_sessions_keep_their_refs tests/telemetry/test_session_ref_stability.py::test_root_refs_are_disjoint_across_minters tests/telemetry/test_session_ref_stability.py::test_host_run_ref_prefixes_are_append_only -q && ! grep -q 'declaring one later is an R10 change' docs/contracts/telemetry-event-envelope.yaml && AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader; r,_=fetch_recs_by_ids(make_reader(),['rec-5477']); print(r[0]['status']); assert r[0]['status']=='closed'"
+    expected: >-
+      Run only after ci.yml's trailer-closure job has finished on the merge SHA (name its run id; it waits behind
+      main-validate, about 16-20 minutes; event-driven, never polled). Exit 0, then prints closed.
+    fix_if: >-
+      Open: run bin/venv-python -m scripts.session.merge_step readback; a missing trailer goes to merge_step recover
+      (git-ops resolves_trailer). After an acceptance-verdict refusal never close by hand: fix forward, or strengthen
+      the acceptance with update_rec in this planning thread. A portal close is sanctioned only after a transport
+      failure or a merge-leg refusal (Decision 201).
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: tests/telemetry/test_session_ref_stability.py
+    behavior: A session a golden case produced at the merge-base that disappears or changes session id at HEAD fails leg (a); a new case or a new session passes.
+    verification_step: 1
+    test_selector: tests/telemetry/test_session_ref_stability.py::test_golden_sessions_keep_their_refs
+    red_green_expectation: red before (file absent), green after; its synthetic re-keyed case is red.
+  - source: tests/telemetry/test_session_ref_stability.py
+    behavior: A minter's golden ref matching another minter's form, or no form, fails leg (b); an annotator's ref must match its named minter's form; a registered producer with no role fails.
+    verification_step: 1
+    test_selector: tests/telemetry/test_session_ref_stability.py::test_root_refs_are_disjoint_across_minters
+    red_green_expectation: red before (file absent), green after.
+  - source: tests/telemetry/test_session_ref_stability.py
+    behavior: A host_run_ref pattern alternative present at the merge-base and changed or removed at HEAD fails leg (c).
+    verification_step: 1
+    test_selector: tests/telemetry/test_session_ref_stability.py::test_host_run_ref_prefixes_are_append_only
+    red_green_expectation: red before (file absent), green after.
+  - source: tests/telemetry/test_litellm_producer_envelope_notes.py
+    behavior: The parser_version description carries the restated R10 (stored-session scope, never-produced inputs, fixed prefixes, the check's path).
+    verification_step: 2
+    test_selector: tests/telemetry/test_litellm_producer_envelope_notes.py::test_r10_is_stated_on_stored_session_refs
+    red_green_expectation: red before (main lacks the four tokens), green after the blocks are placed.
+  - source: tests/telemetry/test_litellm_producer_envelope_notes.py
+    behavior: LL-1 composes the host_run_ref registry and names no later R10 change.
+    verification_step: 2
+    test_selector: tests/telemetry/test_litellm_producer_envelope_notes.py::test_ll1_names_no_r10_change
+    red_green_expectation: red before (main holds "declaring one later is an R10 change"), green after.
+  - source: docs/contracts/telemetry-event-envelope.yaml
+    behavior: The R10, LL-1 and log blocks are placed word for word.
+    verification_step: 2
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug telemetry-session-ref-stability
+    red_green_expectation: red before (blocks absent from main), green after.
+  - source: docs/contracts/telemetry_agents.yaml
+    behavior: The host_run_ref prefix clause and its log row are placed word for word.
+    verification_step: 2
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug telemetry-session-ref-stability
+    red_green_expectation: red before (blocks absent from main), green after.
+weakening_dispositions: []
+constraints:
+  - >-
+    One build PR: the two test files, the ten sidecar blocks verbatim ({{DATE}} -> the build's UTC date), and
+    implementation_declared true in this plan, in one commit series. "Resolves: rec-5477" goes in a branch commit
+    message (validate_merge_step reads branch-commit trailers) and in the explicit merge commit_message
+    (git-ops resolves_trailer TRANSPORT). The
+    build edits no sidecar word, no golden case and no producer code. If a block's before-text is not on main exactly
+    once, STOP to this planning thread.
+  - >-
+    Weakening gate (Decision 235, rec-5441): the sidecar only adds test functions (no node renamed, removed or re-asserted), so the build diff carries no
+    weakening candidate and weakening_dispositions stays empty. If validate_weakening_candidates lists one, STOP to this
+    planning thread; never record one to pass.
+  - The new test never imports another test_* module (tests/fixtures helpers only) and asserts no exact count on a growing collection.
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - >-
+    Decision scout r1 (2026-11-20): FLAGS_FOUND. Decisions triaged: 228 of 228. Roadmap items intersected: 3; CONFLICT:
+    0; RELATED: 2. Serves: NS.6 3/5. CITE 167, 199, 246, 275. WARN 279 and SPIRIT 165 (a rekey: dec-NNN override
+    would be an existence-only authorising marker): resolved by dropping the marker; a real R10 change edits this test
+    under Decision 235's human gate. Routing: the restatement is a governance note in the owning contract
+    (decision-entry.yaml significance, field_semantics row), not a numbered Decision; the scout agrees.
+  - >-
+    Decision scout r2 (2026-11-21): FLAGS_FOUND. Decisions triaged: 228 of 228. Roadmap items intersected: 3;
+    CONFLICT: 0; RELATED: 2. Serves: NS.6 3/5. CITE adds 235 and 279; r1 flags resolved. NOTE Decision 210 cl.1: the
+    per-producer session-ref form is row-decidable, so its writer-side enforcement is deferred to T3.22:c3 (rec-4419);
+    leg (b) holds the form over producer code on the golden corpus until then.
+  - >-
+    Decision scout r3 (2026-11-21): FLAGS_FOUND. Decisions triaged: 228 of 228. Roadmap items intersected: 3;
+    CONFLICT: 0; RELATED: 2. Serves: NS.6 3/5. CITE adds 210. NOTE 181/163 (a skip with no rec or env: label fails
+    validate_test_skip_citations): the leg (a) local skip carries an env: label. NOTE 210 cl.1/cl.3: "refs stay
+    disjoint across producers" states a producer obligation, not a declared dq_intent rule; its writer leg is owned by
+    T3.22:c3 (rec-4419), and leg (b) holds it over the golden corpus until then (no exemption is declared, so no
+    exemption row is owed beside it).
+  - >-
+    rec-5477 acceptance strengthened 2026-11-21 (critique r3: the old form had no decidable segment, so premerge's
+    preview was fatal) through update_rec, read back open with the new text at 11:25 UTC: the three leg node ids plus
+    the LL-1 grep. VP 4 mirrors it.
+  - >-
+    Decision scout r4 (2026-11-21): FLAGS_FOUND. Decisions triaged: 228 of 228. Roadmap items intersected: 3;
+    CONFLICT: 0; RELATED: 2. Serves: NS.6 3/5. NOTE 199: "mint" names the retired mint-once id scheme, so the gate
+    words say "no root ref has two originators" (critique r8: "root refs are disjoint" was false for an annotator) and leg (b)'s node is test_root_refs_are_disjoint_across_minters
+    (rec-5477's acceptance updated to the new node id).
+  - >-
+    Annotating producers (critique r5): PLAN-merge-annotate-producer (rec-5270, approved, unbuilt) registers
+    ci_annotate, whose telemetry_sessions rows carry the root claude_code session's entity_ref by design (Decision 199
+    cl.3). So R10 says "no root ref has two originators" (refs, never ids: no producer mints a session id, Decision 199 cl.3, 2026-10-24 update; an annotator originates none), not that all refs are disjoint across producers, and leg (b)'s
+    producer-role map lists annotators. The maps pre-declare ci_annotate (scope row), so neither build order needs the
+    other to edit this test. The planning thread tells merge-annotate's owner when this plan merges, naming what leg (b) asks of that corpus:
+    root entity_refs in claude_code UUID form. Note for the
+    approval: "a registered prefix never changes" means only through a Decision-gated PR that edits leg (c).
+  - >-
+    Operator rulings 2026-11-20: no exemption precedent; plan the restatement as its own rec, here, before rec-5437
+    (rec-5437 depends on rec-5477, read back). Blind Fable consult:
+    /mnt/project-files/run-persona-backend/rec5437-advisor-brief/ADVICE.md. Operator OK to edit Feedback Loop's files
+    (the envelope, telemetry_agents.yaml, tests/telemetry/) 2026-11-21 ("write the plan" after the ask).
+  - >-
+    Leg (a) compares the derived session_id with its ref, so an identity-spec change that re-keys a stored session
+    also trips it. It covers golden inputs only, like rec-4122's digest check (the envelope's own words on inputs the
+    goldens do not hold). T3.22:c1's obligations index (rec-4417, unbuilt) should point at this module for the
+    session-identity obligation rather than add a second surface.
+  - >-
+    Bytes on ba54da0d: envelope 53841 of 53867 (26 free); after the blocks, net of the three compactions and the
+    events.py cite-out, 53859 (8 B free). telemetry_agents ends 48781 of 49152. The envelope's top-level log keeps
+    zero full rows (no top-level row is added). An unbuilt plan editing the envelope or telemetry_agents rebases and re-measures.
+  - >-
+    Logging: R10 and host_run_ref are field text, so each change is logged on its own field's amendment_log, as every
+    earlier R10 edit was; validate_contract_drift category 6 reads field-level rows on a committed diff and fails a
+    changed description with none (measured on a committed scratch tree of ba54da0d: the field rows pass, top-level
+    rows alone fail; with the sidecar's blocks committed there, scripts.validate --pre passes, 2026-11-21, because the
+    wording check runs the fast tier on an uncommitted tree, rec-5480). No top-level row is added: the envelope has 26 bytes free. A registered prefix freezes whether
+    or not it has stored rows; local:<runtime>/<run id> is already registered, so rec-5437 uses it as it stands. Leg (c) pins whole per-prefix alternatives,
+    so widening an existing alternative's character class is also an R10 change (read with the sidecar's "a
+    registered prefix never changes"). Leg (a)'s CI fail-closed base read follows the precedent in tests/telemetry/test_parser_version_registry.py (_base_registry) and Decision 55 (fail loud).
+  - >-
+    Selection budget (scope draft, 2026-11-20) breadth_waived; hermetic VP 1 replays on pr-validate in under 2 s.
+  - >-
+    Related-work check (scripts.ci_rca.red_overlap, 2026-11-21 10:45 UTC): blocked by rec-5468 (notice-digest
+    _ensure_issue race, slo_breached 17.1 h, shared files none). Deferral rationale: not this plan's repair and it
+    overlaps no scope file, but it is past SLO, so red-main-recovery.yaml halt rule 1 holds: the build is not
+    dispatched until rec-5468 is repaired; the build re-runs red_overlap first and stops on blocked.
+gate_rounds:
+  - gate: decision-scout
+    round: 1
+    scout_input_fingerprint: v1:dacb7816234da06bddf2cc8f933ef13e8d2fb5b4480229fbcf42b8c73a38c496
+    verdict: FLAGS_FOUND
+  - gate: decision-scout
+    round: 2
+    scout_input_fingerprint: v1:f1cd6595e642c66880f8ec23e0c7fd5fffc09d238083f519876fc052a8f3453e
+    verdict: FLAGS_FOUND
+  - {gate: wording-check, round: 1, verdict: PASS, digest: 005355a4ea4ebc39096ea001bda20f48238d3d7309158643650bf42333869d00, base: ba54da0d88ccb9245a44cd88808986b024f7ba18, selection: complete}  # pragma: allowlist secret
+  - gate: decision-scout
+    round: 3
+    scout_input_fingerprint: v1:194deaa2bd565da61965259474e39eee33ea54a285581fb4a14aeba7d1bd207f
+    verdict: FLAGS_FOUND
+  - {gate: wording-check, round: 2, verdict: PASS, digest: 1fb73e6a932c11ff88d7dc9ced225a15e6dad4106ec59a193889233c7aeb9e18, base: ba54da0d88ccb9245a44cd88808986b024f7ba18, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 3, nits: 8}  # B1 bundled rec-5477; B2 code-review + CLOSURE + report-as-facts steps; B3 session pairs from KEY_PLANS (entity_ref on telemetry_sessions); N1 renamed case fails by design; N4 field-log note; N5 approval run required; N7 rollback
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 5}  # B1 validate_contract_drift category 6 needs field-level rows (wording check blind: rec-5480); N2 intent corollary wording + unique prefix tags; N3 local: already registered; N5 single implementation_declared
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 2, nits: 7}  # B1 rec-5477 acceptance undecidable, strengthened via update_rec; B2 VP 4 waits for trailer-closure, readback/recover, no hand close; N1 phase context only; N2 bytes; N3 cap STOP; N4 commit before VP 2; N5 branch-commit trailer; N6 lowercase tags; N7 checklist 210
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 5}  # B1 rollback files a successor rec (Decision 103); N3 selection literals; N4 precedent cite not 208; N5 docstring names rec-4419
+  - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 4}  # B1 'refs stay disjoint across producers' false for ci_annotate (rec-5270 annotates the root's ref): words now 'producers mint disjoint roots', leg (b) producer-role map; N2 disappearance message; N3 selection mechanism; N4 golden-only coverage (bytes; context says so)
+  - {gate: wording-check, round: 3, verdict: PASS, digest: 353578d6cf64cda3aad299cb2444e945426ea9aa6f55f2b4d8b1e0a453af6527, base: ba54da0d88ccb9245a44cd88808986b024f7ba18, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 6, verdict: PROCEED, blocking: 0, nits: 6}  # N1 maps pre-declare ci_annotate (role + corpus literal); N2 docstring cites telemetry_sessions.yaml grammar; N3 annotator red cases; N4 shared base-read rule; N5 never = only by Decision (approval note); N6 R10 gated-set question (no rec yet)
+  - {gate: plan-critique, round: 7, verdict: PROCEED, blocking: 0, nits: 6}  # confirming round; nits applied: N1 continue not skip, None ids; N2 UUID roots asked of merge-annotate; N3 telemetry_agents literal; N4 map equals golden_index; N5 intent and obligation say minters; N6 R10 gated-set question filed as rec-5482
+  - gate: decision-scout
+    round: 4
+    scout_input_fingerprint: v1:ceed7d0b127b83dc7155c093a1f20f84602db20f3d05ca69f566f3680a2e1336
+    verdict: FLAGS_FOUND
+  - {gate: wording-check, round: 4, verdict: PASS, digest: 4124e02562b9f9ed3f75a252a679c1546d114eb7fbf9c790c1b22b92785038f0, base: 2faa7054ec5f2c95b8bbdf7042598321fe051a6b, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 8, verdict: REVISE, blocking: 1, nits: 3}  # B1 'producer root refs are disjoint' false for ci_annotate (annotates the root's ref): words now 'no two producers originate a root ref'; N1 minter vocabulary = refs, never ids; N2 cite 199 cl.3 2026-10-24 update; N3 12l carried
+  - {gate: wording-check, round: 5, verdict: PASS, digest: 346e8cbe8857f4ffa8407cf41e06aee127865899404594bc9fda1d381bb10648, base: 2faa7054ec5f2c95b8bbdf7042598321fe051a6b, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 9, verdict: REVISE, blocking: 1, nits: 5}  # B1 'no two producers originate a root ref' reads as at most one originator: words now 'no root ref has two originators'; N1 cite telemetry_sessions annotate row; N2 'outside R10' kept for its pin; N3 merge-annotate told on merge; N4 12l carried; N5 rec-4122 cite left
+  - {gate: wording-check, round: 6, verdict: PASS, digest: 4c86d681e6c66b0c90ad1d829cc835c0b05dda3ee06eb5d516b88d88bf483b3d, base: 2faa7054ec5f2c95b8bbdf7042598321fe051a6b, selection: complete}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 10, verdict: PROCEED, blocking: 0, nits: 4}  # every env-r10 and tldr sentence checked true; N1 applied (docstring: minter = R10 originator); N2 tldr omits the events.py cut (digest kept); N3 12l carried; N4 never = only by Decision (approval note)
+  - {gate: plan-critique, round: 11, verdict: PROCEED, blocking: 0, nits: 3}  # confirming round; N1 fold correct; nits carried by choice: tldr omits events.py cut (digest kept), 12l ad_hoc_rec, never = only by Decision
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Only the plan-cited decision sections read (167, 199, 210, 235, 246, 275, 279)
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - Run bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-telemetry-session-ref-stability.yaml; on blocked, stop and report.
+  - >-
+    Create tests/telemetry/test_session_ref_stability.py per its scope row: three legs, a synthetic red case per leg,
+    the producer-to-corpus and producer-to-form maps, the base read with the CI fail-closed rule.
+  - Place the sidecar's ten blocks verbatim (approved_text verify passes).
+  - Record weakening dispositions per the constraint.
+  - Commit, then execute the Verification Plan (VP 1-2) on the committed tree (VP 2's drift gate reads merge_base..HEAD only, rec-5480); loop until pass; on an unrecoverable failure stop and report (Decision 55).
+  - Code review via a fresh code-review subagent; fix blocking findings and rerun VP 1-2.
+  - >-
+    CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared true; commit; rebase
+    on origin/main; re-run red_overlap; run VP 3 on the committed clean HEAD; push; open the build PR; subscribe; run
+    merge_step premerge; squash-merge on code review PROCEED and green CI with "Resolves: rec-5477" in the commit body;
+    run merge_step readback; then VP 4.
+  - >-
+    Report, as separate facts: what was implemented; readiness state; the full-tier exit plus validation_result
+    --verify-head for the pushed HEAD; structured postflight evidence (bin/venv-python -m scripts.session.postflight
+    --evidence); the push, PR number, CI result and read-back merge SHA; VP 4's read-back.
+rollback: >-
+  Revert the build's squash commit to restore the contracts and tests. After a revert, file a successor rec via file_rec
+  naming rec-5477 and the revert SHA (Decision 103: a resolved rec is never reactivated). A revert also demotes every
+  file it reverts to gated whole (approval-routing.yaml demotions.rule, Decision 279 cl.7), so restoring them later
+  needs an approval run; prefer a forward fix.
