@@ -47,7 +47,10 @@ scope:
       litellm_read, litellm_sampled_out, calls_over_10s and call_p95_s; not_read_budget counts only unexcused budget
       outcomes (budget outcomes minus litellm_sampled_out), so coverage_incomplete's formula is unchanged and an excused
       litellm tree never raises monitor_coverage_incomplete. MONITOR_BUDGET_S, CALL_WORST_CASE_S, FILING_RESERVE_S,
-      MAX_TREE_CALLS, the run-level and day-level phases (still sequential) and _stops are unchanged.
+      MAX_TREE_CALLS, the run-level and day-level phases (still sequential) and _stops are unchanged. monitor.py reads
+      monitor_capacity.LITELLM_FLOOR and MONITOR_WORKERS as module attributes at call time (import the module, never
+      from-import the constants), so tests can monkeypatch them; no workers == 1 branch, and the excusal branching stays
+      in monitor_capacity, so every new monitor.py line runs at workers=1 under test_monitor.py's per-file coverage.
   - file: scripts/telemetry_verify/__main__.py
     action: Modify
     purpose: >-
@@ -78,8 +81,8 @@ acceptance_criteria:
   - >-
     The existing tests/telemetry_verify/test_monitor.py and tests/telemetry/test_parent_observation_orphan_monitor.py
     pass unchanged (run_monitor defaults to workers=1), and on the golden world workers=1 and workers=2 reports are equal
-    excluding the timing fields and the workers field.
-  - No call starts once MAX_READER_CALLS calls are made or fewer than 2 x CALL_WORST_CASE_S of MONITOR_BUDGET_S remain, at either worker count.
+    excluding run_level_s, elapsed_s, max_call_s, calls_over_10s, call_p95_s and workers.
+  - No call starts once MAX_READER_CALLS calls are made or fewer than 2 x CALL_WORST_CASE_S of MONITOR_BUDGET_S remain, with two concurrent callers.
 verification_plan:
   - step: 1
     phase: pre-deploy
@@ -99,7 +102,9 @@ verification_plan:
       may start), a Budget whose clock sleeps 0.05 s on every read (widening the window between open() and the count
       increment), and two threads released together by a threading.Barrier each attempting one gate call; it asserts one
       call reached named() and the other raised _Refused. With _Gate unlocked both pass open() inside the sleep and two
-      calls reach named(), so the node is red. On a simulated build all seven pass.
+      calls reach named(), so the node is red. Its time leg: the cap patched large, a Budget of 2 x CALL_WORST_CASE_S +
+      0.5 s whose clock advances 1 s per read, two threads released together: no call starts once fewer than
+      2 x CALL_WORST_CASE_S remain. On a simulated build all seven pass.
     expected_literals:
       - 7 passed
     fix_if: A failure is the helper or the gate lock; fix the source, never the test. The prefix node failing means the producer's root ref changed; STOP to the plan owner.
@@ -113,8 +118,10 @@ verification_plan:
       bin/venv-python -m pytest -q tests/telemetry_verify/test_monitor_capacity.py tests/telemetry_verify/test_monitor.py
       tests/telemetry_verify/test_main.py tests/telemetry_verify/test_package_boundary.py tests/telemetry/test_parent_observation_orphan_monitor.py
     expected: >-
-      Exit 0 in a session with duckdb. The golden-world nodes: workers 1 and 2 give equal reports on the golden world
-      (timing fields excluded); with LITELLM_FLOOR monkeypatched to 0 and a per-call cost that refuses the litellm tree,
+      Exit 0 in a session with duckdb. The golden-world nodes, by name: test_two_workers_report_equals_one_worker
+      (equal reports excluding run_level_s, elapsed_s, max_call_s, calls_over_10s, call_p95_s and workers);
+      test_floor_met_excuses_litellm_without_coverage_alarm, test_floor_missed_raises_coverage_incomplete and
+      test_oversize_day_counts_sum_and_backfill_reads_rest (the cases below); with LITELLM_FLOOR monkeypatched to 0 and a per-call cost that refuses the litellm tree,
       every non-litellm tree is compared, litellm_sampled_out is 1, not_read_budget 0, monitor_coverage_incomplete
       absent from findings(), and the orphan_* and rederivation_mismatch:sessions_window classes equal the full-read run's;
       with the floor at 1 the same run raises monitor_coverage_incomplete 1; on an oversize day
@@ -124,7 +131,7 @@ verification_plan:
     fix_if: A golden-world mismatch between worker counts is a thread-safety or ordering defect in monitor.py; fix the source. A changed existing assertion is a STOP to the plan owner.
     hermetic: false
     graduation: waive
-    graduation_waiver_reason: The full tier runs these duckdb tests on every merge, and step 1 is the graduated duckdb-free guard, so a second graduated copy adds no guard.
+    graduation_waiver_reason: The fast-tier runner has no duckdb, so these nodes cannot replay there; the full tier runs them on every merge, which is the standing guard for the golden-world behaviour.
   - step: 3
     phase: pre-deploy
     action: Fast tier, size and import boundary on the branch.
@@ -150,8 +157,8 @@ verification_plan:
     action: rec-5420's acceptance on merged main from the session (agent_platform profile), backgrounded with a 2 h limit, on the latest quiet day.
     command: >-
       set -o pipefail; AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_verify monitor --no-alarms --assert-zero
-      monitor_coverage_incomplete 2>&1 | tee /tmp/monitor-read-budget-vp4.log && grep -E '^MONITOR .* not_read_budget=0 .*
-      workers=2 litellm_quiet=0 litellm_read=0 litellm_sampled_out=0 ' /tmp/monitor-read-budget-vp4.log
+      monitor_coverage_incomplete 2>&1 | tee /tmp/monitor-read-budget-vp5.log && grep -E '^MONITOR .* not_read_budget=0 .*
+      workers=2 litellm_quiet=0 litellm_read=0 litellm_sampled_out=0 ' /tmp/monitor-read-budget-vp5.log
     expected: >-
       The monitor exits 0 and grep prints the MONITOR line. Record reader_calls, elapsed_s, max_call_s, calls_over_10s
       and call_p95_s verbatim in the closure report (counts only). elapsed_s well under 2,000 (about 600 s expected for
@@ -169,9 +176,13 @@ verification_plan:
       AWS_PROFILE=agent_platform aws cloudwatch get-metric-statistics --region "$(cat config/aws-region)"
       --namespace AWS/Lambda --metric-name Throttles --dimensions Name=FunctionName,Value=agent-platform-ducklake-telemetry-reader
       --start-time "$(date -u -d '-1 day' +%Y-%m-%dT00:00:00Z)" --end-time "$(date -u -d '+1 day' +%Y-%m-%dT00:00:00Z)"
+      --period 86400 --statistics Sum --query 'Datapoints[].Sum' --output text &&
+      AWS_PROFILE=agent_platform aws cloudwatch get-metric-statistics --region "$(cat config/aws-region)"
+      --namespace AWS/Lambda --metric-name Invocations --dimensions Name=FunctionName,Value=agent-platform-ducklake-telemetry-reader
+      --start-time "$(date -u -d '-1 day' +%Y-%m-%dT00:00:00Z)" --end-time "$(date -u -d '+1 day' +%Y-%m-%dT00:00:00Z)"
       --period 86400 --statistics Sum --query 'Datapoints[].Sum' --output text
     expected: >-
-      Prints the daily throttle sums; record them with the same call for metric Invocations in the closure report. The
+      Prints the daily throttle sums, then the daily invocation sums; record both in the closure report. The
       7-day baseline before this plan (11-13..11-19) averaged about 1,370 invocations a day (max 2,622) with 7 throttles on
       11-17 and 1 on 11-20. Pass: no day's throttle sum above 7.
     fix_if: A day's throttle sum above 7 is a STOP to the plan owner (drop to one worker or amend), never a reserved-concurrency change in the build.
@@ -186,7 +197,7 @@ verification_plan:
       print(s); assert s['rec-5385']==s['rec-5420']=='closed';
       assert 'litellm_sampled_out' in next(r['context'] for r in rows if r['id']=='rec-4439')"
     expected: Prints the three statuses; rec-5385 and rec-5420 closed and rec-4439's context names residual (9) litellm_sampled_out.
-    fix_if: rec-5385 open means the trailer was missing or its acceptance failed in the closure job; rec-5420 open means update_rec was not run with step 5's MONITOR line as closure artifact.
+    fix_if: rec-5385 open means the trailer was missing, its acceptance failed, or the closure job judged it undecidable (re-read it with recs_by_ids); rec-5420 open means update_rec was not run with step 5's MONITOR line as closure artifact.
     hermetic: false
     graduation: not-applicable
 test_obligations:
@@ -200,6 +211,16 @@ test_obligations:
     verification_step: 1
     test_selector: tests/telemetry_verify/test_monitor_capacity.py::test_gate_holds_cap_and_time_rule_across_two_workers
     red_green_expectation: red before (no lock, two threads pass the cap), green after
+  - source: scripts/telemetry_verify/monitor.py
+    behavior: worker count does not change a report (thread pool keeps input order; entity_ref and read_order wired)
+    verification_step: 2
+    test_selector: tests/telemetry_verify/test_monitor_capacity.py::test_two_workers_report_equals_one_worker
+    red_green_expectation: red before (run_monitor has no workers parameter), green after
+  - source: scripts/telemetry_verify/monitor.py
+    behavior: the Decision 235 loosening - an excused litellm tree nets out of not_read_budget and raises no monitor_coverage_incomplete, only past the floor
+    verification_step: 2
+    test_selector: tests/telemetry_verify/test_monitor_capacity.py::test_floor_met_excuses_litellm_without_coverage_alarm
+    red_green_expectation: red before (no litellm_sampled_out field, the refused litellm tree counts not_read_budget), green after
   - source: scripts/telemetry_verify/__main__.py
     behavior: the MONITOR line carries the six new counts in order
     verification_step: 2
@@ -220,6 +241,8 @@ context:
     Decision 235 loosening, named and operator-chosen (decision card; "write the plan" 2026-11-21 11:41Z, this thread):
     past 60 read litellm trees, unread ones count litellm_sampled_out, not coverage incomplete. Claude Code trees stay
     exhaustive (the harness changes daily); uniform persona runs are sampled (c=0: 59 clean -> 95% that defects < 5%).
+    Not weakening-to-obtain-green (cl.1): the excused stratum has no rows today and step 5 asserts
+    litellm_sampled_out=0, so rec-5420's green comes from capacity.
   - >-
     Decision 181 cl.2: the build appends residual (9) "persona (litellm) trees past LITELLM_FLOOR on a day too large to
     read, counted litellm_sampled_out" to rec-4439's coverage residual list via update_rec (read back with recs_by_ids).
@@ -234,8 +257,14 @@ context:
   - >-
     Decision 215's reader-invocations-doubled condition is written for the recs reader; the monitor calls the telemetry
     reader (Decision 236), so it does not literally apply. Evidence: that reader averaged about 1,370 invocations a day
-    11-13..11-19 (max 2,622); an average day adds about 550 (1.4x), the busiest estimate about 2,200 (2.6x). Decision 88:
-    per-call catalog egress of telemetry reads is UNPROVEN, as are the demand estimates (2.5 heads per PR, 1.5 personas).
+    11-13..11-19 (max 2,622); an average day adds about 550 (1.4x), the busiest estimate about 2,200 (2.6x). If a wider
+    reading is ruled (its 2026-10-16 Update counted a telemetry gauge), the batch verb is the lever; the operator rules.
+    Demand estimates (2.5 heads per PR, 1.5 personas) are UNPROVEN.
+  - >-
+    Decision 88: per-call catalog egress of telemetry reads is UNPROVEN and has no session-reachable measurement
+    (catalog_stats is a maintenance-Lambda action; log_invocation has no egress field), so the post-merge measurement
+    the sign-off presentation named is dropped from this plan and owned by rec-5481 (filed 2026-11-21, read back;
+    Decision 181 cl.2 residual form); operator acknowledgement asked on this thread.
   - >-
     Related-work check (scripts.ci_rca.red_overlap, 2026-11-21 11:55 UTC): blocked by rec-5468 (notice-digest
     _ensure_issue race, Critical, slo_breached 18.4 h, shared files none). Deferral rationale: not this plan's repair and
@@ -253,12 +282,17 @@ context:
     telemetry-read-clients-build-the-routed-reader; no test_main.py node is renamed or removed.
   - >-
     Unbuilt plan on the same files (whichever builds second rebases): PLAN-telemetry-claude-p-capture-adapter
-    (__main__.py, test_main.py). closes_criteria is empty: a rec-driven leg of T4.32 c1, not follow-on mode.
+    (__main__.py, test_main.py); PLAN-merge-annotate-contract-reader's monitor.py change is already on main (#2228).
+    closes_criteria is empty: a rec-driven leg of T4.32 c1, not follow-on mode.
+  - >-
+    rec-5385's acceptance was rewritten 2026-11-21 by update_rec to step 1's seven node ids (decidable, read back with
+    recs_by_ids), so the Resolves trailer can close it.
   - "Owner: this planning thread (Size monitor read budget rec-5385) takes STOPs and amendments."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:ef56a4aec0dc890f7a5043c2b7cd80f56d387fef0e28940bebd06820715f5987"}
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:bf5b0f7041fe2b79f02f70b860e9b0749ecede0f608f829224b01d1b36f9a74e"}
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 4, nits: 9}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 3, nits: 10}
 weakening_dispositions:
   - candidate: "[constant-changed] scripts/telemetry_verify/monitor.py::MAX_READER_CALLS"
     disposition: planned-change
