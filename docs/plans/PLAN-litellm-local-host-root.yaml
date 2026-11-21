@@ -1,0 +1,393 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: litellm-local-host-root
+intent: >-
+  Solves rec-5437. A run_persona litellm run on a local persona compute host (local_container today; sandbox_runtime and
+  sandbox_runtime_windows when T4.34 builds them) has no root ref, so the litellm producer DEFERS it and the run is never
+  measured (ports.yaml PC-13). This plan roots such runs under the already-registered host_run_ref prefix
+  local:<runtime>/<run id>: the local_container adapter mints one run id per run and returns the host-run sidecar, the
+  litellm producer reads gha or local sidecars (parser_version 2), the claude_code reader stays gha-only, and host
+  precedence is fixed now (when hosts nest, the outermost host's sidecar names the run). The persona compute host
+  conformance suite binds every later local adapter to the same sidecar. PC-13 narrows to fargate. Serves NS.6 (persona
+  runs are recorded run units on every host).
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-litellm-local-host-root.yaml
+phase: >-
+  T3.22 (producer onboarding; rec-5437), cited for context only: a rec-driven slice that closes no criterion. Producer,
+  host adapter, test and contract-word changes only: no row is sent and no writer, Lambda or workflow changes, so nothing
+  deploys (V2).
+closes_criteria: []
+cites: [dec:101, dec:184, dec:199, dec:205, dec:206, dec:207, dec:210, dec:212, dec:231, dec:234, dec:246, dec:275, dec:279]
+scope:
+  - file: src/turn_capture/host_run.py
+    action: Modify
+    purpose: >-
+      LOCAL_RUNTIMES = ("local_container", "sandbox_runtime", "sandbox_runtime_windows") and a frozen LocalRun(project_ref,
+      agent, content_policy, runtime, run_id) dataclass. The schema_version 1 top-level parse (keys, project_ref PIN_REF,
+      agent AGENT_KEY, content_policy) moves into one private helper both readers share. New
+      parse_persona_host_run(data: bytes | None) -> HostRun | LocalRun | None, the litellm reader: host.kind "gha" uses the
+      unchanged gha grammar, host.kind "local" needs host keys exactly {kind, runtime, run_id}, runtime in LOCAL_RUNTIMES
+      and run_id matching [A-Za-z0-9_.-]{1,128} (the registered local: pattern's run id class); anything else is None.
+      parse_host_run (the claude_code reader and rule P-5's resolve_pin) stays gha-only and byte-for-byte unchanged in
+      behaviour, so no claude_code output changes. render_host_run_ref(host: HostRun | LocalRun) renders
+      local:<runtime>/<run_id> for a LocalRun.
+  - file: src/turn_capture/litellm_producer.py
+    action: Modify
+    purpose: >-
+      map_run reads the sidecar with parse_persona_host_run. A LocalRun root: session litellm:local:<runtime>/<run id>
+      (litellm_root_ref of the rendered ref, as today); the top-level run rows carry trigger manual, workflow_run_id
+      NULL and host_run_ref local:<runtime>/<run id>; the session rows carry execution_attempt 1; Ctx gets host None (Ctx.host
+      stays HostRun | None: only the claude_code path reads it). gha output is unchanged except the two version columns.
+      PARSER_VERSION 2, PRODUCER_VERSION "litellm-2".
+  - file: src/persona_hosts/local_container/adapter.py
+    action: Modify
+    purpose: >-
+      RunImageResult gains host_run: bytes | None = None. run_image gains keyword-only project_ref: str | None = None,
+      agent: str | None = None, host_run: bytes | None = None. Host precedence (the outermost host wins): a caller that
+      already holds a sidecar passes it as host_run and gets the same bytes back; it may not also pass project_ref or
+      agent (ValueError). Otherwise project_ref and agent go together (one without the other is a ValueError): run_image
+      mints uuid.uuid4().hex as the run id on each call (a re-run is a new session; no hostname, Decision 101), builds the
+      schema_version 1 sidecar {schema_version, project_ref, agent, content_policy "full", host {kind "local", runtime
+      "local_container", run_id}} as sorted-key JSON bytes, and checks it with
+      src.turn_capture.host_run.parse_persona_host_run before docker runs (an invalid project_ref or agent is a ValueError,
+      so the grammar has one source, Decision 210 cl.3). agent is the persona's executor-personas.yaml registry_key (for
+      example plan-critique), never its persona id (Decision 206 cl.4: one persona's runs share one key on every host); the
+      caller passes it, because the conformance fixture persona has no personas row. With none of the three, host_run is
+      None and the run DEFERS, as today. src.persona_hosts may import src.turn_capture (.importlinter forbids only
+      scripts, src.persona_backends, src.lambdas and src.data).
+  - file: tests/persona_hosts/conformance_suite.py
+    action: Modify
+    purpose: >-
+      One leg, test_run_returns_a_host_run_sidecar_the_producer_roots, parametrised over ADAPTERS like every leg (Decision
+      212 cl.1-2: a later adapter adds an ADAPTERS entry, never a second suite): one complete-input run with
+      project_ref "example/project" and agent "plan-critique" returns host_run bytes that parse_persona_host_run accepts;
+      for an adapter id in LOCAL_RUNTIMES the result is a LocalRun whose runtime equals the adapter id and whose agent and
+      project_ref are the ones passed. The sandbox_runtime adapters (T4.34:c3 binds them to this one gating suite,
+      Decision 234 cl.2) inherit it. Needs the Docker daemon like the rest of the suite (ci.yml's conformance step).
+  - file: tests/turn_capture/test_litellm_non_gha_root.py
+    action: Create
+    purpose: >-
+      rec-5437's acceptance file. (1) A local sidecar maps to rows: one session open and close under
+      litellm:local:local_container/<run id>, the run rows with trigger manual, workflow_run_id absent (None) and
+      host_run_ref local:local_container/<run id>, execution_attempt 1, model_call rows under the same session ref.
+      (2) Invalid local sidecars DEFER: an unknown runtime, a run id with ':' or '/', an extra host key, a missing
+      run_id. (3) parse_host_run still returns None for a valid local sidecar (claude_code reads gha only). (4) Round
+      trip: run_image with subprocess.run mocked (the test_adapter pattern) and project_ref and agent given returns a
+      sidecar that map_run roots; given a gha sidecar as host_run, it returns those bytes unchanged and map_run roots the
+      gha session (outermost host wins). Names stay as here: rec-5437's acceptance runs this file.
+  - file: tests/turn_capture/test_host_run.py
+    action: Modify
+    purpose: >-
+      Unit legs for the new branches (per-file coverage of host_run.py, scripts/test_coverage_checker.py): local accepted
+      for each runtime, each refusal, render of a LocalRun, and LOCAL_RUNTIMES is a subset of the persona_compute_host
+      adapter ids in docs/contracts/ports.yaml (read from the file; growth-safe subset, never a count).
+  - file: tests/turn_capture/test_litellm_producer.py
+    action: Modify
+    purpose: Unit legs for the LocalRun branches of the session and run rows (coverage of litellm_producer.py).
+  - file: tests/persona_hosts/local_container/test_adapter.py
+    action: Modify
+    purpose: >-
+      Daemon-free legs: a minted sidecar per call with a fresh run id (two calls differ), sorted-key bytes that
+      parse_persona_host_run accepts; host_run passed through unchanged; ValueError for host_run with project_ref, for
+      project_ref without agent and the reverse, and for an agent that fails the grammar; no sidecar when none is given.
+  - file: tests/fixtures/turn_capture_litellm_cases.py
+    action: Modify
+    purpose: >-
+      HOST_RUN_LOCAL, a local sidecar (agent plan-critique, project_ref example/project, runtime local_container, run_id
+      the fixed 32-hex 0123456789abcdef0123456789abcdef), and a local_container_run.json builder: the single_call script
+      under HOST_RUN_LOCAL. The existing builders are unchanged.
+  - file: tests/fixtures/turn_capture/golden/litellm/local_container_run.json
+    action: Create
+    purpose: The new golden case, written from its builder (files) and map_run plus normalise (expected_rows).
+  - file: tests/fixtures/turn_capture/golden/litellm/index.json
+    action: Modify
+    purpose: The case list gains local_container_run.json last.
+  - file: tests/fixtures/turn_capture/golden/litellm/single_call.json
+    action: Modify
+    purpose: >-
+      expected_rows regenerated at parser_version 2 (only the parser_version and producer_version columns change; the
+      same holds for the six rows below). Each existing case's files are unchanged.
+  - file: tests/fixtures/turn_capture/golden/litellm/anthropic_thinking.json
+    action: Modify
+    purpose: expected_rows regenerated at parser_version 2.
+  - file: tests/fixtures/turn_capture/golden/litellm/fail_over_probe.json
+    action: Modify
+    purpose: expected_rows regenerated at parser_version 2.
+  - file: tests/fixtures/turn_capture/golden/litellm/deadline_cancelled.json
+    action: Modify
+    purpose: expected_rows regenerated at parser_version 2.
+  - file: tests/fixtures/turn_capture/golden/litellm/repair_loss_markers.json
+    action: Modify
+    purpose: expected_rows regenerated at parser_version 2.
+  - file: tests/fixtures/turn_capture/golden/litellm/aborted_transport.json
+    action: Modify
+    purpose: expected_rows regenerated at parser_version 2.
+  - file: tests/fixtures/turn_capture/golden/litellm/partial_no_end.json
+    action: Modify
+    purpose: expected_rows regenerated at parser_version 2.
+  - file: tests/telemetry/test_parser_version_registry.py
+    action: Modify
+    purpose: LITELLM_CASES gains local_container_run.json last (the tuple must equal the index's case list).
+  - file: config/telemetry/parser_versions.yaml
+    action: Modify
+    purpose: >-
+      litellm history gains version 2 (date the build's UTC date, golden_digest recomputed over the eight cases, reason:
+      PLAN-litellm-local-host-root (rec-5437): a local host-run sidecar roots a run as litellm:local:<runtime>/<run id>,
+      trigger manual, no workflow_run_id; one new golden case), current 2. Version 1's row is unchanged.
+  - file: tests/personas/test_telemetry_rows.py
+    action: Modify
+    purpose: The rows-document version pin reads ("litellm", 2, "litellm-2").
+  - file: docs/contracts/telemetry-event-envelope.yaml
+    action: Modify
+    purpose: >-
+      Sidecar blocks env-host and env-ll1 only: the LITELLM line's host-run facts are those "of the host that ran it",
+      and LL-1 reads "litellm:<host_run_ref>. On gha a retry ordinal counts ..." so the gha clause no longer reads as the
+      only grammar. Both are prose fixes of words rec-5477 already generalised ("Its root composes the host_run_ref
+      registry"): no rule changes, so no log row (validate_contract_drift needs none for governance_notes, measured).
+      53859 (after rec-5477's build) -> 53826 of 53867.
+  - file: docs/contracts/telemetry_agents.yaml
+    action: Modify
+    purpose: >-
+      Sidecar blocks agt-mint, agt-nest, agt-log and agt-populated only: host_run_ref semantics says the host mints one
+      run id per run and that when hosts nest the outermost host's sidecar names the run and an inner host handed one
+      writes none; one semantic_break true row on fields.host_run_ref.amendment_log (category 6); workflow_run_id
+      populated_by names a gha sidecar. 48781 (after rec-5477's build) -> 49137 of 49152.
+  - file: docs/contracts/ports.yaml
+    action: Modify
+    purpose: >-
+      Sidecar blocks ports-pc13 and ports-log only: PC-13 narrows to fargate (owner T4.15:c15, CAPTURE FROM DAY ONE),
+      still open; its ports stay [persona_compute_host, verdict_plane] and it keeps naming github_actions_shell and LL-1
+      (tests/telemetry/test_litellm_producer_contract_notes.py pins both; test_validate_ports_contract removes the
+      run_persona port from a copy, so a row naming it fails). One terse top-level row (not a full row, so keep_full
+      holds). 50168 -> 50251 of 50251 (the limit is inclusive: _byte_budget fails only a size that exceeds it).
+  - file: docs/plans/approved/litellm-local-host-root.yaml
+    action: Create
+    purpose: >-
+      Plan PR only, never the build: the approved-text sidecar (Decision 246), eight blocks over three contracts. All
+      three are notice class (Decision 279); the sidecar is voluntary and binds the precedence words, which become a
+      root-ref rule once local rows exist (rec-5482 asks whether such words should be gated).
+implementation_declared: false
+bundled_recommendations:
+  - rec-5437
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - The envelope, telemetry_agents and ports words are on main exactly as the sidecar's blocks (approved_text verify).
+  - A local_container run that run_image gave a sidecar maps to litellm:local:local_container/<run id> rows, and an outer gha sidecar passed in roots the gha session instead.
+  - claude_code output is unchanged and every pre-existing litellm golden session keeps its ref (rec-5477's leg (a)).
+  - rec-5437's acceptance command exits 0 on main and the rec is closed by the merge's Resolves trailer.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: rec-5437's acceptance file and the unit legs.
+    command: bin/venv-python -m pytest tests/turn_capture/test_litellm_non_gha_root.py tests/turn_capture/test_host_run.py tests/turn_capture/test_litellm_producer.py tests/persona_hosts/local_container/test_adapter.py tests/personas/test_telemetry_rows.py -q
+    expected: 'Exit 0. Red before: test_litellm_non_gha_root.py is absent (pytest exits 4).'
+    fix_if: Any failure; fix the producer or adapter, never a golden case by hand.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: These files are the standing checks and run in every tier that selects tests/turn_capture, tests/persona_hosts or tests/personas; a graduated shard would duplicate them.
+  - step: 2
+    phase: pre-deploy
+    action: Registry, goldens and the ref-stability check hold at parser_version 2.
+    command: bin/venv-python -m pytest tests/telemetry/test_parser_version_registry.py tests/telemetry/test_session_ref_stability.py tests/turn_capture/test_litellm_producer.py::test_golden_rows tests/turn_capture/test_litellm_producer.py::test_cases_match_builders -q
+    expected: Exit 0; leg (a) of test_session_ref_stability.py shows every base litellm session kept its ref.
+    fix_if: 'A base session moved: STOP to this planning thread (an R10 change), never edit a golden case to pass.'
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: The registry and ref-stability modules are themselves the standing checks for every producer bump.
+  - step: 3
+    phase: pre-deploy
+    action: The conformance suite's new leg on a real Docker daemon.
+    command: bin/venv-python -m pytest tests/persona_hosts/conformance_suite.py -q
+    expected: Exit 0, every leg including test_run_returns_a_host_run_sidecar_the_producer_roots. Without a reachable daemon the suite fails by design; then read the leg's result from ci.yml's conformance step on the build PR (name its run id).
+    fix_if: The leg fails; fix run_image. A daemon-less local environment is not a failure of this step when the PR's conformance step passed.
+    hermetic: false
+    graduation: not-applicable
+  - step: 4
+    phase: pre-deploy
+    action: The approved words are placed word for word and the contract gates and size limits hold.
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug litellm-local-host-root && bin/venv-python -c "from scripts.checks.contracts.validate_contract_drift import validate_contract_drift as v; f=[]; v(f); assert not f, f" && bin/venv-python -m pytest tests/telemetry/test_litellm_producer_envelope_notes.py tests/telemetry/test_contract_amendments.py -q
+    expected: Prints the approved-text OK line, the drift gate passes on the committed diff (run after the commit), then exit 0 from pytest.
+    fix_if: 'A before-block not found once (main moved under it) or a byte cap crossed: STOP to this planning thread for a sidecar amendment, never re-word or compact in the build.'
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: approved_text verify is the merge-step check and the drift gate and pytest files are standing checks in every tier that reads these contracts.
+  - step: 5
+    phase: pre-deploy
+    action: Pre-handoff full tier on the committed, rebased tree (Decision 163), read through its evidence file.
+    command: bin/venv-python -m scripts.validate; bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: Start the full tier backgrounded with a 2 h limit from the top-level session (AGENTS.md), then read the verdict with --verify-head, never a pipe's exit status. It reports the full tier passed on HEAD's tree, including validate_contract_drift, the structural size budgets and per-file coverage.
+    fix_if: >-
+      Any failure; fix and re-run both from the start (timeout_disposition blocked). A byte or line cap exceeded after a
+      rebase, or a before-block moved: STOP to this planning thread for a sidecar amendment.
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: post-deploy
+    action: rec-5437's acceptance holds on main after the merge, and the rec is closed.
+    command: >-
+      bin/venv-python -m pytest tests/turn_capture/test_litellm_non_gha_root.py -q && grep -q 'id: PC-13, ports: \[persona_compute_host, verdict_plane\], location: src/turn_capture/, status: open, owning_item: "T4.15:c15"' docs/contracts/ports.yaml && AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader; r,_=fetch_recs_by_ids(make_reader(),['rec-5437']); print(r[0]['status']); assert r[0]['status']=='closed'"
+    expected: >-
+      Run only after ci.yml's trailer-closure job has finished on the merge SHA (name its run id; it waits behind
+      main-validate; event-driven, never polled). Exit 0, then prints closed.
+    fix_if: >-
+      Open: run bin/venv-python -m scripts.session.merge_step readback; a missing trailer goes to merge_step recover
+      (git-ops resolves_trailer). After an acceptance-verdict refusal never close by hand: fix forward, or strengthen
+      the acceptance with update_rec in this planning thread. A portal close is sanctioned only after a transport
+      failure or a merge-leg refusal (Decision 201).
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: src/turn_capture/host_run.py
+    behavior: parse_persona_host_run accepts a gha or a local sidecar and refuses an unknown runtime, a run id outside the class, an extra or missing host key; parse_host_run still refuses local.
+    verification_step: 1
+    test_selector: tests/turn_capture/test_litellm_non_gha_root.py
+    red_green_expectation: red before (file absent), green after.
+  - source: src/turn_capture/litellm_producer.py
+    behavior: A local sidecar maps to a litellm:local:<runtime>/<run id> session with trigger manual, workflow_run_id NULL and execution_attempt 1; a gha sidecar's rows keep their refs.
+    verification_step: 1
+    test_selector: tests/turn_capture/test_litellm_non_gha_root.py
+    red_green_expectation: red before (file absent; on main a local sidecar DEFERS), green after.
+  - source: src/persona_hosts/local_container/adapter.py
+    behavior: run_image mints a fresh local sidecar per call when given project_ref and agent, returns a passed-in sidecar unchanged, refuses mixed or half arguments, and returns none otherwise.
+    verification_step: 1
+    test_selector: tests/persona_hosts/local_container/test_adapter.py
+    red_green_expectation: red before (run_image takes no project_ref), green after.
+  - source: tests/persona_hosts/conformance_suite.py
+    behavior: Every adapter's run returns a sidecar the producer roots; a local adapter's runtime is its own id.
+    verification_step: 3
+    test_selector: tests/persona_hosts/conformance_suite.py::test_run_returns_a_host_run_sidecar_the_producer_roots
+    red_green_expectation: red before (leg absent), green after on a Docker daemon.
+  - source: config/telemetry/parser_versions.yaml
+    behavior: litellm current 2 with the recomputed golden digest over eight cases; version 1's row unchanged.
+    verification_step: 2
+    test_selector: tests/telemetry/test_parser_version_registry.py
+    red_green_expectation: red before (expected rows edited without a bump), green after.
+  - source: docs/contracts/telemetry_agents.yaml
+    behavior: The host_run_ref mint and nesting words and their field row are placed word for word.
+    verification_step: 4
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug litellm-local-host-root
+    red_green_expectation: red before (blocks absent from main), green after.
+  - source: docs/contracts/telemetry-event-envelope.yaml
+    behavior: The LITELLM line and LL-1 words are placed word for word.
+    verification_step: 4
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug litellm-local-host-root
+    red_green_expectation: red before (blocks absent from main), green after.
+  - source: docs/contracts/ports.yaml
+    behavior: PC-13 narrows to fargate and its row is placed word for word.
+    verification_step: 4
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug litellm-local-host-root
+    red_green_expectation: red before (blocks absent from main), green after.
+weakening_dispositions: []
+constraints:
+  - >-
+    One build PR: the code, the tests, the regenerated goldens, the eight sidecar blocks verbatim ({{DATE}} -> the build's
+    UTC date) and implementation_declared true in this plan, in one commit series. "Resolves: rec-5437" goes in a branch
+    commit message (validate_merge_step reads branch-commit trailers) and in the explicit merge commit_message (git-ops
+    resolves_trailer TRANSPORT). The build edits no sidecar word. If a block's before-text is not on main exactly once,
+    STOP to this planning thread.
+  - >-
+    The build starts only after rec-5477's build has merged (rec-5437 depends on rec-5477; execution step 1 reads it
+    closed): the byte figures above are measured on main plus rec-5477's sidecar, and its leg (a) is VP 2's ref-stability
+    check. The blocks anchor only on words main and rec-5477's build both hold, so either order of placement finds each
+    before-text once.
+  - >-
+    Goldens: each existing case's files stay byte-identical; only expected_rows regenerate, through the case builders,
+    map_run and the corpus normalise (a scratch script outside the repo, never committed). A change to any row other than
+    the two version columns in an existing case is a producer regression: fix the code.
+  - >-
+    Weakening gate (Decision 235): the test edits add functions and update the one version pin in
+    tests/personas/test_telemetry_rows.py (a literal the bump moves, not a weakened assertion). If
+    validate_weakening_candidates lists a candidate, STOP to this planning thread; never record one to pass.
+  - No new test imports another test_* module (tests/fixtures helpers only) and none asserts an exact count on a growing collection.
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - >-
+    Decision scout r1 on this plan file (2026-11-21 15:20 UTC): NO_FLAGS. Decisions triaged: 228 of 228. Roadmap items
+    intersected: 5; CONFLICT: 0; RELATED: 5. Serves: NS.6 4/5. CITE 101, 184, 199, 205, 206, 207, 210, 212, 231, 234, 246,
+    275, 279; the pre-draft WARN 206 and NOTE 212 are resolved. Observation: the conformance leg also binds a later
+    github_actions_shell or fargate ADAPTERS entry to return a sidecar the producer roots, which matches PC-13's owner.
+  - >-
+    rec-5437 acceptance updated 2026-11-21 through update_rec and read back open: the acceptance file plus a grep that
+    PC-13 is owned by "T4.15:c15" (the old form asserted the row's prefix changed, which only a ports-list edit could
+    satisfy, and that edit breaks two pinned tests). VP 6 mirrors it.
+  - >-
+    Pre-draft scouts on the brief (no plan file yet): r1 2026-11-20 FLAGS_FOUND (NOTE 212: bind future hosts to the
+    conformance suite), before the operator's frame ruling; r2 2026-11-21 14:45 UTC FLAGS_FOUND, 228 of 228, Roadmap
+    items intersected: 5; CONFLICT: 0; RELATED: 3. Serves: NS.6 4/5. WARN Decision 206 cl.4: the sidecar agent must be the
+    persona's registry_key, not its id (fixed: the caller passes the key; goldens and tests use plan-critique). NOTE 212:
+    recorded as the conformance leg. PC-13 owner T4.15:c15, not c12. Routing answer: host precedence is field semantics in
+    the owning contract (decision-entry.yaml significance, field_semantics), not a numbered Decision; once local rows
+    exist, reversing it would re-key stored sessions and need a Decision (restated R10).
+  - >-
+    Operator rulings: 2026-11-20 no exemption precedent, R10 restated first as rec-5477 (plan #2328, squash 5070cb63; build
+    pending behind rec-5468); 2026-11-21 14:48 UTC "write the plan" for this proposal
+    (/mnt/project-files/run-persona-backend/PRESENTATION-plan-rec5437-r2.md), which also OKs editing Feedback Loop's
+    parser registry and its test, the litellm goldens and the envelope. Blind Fable consult:
+    /mnt/project-files/run-persona-backend/rec5437-advisor-brief/ADVICE.md (keep the claude_code reader gha-only; the host
+    mints and persists the run id; fix precedence now; deferred runs are lost, not delayed: no backfill).
+  - >-
+    Where the precedence words live: the envelope has 8 free bytes after rec-5477's build and its top-level log has no
+    compactable row (every older row is semantic_break true and stays full), so the mint and nesting rules sit on
+    telemetry_agents host_run_ref, the field that names a run's host, and LL-1 only stops reading as gha-only. Measured on a
+    local clone of main 5070cb63 with rec-5477's sidecar edits committed as origin/main: validate_contract_drift fails a
+    host_run_ref semantics change without a field row and passes with the semantic_break true row; the envelope prose
+    fixes need no row; bytes as in the scope rows.
+  - >-
+    Precedence in practice: the only GitHub-hosted persona host is the pending github_actions_shell adapter (T4.2:c8),
+    whose writer is the T8 fixture-run plan; a GitHub job that runs local_container on its runner passes its gha sidecar
+    in. Decision 205 cl.2 ("the shell is the only GitHub-aware layer") holds: run_image treats a passed sidecar as opaque
+    bytes. Decision 229 cl.3 keeps compute-plane personas off Actions, so nesting arises for verdict personas only.
+  - >-
+    Not in scope: a GitHub Actions writer for run_persona sidecars (T8 fixture-run plan), the sandbox_runtime adapters
+    (T4.34), the fargate root (PC-13, T4.15:c15) and any backfill of runs that DEFERRED before this build.
+  - >-
+    Related-work check (scripts.ci_rca.red_overlap): run by the build first (execution step 1); rec-5468 (main red past
+    SLO) halts build dispatch under red-main-recovery.yaml halt rule 1 until repaired.
+gate_rounds:
+  - gate: decision-scout
+    round: 1
+    scout_input_fingerprint: v1:0b21c4dec67ea4c9a0241314058dbb65c0d3ad78ad786d5e204c655be71da8b5
+    verdict: NO_FLAGS
+  - {gate: wording-check, round: 1, verdict: FAIL, digest: aeccca5de46c7bd5661675493aa9d85b2c49eacf5cdf27a2a019e70a24757883, base: 5070cb63c1e0fd9ad3a9eedb7e43664724525365, selection: complete}  # pragma: allowlist secret  # PC-13 ports run_persona broke two pinned tests; ports kept, acceptance updated
+  - {gate: wording-check, round: 2, verdict: PASS, digest: d8a8a09586bb219b64c47ed12d11f3a70086ba16503e76c832fee589d28b6b3c, base: 5070cb63c1e0fd9ad3a9eedb7e43664724525365, selection: complete}  # pragma: allowlist secret
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - rec-5477 read closed (its build merged)
+  - Only the plan-cited decision sections read
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - >-
+    Run bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-litellm-local-host-root.yaml; on blocked,
+    stop and report. Read rec-5477 through the reader; if it is not closed, stop and report (its build must merge first).
+  - Implement host_run.py, litellm_producer.py and adapter.py per their scope rows.
+  - >-
+    Add the local_container_run.json builder, regenerate every litellm case's expected_rows from its builder, add the new
+    case to index.json and LITELLM_CASES, and register litellm version 2 in parser_versions.yaml with the recomputed
+    digest.
+  - Write the new and modified tests per their scope rows, including the conformance leg.
+  - Place the sidecar's eight blocks verbatim (approved_text verify passes).
+  - Record weakening dispositions per the constraint.
+  - Commit, then execute the Verification Plan (VP 1-4) on the committed tree (VP 4's drift gate reads merge_base..HEAD only, rec-5480); loop until pass; on an unrecoverable failure stop and report (Decision 55).
+  - Code review via a fresh code-review subagent; fix blocking findings and rerun VP 1-4.
+  - >-
+    CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared true; commit; rebase
+    on origin/main; re-run red_overlap; run VP 5 on the committed clean HEAD; push; open the build PR; subscribe; run
+    merge_step premerge; squash-merge on code review PROCEED and green CI with "Resolves: rec-5437" in the commit body;
+    run merge_step readback; then VP 6.
+  - >-
+    Report, as separate facts: what was implemented; readiness state; the full-tier exit plus validation_result
+    --verify-head for the pushed HEAD; structured postflight evidence (bin/venv-python -m scripts.session.postflight
+    --evidence); the push, PR number, CI result (including the conformance step's run id) and read-back merge SHA; VP 6's
+    read-back.
+rollback: >-
+  Revert the build's squash commit to restore the producer, adapter, goldens and contracts. Rows a local run wrote before
+  the revert keep their refs; a later re-introduction must reproduce the same local grammar or it is an R10 change. After a
+  revert, file a successor rec via file_rec naming rec-5437 and the revert SHA (Decision 103: a resolved rec is never
+  reactivated). A revert also demotes every file it reverts to gated whole (approval-routing.yaml demotions.rule,
+  Decision 279 cl.7), so restoring them later needs an approval run; prefer a forward fix.
