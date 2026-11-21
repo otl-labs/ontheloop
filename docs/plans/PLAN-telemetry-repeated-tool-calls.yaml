@@ -31,7 +31,12 @@ scope:
       (external_ref without '/tool_call_open', same tenant_id, project_id, producer, session_id, parser_version); window
       counts per (session_id, tool name) ordered by (event_timestamp, source_ordinal, event_id) give repeat_input_count,
       repeat_output_count and repeat_output_bytes (output_sha256 not NULL and output_bytes > 0 on the call's latest
-      close); each count is coalesced to 0 when no call repeats, never NULL. No CTE projects transcript text. The edit fits the module's 48-SLOC headroom (452 of 500): no facade split,
+      close); each count is coalesced to 0 when no call repeats, never NULL. A call whose open reaches no surviving
+      tool_input row (withheld, empty or unlinked, so its digest is NULL after the LEFT JOIN) never counts and never
+      anchors a repeat: the input flag is digest IS NOT NULL AND row_number() OVER (PARTITION BY session_id, name, digest
+      ORDER BY ...) > 1, mirroring the output side's output_sha256 IS NOT NULL. If dedupe leaves two tool_input rows on one
+      external_ref, the first by (event_timestamp, source_ordinal, event_id) is used. No CTE projects transcript text.
+      The edit fits the module's 48-SLOC headroom (452 of 500): no facade split,
       since a new module would change the content reader's bundled set (Decision 272 cl.1); if it would cross 500, stop
       and tell the coordinator, never a raise (Decision 128).
   - file: src/common/ducklake_event_read_verbs.py
@@ -50,7 +55,9 @@ scope:
       The independent oracle's tool_use_rollup derives the same three counts from the deduped rows: it maps each open's
       external_ref to its tool_input transcript row by the link key (scope.tables[TRANSCRIPTS], which follows the verb's
       registered tables), then per (session_id, tool name) counts calls after the first holding the same non-empty
-      digest, and the same for the latest close's output_sha256 with output_bytes > 0; all three are 0, never None, when
+      digest (a call with no linked non-empty digest never repeats and never anchors one; of two tool_input rows on one
+      external_ref the first by (event_timestamp, source_ordinal, event_id) is used), and the same for the latest close's
+      output_sha256 with output_bytes > 0; all three are 0, never None, when
       nothing repeats (the module's _total NULL convention does not apply). Written from the contract note,
       never from the SQL; the module docstring's declared conventions gain one line for it.
   - file: scripts/telemetry_usage.py
@@ -60,21 +67,25 @@ scope:
       (true when tool_name is in BOOKKEEPING_TOOLS). BOOKKEEPING_TOOLS = ("mcp__hearthbot__no_reply_needed",
       "ReadNotifications"), the two tools the 2026-11-19 probe found repeating by design (267 and 89 of 573 repeated calls).
       For the tools command the result gains repeat_totals {all, without_bookkeeping}, each the three sums over every
-      row read.
+      row read, 0 (never None) when no row was read.
   - file: docs/contracts/ducklake_telemetry_reader.yaml
     action: Modify
     purpose: >-
       The "Usage verbs" audit invariant gains, after the tool_use_rollup sentence, the text in context (Contract text);
       one amendment_log row appended last (change_class field_add, semantic_break false, naming model_usage_rollup,
-      tool_use_rollup and session_startup_baseline, which test_reader_contract_declares_the_usage_verbs reads). Notice
+      tool_use_rollup and session_startup_baseline, which test_reader_contract_declares_the_usage_verbs reads; its summary
+      also says tool_use_rollup's derivation_conflicted and conflicted_grain_keys can now flip on a transcript-only
+      conflict, so the CLI's conflicted_rows for tools can grow with no observation change). Notice
       class (Decision 279): no approved-text sidecar.
   - file: tests/common/test_ducklake_event_read_tool_usage.py
     action: Modify
     purpose: >-
       Three nodes over verb and oracle: test_repeat_input_count_same_tool_same_session (rec-5079 acceptance),
       test_repeat_output_count_and_bytes_on_latest_close (rec-5250 acceptance) and
-      test_empty_withheld_and_cross_session_inputs_never_repeat (all three counts equal 0, not None, on rows with no
-      repeat). Each hand-built call replaces external_ref (its open, its tool_input row with the matching ref and its
+      test_empty_withheld_and_cross_session_inputs_never_repeat: two withheld calls (empty-string digest) of one tool in
+      one session, two opens of one tool with no tool_input row, and one input shared by two sessions, each asserting
+      repeat_input_count == 0 (red against a NULL-partition implementation), and all three counts equal 0, not None, on
+      rows with no repeat. Each hand-built call replaces external_ref (its open, its tool_input row with the matching ref and its
       close), observation_id and event_id together, so a clone never links to the source call's input. The existing golden-tree oracle test covers the new
       columns unchanged.
   - file: tests/test_telemetry_usage.py
@@ -174,7 +185,8 @@ verification_plan:
       times the baseline (8 s and 31 s) passes, above it passes with the ratio reported to the coordinator as the read-cost
       finding. TOTALS shows without_bookkeeping no larger than all.
     fix_if: >-
-      a 504 read_deadline_exceeded or a 500 on either direct read: stop and tell the coordinator (the transcripts scan is
+      a 413 response_too_large on the three-day read: report it and rerun that window as three one-day reads (the CLI
+      halves the same way; row size grew by three integers), not a failure; a 504 read_deadline_exceeded or a 500 on either direct read: stop and tell the coordinator (the transcripts scan is
       the plan's open risk). The default remedy the coordinator weighs is the plan's rollback (revert the merge commit and
       let deploy-ducklake-lambdas ship it), since an existing verb is degraded; a narrower read is a separate plan, never a
       deadline raise here. A repeat count above call_count:
@@ -209,7 +221,8 @@ verification_plan:
       fi; break; done; test -n "$ok"
     expected: >-
       "run <id> deployed <sha>" then contains, exit 0: the newest deploy-telemetry-content run whose record job succeeded,
-      and the commit it deployed contains the build commit. The report names the run id.
+      and the commit it deployed contains the build commit. The report names the run id (the same read through
+      mcp__github__actions_list and get_job_logs where gh is unavailable).
     fix_if: no approved run since the merge yet (wait, never dispatch), or the run failed (the content channel's own recovery)
     hermetic: false
 test_obligations:
@@ -257,15 +270,16 @@ context:
   - "Why a separate count, not a friction rule change: the 2026-11-18/19 probe (72 roots) found every classifier_version 3 failure run had 3 distinct inputs, so an identical-input run key would zero the rework signal; operator chose the separate count on 2026-11-21."
   - "Partition choice: a repeat is per (session_id, tool name), the row's own grain; order only picks which call is first, so counts and bytes do not depend on it (equal output_sha256 means equal bytes). A tool_input row duplicated after dedupe keeps the first by (event_timestamp, source_ordinal, event_id), so a link never fans out a call."
   - "Decision 207: adding TRANSCRIPTS to the verb's tables widens compose()'s conflicts union, so the tree-level stamps also report telemetry_transcripts conflicts; the contract text says so."
-  - "Contract text (append after the tool_use_rollup sentence of the Usage verbs invariant): tool_use_rollup also reads telemetry_transcripts and carries repeat_input_count (calls whose tool_input row, reached by _joins.yaml ref_links.tool_call_open_to_tool_input, has a content_sha256 equal to an earlier call's of the same tool name in the same session; the empty-string digest of a withheld row never counts), repeat_output_count (calls whose latest close has a non-NULL output_sha256 with output_bytes above 0 equal to an earlier call's of the same tool name in the same session) and repeat_output_bytes (those calls' output_bytes summed); each is 0 when no call repeats; earlier is by the open row's event_timestamp, source_ordinal and event_id. It reads the digest only, never content, and its tree-level stamps also cover telemetry_transcripts conflicts."
+  - "Contract text (append after the tool_use_rollup sentence of the Usage verbs invariant): tool_use_rollup also reads telemetry_transcripts and carries repeat_input_count (calls whose tool_input row, reached by _joins.yaml ref_links.tool_call_open_to_tool_input, has a content_sha256 equal to an earlier call's of the same tool name in the same session; a call with no linked digest, or the empty-string digest of a withheld row, never counts and never anchors a repeat), repeat_output_count (calls whose latest close has a non-NULL output_sha256 with output_bytes above 0 equal to an earlier call's of the same tool name in the same session) and repeat_output_bytes (those calls' output_bytes summed); each is 0 when no call repeats; earlier is by the open row's event_timestamp, source_ordinal and event_id. It reads the digest only, never content, and its tree-level stamps also cover telemetry_transcripts conflicts."
   - "Notice-class files this plan changes (Decision 279): docs/contracts/ducklake_telemetry_reader.yaml and this plan."
-  - "red_overlap (2026-11-21 ~15:10 UTC, main 5070cb63): blocked by rec-5468 (notice-digest issue create race, scripts/ci/notice_digest.py), past the 4 h SLO, shared files none; PLAN-notice-digest-create-number is its fix. Deferral: operator 2026-11-17, builds proceed past reds sharing no files; the build re-runs red_overlap before it starts."
+  - "red_overlap (2026-11-21 ~15:10 UTC, main 5070cb63): blocked by rec-5468 (notice-digest issue create race, scripts/ci/notice_digest.py), past the 4 h SLO, shared files none; its fix has since landed (29aa11ee). Deferral: operator 2026-11-17, builds proceed past reds sharing no files; the build re-runs red_overlap before it starts."
   - "Rec re-key 2026-11-21: rec-5079's acceptance moved from the dropped producer test to test_repeat_input_count_same_tool_same_session and its file to the sql module; rec-5250's undecidable acceptance moved to test_repeat_output_count_and_bytes_on_latest_close."
   - "Kept graduated shards (assertions additive only): friction-signature-registration-and-cli, telemetry-usage-cli-fails-closed, telemetry-usage-verbs-registered."
   - "Headroom (plan_obligations, 5070cb63): sql 452/500, verbs 389/500, telemetry_usage.py 394/500, tests/test_telemetry_usage.py 442/500 (two short tests fit), contract 18,619 of 49,152 B."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:5338aeda44f5e01ca2887d3595d95552252a03b0b1a8bf68971baf947b172209"}  # pragma: allowlist secret
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 1, nits: 6}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 6}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
