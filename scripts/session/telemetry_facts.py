@@ -24,6 +24,7 @@ _KIND_RANK = {
     "metadata_key": 4,
     "ref_link": 5,
     "verb_only": 6,
+    "retired": 7,
 }
 _CONCEPT, _ADDRESS, _DESCRIPTION = 0, 1, 2
 _NO_MATCH = "no match is not proof of absence: answer data-modeling-standard.yaml design_time_walk step 0 from its sources"
@@ -106,7 +107,9 @@ def render(row: FactRow) -> str:
     lines = [head]
     if row.description:
         lines.append(f"  {row.description}")
-    owner = f"unproduced owner {row.owner}" if row.kind == "unproduced" else row.owner
+    owner = {"unproduced": f"unproduced owner {row.owner}", "retired": f"retired, dropped by {row.owner}"}.get(
+        row.kind, row.owner
+    )
     if row.producers:
         lines.append(f"  producers: {', '.join(row.producers)}")
     if owner:

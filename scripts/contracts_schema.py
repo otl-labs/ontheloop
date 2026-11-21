@@ -211,14 +211,16 @@ class Realization(BaseModel):
     scripts/checks/contracts/validate_telemetry_field_realization.py).
 
     `produced` keys are a registered producer id or the literal `write_boundary`; `unproduced` keys are
-    owners. Unrelated to a read-derived field's `derivation.realized`, which says a write-time derivation
-    is implemented.
+    owners; `retired` keys are the rec that owns the physical drop of columns no producer ever wrote (a third
+    placement, exclusive with the other two). Unrelated to a read-derived field's `derivation.realized`, which
+    says a write-time derivation is implemented.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     produced: dict[str, list[str]] = Field(default_factory=dict)
     unproduced: dict[str, list[str]] = Field(default_factory=dict)
+    retired: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class RunShape(BaseModel):

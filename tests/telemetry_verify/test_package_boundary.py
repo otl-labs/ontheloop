@@ -19,6 +19,7 @@ _ALLOWED_MODULES = {
     "src.common.ducklake_reader_client",
     "src.telemetry.identity",
     "scripts.rec_episode",
+    "scripts.checks.contracts.validate_telemetry_field_realization",
     "scripts.telemetry_capture.read_route",
 }
 _FORBIDDEN = (

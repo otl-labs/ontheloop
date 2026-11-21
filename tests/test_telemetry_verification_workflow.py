@@ -93,3 +93,14 @@ def test_the_telemetry_reader_url_and_host_are_masked() -> None:
     written = run.index('>> "$GITHUB_ENV"')
     assert run.index('echo "::add-mask::${URL}"') < written and run.index('echo "::add-mask::${HOST}"') < written
     assert f"DUCKLAKE_{'telemetry_reader'.upper()}_URL" == read_route.READER_URL_ENV
+
+
+def test_owners_step_runs_after_the_monitor() -> None:
+    monitor = _index(lambda s: "scripts.telemetry_verify monitor" in str(s.get("run", "")))
+    owners = _index(lambda s: "scripts.telemetry_verify owners" in str(s.get("run", "")))
+    assert owners > monitor
+    step = _steps()[owners]
+    assert step["if"] == "!cancelled()" and step["name"] == "Check telemetry field owners are open"
+    assert step["timeout-minutes"] == 5
+    assert step["run"].strip().splitlines()[-1].strip() == ".venv/bin/python -m scripts.telemetry_verify owners"
+    assert "--no-alarms" not in step["run"]

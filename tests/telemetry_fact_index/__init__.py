@@ -56,9 +56,14 @@ def make_root(tmp_path: Path, overrides: dict[str, dict[str, Any]] | None = None
                 "name": _field(dq_intent={"required_when": {"event_kind": ["point"], "observation_type": ["process_event"]}}),
                 "output_sha256": _field(dq_intent={"required_when": {"output_capture": ["captured", "omitted_oversize"]}}),
                 "legacy": _field(),
+                "dropped": _field(),
                 "metadata": _field(),
             },
-            {"produced": {"claude_code": ["name", "output_sha256", "metadata"]}, "unproduced": {"rec-1": ["legacy"]}},
+            {
+                "produced": {"claude_code": ["name", "output_sha256", "metadata"]},
+                "unproduced": {"rec-1": ["legacy"]},
+                "retired": {"rec-2": ["dropped"]},
+            },
         ),
         "telemetry_agents": _contract(
             "telemetry_agents", {"agent_type": _field()}, {"produced": {"claude_code": ["agent_type"]}}

@@ -35,6 +35,11 @@ def test_unproduced_row_names_its_owner(synthetic_rows: dict[str, Any]) -> None:
     assert synthetic_rows["telemetry_sessions.workflow"].kind == "stored"
 
 
+def test_retired_row_is_its_own_kind_owned_by_its_drop_rec(synthetic_rows: dict[str, Any]) -> None:
+    row = synthetic_rows["telemetry_observations.dropped"]
+    assert (row.kind, row.owner, row.producers) == ("retired", "rec-2", [])
+
+
 def test_read_derived_served_from_registry_not_realized(synthetic_rows: dict[str, Any]) -> None:
     served = synthetic_rows["telemetry_sessions.surface"]
     assert served.kind == "read_derived" and [s.verb for s in served.serving] == ["session_surface"]
