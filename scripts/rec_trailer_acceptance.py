@@ -36,11 +36,14 @@ import json
 import subprocess
 import sys
 import tempfile
+from functools import partial
 from pathlib import Path
 from typing import Any, Optional
 
 from scripts.backlog_health import census as census_mod
 from scripts.backlog_health import probe as probe_mod
+from scripts.ci import trailer_range
+from scripts.ci.deploy_gate import Git, GithubApi
 from scripts.executor.acceptance_lint import lint_acceptance_command
 from scripts.ops_portal.closure_gate import ACCEPTANCE_VERDICTS, FAILS, HOLDS, OUT_OF_GRAMMAR, UNMEASURABLE
 from scripts.rec_trailer_acceptance_junit import ROUTE_JUNIT, ROUTE_REFUSE, ROUTE_STATIC, classify_grammar
@@ -98,6 +101,7 @@ def census(
     repo_root: Path = ROOT,
     reader: Any = None,
     profile: Optional[str] = None,
+    closing_sha: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """Read every trailer-named rec (via `rows`, the test-injection seam, or a per-id
     `rec_by_id` reader read) and classify each into a census bucket, EXECUTING the
@@ -156,6 +160,7 @@ def census(
                 "acceptance_sha256": hashlib.sha256(acceptance.encode("utf-8")).hexdigest(),
                 "bucket": bucket,
                 "route": route,
+                "closing_sha": closing_sha,
             }
         )
     return entries
@@ -257,7 +262,7 @@ def rejoin(
             if entry.get("route") == ROUTE_JUNIT and rec_id not in clean:
                 clean[rec_id] = {
                     "rec_id": rec_id,
-                    "sha": census_doc.get("sha", "unknown"),
+                    "sha": entry.get("closing_sha") or census_doc.get("sha", "unknown"),
                     "acceptance_sha256": entry.get("acceptance_sha256"),
                     "verdict": UNMEASURABLE,
                     "source": SOURCE_JUNIT,
@@ -312,16 +317,24 @@ def _read_json(path: Path) -> dict[str, Any]:
 def cmd_census(args: argparse.Namespace) -> int:
     from scripts.rec_trailer import parse_resolves_trailer  # noqa: PLC0415
 
-    message = _current_commit_message(ROOT)
-    ids = parse_resolves_trailer(message)
-    if not ids:
+    ids = parse_resolves_trailer(_current_commit_message(ROOT))
+    head = _current_sha(ROOT)
+    entries = census(ids, repo_root=ROOT, closing_sha=head) if ids else []
+    doc = trailer_range.extend_census(
+        head,
+        ids,
+        entries,
+        census_fn=partial(census, repo_root=ROOT),
+        parse_trailer=parse_resolves_trailer,
+        reader=_make_reader(),
+        api=GithubApi(),
+        git=Git(str(ROOT)),
+    )
+    if not doc["ids"]:
         print("[rec_trailer_acceptance census] no Resolves trailer found -- no-op")
-        _write_json(args.artifact_dir / _CENSUS_ARTIFACT, {"ids": [], "entries": []})
-        return 0
-
-    entries = census(ids, repo_root=ROOT)
-    print(f"[rec_trailer_acceptance census] ids={ids} entries={[e['bucket'] for e in entries]}")
-    _write_json(args.artifact_dir / _CENSUS_ARTIFACT, {"ids": ids, "entries": entries})
+    else:
+        print(f"[rec_trailer_acceptance census] ids={doc['ids']} entries={[e['bucket'] for e in doc['entries']]}")
+    _write_json(args.artifact_dir / _CENSUS_ARTIFACT, doc)
     return 0
 
 
@@ -380,14 +393,20 @@ def cmd_close(args: argparse.Namespace) -> int:
         if found:
             recs_cache[rec_id] = dict(found[0])
 
-    return close_recs_from_trailer(
-        ids,
-        commit_sha,
-        run_url,
-        recs_cache,
-        acceptance_verdicts=acceptance_verdicts,
-        require_acceptance_verdict=True,
-    )
+    code = 0
+    for closing_sha, group_ids in trailer_range.close_groups(census_doc, commit_sha):
+        code = max(
+            code,
+            close_recs_from_trailer(
+                group_ids,
+                closing_sha,
+                run_url,
+                recs_cache,
+                acceptance_verdicts=acceptance_verdicts,
+                require_acceptance_verdict=True,
+            ),
+        )
+    return code
 
 
 def build_parser() -> argparse.ArgumentParser:

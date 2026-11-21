@@ -1847,6 +1847,8 @@ conditions:
 
 **Related:** Decisions 55, 77, 100, 142, 181, 186, 187, 217, 235, 246, 248, 252; rec-4874, rec-5019, rec-5033.
 
+> **Update (2026-11-21):** Cl.9's cl.4 row is split. rec-5106 (build plans 2a and 2b: PLAN-last-green-range-consumers, PLAN-trailer-range-closure) built cl.2's resolver, ci-rca's range diff and cross-workflow dedup, and the trailer census and junit binding over a range. Three cl.4 legs stay dormant until rec-5107 and are rec-5107's: push_context_base anchoring on prev in main-validate; ci-rca's anchor, pull-request lookup and selection manifest on the recorded range and culprit; and a workflow_dispatch re-diagnosis diffing prev..<run head>. The trailer binding's missed-rec residual (docs/contracts/full-tier-range.yaml trailer_census.missed) is also rec-5107's until it serialises main-validate.
+
 ---
 
 ## Decision 253: The DuckLake catalog moves to RDS PostgreSQL -- SIT is born on it, PROD follows once SIT's reset has rehearsed the restore, and SIT's instance runs only while a pipeline uses it (amends Decisions 107 and 214) (Decided)

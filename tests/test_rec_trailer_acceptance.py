@@ -45,6 +45,18 @@ from scripts.rec_trailer_acceptance import (
 from scripts.rec_trailer_acceptance_junit import ROUTE_JUNIT, ROUTE_REFUSE, ROUTE_STATIC
 
 _REAL_NODE = "tests/test_rec_trailer_acceptance.py::TestRejoin::test_matching_record_survives"
+_HEAD = "headsha"
+
+
+@pytest.fixture(autouse=True)
+def _range_seams(monkeypatch: pytest.MonkeyPatch) -> None:
+    import scripts.rec_trailer_acceptance as m
+
+    monkeypatch.setattr(m.trailer_range, "extend_census", lambda head, ids, entries, **kw: {"ids": ids, "entries": entries})
+    monkeypatch.setattr(m.trailer_range, "close_groups", lambda doc, head: [(head, doc["ids"])])
+    for name in ("GithubApi", "Git", "_make_reader"):
+        monkeypatch.setattr(m, name, MagicMock())
+    monkeypatch.setattr(m, "_current_sha", lambda root: _HEAD)
 
 
 def _run_cmd_close(
@@ -96,9 +108,7 @@ class TestVerdictMapping:
         )
 
     def test_axis_parity_with_vp_red_before(self) -> None:
-        """Decision 189 axis discipline: the intersection of ACCEPTANCE_VERDICTS with
-        vp-red-before.yaml's OUTCOME_CLASSES is exactly the single genuinely shared arm,
-        "unmeasurable" -- asserted, not merely stated in prose."""
+        """Decision 189 axis discipline: the only arm shared with OUTCOME_CLASSES is "unmeasurable"."""
         assert ACCEPTANCE_VERDICTS & set(OUTCOME_CLASSES) == {UNMEASURABLE}
 
     def test_probeable_pass_holds(self) -> None:
@@ -123,9 +133,7 @@ class TestVerdictMapping:
 
 class TestCensus:
     def test_undecidable_acceptance_is_out_of_grammar(self) -> None:
-        """The census stage EXECUTES the require_decidable ratchet: a trailer-named rec whose
-        acceptance carries no decidable assertion is classified out_of_grammar (via
-        unprobeable_shape) and never probed."""
+        """The census EXECUTES the require_decidable ratchet: no decidable assertion is out_of_grammar."""
         rows = [{"id": "rec-1", "acceptance": "echo done"}]
         entries = census(["rec-1"], rows=rows)
         assert len(entries) == 1
@@ -147,9 +155,7 @@ class TestCensus:
 
 class TestEvaluate:
     def test_isolation_unavailable_resolves_every_entry_to_unmeasurable(self, tmp_path) -> None:
-        """evaluate() delegates isolation_available entirely to probe.run_all's own returned
-        artifact rather than deciding it itself -- an ISOLATION_UNAVAILABLE run resolves to
-        `unmeasurable` for every probeable entry, never a silent pass."""
+        """isolation_available comes from probe.run_all; an unavailable run is unmeasurable, never a pass."""
         entries = [
             {
                 "rec_id": "rec-1",
@@ -262,13 +268,7 @@ class TestJunitRouting:
         assert entries[0]["route"] == ROUTE_STATIC
 
     def test_unparseable_pytest_command_is_refused_and_reaches_neither_route(self) -> None:
-        """In this tree, slice A's own require_decidable lint already fails-closed on a
-        shlex-unparseable command (its own segmentation raises, so no segment can be decidable),
-        rerouting it to unprobeable_shape before this plan's grammar routing would ever run --
-        the lint-wins precedence in action. This test isolates the ROUTING partition's OWN
-        fail-closed behaviour independent of that coupling (defense in depth: the routing must
-        never admit an unparseable command to junit even if lint's own gate ever changed), by
-        forcing the lint check to pass so census() reaches the grammar classifier directly."""
+        """Forcing the lint to pass isolates the routing partition's own fail-closed arm (defense in depth)."""
         cmd = "pytest " + _REAL_NODE + " " + chr(92)
         with patch("scripts.rec_trailer_acceptance.lint_acceptance_command", return_value=(True, None)):
             rows = [{"id": "rec-1", "acceptance": cmd}]
@@ -288,10 +288,7 @@ class TestJunitRouting:
         assert real_lint_ok is False
 
     def test_lint_refusal_wins_over_junit_routing(self) -> None:
-        """A require_decidable lint refusal reroutes bucket to unprobeable_shape BEFORE grammar
-        routing ever runs, so a command that would otherwise be junit-eligible is instead
-        out_of_grammar via slice A's own refusal path -- precedence stated in
-        docs/contracts/git-ops.yaml#trailer_acceptance_gate."""
+        """A lint refusal wins over junit routing (git-ops.yaml#trailer_acceptance_gate)."""
         with patch("scripts.rec_trailer_acceptance.lint_acceptance_command", return_value=(False, "refused")):
             rows = [{"id": "rec-1", "acceptance": "pytest " + _REAL_NODE}]
             entries = census(["rec-1"], rows=rows)
@@ -327,6 +324,8 @@ class TestJunitRouting:
         merged = rejoin(census_doc, static_doc, None)
         assert merged["rec-1"]["verdict"] == UNMEASURABLE
         assert merged["rec-1"]["arm"] == "report_unavailable"
+        census_doc = {"sha": "run", "entries": [{"rec_id": "rec-1", "route": ROUTE_JUNIT, "closing_sha": "merge1"}]}
+        assert rejoin(census_doc, static_doc, None)["rec-1"]["sha"] == "merge1"
 
     def test_rejoin_empty_but_present_junit_doc_synthesizes_nothing(self) -> None:
         """A present-but-empty junit document is a legitimate result (the junit-verdict stage ran
@@ -438,7 +437,7 @@ class TestCliStages:
         ):
             rc = cmd_census(args)
         assert rc == 0
-        mock_census.assert_called_once_with(["rec-1"], repo_root=RTA_ROOT)
+        mock_census.assert_called_once_with(["rec-1"], repo_root=RTA_ROOT, closing_sha=_HEAD)
         assert json.loads((tmp_path / _CENSUS_ARTIFACT).read_text(encoding="utf-8")) == {
             "ids": ["rec-1"],
             "entries": fake_entries,

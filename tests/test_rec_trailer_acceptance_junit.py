@@ -328,6 +328,14 @@ class TestJunitGrammar:
             assert result.route in ROUTES
 
 
+def test_record_sha_is_entry_closing_sha(tmp_path: Path) -> None:
+    report = _write_report(tmp_path, '<testcase classname="tests.x" name="test_a"/>')
+    entry = {"acceptance": "pytest tests/x.py::test_a", "acceptance_sha256": "a", "route": ROUTE_JUNIT}
+    census_doc = {"entries": [{"rec_id": "rec-1", **entry, "closing_sha": "merge1"}, {"rec_id": "rec-2", **entry}]}
+    shas = {r["rec_id"]: r["sha"] for r in junit_verdict(census_doc, report, "runsha")["records"]}
+    assert shas == {"rec-1": "merge1", "rec-2": "runsha"}
+
+
 def test_junit_arms_and_grammar_arms_are_disjoint_vocabularies() -> None:
     assert set(JUNIT_ARMS).isdisjoint(set(GRAMMAR_ARMS))
 

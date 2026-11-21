@@ -91,3 +91,15 @@ def test_non_mapping_contract_is_red(tmp_path: Path) -> None:
     root = _tree(tmp_path)
     (root / CONTRACT).write_text("- a\n- b\n", encoding="utf-8")
     assert _run(root) == [LABEL]
+
+
+def test_trailer_census_marker_drift_fails(tmp_path: Path) -> None:
+    root = _tree(tmp_path, ('deferred: "TRAILER-RANGE DEFERRED"', 'deferred: "TRAILER-RANGE HELD"'))
+    assert _run(root) == [LABEL]
+
+
+def test_missing_trailer_census_fails(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    text = (root / CONTRACT).read_text(encoding="utf-8")
+    (root / CONTRACT).write_text(text.replace("trailer_census:", "trailer_census_removed:"), encoding="utf-8")
+    assert _run(root) == [LABEL]

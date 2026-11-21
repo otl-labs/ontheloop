@@ -322,7 +322,7 @@ def junit_verdict(census_doc: dict[str, Any], junit_path: Path, sha: str) -> dic
         records.append(
             {
                 "rec_id": entry["rec_id"],
-                "sha": sha,
+                "sha": entry.get("closing_sha") or sha,
                 "acceptance_sha256": entry["acceptance_sha256"],
                 "verdict": verdict_for_junit(arm),
                 "source": SOURCE_JUNIT,
