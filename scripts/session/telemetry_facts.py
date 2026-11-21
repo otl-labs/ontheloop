@@ -104,8 +104,6 @@ def render(row: FactRow) -> str:
     if row.type:
         head += f" type={row.type}"
     lines = [head]
-    if row.condition and "[" not in row.address:
-        lines.append(f"  when: {row.condition}")
     if row.description:
         lines.append(f"  {row.description}")
     owner = f"unproduced owner {row.owner}" if row.kind == "unproduced" else row.owner

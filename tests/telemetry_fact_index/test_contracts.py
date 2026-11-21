@@ -10,8 +10,7 @@ import yaml
 
 from scripts.contracts import load_contract, resolve_refs
 from scripts.telemetry_fact_index import project
-from scripts.telemetry_fact_index.contracts import project_contracts
-from scripts.telemetry_fact_index.model import TABLES
+from scripts.telemetry_fact_index.contracts import TABLES, project_contracts
 from tests.telemetry_fact_index import _contract, _field, make_root
 
 REPO = Path(__file__).resolve().parents[2]

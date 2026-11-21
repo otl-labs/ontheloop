@@ -151,51 +151,57 @@ class TestWiring:
         assert resolved is validate_telemetry_lexicon_tables
 
 
-class TestFactsEntries:
-    """test_facts_entries_resolve / test_facts_entry_rejects_non_address (PLAN-telemetry-fact-index)."""
+def _setup_facts(tmp_path: Path, terms: list[dict], contract_text: str | None = None) -> list[str]:
+    field = {"type": "str", "iceberg_type": "string", "nullable": True, "description": "d"}
+    doc = {
+        "contract": {
+            "id": "telemetry_transcripts",
+            "class": "A",
+            "contract_version": 1,
+            "status": "draft",
+            "description": "d",
+            "projects_to": {"artifact": "a", "table": "telemetry_transcripts", "generator": "g"},
+        },
+        "fields": {
+            "content": field,
+            "purpose": {**field, "dq_intent": {"accepted_values": {"values": ["tool_input", "prompt"]}}},
+        },
+    }
+    text = contract_text if contract_text is not None else yaml.safe_dump(doc)
+    (tmp_path / "telemetry_transcripts.yaml").write_text(text, encoding="utf-8")
+    lexicon = {"lexicon": {"model": {"canonical_tables": ["telemetry_transcripts"], "collapses": {}}, "terms": terms}}
+    (tmp_path / _CONTRACT_NAME).write_text(yaml.dump(lexicon), encoding="utf-8")
+    failed: list[str] = []
+    validate_telemetry_lexicon_tables(failed, contracts_dir=tmp_path)
+    return failed
 
-    @staticmethod
-    def _setup(tmp_path: Path, terms: list[dict]) -> list[str]:
-        field = {"type": "str", "iceberg_type": "string", "nullable": True, "description": "d"}
-        doc = {
-            "contract": {
-                "id": "telemetry_transcripts",
-                "class": "A",
-                "contract_version": 1,
-                "status": "draft",
-                "description": "d",
-                "projects_to": {"artifact": "a", "table": "telemetry_transcripts", "generator": "g"},
-            },
-            "fields": {
-                "content": field,
-                "purpose": {**field, "dq_intent": {"accepted_values": {"values": ["tool_input", "prompt"]}}},
-            },
-        }
-        (tmp_path / "telemetry_transcripts.yaml").write_text(yaml.safe_dump(doc), encoding="utf-8")
-        lexicon = {"lexicon": {"model": {"canonical_tables": ["telemetry_transcripts"], "collapses": {}}, "terms": terms}}
-        (tmp_path / _CONTRACT_NAME).write_text(yaml.dump(lexicon), encoding="utf-8")
-        failed: list[str] = []
-        validate_telemetry_lexicon_tables(failed, contracts_dir=tmp_path)
-        return failed
 
-    def test_facts_entries_resolve(self, tmp_path: Path) -> None:
-        good = {
-            "term": "t",
-            "aka": ["a"],
-            "facts": ["telemetry_transcripts.content[purpose=tool_input]", "telemetry_transcripts.content#skill"],
-        }
-        assert self._setup(tmp_path, [good]) == []
-        cases = {
-            "missing field": {"facts": ["telemetry_transcripts.nope"]},
-            "missing discriminator": {"facts": ["telemetry_transcripts.content[nodisc=x]"]},
-            "two discriminators": {"facts": ["telemetry_transcripts.content[purpose=prompt,content=x]"]},
-            "value outside accepted_values": {"facts": ["telemetry_transcripts.content[purpose=bogus]"]},
-            "aka case": {"aka": ["Hash"], "facts": []},
-            "aka duplicate": {"aka": ["a", "a"], "facts": []},
-        }
-        for label, extra in cases.items():
-            assert self._setup(tmp_path, [{"term": "t", **extra}]), label
+def test_facts_entries_resolve(tmp_path: Path) -> None:
+    good = {
+        "term": "t",
+        "aka": ["a"],
+        "facts": ["telemetry_transcripts.content[purpose=tool_input]", "telemetry_transcripts.content#skill"],
+    }
+    assert _setup_facts(tmp_path, [good]) == []
+    cases = {
+        "missing field": {"facts": ["telemetry_transcripts.nope"]},
+        "missing discriminator": {"facts": ["telemetry_transcripts.content[nodisc=x]"]},
+        "two discriminators": {"facts": ["telemetry_transcripts.content[purpose=prompt,content=x]"]},
+        "value outside accepted_values": {"facts": ["telemetry_transcripts.content[purpose=bogus]"]},
+        "aka case": {"aka": ["Hash"], "facts": []},
+        "aka duplicate": {"aka": ["a", "a"], "facts": []},
+    }
+    for label, extra in cases.items():
+        assert _setup_facts(tmp_path, [{"term": "t", **extra}]), label
 
-    def test_facts_entry_rejects_non_address(self, tmp_path: Path) -> None:
-        assert self._setup(tmp_path, [{"term": "t", "facts": [{"address": "telemetry_transcripts.content"}]}])
-        assert self._setup(tmp_path, [{"term": "t", "facts": ["the content column, a text"]}])
+
+def test_facts_entry_rejects_non_address(tmp_path: Path) -> None:
+    assert _setup_facts(tmp_path, [{"term": "t", "facts": [{"address": "telemetry_transcripts.content"}]}])
+    assert _setup_facts(tmp_path, [{"term": "t", "facts": ["the content column, a text"]}])
+
+
+def test_facts_entry_on_an_unloadable_contract_fails(tmp_path: Path) -> None:
+    failed = _setup_facts(
+        tmp_path, [{"term": "t", "facts": ["telemetry_transcripts.content"]}], contract_text="contract: [not a mapping]\n"
+    )
+    assert any("names no resolved field" in f for f in failed)

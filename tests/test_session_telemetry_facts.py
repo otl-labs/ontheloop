@@ -90,3 +90,15 @@ def test_lexicon_concepts_carry_their_facts(lexicon: dict[str, Any]) -> None:
     terms = {t["term"]: t for t in lexicon["lexicon"]["terms"]}
     assert terms["digest"]["aka"] == ["hash", "fingerprint", "checksum", "sha256"]
     assert len(terms["digest"]["facts"]) == 4 and len(terms["skill name"]["facts"]) == 3
+
+
+def test_render_shows_each_row_kind(rows: list[Any]) -> None:
+    by_address = {r.address: r for r in rows}
+    surface = telemetry_facts.render(by_address["telemetry_sessions.surface"])
+    assert "served by: unserved" in surface
+    owned = next(r for r in rows if r.kind == "unproduced")
+    assert f"owner: unproduced owner {owned.owner}" in telemetry_facts.render(owned)
+    meta = next(r for r in rows if r.kind == "metadata_key")
+    assert "declared: " in telemetry_facts.render(meta)
+    link = telemetry_facts.render(by_address["ref_link:tool_call_open_to_tool_input"])
+    assert "from: telemetry_observations" in link and "to: telemetry_transcripts" in link

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from scripts.telemetry_fact_index.model import FactRow, Serving, parse_address, tokens
+from scripts.telemetry_fact_index.contracts import FactRow, Serving, parse_address, tokens
 
 __all__ = ["FactRow", "Serving", "parse_address", "project", "tokens"]
 

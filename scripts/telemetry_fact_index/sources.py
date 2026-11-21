@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml
 
-from scripts.telemetry_fact_index.model import FactRow, Serving, condition_of, parse_address, tokens
+from scripts.telemetry_fact_index.contracts import FactRow, Serving, condition_of, parse_address, tokens
 
 _SERVED_KINDS = ("stored", "unproduced", "payload_key", "metadata_key")
 _REGISTRY_REL = "docs/contracts/telemetry-metadata-keys.yaml"

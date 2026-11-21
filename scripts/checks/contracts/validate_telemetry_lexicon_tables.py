@@ -8,12 +8,13 @@ an existing Class A contract (docs/contracts/<table>.yaml, contract.class == "A"
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import yaml
 
 from scripts.checks import _common, registry
 from scripts.contracts import ContractValidationError, load_contract, resolve_refs
-from scripts.telemetry_fact_index.model import parse_address
+from scripts.telemetry_fact_index.contracts import parse_address
 
 _CONTRACT_NAME = "telemetry-lexicon.yaml"
 
@@ -59,7 +60,7 @@ def _facts_errors(target_dir: Path, terms: object) -> tuple[list[str], int]:
     cache: dict[str, object] = {}
     for term in terms if isinstance(terms, list) else []:
         name = term.get("term") if isinstance(term, dict) else None
-        aka = term.get("aka") if isinstance(term, dict) and isinstance(term.get("aka"), list) else []
+        aka: list[Any] = term["aka"] if isinstance(term, dict) and isinstance(term.get("aka"), list) else []
         if any(not isinstance(a, str) or a != a.lower() for a in aka) or len(set(aka)) != len(aka):
             errors.append(f"term {name!r}: aka words must be lower case and unique")
         for entry in (term.get("facts") or []) if isinstance(term, dict) else []:
