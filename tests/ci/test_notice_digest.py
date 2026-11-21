@@ -175,12 +175,22 @@ def test_posting_uses_the_lowest_labelled_issue_and_a_body_file(monkeypatch: pyt
     assert calls[0] == ["row one", "row two"]
 
 
+def test_ensure_issue_captures_create_response_number(monkeypatch: pytest.MonkeyPatch) -> None:
+    url = "https://github.com/otl-labs/ontheloop/issues/2307\n"
+    calls = _gh_recorder(monkeypatch, [_ok("[]"), _ok(), _ok(url)])
+    assert nd._ensure_issue() == 2307
+    assert [tuple(c[1:3]) for c in calls[1:]] == [("issue", "list"), ("label", "create"), ("issue", "create")]
+    _gh_recorder(monkeypatch, [_ok("[]"), _ok(), _ok("Creating issue in otl-labs/ontheloop\n" + url)])
+    assert nd._ensure_issue() == 2307
+
+
 def test_a_missing_issue_creates_the_label_then_the_issue(monkeypatch: pytest.MonkeyPatch) -> None:
     exists = SimpleNamespace(returncode=1, stdout="", stderr="label already exists")
-    calls = _gh_recorder(monkeypatch, [_ok("[]"), exists, _ok(), _ok(json.dumps([{"number": 12}])), _ok()])
+    created = _ok("https://github.com/otl-labs/ontheloop/issues/12\n")
+    calls = _gh_recorder(monkeypatch, [_ok("[]"), exists, created, _ok()])
     nd.post(["only"])
     kinds = [tuple(c[1:3]) for c in calls[1:]]
-    assert kinds == [("issue", "list"), ("label", "create"), ("issue", "create"), ("issue", "list"), ("issue", "comment")]
+    assert kinds == [("issue", "list"), ("label", "create"), ("issue", "create"), ("issue", "comment")]
     assert calls[-1][3] == "12"
 
 
@@ -188,8 +198,8 @@ def test_gh_failures_are_loud(monkeypatch: pytest.MonkeyPatch, repo: Path, capsy
     _gh_recorder(monkeypatch, [_ok("[]"), SimpleNamespace(returncode=1, stdout="", stderr="denied")])
     with pytest.raises(RuntimeError, match="label create failed"):
         nd.post(["x"])
-    _gh_recorder(monkeypatch, [_ok("[]"), _ok(), _ok(), _ok("[]")])
-    with pytest.raises(RuntimeError, match="not found after creating"):
+    _gh_recorder(monkeypatch, [_ok("[]"), _ok(), _ok("")])
+    with pytest.raises(RuntimeError, match="printed no issue URL"):
         nd.post(["x"])
     _gh_recorder(monkeypatch, [SimpleNamespace(returncode=1, stdout="", stderr="boom")])
     before = _with_map(repo)
