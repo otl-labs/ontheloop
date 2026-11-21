@@ -33,15 +33,17 @@ scope:
       unread-by-budget litellm trees excused (non-zero only when no non-litellm tree is unread by budget and at least
       min(floor, litellm trees to read) litellm trees were compared; moved or collided trees are not clean samples and
       do not count toward the floor); CallStats, a lock-guarded recorder of call seconds with
-      calls_over_10s and call_p95_s (whole seconds, ceil) over every gated call and both describes (the calls
+      calls_over_10s (calls lasting strictly more than 10 s) and call_p95_s (whole seconds, ceil) over every gated call and both describes (the calls
       reader_calls counts).
   - file: scripts/telemetry_verify/monitor.py
     action: Modify
     purpose: >-
-      MAX_READER_CALLS 800 -> 3000. _Gate takes one threading.Lock over the open() check and the count increment (so two
-      workers never pass the cap; the time rule already holds under concurrency, since each in-flight call started with
-      at least 900 s left and lasts at most 450 s) and over max_call_s/max_bytes, and records each
-      call's seconds in a CallStats. _root_row keeps entity_ref. run_monitor gains workers: int = 1 (so every existing
+      MAX_READER_CALLS 800 -> 3000. _Gate's __call__ holds one threading.Lock around the cap and time check (an
+      unlocked private helper that open() also calls) and the count increment, so two workers never pass the cap; the
+      time rule already holds under concurrency, since each in-flight call started with at least 900 s left and lasts
+      at most 450 s. open() never takes that non-reentrant lock, so _process's own gate.open() pre-check stays advisory
+      and cannot deadlock. The same lock guards max_call_s/max_bytes, and the gate records each call's seconds in a
+      CallStats. _root_row keeps entity_ref. run_monitor gains workers: int = 1 (so every existing
       caller and test stays sequential; only __main__ passes MONITOR_WORKERS); to_read is
       read_order(quiet)[skip_trees:] (quiet sorted as today first, so skip_trees and next_skip stay positional over the
       new order); the tree phase runs _process over to_read on a ThreadPoolExecutor(max_workers=workers) with map, so
@@ -124,9 +126,12 @@ verification_plan:
       tests/telemetry_verify/test_main.py tests/telemetry_verify/test_package_boundary.py tests/telemetry/test_parent_observation_orphan_monitor.py
     expected: >-
       Exit 0 in a session with duckdb. The golden-world nodes, by name: test_two_workers_report_equals_one_worker
-      (equal reports excluding run_level_s, elapsed_s, max_call_s, calls_over_10s, call_p95_s and workers; with
-      world.cost = 11.0 it also asserts report.calls_over_10s == report.reader_calls - 2 (the two describes cost 0),
-      report.call_p95_s == 11, and report.workers == 2 on the two-worker run, so a report that always prints 0 is red);
+      (the equality pair runs at the World's default cost 0, where the default Budget never binds: equal reports
+      excluding run_level_s, elapsed_s, max_call_s, calls_over_10s, call_p95_s and workers; then, with world.cost = 11.0
+      and budget=monitor.Budget(10**6, world.clock) so the time rule cannot cut the world short, a workers=1 run asserts
+      calls_over_10s == reader_calls - 2 (the two describes cost 0) and call_p95_s == 11, and a workers=2 run asserts
+      workers == 2, calls_over_10s == reader_calls - 2 and call_p95_s >= 11, since the serialised World adds the other
+      worker's call to a waiting call's measured seconds; a report that always prints 0 is red);
       test_floor_met_excuses_litellm_without_coverage_alarm, test_floor_missed_raises_coverage_incomplete and
       test_oversize_day_counts_sum_and_backfill_reads_rest (the cases below); with LITELLM_FLOOR monkeypatched to 0 and a per-call cost that refuses the litellm tree,
       every non-litellm tree is compared, litellm_sampled_out is 1, not_read_budget 0, monitor_coverage_incomplete
@@ -135,7 +140,7 @@ verification_plan:
       trees_read + tree_too_large + tree_read_failed + not_read_budget + litellm_sampled_out equals quiet - skip_trees,
       and a second run with skip_trees = next_skip reads the rest. Red before: those nodes fail (no workers parameter, no
       litellm_sampled_out); the new regex and test_monitor_command_runs_two_workers fail against main's line and CLI.
-    fix_if: A golden-world mismatch between worker counts is a thread-safety or ordering defect in monitor.py; fix the source. An excused run whose orphan_* or sessions_window classes differ from the full-read run's means an unread litellm tree leaks into the day-level comparison; fix the source (judge only compared trees). A changed existing assertion is a STOP to the plan owner.
+    fix_if: A golden-world mismatch between worker counts is first checked against the harness (a budget that binds, or the serialised World clock inflating a call's seconds); only then is it a thread-safety or ordering defect in monitor.py; fix the source. An excused run whose orphan_* or sessions_window classes differ from the full-read run's means an unread litellm tree leaks into the day-level comparison; fix the source (judge only compared trees). A changed existing assertion is a STOP to the plan owner.
     hermetic: false
     graduation: waive
     graduation_waiver_reason: The fast-tier runner has no duckdb, so these nodes cannot replay there; the full tier runs them on every merge, which is the standing guard for the golden-world behaviour.
@@ -227,8 +232,13 @@ test_obligations:
     verification_step: 1
     test_selector: tests/telemetry_verify/test_monitor_capacity.py::test_litellm_prefix_matches_the_producer_root_ref
     red_green_expectation: red before (module missing), green after
+  - source: scripts/telemetry_verify/monitor_capacity.py
+    behavior: CallStats counts calls strictly over 10 s and reports call_p95_s as whole seconds, rounded up
+    verification_step: 1
+    test_selector: tests/telemetry_verify/test_monitor_capacity.py::test_call_stats_count_slow_calls_and_p95
+    red_green_expectation: red before (module missing), green after
   - source: scripts/telemetry_verify/monitor.py
-    behavior: the gate holds the call cap and time rule across two workers, and worker count does not change a report
+    behavior: the gate holds the call cap and time rule across two workers
     verification_step: 1
     test_selector: tests/telemetry_verify/test_monitor_capacity.py::test_gate_holds_cap_and_time_rule_across_two_workers
     red_green_expectation: red before (no lock, two threads pass the cap), green after
@@ -258,7 +268,7 @@ constraints:
     RoutedReader's lazy catalog and event-reader state (read_route.py), so two workers never race its initialisation.
   - >-
     If validate_weakening_candidates also flags the not_read_budget netting, the build records a planned-change
-    disposition citing test_obligations[5] and the Decision 235 operator choice in context.
+    disposition citing test_obligations[6] and the Decision 235 operator choice in context.
 context:
   - >-
     Decision-scout r2 FLAGS_FOUND; CITE dec:101, dec:181, dec:210, dec:235. Decisions triaged: 228 of 228. Roadmap items
@@ -323,6 +333,7 @@ gate_rounds:
   - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 6}
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 6}
   - {gate: plan-critique, round: 5, verdict: PROCEED, blocking: 0, nits: 6}
+  - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 1, nits: 5}
 weakening_dispositions:
   - candidate: "[constant-changed] scripts/telemetry_verify/monitor.py::MAX_READER_CALLS"
     disposition: planned-change
