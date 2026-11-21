@@ -69,6 +69,24 @@ def test_r10_says_a_first_grammar_is_not_a_change() -> None:
     assert entry["change_class"] == "governance_note_add" and entry["semantic_break"] is True
 
 
+def test_r10_is_stated_on_stored_session_refs() -> None:
+    description = _flat(_load()["fields"]["parser_version"]["description"])
+    for token in (
+        "of any input that has stored rows",
+        "nor is a ref for an input that never produced a row",
+        "A registered host_run_ref prefix never changes",
+        "tests/telemetry/test_session_ref_stability.py",
+    ):
+        assert token in description, token
+
+
+def test_ll1_names_no_r10_change() -> None:
+    text = _text()
+    between = _flat(text[text.index("  LITELLM PARSER_VERSION 1 (") : text.index("DQ intents")])
+    assert "Its root composes the host_run_ref registry" in between
+    assert "declaring one later is an R10 change" not in between
+
+
 def test_litellm_line_states_the_decision_228_deviation() -> None:
     text = _text()
     between = _flat(text[text.index("  LITELLM PARSER_VERSION 1 (") : text.index("DQ intents")])
