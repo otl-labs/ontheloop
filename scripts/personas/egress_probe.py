@@ -20,6 +20,9 @@ AGENT_PATH = "/home/agent/agent"
 SINKHOLE = "54.185.253.63"
 TIMEOUT = 5.0
 AZURE_DNS = "168.63.129.16"
+VENDOR_PATH = "/sys/class/dmi/id/sys_vendor"
+ROUTE_PATH = "/proc/net/route"
+EXPECTED_IFACE = "eth0"
 Case = tuple[str, str, str, int]
 Result = tuple[str, str, str]
 
@@ -38,6 +41,7 @@ CASES: tuple[Case, ...] = (
     ("ipv6", "tcp", "2606:4700:4700::1111", 443),
     ("sudo", "sudo", "sudo", 0),
     ("agent_binary", "agent_binary", AGENT_PATH, 0),
+    ("default_iface", "default_iface", ROUTE_PATH, 0),
 )
 BY_ID = {case[0]: case for case in CASES}
 
@@ -138,6 +142,30 @@ def _agent_binary(path: str) -> bool:
     return digest != AGENT_SHA256
 
 
+def placement() -> tuple[str, str]:
+    try:
+        with open(VENDOR_PATH, encoding="utf-8") as handle:
+            vendor = handle.read().strip() or "unknown"
+    except OSError:
+        vendor = "unknown"
+    best: tuple[int, str] | None = None
+    try:
+        with open(ROUTE_PATH, encoding="utf-8") as handle:
+            for line in handle.read().splitlines()[1:]:
+                parts = line.split()
+                if len(parts) >= 8 and parts[1] == "00000000" and parts[7] == "00000000":
+                    metric = int(parts[6])
+                    if best is None or metric < best[0]:
+                        best = (metric, parts[0])
+    except (OSError, ValueError):
+        best = None
+    return vendor, best[1] if best else ""
+
+
+def _default_iface() -> bool:
+    return placement()[1] != EXPECTED_IFACE
+
+
 def attempt(case: Case) -> bool:
     _, kind, target, port = case
     dispatch: dict[str, Callable[[], bool]] = {
@@ -149,6 +177,7 @@ def attempt(case: Case) -> bool:
         "dns_tcp": lambda: _tcp_dns(target),
         "sudo": _sudo,
         "agent_binary": lambda: _agent_binary(target),
+        "default_iface": _default_iface,
     }
     return dispatch[kind]()
 
@@ -166,12 +195,20 @@ def emit(prefix: str, results: Sequence[Result]) -> None:
         print(f"{prefix} case={case_id} expect={want} got={got}")
 
 
+def emit_placement() -> None:
+    vendor, iface = placement()
+    print(f"EGRESS-PLACEMENT vendor={vendor} iface={iface}")
+
+
 def main(argv: Sequence[str]) -> int:
     expect = {case[0]: "refused" for case in CASES}
     expect["listed"] = "reached"
     expect["dns_tcp_azure"] = "reported"
+    emit_placement()
     results = run_cases(CASES, expect)
     emit("EGRESS-PROBE", results)
     bad = failures(results)
+    if "default_iface" in bad:
+        print(f"EGRESS-PROBE UNSUPPORTED_PLACEMENT iface={placement()[1]}")
     print("EGRESS-PROBE PASS" if not bad else "EGRESS-PROBE FAIL " + " ".join(bad))
     return 0 if not bad else 1
