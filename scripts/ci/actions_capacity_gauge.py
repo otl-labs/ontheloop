@@ -22,7 +22,7 @@ from scripts import repo_identity
 from scripts.ci import actions_capacity_github as gh
 from scripts.ci.actions_capacity_contract import Contract, JobRef, load_contract
 
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 2
 BLOCKING = frozenset({"queued", "requested", "in_progress"})
 FILLED_OF_168 = 144
 
@@ -39,6 +39,7 @@ class Job:
     status: str
     conclusion: Optional[str]
     run_created_at: Optional[datetime] = None
+    runner: bool = True
 
 
 @dataclass
@@ -121,9 +122,17 @@ def normalize(fetched: gh.Fetched) -> tuple[list[Run], list[Job]]:
                 str(j.get("status")),
                 j.get("conclusion"),
                 gh.parse_ts(run.get("created_at")),
+                _held_runner(j),
             )
         )
     return runs, jobs
+
+
+def _held_runner(job: dict[str, Any]) -> bool:
+    if "runner_id" in job:
+        rid = job["runner_id"]
+        return isinstance(rid, int) and not isinstance(rid, bool) and rid > 0
+    return bool(job.get("runner_name"))
 
 
 def nearest_rank(values: list[float], q: float = 0.9) -> Optional[float]:
@@ -134,7 +143,9 @@ def nearest_rank(values: list[float], q: float = 0.9) -> Optional[float]:
 
 
 def _span(job: Job, now: datetime) -> Optional[tuple[datetime, datetime]]:
-    if job.started_at is None or job.conclusion == "skipped":
+    if job.started_at is None or job.conclusion == "skipped" or not job.runner:
+        return None
+    if job.completed_at is None and job.status == "completed":
         return None
     return job.started_at, job.completed_at or now
 
@@ -254,15 +265,17 @@ def pool_table(table: list[HourRow], contract: Contract) -> list[HourRow]:
 def start_hour(previous: Optional[list[HourRow]], now: datetime, contract: Contract) -> datetime:
     w = contract.window
     overlap = timedelta(hours=w.overlap_hours)
-    cutoff = _floor(now) - timedelta(hours=w.table_hours)
+    floor = _floor(now)
+    earliest = floor - timedelta(hours=w.bootstrap_hours) - overlap
+    cutoff = floor - timedelta(hours=w.table_hours)
     rows = [r for r in previous or [] if r.start >= cutoff]
-    holes = [r for r in rows if not r.evaluated]
+    holes = [r for r in rows if not r.evaluated and r.start >= floor - timedelta(hours=w.bootstrap_hours)]
     if holes:
-        return min(r.start for r in holes) - overlap
+        return max(min(r.start for r in holes) - overlap, earliest)
     evaluated = [r for r in rows if r.evaluated]
     if evaluated:
-        return max(r.start for r in evaluated) + timedelta(hours=1) - overlap
-    return _floor(now) - timedelta(hours=w.bootstrap_hours) - overlap
+        return max(max(r.start for r in evaluated) + timedelta(hours=1) - overlap, earliest)
+    return earliest
 
 
 def _matches(key: str, ref: JobRef) -> bool:
@@ -413,9 +426,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     budget = gh.Budget(contract.window.request_budget_per_tick, contract.window.time_budget_seconds)
     budget.job_seconds_left = gh.job_seconds_left(caller, budget, run_id, now, owner, repo)
     prev = gh.previous_table(caller, gh.make_artifact_fetcher(token), budget, owner, repo)
-    prev_rows = [HourRow.from_dict(r) for r in (prev or {}).get("table", [])] if prev else None
+    prev_doc = prev or {}
+    same = prev_doc.get("contract_version") == CONTRACT_VERSION
+    prev_rows = [HourRow.from_dict(r) for r in prev_doc.get("table", [])] if same else None
     read_from = start_hour(prev_rows, now, contract)
-    fetched = gh.fetch_runs_and_jobs(caller, read_from, budget, now, owner, repo)
+    fetched = gh.fetch_runs_and_jobs(
+        caller,
+        read_from,
+        budget,
+        now,
+        owner,
+        repo,
+        evaluate_from=read_from + timedelta(hours=contract.window.overlap_hours),
+        cache=prev_doc.get("jobs_cache") if same else None,
+    )
     runs, jobs = normalize(fetched)
     fresh = hour_table(jobs, runs, fetched.coverage, read_from, now, contract, run_id or None)
     table = pool_table(merge_tables(prev_rows or [], fresh, contract), contract)
@@ -451,6 +475,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "read_failed_ticks": failed_ticks,
         "alarm": action,
         "fetch_error": fetched.error,
+        "jobs_cache": fetched.cache,
     }
     if args.reading_out:
         Path(args.reading_out).write_text(json.dumps(payload, indent=1), encoding="utf-8")
@@ -461,7 +486,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     rate = getattr(caller, "rate_remaining", None)
     print(
         f"[actions_capacity] verdict={reading.verdict} evaluated_hours={sum(1 for r in table if r.evaluated)} "
-        f"chained={int(prev is not None)} calls={budget.calls} elapsed_s={round(budget.elapsed_s)} "
+        f"chained={int(same)} calls={budget.calls} elapsed_s={round(budget.elapsed_s)} "
         f"peak_slot_demand={reading.peak_slot_demand:.2f} p90_queue_s={reading.p90_queue_s} "
         f"projected_peak={reading.projected_peak:.2f} late_start_minutes={payload['late_start_minutes']} "
         f"alarm={action} rate_remaining={rate} read_failed_ticks={failed_ticks}"
