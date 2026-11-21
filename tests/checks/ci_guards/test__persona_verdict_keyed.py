@@ -229,6 +229,20 @@ RED = [
 ]
 
 
+RED += [
+    (
+        "account-id-not-the-secret",
+        "AWS_ACCOUNT_ID is not exactly",
+        lambda d: _named(d["jobs"]["smoke"], "Smoke the primary role")["env"].update({"AWS_ACCOUNT_ID": "x"}),
+    ),
+    (
+        "secret-in-a-job-level-env",
+        "holds a secrets reference outside its steps",
+        lambda d: d["jobs"]["keyprep"].update({"env": {"X": "${{ secrets.OTHER }}"}}),
+    ),
+]
+
+
 @pytest.mark.parametrize(("name", "expect", "edit"), RED, ids=[r[0] for r in RED])
 def test_each_mutation_is_refused(name: str, expect: str, edit: Callable[[dict[str, Any]], None]) -> None:
     assert any(expect in p for p in _problems(edit)), (name, _problems(edit))

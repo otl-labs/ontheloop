@@ -348,6 +348,22 @@ RED = [
 ]
 
 
+def test_a_malformed_provider_hosts_map_is_refused(tmp_path: Path) -> None:
+    problems = _problems(tmp_path, lambda d: d["cfg"].update({"provider_hosts": {"deepseek/": 1}}))
+    assert any("provider_hosts must map" in p for p in problems)
+
+
+def test_a_missing_inference_provider_contract_is_refused_for_a_smoke_job(tmp_path: Path) -> None:
+    root = _tree(tmp_path, _templated([STS_T, SSM_T, DEEPSEEK, ANTHROPIC], smoke=True))
+    (root / v.INFERENCE_PROVIDER).unlink()
+    assert any("does not give the tier models" in p for p in v.check_tree(root)[0])
+
+
+def test_a_filter_with_value_other_than_endpoints_may_not_hold_an_expression(tmp_path: Path) -> None:
+    problems = _problems(tmp_path, _set_with("egress-policy", "${{ inputs.p }}"))
+    assert any("other than allowed-endpoints holds an expression" in p for p in problems)
+
+
 def test_a_docker_path_segment_is_not_a_docker_command(tmp_path: Path) -> None:
     run = 'pip install -r "$GITHUB_WORKSPACE/main/docker/persona/requirements-persona.txt"'
     assert _problems(tmp_path, _insert(4, {"run": run})) == []
