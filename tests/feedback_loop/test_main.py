@@ -147,7 +147,8 @@ def test_assert_quiet_recurring_exit_contract() -> None:
     assert quiet(friction.RECURRING, subject, V + 1, fx.Reader(FIRING)) == (2, reason("version_mismatch"))
     assert quiet(friction.RECURRING, subject, V, fx.Reader(fx.recurring(3, 6))) == (2, reason("few_trees"))
     assert quiet(friction.RECURRING, subject, V, fx.Reader([])) == (2, reason("few_trees"))
-    assert quiet(friction.RECURRING, subject, V, fx.Reader(error=RuntimeError("x"))) == (2, reason("read_failed"))
+    failing = ReaderInvokeError("named", 503, "down", None)
+    assert quiet(friction.RECURRING, subject, V, fx.Reader(error=failing)) == (2, reason("read_failed"))
 
 
 def test_assert_quiet_coverage_exit_contract() -> None:
@@ -210,3 +211,26 @@ class TestPackageBoundary:
     def test_the_scan_flags_what_it_forbids(self) -> None:
         tree = ast.parse("from scripts.ops_data_portal import file_rec\nimport src.common.ducklake_writer_x\n")
         assert {"scripts.ops_data_portal", "src.common.ducklake_writer_x"} <= _imports(tree)
+
+
+def test_an_output_write_failure_is_an_internal_stop_without_a_traceback_in_ci(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    err = io.StringIO()
+    out = io.StringIO()
+    code = cli.main(
+        ["friction", "--summary", str(tmp_path / "missing" / "sum.md")],
+        reader=fx.Reader(many()),
+        today=TODAY,
+        out=out,
+        err=err,
+    )
+    assert code == 1 and out.getvalue() == "FRICTION_STOP stage=internal error_type=FileNotFoundError status=none\n"
+    assert err.getvalue() == ""
+
+
+def test_assert_quiet_internal_error_prints_the_internal_stage_and_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(friction, "detect", lambda *a, **k: (_ for _ in ()).throw(ValueError("x")))
+    code, out = quiet(friction.RECURRING, "r01|hook:never_on_main", V, fx.Reader(many()))
+    assert (code, out) == (2, "FRICTION_STOP stage=internal error_type=ValueError status=none\n")

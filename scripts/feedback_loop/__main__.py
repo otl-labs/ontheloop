@@ -125,6 +125,13 @@ def _write_outputs(args: argparse.Namespace, result: friction.Result) -> None:
             handle.write(render.summary_markdown(result))
 
 
+def _internal(exc: Exception, out: Any, err: Any, code: int) -> int:
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        traceback.print_exc(file=err)
+    print(f"FRICTION_STOP stage=internal error_type={_word(type(exc).__name__)} status=none", file=out)
+    return code
+
+
 def _run(args: argparse.Namespace, reader: Any, last: date, out: Any, err: Any) -> int:
     quiet = args.assert_quiet is not None
     stage = "window"
@@ -148,15 +155,16 @@ def _run(args: argparse.Namespace, reader: Any, last: date, out: Any, err: Any) 
         return _stop("window", match.group(1) if match else "unknown", getattr(exc.__context__, "status", None), out)
     except Exception as exc:  # noqa: BLE001 -- the run fails closed naming a stage and a type only
         if quiet:
-            return _quiet("unmeasurable", out, "read_failed")
+            return _internal(exc, out, err, 2)
         if stage == "recs":
             return _stop("recs", _error_type(exc), getattr(exc, "status", None), out)
-        if os.environ.get("GITHUB_ACTIONS") != "true":
-            traceback.print_exc(file=err)
-        return _stop("internal", type(exc).__name__, None, out)
+        return _internal(exc, out, err, 1)
     if quiet:
         return _assert_quiet(args, result, out)
-    _write_outputs(args, result)
+    try:
+        _write_outputs(args, result)
+    except Exception as exc:  # noqa: BLE001 -- an output write failure is an internal stop, never a traceback in CI
+        return _internal(exc, out, err, 1)
     print(_counts_line(_counts(result)), file=out)
     return 0
 

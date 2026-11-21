@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import functools
 import shlex
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -20,6 +21,7 @@ _EVIDENCE_NOT_PROOF = (
 )
 
 
+@functools.cache
 def _manifest_modules() -> dict[str, str]:
     modules: dict[str, str] = {}
     for manifest in sorted((ROOT / "scripts" / "checks").glob("*/_manifest.py")):
@@ -59,6 +61,7 @@ def _command(finding: Finding, version: int) -> str:
 
 def draft(finding: Finding, window: tuple[str, str], versions: dict[str, int]) -> dict[str, Any]:
     """The file_rec fields and context_v2_json for one finding; nothing a rule does not name is spelled in them."""
+    # friction imports this module at runtime (SOURCE), so the reverse import waits until the first draft
     from scripts.feedback_loop.friction import COVERAGE, is_published  # noqa: PLC0415
 
     version, first, last = versions["classifier_version"], window[0], window[1]

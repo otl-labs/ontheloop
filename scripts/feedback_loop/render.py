@@ -133,7 +133,7 @@ def sheet_markdown(result: Result, rows: list[dict[str, Any]] | None = None) -> 
     lines += ["", "## Repeat runs, per tree", ""]
     repeats = [(refs[k], n, t["groups"][n]) for k, t in per_tree.items() for n in t["groups"]
                if result.groups[n - 1]["rule_id"] == friction.REPEAT_RULE_ID]  # fmt: skip
-    for ref, number, facts in sorted(repeats):
+    for ref, number, facts in sorted(repeats, key=lambda r: (int(r[0][1:]), r[1])):
         lines.append(f"- {ref} group {number}: {facts} facts")
     lines += ["", "## Tree index", "", _row(["tree", "workflow", "root_session_id", "groups"]), _row(["---"] * 4)]
     for key, ref in sorted(refs.items(), key=lambda kv: int(kv[1][1:])):
