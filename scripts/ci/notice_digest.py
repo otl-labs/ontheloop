@@ -26,6 +26,7 @@ TITLE = "Notice digest (wording approval lane)"
 LIMIT = 65536
 _ZERO = re.compile(r"^0+$")
 _PR = re.compile(r"\(#(\d+)\)\s*$")
+_ISSUE_URL = re.compile(r"/issues/(\d+)\s*$", re.M)
 
 
 def _git(*args: str) -> str | None:
@@ -124,11 +125,13 @@ def _ensure_issue() -> int:
     made = _gh("label", "create", LABEL, "--description", "Wording approval lane digest", "--color", "ededed", check=False)
     if made.returncode != 0 and "already exists" not in made.stderr:
         raise RuntimeError(f"gh label create failed: {made.stderr.strip()}")
-    _gh("issue", "create", "--title", TITLE, "--label", LABEL, "--body-file", _body_file("One comment per merged commit."))
-    number = _issue_number()
-    if number is None:
-        raise RuntimeError("the notice-digest issue was not found after creating it")
-    return number
+    created = _gh(
+        "issue", "create", "--title", TITLE, "--label", LABEL, "--body-file", _body_file("One comment per merged commit.")
+    )
+    found = _ISSUE_URL.findall(created.stdout or "")
+    if not found:
+        raise RuntimeError(f"gh issue create printed no issue URL: {created.stdout!r}")
+    return int(found[-1])
 
 
 def post(lines: list[str]) -> None:
