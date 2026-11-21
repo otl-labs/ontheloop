@@ -124,7 +124,9 @@ verification_plan:
       tests/telemetry_verify/test_main.py tests/telemetry_verify/test_package_boundary.py tests/telemetry/test_parent_observation_orphan_monitor.py
     expected: >-
       Exit 0 in a session with duckdb. The golden-world nodes, by name: test_two_workers_report_equals_one_worker
-      (equal reports excluding run_level_s, elapsed_s, max_call_s, calls_over_10s, call_p95_s and workers);
+      (equal reports excluding run_level_s, elapsed_s, max_call_s, calls_over_10s, call_p95_s and workers; with
+      world.cost = 11.0 it also asserts report.calls_over_10s == report.reader_calls - 2 (the two describes cost 0),
+      report.call_p95_s == 11, and report.workers == 2 on the two-worker run, so a report that always prints 0 is red);
       test_floor_met_excuses_litellm_without_coverage_alarm, test_floor_missed_raises_coverage_incomplete and
       test_oversize_day_counts_sum_and_backfill_reads_rest (the cases below); with LITELLM_FLOOR monkeypatched to 0 and a per-call cost that refuses the litellm tree,
       every non-litellm tree is compared, litellm_sampled_out is 1, not_read_budget 0, monitor_coverage_incomplete
@@ -161,13 +163,14 @@ verification_plan:
     phase: post-deploy
     action: rec-5420's acceptance on merged main from the session (agent_platform profile), backgrounded with a 2 h limit, on the latest quiet day.
     command: >-
-      set -o pipefail; AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_verify monitor --no-alarms --assert-zero
-      monitor_coverage_incomplete 2>&1 | tee /tmp/monitor-read-budget-vp5.log && grep -E '^MONITOR .* not_read_budget=0 .*
-      workers=2 litellm_quiet=0 litellm_read=0 litellm_sampled_out=0 ' /tmp/monitor-read-budget-vp5.log
+      set -o pipefail; log="$(mktemp)"; AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_verify monitor --no-alarms --assert-zero
+      monitor_coverage_incomplete 2>&1 | tee "$log" && grep -E '^MONITOR .* not_read_budget=0 .*
+      workers=2 litellm_quiet=0 litellm_read=0 litellm_sampled_out=0 ' "$log"
     expected: >-
       The monitor exits 0 and grep prints the MONITOR line. Record reader_calls, elapsed_s, max_call_s, calls_over_10s
       and call_p95_s verbatim in the closure report (counts only). elapsed_s well under 2,000 (about 600 s expected for
-      about 880 calls at 0.64 s; recorded, not asserted).
+      about 880 calls at 0.64 s; recorded, not asserted). tree_read_failed is the signal attributable to this run's two
+      workers (a throttled call counts there); step 6's daily sums are context, not attribution.
     fix_if: >-
       not_read_budget above 0 at workers=2 means the measured speedup did not hold on a full run; tree_read_failed above
       0 with throttles in step 6 means two workers contend for the reader's 4 reserved slots. Either is a STOP to the plan
@@ -183,7 +186,8 @@ verification_plan:
       AWS_PROFILE=agent_platform aws cloudwatch get-metric-statistics --region "$(cat config/aws-region)"
       --namespace AWS/Lambda --metric-name Throttles --dimensions Name=FunctionName,Value=agent-platform-ducklake-telemetry-reader
       --start-time "$(date -u -d '-1 day' +%Y-%m-%dT00:00:00Z)" --end-time "$(date -u -d '+1 day' +%Y-%m-%dT00:00:00Z)"
-      --period 86400 --statistics Sum --query 'Datapoints[].Sum' --output text &&
+      --period 86400 --statistics Sum --query 'Datapoints[].Sum' --output text | tr '\t' '\n' |
+      awk 'NF {print "throttles", $1; if ($1 + 0 > 7) bad = 1} END {exit bad}' &&
       AWS_PROFILE=agent_platform aws cloudwatch get-metric-statistics --region "$(cat config/aws-region)"
       --namespace AWS/Lambda --metric-name Invocations --dimensions Name=FunctionName,Value=agent-platform-ducklake-telemetry-reader
       --start-time "$(date -u -d '-1 day' +%Y-%m-%dT00:00:00Z)" --end-time "$(date -u -d '+1 day' +%Y-%m-%dT00:00:00Z)"
@@ -191,7 +195,7 @@ verification_plan:
     expected: >-
       Prints the daily throttle sums, then the daily invocation sums; record both in the closure report. The
       7-day baseline before this plan (11-13..11-19) averaged about 1,370 invocations a day (max 2,622) with 7 throttles on
-      11-17 and 1 on 11-20. Pass: no day's throttle sum above 7.
+      11-17 and 1 on 11-20. Pass: no day's throttle sum above 7 (the awk exits 1 otherwise, so the command fails).
     fix_if: A day's throttle sum above 7 is a STOP to the plan owner (drop to one worker or amend), never a reserved-concurrency change in the build.
     hermetic: false
     graduation: not-applicable
@@ -209,9 +213,19 @@ verification_plan:
     graduation: not-applicable
 test_obligations:
   - source: scripts/telemetry_verify/monitor_capacity.py
-    behavior: stratified stable order, the floor rule and the litellm prefix pin
+    behavior: stratified stable order (non-litellm roots first in given order, then litellm roots by session-id hash)
+    verification_step: 1
+    test_selector: tests/telemetry_verify/test_monitor_capacity.py::test_litellm_roots_follow_in_a_stable_hash_order
+    red_green_expectation: red before (module missing), green after
+  - source: scripts/telemetry_verify/monitor_capacity.py
+    behavior: the floor rule (unread litellm trees excused only once every non-litellm tree and LITELLM_FLOOR litellm trees are read)
     verification_step: 1
     test_selector: tests/telemetry_verify/test_monitor_capacity.py::test_floor_met_excuses_unread_litellm_trees
+    red_green_expectation: red before (module missing), green after
+  - source: scripts/telemetry_verify/monitor_capacity.py
+    behavior: the monitor's litellm prefix literal equals the producer's root ref prefix
+    verification_step: 1
+    test_selector: tests/telemetry_verify/test_monitor_capacity.py::test_litellm_prefix_matches_the_producer_root_ref
     red_green_expectation: red before (module missing), green after
   - source: scripts/telemetry_verify/monitor.py
     behavior: the gate holds the call cap and time rule across two workers, and worker count does not change a report
@@ -219,7 +233,7 @@ test_obligations:
     test_selector: tests/telemetry_verify/test_monitor_capacity.py::test_gate_holds_cap_and_time_rule_across_two_workers
     red_green_expectation: red before (no lock, two threads pass the cap), green after
   - source: scripts/telemetry_verify/monitor.py
-    behavior: worker count does not change a report (thread pool keeps input order; entity_ref and read_order wired)
+    behavior: worker count does not change a report (thread pool keeps input order; entity_ref and read_order wired), and workers, calls_over_10s and call_p95_s are wired from the gate's CallStats
     verification_step: 2
     test_selector: tests/telemetry_verify/test_monitor_capacity.py::test_two_workers_report_equals_one_worker
     red_green_expectation: red before (run_monitor has no workers parameter), green after
@@ -244,7 +258,7 @@ constraints:
     RoutedReader's lazy catalog and event-reader state (read_route.py), so two workers never race its initialisation.
   - >-
     If validate_weakening_candidates also flags the not_read_budget netting, the build records a planned-change
-    disposition citing acceptance_criteria[2] and the Decision 235 operator choice in context.
+    disposition citing test_obligations[5] and the Decision 235 operator choice in context.
 context:
   - >-
     Decision-scout r2 FLAGS_FOUND; CITE dec:101, dec:181, dec:210, dec:235. Decisions triaged: 228 of 228. Roadmap items
@@ -308,6 +322,7 @@ gate_rounds:
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 3, nits: 10}
   - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 6}
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 6}
+  - {gate: plan-critique, round: 5, verdict: PROCEED, blocking: 0, nits: 6}
 weakening_dispositions:
   - candidate: "[constant-changed] scripts/telemetry_verify/monitor.py::MAX_READER_CALLS"
     disposition: planned-change
