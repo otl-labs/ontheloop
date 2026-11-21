@@ -381,3 +381,10 @@ def test_plan_doc_at_tolerates_unreadable_plans(tmp_path, monkeypatch) -> None:
     assert at._plan_doc_at(PLAN_REL, repo, "HEAD") == {}
     _commit(repo, {PLAN_REL: "- a list\n"}, "list plan")
     assert at._plan_doc_at(PLAN_REL, repo, "HEAD") == {}
+
+
+def test_cli_verify_prints_landed(tmp_path, monkeypatch, capsys) -> None:
+    repo = _landed_repo(tmp_path, monkeypatch)
+    sha = _apply(repo)
+    assert at.main(["verify", "--slug", SLUG, "--root", str(repo), "--base", "HEAD"]) == 0
+    assert f"APPROVED-TEXT LANDED doc.md {sha}" in capsys.readouterr().out
