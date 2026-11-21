@@ -1,0 +1,244 @@
+"""The keyed-job pins: each mutation of the live persona-verdict.yml is refused; the live file passes."""
+
+from __future__ import annotations
+
+import copy
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+import pytest
+import yaml
+
+from scripts.checks import _common
+from scripts.checks.ci_guards import _persona_verdict_keyed as k
+from scripts.checks.ci_guards import validate_persona_verdict_chain as v
+from scripts.llm import tier_selection
+
+LIVE = Path(_common.ROOT)
+
+
+def _doc() -> dict[str, Any]:
+    return copy.deepcopy(yaml.safe_load((LIVE / v.VERDICT).read_text(encoding="utf-8")))
+
+
+def _evidence() -> dict[str, Any]:
+    return yaml.safe_load((LIVE / v.EVIDENCE).read_text(encoding="utf-8"))
+
+
+def _named(job: dict[str, Any], name: str) -> dict[str, Any]:
+    (found,) = [s for s in job["steps"] if s.get("name") == name]
+    return found
+
+
+def _problems(edit: Callable[[dict[str, Any]], None] | None) -> list[str]:
+    doc = _doc()
+    if edit:
+        edit(doc)
+    return v.verdict_problems(doc, _evidence())
+
+
+def test_live_file_passes() -> None:
+    assert k.keyed_problems(_doc()) == []
+    assert _problems(None) == []
+
+
+def test_tier_roles_equal_the_committed_tier_selection_roles() -> None:
+    assert set(k.TIER_ROLES) == set(tier_selection._ROLES)
+
+
+def _drop_step(job: str, name: str) -> Callable[[dict[str, Any]], None]:
+    return lambda d: d["jobs"][job]["steps"].remove(_named(d["jobs"][job], name))
+
+
+def _step_update(job: str, name: str, **kw: Any) -> Callable[[dict[str, Any]], None]:
+    return lambda d: _named(d["jobs"][job], name).update(kw)
+
+
+def _if(job: str, text: str) -> Callable[[dict[str, Any]], None]:
+    return lambda d: d["jobs"][job].update({"if": text})
+
+
+def _without(conjunct: str) -> str:
+    return k.CONDITIONS["smoke"].replace(f" && {conjunct}", "").replace(f"{conjunct} && ", "")
+
+
+RED = [
+    ("smoke-without-environment", "persona-verdict Environment", lambda d: d["jobs"]["smoke"].pop("environment")),
+    (
+        "refusal-with-environment",
+        "names an Environment",
+        lambda d: d["jobs"]["refusal"].update({"environment": "persona-verdict"}),
+    ),
+    (
+        "keyprep-with-environment",
+        "names an Environment",
+        lambda d: d["jobs"]["keyprep"].update({"environment": "persona-verdict"}),
+    ),
+    ("third-id-token-job", "holds id-token: write", lambda d: d["jobs"]["post"]["permissions"].update({"id-token": "write"})),
+    ("keyprep-id-token", "holds id-token: write", lambda d: d["jobs"]["keyprep"]["permissions"].update({"id-token": "write"})),
+    ("no-keyprep-conjunct-smoke", "condition is not", _if("smoke", "${{ " + k.KEYED_IF + " }}")),
+    ("no-keyprep-conjunct-refusal", "condition is not", _if("refusal", "${{ " + k.KEYED_IF + " }}")),
+    (
+        "no-fixture-conjunct",
+        "condition is not",
+        _if(
+            "keyprep", "${{ " + _without("needs.prepare.outputs.fixture == 'true'").replace(" && " + k.KEYPREP_OK, "") + " }}"
+        ),
+    ),
+    (
+        "no-allowlisted-conjunct",
+        "condition is not",
+        _if("keyprep", "${{ " + k.KEYED_IF.replace(" && needs.prepare.outputs.allowlisted == 'true'", "") + " }}"),
+    ),
+    (
+        "no-pull-request-conjunct",
+        "condition is not",
+        _if("keyprep", "${{ " + k.KEYED_IF.replace(" && github.event.workflow_run.event == 'pull_request'", "") + " }}"),
+    ),
+    (
+        "another-secret",
+        "other than secrets.GITHUB_TOKEN",
+        _step_update(
+            "smoke",
+            "Smoke the primary role",
+            env={
+                "AWS_ACCOUNT_ID": k.ACCOUNT_ENV,
+                "PERSONA_AWS_REGION": k.REGION_ENV,
+                "PERSONA_SMOKE_ROLE": "primary",
+                "PERSONA_SNAPSHOT": v.SNAPSHOT,
+                "X": "${{ secrets.OTHER }}",
+            },
+        ),
+    ),
+    (
+        "account-id-before-the-self-check",
+        "secrets.AWS_ACCOUNT_ID appears outside",
+        lambda d: _named(d["jobs"]["smoke"], "Create the work directory").update({"env": {"A": k.ACCOUNT_ENV}}),
+    ),
+    (
+        "account-id-in-the-install-step",
+        "secrets.AWS_ACCOUNT_ID appears outside",
+        _step_update("smoke", "Install the wheelhouse offline", env={"A": k.ACCOUNT_ENV}),
+    ),
+    (
+        "configure-aws-credentials",
+        "configure-aws-credentials",
+        lambda d: d["jobs"]["smoke"]["steps"].append({"id": "c", "uses": "aws-actions/configure-aws-credentials@" + "a" * 40}),
+    ),
+    (
+        "pip-install-without-no-index",
+        "pip lines are not exactly",
+        lambda d: _named(d["jobs"]["smoke"], "Install the wheelhouse offline").update(
+            {"run": k.PIP_INSTALL.replace("--no-index ", "")}
+        ),
+    ),
+    (
+        "pip-install-without-require-hashes",
+        "pip lines are not exactly",
+        lambda d: _named(d["jobs"]["smoke"], "Install the wheelhouse offline").update(
+            {"run": k.PIP_INSTALL.replace("--require-hashes ", "")}
+        ),
+    ),
+    (
+        "pip-in-refusal",
+        "pip lines are not exactly",
+        lambda d: d["jobs"]["refusal"]["steps"].append({"id": "p", "run": "pip install x"}),
+    ),
+    (
+        "upload-in-smoke",
+        "uploads",
+        lambda d: d["jobs"]["smoke"]["steps"].append({"uses": "actions/upload-artifact@" + "b" * 40, "with": {"name": "x"}}),
+    ),
+    (
+        "download-of-another-artifact",
+        "downloads",
+        lambda d: _named(d["jobs"]["smoke"], "Download the wheelhouse")["with"].update({"name": "persona-verdict-prepared"}),
+    ),
+    (
+        "keyprep-runs-a-verb",
+        "runs python or a run.py verb",
+        lambda d: d["jobs"]["keyprep"]["steps"].append({"id": "x", "run": v.RUN_PREFIX + "key-refusal"}),
+    ),
+    (
+        "missing-tier-role-step",
+        "run.py steps are not exactly",
+        _drop_step("smoke", "Smoke the warm_fetched_escape_hatch role"),
+    ),
+    (
+        "wrong-tier-role",
+        "PERSONA_SMOKE_ROLE values",
+        lambda d: _named(d["jobs"]["smoke"], "Smoke the primary role")["env"].update({"PERSONA_SMOKE_ROLE": "tier_3"}),
+    ),
+    (
+        "keyprep-checkout-with-ref",
+        "checkout is not exactly",
+        lambda d: d["jobs"]["keyprep"]["steps"][0]["with"].update({"ref": "x"}),
+    ),
+    (
+        "keyprep-checkout-with-path",
+        "checkout is not exactly",
+        lambda d: d["jobs"]["keyprep"]["steps"][0]["with"].update({"path": "x"}),
+    ),
+    (
+        "keyprep-checkout-persists-credentials",
+        "checkout is not exactly",
+        lambda d: d["jobs"]["keyprep"]["steps"][0]["with"].update({"persist-credentials": True}),
+    ),
+    (
+        "region-from-elsewhere",
+        "PERSONA_AWS_REGION is not exactly",
+        lambda d: _named(d["jobs"]["smoke"], "Smoke the primary role")["env"].update(
+            {"PERSONA_AWS_REGION": "${{ needs.prepare.outputs.region }}"}
+        ),
+    ),
+    (
+        "continue-on-error-on-a-keyed-step",
+        "continue-on-error",
+        _step_update("smoke", "Smoke the primary role", **{"continue-on-error": True}),
+    ),
+    (
+        "continue-on-error-on-a-keyed-job",
+        "sets continue-on-error",
+        lambda d: d["jobs"]["refusal"].update({"continue-on-error": True}),
+    ),
+    ("container-in-a-keyed-job", "sets container", lambda d: d["jobs"]["smoke"].update({"container": "x"})),
+    ("services-in-a-keyed-job", "sets services", lambda d: d["jobs"]["smoke"].update({"services": {}})),
+    (
+        "docker-command-in-a-keyed-job",
+        "runs a docker command",
+        lambda d: d["jobs"]["refusal"]["steps"].append({"id": "d", "run": "docker ps"}),
+    ),
+    (
+        "aws-region-action-in-refusal",
+        "uses the local action",
+        lambda d: d["jobs"]["refusal"]["steps"].insert(1, {"id": "r", "uses": "./.github/actions/aws-region"}),
+    ),
+    (
+        "other-local-action-in-keyprep",
+        "uses the local action",
+        _step_update("keyprep", "Resolve the project region", uses="./.github/actions/other"),
+    ),
+    ("run-step-without-an-id", "without an id", lambda d: d["jobs"]["keyprep"]["steps"][3].pop("id")),
+    ("keyprep-needs-changed", "needs are not exactly", lambda d: d["jobs"]["keyprep"].update({"needs": ["prepare", "run"]})),
+    (
+        "smoke-permissions-widened",
+        "permissions are not exactly",
+        lambda d: d["jobs"]["smoke"]["permissions"].update({"actions": "read"}),
+    ),
+]
+
+
+@pytest.mark.parametrize(("name", "expect", "edit"), RED, ids=[r[0] for r in RED])
+def test_each_mutation_is_refused(name: str, expect: str, edit: Callable[[dict[str, Any]], None]) -> None:
+    assert any(expect in p for p in _problems(edit)), (name, _problems(edit))
+
+
+def test_the_group_exists_together_or_not_at_all() -> None:
+    doc = _doc()
+    for name in k.KEYED_JOBS:
+        doc["jobs"].pop(name)
+    assert k.keyed_problems(doc) == []
+    doc = _doc()
+    doc["jobs"].pop("smoke")
+    assert any("together or not at all" in p for p in k.keyed_problems(doc))

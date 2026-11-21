@@ -92,6 +92,7 @@ class TransportError(RuntimeError):
 
 def load_litellm() -> Any:
     os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+    os.environ.setdefault("LITELLM_LOCAL_ANTHROPIC_BETA_HEADERS", "True")
     import litellm
 
     return litellm

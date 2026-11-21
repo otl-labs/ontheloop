@@ -26,6 +26,8 @@ VERBS = {
     "egress-probe": "egress_probe",
     "egress-self-check": "egress_self_check",
     "egress-control": "egress_control",
+    "inference-smoke": "inference_smoke",
+    "key-refusal": "key_refusal",
 }
 EXIT_SNAPSHOT_ON_PATH = 3
 
