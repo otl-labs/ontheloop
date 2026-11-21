@@ -1,0 +1,341 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: actions-capacity-gauge-progress
+intent: >-
+  Make the Actions capacity gauge see again and count only real runner time: every tick makes forward progress whatever
+  an hour costs to read, and a job that never held a runner (waiting on an Environment approval, or cancelled while
+  waiting) counts no minutes. Its readings drive the operator's capacity decisions and its green reading gates the first
+  persona add and rec-5019.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-actions-capacity-gauge-progress.yaml
+phase: >-
+  ad_hoc_rec (soft-warn exception category: rec-5473, filed by this planner 2026-11-20; no tier_item claimed, so the Tier
+  Item Freshness Gate is skipped). T4.32's persona adds are a downstream beneficiary, not a follow-on: they cite a
+  green reading (actions-capacity.yaml consumer_rule); this plan closes no T4.32 criterion. Code runs from the checkout in
+  convergence-health.yml; no Lambda-packaged file and no deploy, so V2.
+cites: [dec:279]
+scope:
+  - file: scripts/ci/actions_capacity_github.py
+    action: Modify
+    purpose: >-
+      (1) fetch_runs_and_jobs gains keyword arguments evaluate_from (first evaluated hour) and cache (the previous
+      reading's jobs_cache). A listed run created before evaluate_from whose status is completed and whose updated_at is
+      earlier than evaluate_from minus LEAD_IN_MARGIN (5 min) is kept in runs but its jobs are not read (it cannot reach
+      an evaluated hour). A completed run whose cache entry has the same run_attempt and updated_at reuses the cached
+      jobs with no call. Every completed run whose jobs are read is cached as it is read, so a budget stop mid-hour keeps
+      the work done. Both new arguments default to None (existing positional callers keep working). Fetched gains a
+      defaulted last field cache, a JSON-safe dict keyed by str(run id) (the artifact round-trips it through JSON):
+      entries for runs created at or after since (a carried entry is kept even if its run is listed not completed now;
+      reuse needs a matching run_attempt and updated_at, so it is re-read when completed), each {created_at,
+      run_attempt, updated_at, jobs}, jobs keeping only the job API keys normalize reads plus runner_id and runner_name;
+      a reused job gets `_run` re-attached from the fresh run listing, as a read one does. Fetched.cache is returned on
+      every path, the _Stop and the generic-Exception paths included, so an HTTP error mid-hour keeps the work too.
+      Size: bounded by the runs created in the 26 h read window (estimate 1-3 MB of JSON, unmeasured; VP 5 reports the
+      artifact size). (2) PREVIOUS_CALL_CAP becomes
+      1 + 2 * PREVIOUS_RUNS (rec-5093: four runs whose artifacts download but do not parse spend 1 + 4 x 2 calls).
+  - file: scripts/ci/actions_capacity_gauge.py
+    action: Modify
+    purpose: >-
+      (1) Job gains runner: bool = True; normalize sets it true only when runner_id is an int above 0, or runner_id is
+      absent and runner_name is non-empty. _span returns None for a job with no runner, and for a completed job with no
+      completed_at. _blocks is unchanged (a queued job still blocks its hour). (2) start_hour takes holes only from rows
+      starting at or after _floor(now) - bootstrap_hours: an older hole is given up (it stays not evaluated and ages out)
+      and never pulls the start back; with no hole in that window the start is the newest evaluated hour + 1 h -
+      overlap_hours as today; the result is never earlier than _floor(now) - bootstrap_hours - overlap_hours (rec-5091).
+      (3) CONTRACT_VERSION 2; a previous reading whose contract_version differs supplies no table and no jobs_cache (a
+      version-1 table was counted with the old rule, so the first tick bootstraps) but still supplies read_failed_ticks
+      (a count of warehouse-read failures, not hours); the status line's chained=1 means a same-version table was
+      chained. main passes evaluate_from = read_from + overlap_hours and the previous jobs_cache to
+      fetch_runs_and_jobs and writes jobs_cache into the reading. Stays under the 500-SLOC limit (no budget raise).
+  - file: docs/contracts/actions-capacity.yaml
+    action: Modify
+    purpose: >-
+      Notice-class wording (not in approval-routing gated set). contract_version 1 -> 2; one terse amendment_log row
+      (semantic_break true, change_class correction, PLAN-actions-capacity-gauge-progress (rec-5473)).
+      trigger.slot_demand.definition: a job counts only while a runner held it (runner_id above 0); a job waiting on an
+      Environment approval or cancelled before a runner took it counts nothing (runner_name is read only when the
+      runner_id field is absent; a null runner_id is the API's no-runner marker, as on a job skipped by a cancel). window.chaining: a tick starts no
+      earlier than the current hour minus (bootstrap_hours plus overlap_hours), 26 h, and a hole older than the current
+      hour minus bootstrap_hours is given up; lead-in runs completed
+      before the first evaluated hour (5 min margin) are not expanded; completed runs' jobs carry in the reading's
+      jobs_cache and are reused while run_attempt and updated_at are unchanged; a reading of another contract_version is
+      not chained. validity.evaluated_hour's "read in full" gains a pointer to the lead-in skip (a skipped run has no
+      job in the hour). The slot_demand definition keeps its late-start lower-bound sentence and late_start_minutes (an
+      approved job whose run was created more than overlap_hours earlier is still missed).
+  - file: tests/ci/test_actions_capacity_github.py
+    action: Modify
+    purpose: >-
+      New nodes, runs and jobs in the real Jobs API shapes probed 2026-11-20 (status, updated_at, run_attempt,
+      runner_id, runner_name): test_lead_in_skips_runs_finished_before_first_evaluated_hour (completed lead-in run with
+      updated_at before evaluate_from minus 5 min gets no jobs call; one inside the margin, an in_progress one and a
+      re-run with a later updated_at do), test_jobs_cache_resumes_mid_hour_without_rereading (tick 1 stops on the
+      request budget inside an hour; tick 2 with tick 1's cache finishes that hour and issues no jobs call for any cached
+      run; a changed run_attempt or updated_at is re-read; tick 1's cache passes through json.loads(json.dumps(...))
+      before tick 2, and hour_table over tick 2's normalize output equals an uncached single-tick read of the same
+      fixtures in slot_demand, job_minutes keys, peak_concurrency and queue_waits_s, with at least one cached job
+      carrying runner_id above 0 and one ci.yml main-validate push job), test_chain_survives_artifactless_runs (name
+      kept, since rec-5093's acceptance names it; rec-5093: 5 main runs
+      whose first 4 each carry an artifact that downloads but does not parse and whose 5th is readable are chained, red
+      at today's cap 8 (it stops at the 4th run's download: 1 list + 4 listings + 3 downloads) and green at 11; a
+      second case with 4 artifact-less runs also chains); test_http_error_stops_without_retry gains an assertion that
+      Fetched.cache holds the runs read before the error (adds an assertion, loosens none). The shared run() helper and
+      FakeCaller runs gain status completed, updated_at and run_attempt so read runs are cacheable; existing callers pass
+      no evaluate_from or cache, so their behaviour is unchanged. Existing nodes keep every assertion
+      (test_http_error_stops_without_retry gains one); graduated shard
+      actions-capacity-budgets-and-episodes is kept unchanged.
+  - file: tests/ci/test_actions_capacity_gauge.py
+    action: Modify
+    purpose: >-
+      New nodes: test_runnerless_jobs_count_no_minutes (from real shapes: waiting approve job started_at == created_at
+      with no runner fields, cancelled-while-waiting runner_id 0, skipped-by-cancel runner_id null, approved job
+      runner_id above 0; only the last counts minutes and peak; the waiting job still does not block its hour; plus a
+      runner_id-absent job with a non-empty runner_name, which counts, and a completed job with null completed_at, which
+      does not),
+      test_never_evaluable_hole_does_not_starve_newest_hours (rec-5091: with a hole 40 h old and every later hour
+      evaluated, start_hour is the newest evaluated hour + 1 h - overlap, not 40 h back; with a second hole 10 h old it is
+      that hole - overlap; with a table whose rows end 72 h ago and hold no hole it is _floor(now) - 26 h, not
+      _floor(now) - 73 h; six chained ticks keep the 40 h hole not evaluated and evaluate the newest closed hour, each
+      tick starting at or after _floor(now) - 26 h), test_older_version_reading_is_not_chained (main with a version-1 previous
+      reading bootstraps, prints chained=0 and still carries its read_failed_ticks; a version-2 one prints chained=1 and
+      its jobs_cache reaches the fetch; and CONTRACT_VERSION equals load_contract().contract.contract_version),
+      test_main_passes_evaluate_from_and_writes_jobs_cache (the recorded evaluate_from equals the recorded since plus
+      overlap_hours, and the written reading's jobs_cache equals the sentinel cache the fake fetch returned). The cli
+      fixture's fake fetch gains evaluate_from=None and cache=None keyword parameters it records and can return a
+      Fetched with a given cache (adds parameters, loosens no assertion). Existing nodes and their assertions unchanged; graduated shard
+      actions-capacity-trigger-and-validity is kept unchanged. Headroom is 181 SLOC: keep the new nodes compact (shared
+      local helpers); a crossing of 500 is a plan defect for the planner (a sibling module needs a scope row), never a
+      budget raise (Decision 128).
+bundled_recommendations: [rec-5473, rec-5091, rec-5093]
+followon_recs: [rec-5478]
+infrastructure_dependencies: []
+acceptance_criteria:
+  - A job with no runner (runner_id 0, null or absent with empty runner_name) adds no minutes and no concurrency; an approved job counts from its reset started_at.
+  - A completed lead-in run that finished more than 5 min before the first evaluated hour costs no jobs call.
+  - A tick stopped mid-hour keeps the completed runs it read; the next tick reuses them with no jobs call and gets further.
+  - A tick never starts earlier than _floor(now) minus (bootstrap_hours plus overlap_hours), and a hole older than _floor(now) minus bootstrap_hours never pulls the start back.
+  - A previous reading of another contract_version supplies no table and no jobs_cache, still supplies read_failed_ticks, and the status line prints chained=0.
+  - rec-5473, rec-5091 and rec-5093 acceptance commands pass; every existing actions-capacity node passes with its assertions unchanged (fixtures gain fields or keyword parameters only).
+  - Post-merge, the gauge's coverage reaches the last closed hour and rec-5368 (gauge_blind) is closed by the alarm.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: >-
+      rec-5473's acceptance (red before: both nodes absent; the counting rule and lead-in skip are what they assert).
+    command: >-
+      bin/venv-python -m pytest tests/ci/test_actions_capacity_github.py::test_lead_in_skips_runs_finished_before_first_evaluated_hour
+      tests/ci/test_actions_capacity_gauge.py::test_runnerless_jobs_count_no_minutes -q
+    expected: exit 0, 2 passed
+    fix_if: a jobs call for a skippable lead-in run, or minutes from a runner-less job
+    hermetic: true
+    expected_literals: ["2 passed"]
+    graduation: graduate
+    graduation_check_id: actions-capacity-runner-minutes-and-progress
+  - step: 2
+    phase: pre-deploy
+    action: Progress guarantee and chaining nodes, including rec-5091's and rec-5093's acceptance nodes.
+    command: >-
+      bin/venv-python -m pytest tests/ci/test_actions_capacity_github.py::test_jobs_cache_resumes_mid_hour_without_rereading
+      tests/ci/test_actions_capacity_gauge.py::test_never_evaluable_hole_does_not_starve_newest_hours
+      tests/ci/test_actions_capacity_github.py::test_chain_survives_artifactless_runs
+      tests/ci/test_actions_capacity_gauge.py::test_older_version_reading_is_not_chained
+      tests/ci/test_actions_capacity_gauge.py::test_main_passes_evaluate_from_and_writes_jobs_cache -q
+    expected: exit 0, 5 passed
+    fix_if: tick 2 re-reads a cached run, start_hour reaches the 40 h hole, the 5th run's artifact is not reached, or a version-1 table is chained
+    hermetic: true
+    expected_literals: ["5 passed"]
+    graduation: graduate
+    graduation_check_id: actions-capacity-chain-progress
+  - step: 3
+    phase: pre-deploy
+    action: Every existing actions-capacity node still passes (graduated shards included); no assertion is loosened.
+    command: >-
+      bin/venv-python -m pytest tests/ci/test_actions_capacity_contract.py tests/ci/test_actions_capacity_gauge.py
+      tests/ci/test_actions_capacity_github.py tests/ci/test_actions_capacity_alarm.py tests/ci/test_actions_capacity_steps.py
+      tests/checks/contracts/test_validate_actions_capacity.py -q
+    expected: exit 0, no failures
+    fix_if: an existing node fails (fix the code, never the assertion, Decision 235)
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Whole-file re-run of existing standing tests already graduated in four actions-capacity shards; it adds no new guard.
+  - step: 4
+    phase: pre-deploy
+    action: >-
+      Fast tier, then the full tier before handoff (handoff_policy): bin/venv-python -m scripts.validate --pre in the
+      foreground (exit 0), then this command as its own backgrounded run with a 2 h limit from the top-level session.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: "--pre exited 0 first; this command exits 0 for HEAD"
+    fix_if: >-
+      a failure in this plan's files is fixed at root and the full tier rerun; a failure only in another project's open
+      red goes to the operator as the implement skill's go/no-go
+    hermetic: false
+    graduation: not-applicable
+  - step: 5
+    phase: post-deploy
+    action: >-
+      The first gauge tick on main after the merge (the first convergence-health.yml run on main created after the merge
+      time, scheduled or dispatched with mcp__github__actions_run_trigger, no inputs; a later tick chains and prints
+      chained=1): wait for completion, save its health-check job log (mcp__github__get_job_logs) to $CH_LOG.
+    command: grep -E "\[actions_capacity\] verdict=[a-z_]+ evaluated_hours=[1-9][0-9]* chained=0 " "$CH_LOG"
+    expected: >-
+      One line, chained=0 (the version-1 table is dropped) and evaluated_hours of at least 1: the bootstrap advanced.
+      Report calls, elapsed_s, peak_slot_demand, p90_queue_s and the reading artifact's size_in_bytes
+      (list_workflow_run_artifacts).
+    fix_if: >-
+      evaluated_hours 0 means the first tick still did not finish an hour; read fetch_error and coverage in the artifact
+      (coverage advanced, fetch_error null and rows reading job_open is the known zombie-job residual, not a progress
+      defect).
+      peak_slot_demand=0.00 with evaluated_hours of at least 1 means real jobs carry no runner fields (the runner rule
+      counts nothing): treat as a defect, not a quiet hour.
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: post-deploy
+    action: >-
+      Within 24 h of the merge: download the newest convergence-health actions-capacity-reading artifact on main
+      (mcp__github__actions_list list_workflow_run_artifacts, then actions_get download_workflow_run_artifact) and unzip
+      it to $ACR_DIR.
+    command: >-
+      bin/venv-python -m scripts.ci.actions_capacity_gauge --assert-clear gauge_blind --reading
+      "$ACR_DIR/actions-capacity-reading.json" && bin/venv-python -c "import json,os;
+      p=json.load(open(os.path.join(os.environ['ACR_DIR'],'actions-capacity-reading.json'))); print(p['coverage'], p['generated_at']);
+      assert p['coverage']==p['generated_at'][:14]+'00:00Z'"
+    expected: "assert-clear gauge_blind: clear (at least 12 evaluated hours in the trailing 24), then coverage equal to the last closed hour; exit 0"
+    fix_if: >-
+      not clear after 24 h: if coverage and evaluated_hours still rise tick over tick, the bootstrap is still catching up
+      (wait and re-check); if they stall, a tick still loses progress: read calls, elapsed_s, fetch_error and coverage
+      across ticks
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: post-deploy
+    action: >-
+      rec-5368 closed by the alarm (gauge_blind cleared), and the bundled recs closed by the merge.
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import make_reader;
+      r=make_reader(profile='agent_platform').named('recs_by_ids', ids='rec-5368,rec-5473,rec-5091,rec-5093');
+      s={x['id']:x['status'] for x in r}; print(s); assert all(v=='closed' for v in s.values()) and len(s)==4"
+    expected: all four closed
+    fix_if: rec-5368 open while step 6 is clear means the alarm's close write failed (read the tick log); a bundled rec open means the Resolves trailer was missing
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: scripts/ci/actions_capacity_github.py
+    behavior: Cached completed runs are not re-read, survive the artifact's JSON round trip, and yield the same hour rows as a fresh read; a tick stopped mid-hour keeps the work it did.
+    verification_step: 2
+    test_selector: tests/ci/test_actions_capacity_github.py::test_jobs_cache_resumes_mid_hour_without_rereading
+    red_green_expectation: red before (node absent; fetch_runs_and_jobs has no cache argument), green after.
+  - source: scripts/ci/actions_capacity_github.py
+    behavior: A completed lead-in run that finished before the first evaluated hour (5 min margin) is not expanded.
+    verification_step: 1
+    test_selector: tests/ci/test_actions_capacity_github.py::test_lead_in_skips_runs_finished_before_first_evaluated_hour
+    red_green_expectation: red before (node absent; no evaluate_from argument), green after.
+  - source: scripts/ci/actions_capacity_github.py
+    behavior: The previous-table traversal reaches its 5th run past four unparsable artifacts (rec-5093).
+    verification_step: 2
+    test_selector: tests/ci/test_actions_capacity_github.py::test_chain_survives_artifactless_runs
+    red_green_expectation: red before (cap 8 stops at the 4th download), green after (cap 11).
+  - source: scripts/ci/actions_capacity_gauge.py
+    behavior: A job with no runner counts no minutes and no concurrency; an approved job counts from its reset start.
+    verification_step: 1
+    test_selector: tests/ci/test_actions_capacity_gauge.py::test_runnerless_jobs_count_no_minutes
+    red_green_expectation: red before (the waiting job adds minutes until now), green after.
+  - source: scripts/ci/actions_capacity_gauge.py
+    behavior: A hole older than the trailing bootstrap window never pulls the start back, and the start is never earlier than _floor(now) - 26 h even after a stale table (rec-5091).
+    verification_step: 2
+    test_selector: tests/ci/test_actions_capacity_gauge.py::test_never_evaluable_hole_does_not_starve_newest_hours
+    red_green_expectation: red before (start_hour returns the 40 h hole minus 2 h, and _floor(now) - 73 h for a table ending 72 h ago), green after.
+  - source: scripts/ci/actions_capacity_gauge.py
+    behavior: main passes evaluate_from (read start plus overlap) and the previous jobs_cache to the fetch and writes the fetched cache into the reading.
+    verification_step: 2
+    test_selector: tests/ci/test_actions_capacity_gauge.py::test_main_passes_evaluate_from_and_writes_jobs_cache
+    red_green_expectation: red before (node absent; main passes neither argument and writes no jobs_cache), green after.
+  - source: docs/contracts/actions-capacity.yaml
+    behavior: contract.contract_version equals the gauge's CONTRACT_VERSION, which decides what is chained.
+    verification_step: 2
+    test_selector: tests/ci/test_actions_capacity_gauge.py::test_older_version_reading_is_not_chained
+    red_green_expectation: red before (node absent; both versions 1 and no version check), green after.
+  - source: tests/ci/test_actions_capacity_github.py
+    behavior: Test file.
+    verification_step: 2
+    test_selector: tests/ci/test_actions_capacity_github.py::test_chain_survives_artifactless_runs
+    waiver_reason: A test file, not behaviour; its new nodes are the evidence for the github module rows above.
+  - source: tests/ci/test_actions_capacity_gauge.py
+    behavior: Test file.
+    verification_step: 2
+    test_selector: tests/ci/test_actions_capacity_gauge.py::test_never_evaluable_hole_does_not_starve_newest_hours
+    waiver_reason: A test file, not behaviour; its new nodes are the evidence for the gauge module rows above.
+constraints:
+  - Never edit .github/workflows/convergence-health.yml (CI Reform's); the gauge stays alarm-only, exit 0 except a portal write failure.
+  - No budget, cap or threshold value in the contract changes (request 400, time 180 s, overlap 2, bootstrap 24, table 168).
+  - No existing test assertion is loosened (Decision 235); existing node names are kept (graduated shards name them).
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - >-
+    Decision-scout verdict + CITE list (round 1): Verdict: NO_FLAGS. Decisions triaged: 228 of 228. Roadmap items
+    intersected: 2; CONFLICT: 0; RELATED: 2. Serves: NS.3 3/5. CITE: 279 (cl.1: actions-capacity.yaml is notice class,
+    so no approved-text sidecar). Related: 275, 168, 128, 84, 83, 235, 181, 132, 189, 244, 163, 205, 184, 267, 250, 100.
+    Report /mnt/project-files/actions-capacity-gauge-fix/SCOUT-r1.md.
+  - >-
+    Related-work check (scripts.ci_rca.red_overlap, 2026-11-20 22:40 UTC): blocked by rec-5468 (notice-digest
+    _ensure_issue race, slo_breached 5.2 h, shared files none; unclaimed in coordinator log #1963). Deferral rationale:
+    not this plan's repair and it overlaps no scope file, but it is past SLO, so red-main-recovery.yaml halt rule 1
+    holds: the build is not dispatched until rec-5468 is repaired, and the handoff gate stays verify-head ok (VP 4).
+  - >-
+    Evidence (2026-11-20): reading of run 44813032742: coverage 2026-11-17T19:00Z, calls 292, elapsed_s 181, fetch_error
+    time_budget, 69 of 168 hours unread; each tick re-reads lead-in 17:00 and 18:00. Job shapes: run 44771959280 job
+    approve (status waiting, started_at == created_at, no runner, no steps); run 44769409245 approve (approved; started_at
+    reset to the runner start, runner_id above 0); run 44760441052 approve (cancelled while waiting: runner_id 0, no
+    steps) and wake (skipped: runner_id null).
+  - >-
+    Blind Fable consult /mnt/project-files/actions-capacity-gauge-fix/advisor-brief/ADVICE.md: adopted counting rule
+    (runner_id), lead-in skip with 5 min margin, jobs cache keyed by run id + run_attempt + updated_at. Adapted: the
+    trailing-24 h valve becomes a hard clamp and the version-1 table is dropped instead of re-read (simpler; the
+    contract already says the first green reading comes 7 days after the gauge starts). Deferred: jobs pagination past
+    100, a rate_remaining reserve, re-run double count under filter=all, peak above cap tripwire, budget alignment.
+  - 'Sign-off: operator "write the plan" 2026-11-20 22:33 UTC; fork by decision card 22:03 UTC: drop the version-1 table and start fresh, not re-read it. Presentation /mnt/project-files/actions-capacity-gauge-fix/PRESENTATION.md.'
+  - >-
+    Follow-on rec-5478 (filed 2026-11-20, depends on rec-5473): jobs pagination past 100 (a cached truncated list stays
+    truncated), rate_remaining reserve, re-run double count under filter=all, peak-above-cap tripwire, budget alignment.
+    Residual: a zombie open job inside the 26 h window still blocks later hours until its run leaves the window (about
+    a day, down from up to 7).
+  - rec-5368 is the alarm's own gauge_blind episode rec; it closes itself when cleared and is not bundled (step 7 reads it).
+  - "Unbuilt plans on the same files: PLAN-persona-image-pin (#2277) adds a ledger row to actions-capacity.yaml; whichever builds second rebases (different keys)."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:319d64fc2971bbd0b451208d46c7808378b63c32c4e39a86c7415a06e19181e6'}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 3, nits: 7}  # B1 rec-5093 node now uses unparsable artifacts (red at cap 8, critic probe); B2 other-version reading drops table+cache, carries read_failed_ticks, chained=0; B3 rec-5478 filed; N1 old holes excluded from the hole set; N2 _run re-attach; N3 cli fixture kwargs + defaults; N4 version tie node; N5 phase; N6 change_class correction; N7 rollback
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 6}  # B1 red_overlap start step + CLOSURE + closure-evidence steps; B2 one test_obligations row per behaviour; N1 floored bound wording; N2 VP 6 coverage assert; N3 cache on every return path; N4 rollback rec-5091; N5 cache size estimate + VP 5 size report; N6 VP 5 first tick after merge
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 3}  # B1 main plumbing node test_main_passes_evaluate_from_and_writes_jobs_cache + obligation row; N1 runner_name fallback, null completed_at, cache on HTTPError cases; N2 evaluated_hour pointer + late-start sentence kept; N3 cap-8 stop wording
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 2}  # B1 stale-table no-hole case (start = floor(now) - 26 h, red at -73 h); N1 run()/FakeCaller fields declared; N2 chaining bound parenthesised
+  - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 5}  # B1 cache JSON round trip + reused-equals-fresh hour rows, str keys; N1 wording; N2 rename disputed (rec-5093 acceptance names the node); N3 compact nodes, crossing is a plan defect; N4 VP 6 catch-up fix_if; N5 runner_name only when runner_id absent, stated
+  - {gate: plan-critique, round: 6, verdict: PROCEED, blocking: 0, nits: 3}  # N1 VP 5 reports peak_slot_demand/p90, zero peak with evaluated hours is a fix_if; N2 AC 6 wording; N3 carried-entry rule
+  - {gate: plan-critique, round: 7, verdict: PROCEED, blocking: 0, nits: 2}  # confirming round; n1 AC 6 keyword parameters; n2 VP 5 zombie-residual diagnosis
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - Run bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-actions-capacity-gauge-progress.yaml; on blocked, stop and report (rec-5468 was open past SLO at plan time).
+  - Tests per the two test scope rows, in the real Jobs API shapes; see VP 1 and VP 2 fail first.
+  - scripts/ci/actions_capacity_github.py -- evaluate_from skip, cache reuse and carry on every return path, PREVIOUS_CALL_CAP (scope row).
+  - scripts/ci/actions_capacity_gauge.py -- runner rule, start clamp, version 2 with read_failed_ticks carry, jobs_cache plumbing (scope row).
+  - docs/contracts/actions-capacity.yaml -- contract_version 2, amendment_log row, slot_demand and chaining wording.
+  - VP 1, VP 2 and VP 3; graduate VP 1 and VP 2 into their registry shards.
+  - >-
+    CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; commit; git
+    fetch origin main && git rebase origin/main; re-run red_overlap (stop on blocked); bin/venv-python -m scripts.validate
+    --pre; VP 4 (full tier backgrounded from the top-level session, then --verify-head; a timeout or incomplete run is
+    BLOCKED, no push); push; open the PR; subscribe; code review in a fresh context; merge on green under standing
+    authorisation with merge_pull_request(merge_method=squash), an explicit commit_message carrying 'Resolves: rec-5473,
+    rec-5091, rec-5093' and expectedHeadSha.
+  - >-
+    Closure evidence, recorded as four SEPARATE facts (implement skill Commit Flows): GitHub readiness state
+    (bin/venv-python -m scripts.session.github_readiness; unknown is not PASS); parent validator evidence (VP 4 plus
+    --verify-head for the pushed HEAD); structured postflight evidence (bin/venv-python -m scripts.session.postflight
+    --evidence); the real outcome -- push, build PR number, pr-validate run id, CI green by event-driven wake, merge SHA.
+  - 'Report: what was implemented, verification results, merge SHA, each closure fact separately; VP 5 to VP 7 after the merge (VP 6 and VP 7 within 24 h).'
+rollback: Revert the squash commit; the old code then chains the version-2 table (it ignores unknown keys), so the table mixes two counting rules until those hours age out (168 h), and rec-5091's pin returns (the old start_hour sees given-up holes again).

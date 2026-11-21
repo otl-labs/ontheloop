@@ -12,23 +12,26 @@ from pathlib import Path
 
 from scripts import verification_graduation
 from scripts.checks import _common, registry
+from scripts.checks.verification import _graduation_git
 from scripts.checks.verification import _implementation_merge as _im
 from scripts.checks.verification import _registry_command_portability as _portability
+from scripts.contract_rules import parse_yaml
 
 
-def _added_entries(current_entries: list[dict], root: Path | None = None) -> list[dict]:
+def _added_entries(current_entries: list[dict], root: Path | None = None, baseline: list[dict] | None = None) -> list[dict]:
     """Entries present now but absent from origin/main, matched by check_id (VF-06 c2).
 
     Returns [] when origin/main does not resolve (advisory -- the caller's own reachability
     check is what decides whether to skip the whole differential leg, not this helper)."""
-    baseline = verification_graduation.entries_at_ref("origin/main", repo_root=root or _common.ROOT)
+    if baseline is None:
+        baseline = verification_graduation.entries_at_ref("origin/main", repo_root=root or _common.ROOT)
     if baseline is None:
         return []
     baseline_ids = {e.get("check_id") for e in baseline if isinstance(e, dict)}
     return [e for e in current_entries if isinstance(e, dict) and e.get("check_id") not in baseline_ids]
 
 
-def _modified_entries(current_entries: list[dict], root: Path | None = None) -> list[dict]:
+def _modified_entries(current_entries: list[dict], root: Path | None = None, baseline: list[dict] | None = None) -> list[dict]:
     """Entries present in BOTH current and origin/main (same check_id) whose parsed record
     mapping differs from the baseline -- closes the silent-modification hole: a record whose
     check_spec is edited in place, without a new check_id, was previously invisible to the
@@ -38,7 +41,8 @@ def _modified_entries(current_entries: list[dict], root: Path | None = None) -> 
     every record at width=200, so a byte/text-based detector would select all 476 records instead
     of only the ones whose content genuinely changed. Returns [] when origin/main does not
     resolve (mirrors _added_entries)."""
-    baseline = verification_graduation.entries_at_ref("origin/main", repo_root=root or _common.ROOT)
+    if baseline is None:
+        baseline = verification_graduation.entries_at_ref("origin/main", repo_root=root or _common.ROOT)
     if baseline is None:
         return []
     baseline_by_id = {e.get("check_id"): e for e in baseline if isinstance(e, dict)}
@@ -110,26 +114,25 @@ def _run_added_entry_differentials(
     root = root or _common.ROOT
     bases = bases or {}
     pending = pending or set()
-    for row in candidates:
-        cid = row.get("check_id", "?")
-        if cid in pending:
-            print(f"    PENDING: {cid} (late-closure declaration not committed; the committed run decides)")
-            continue
-        try:
-            if cid in bases:
-                outcome = verification_graduation.run_differential(row, repo_root=root, base_ref=bases[cid])
+    with _graduation_git.shared_worktrees(root) as wt:
+        for row in candidates:
+            cid = row.get("check_id", "?")
+            if cid in pending:
+                print(f"    PENDING: {cid} (late-closure declaration not committed; the committed run decides)")
+                continue
+            try:
+                kwargs = {"base_ref": bases[cid]} if cid in bases else {}
+                outcome = verification_graduation.run_differential(row, repo_root=root, worktree_for=wt.get, **kwargs)
+            except verification_graduation.GraduationError as exc:
+                failed.append(f"verification-registry differential: check_id={cid}: error -- {exc}")
+                continue
+            if outcome.skipped:
+                print(f"    skipped (non-fatal): {cid} ({outcome.reason})")
+            elif not outcome.admitted:
+                failed.append(f"verification-registry differential: check_id={cid}: not admitted -- {outcome.reason}")
             else:
-                outcome = verification_graduation.run_differential(row, repo_root=root)
-        except verification_graduation.GraduationError as exc:
-            failed.append(f"verification-registry differential: check_id={cid}: error -- {exc}")
-            continue
-        if outcome.skipped:
-            print(f"    skipped (non-fatal): {cid} ({outcome.reason})")
-        elif not outcome.admitted:
-            failed.append(f"verification-registry differential: check_id={cid}: not admitted -- {outcome.reason}")
-        else:
-            late = f" [late-closure base {bases[cid]}]" if cid in bases else ""
-            print(f"    admitted: {cid} ({outcome.reason}){late}")
+                late = f" [late-closure base {bases[cid]}]" if cid in bases else ""
+                print(f"    admitted: {cid} ({outcome.reason}){late}")
 
 
 def _schema_errors(entries: list, canonical_slots: frozenset[str]) -> list[str]:
@@ -201,13 +204,11 @@ def validate_verification_registry(failed: list[str], root: Path | None = None) 
         registry.skipped("entries directory missing")
         return
 
-    import yaml  # noqa: PLC0415
-
     shard_files = sorted(p for p in entries_dir.glob("*.yaml"))
     entries_by_path: dict = {}
     for path in shard_files:
         try:
-            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            data = parse_yaml(path.read_text(encoding="utf-8"))
         except Exception as exc:
             failed.append(f"verification-registry: {path.name}: YAML parse error: {exc}")
             continue
@@ -249,8 +250,13 @@ def validate_verification_registry(failed: list[str], root: Path | None = None) 
         registry.skipped("origin/main unreachable")
         return
 
-    added = _added_entries(entries, root)
-    modified = _modified_entries(entries, root)
+    baseline = verification_graduation.entries_at_ref("origin/main", repo_root=root)
+    if baseline is None:
+        added = _added_entries(entries, root)
+        modified = _modified_entries(entries, root)
+    else:
+        added = _added_entries(entries, root, baseline=baseline)
+        modified = _modified_entries(entries, root, baseline=baseline)
     candidates = added + modified
     portability_failures, portability_line = _portability.admission_report(candidates)
     print(f"  {portability_line}")

@@ -21,6 +21,9 @@ ALLOWED = {
     "execute": {"jsonschema"},
     "post_verdict": {"yaml", "jsonschema"},
     "wake": {"yaml"},
+    "egress_probe": set(),
+    "egress_self_check": set(),
+    "egress_control": {"yaml"},
 }
 
 
@@ -98,3 +101,20 @@ def test_import_closure_matches_the_jobs_install(verb: str) -> None:
 
 def test_run_itself_is_stdlib_only_at_import() -> None:
     assert {n.split(".")[0] for n in _imports(ROOT / "scripts/personas/run.py")} <= STDLIB | {"__future__"}
+
+
+@pytest.mark.parametrize(
+    ("verb", "module"),
+    [
+        ("egress-probe", "egress_probe"),
+        ("egress-self-check", "egress_self_check"),
+        ("egress-control", "egress_control"),
+    ],
+)
+def test_egress_verbs_dispatch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, verb: str, module: str) -> None:
+    monkeypatch.chdir(tmp_path)
+    called: list[str] = []
+    monkeypatch.setattr(
+        run.importlib, "import_module", lambda name: type("M", (), {"main": staticmethod(lambda a: called.append(name) or 0)})
+    )
+    assert run.main([verb]) == 0 and called == [f"scripts.personas.{module}"]

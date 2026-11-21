@@ -17,8 +17,11 @@ env it reads: GITHUB_API_URL, GITHUB_REPOSITORY, GITHUB_RUN_ID, GH_TOKEN, REVIEW
 Residuals, stated not fixed: approvals are recorded per run, not per attempt, so a re-run attempt is satisfied by an
 earlier attempt's approval; whether an admin bypass writes an approvals entry is unproven (a bypass by a non-listed
 admin fails closed here); the check lives in each job's own definition, so a workflow dispatched from a non-main
-branch could drop it and the Environment's reviewers stay the only gate on that path (Decision 94's premise, that the
-environment sub is approval-gated, holds only for main-defined jobs until rec-4651/rec-4965); the preview job's
+branch could drop it and the Environment's reviewers stay the only gate on that path (Decision 277 cl.1, which carries
+the premise Decision 94 stated: every reviewer-gated Environment but deployment-approval-probe is main-only, so a
+non-main-branch job cannot enter one; admins can still bypass tf-gated-apply, rec-4965 takes the terraform/github apply
+job off it, after which its bypass, still used by the terraform/personal gated apply and reconcile, needs its own
+change); the preview job's
 environment check runs after its credentials step, so its process environment holds session credentials, which this
 script never prints or forwards.
 """

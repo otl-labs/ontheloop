@@ -234,6 +234,7 @@ count).
 declaration a test pins (tests/telemetry/test_parser_version_registry.py) **[repo; partial grep]**; a window verb
 for `unmapped_failure_share` per classifier_version (the register and ladder input); per-session exposed and
 affected flags (backval-q1); the c3 operator label review; the repeat key `input_key` (rec-5079, proposal S3).
+Superseded 2026-11-20 (operator): the repeat key reads the stored tool-input digest at read time, not a producer `input_key`.
 
 **Waits on:** rec-4605, rec-4959 and rec-5097 (one rules PR, one classifier_version bump); rec-4691 (phantom turn
 before each project-thread wake) and rec-4720 (missed sub-agent usage) only for counts that read turns **[recs,
@@ -714,7 +715,7 @@ not pass.
 | 5 | DQ-monitor substrate | Exists (telemetry-verification workflow); drift check unbuilt; durable per-day counts are rec-4438, stored under R2 only once its amending Decision exists, and the monitor is not a verb (section 8) | deliberation build; rec-4438 |
 | 6 | Self-describing gate markers | Done | rec-4172 closed |
 | 7 | MVP price map | Priced at read stands (budget-k3 (a), CD.50); `cost_source` exists; the table itself can wait for a metered lane (S5, proposed) | rec-4031 (post-MVP, S5 note) |
-| 8 | `input_key` | Producer field at the next parser bump (S3, proposed) | rec-5079 |
+| 8 | `input_key` | Producer field at the next parser bump (S3, proposed); superseded 2026-11-20: read the stored digest | rec-5079 |
 | 9 | Ops homes (close_proposed, covered_by, close time, fix attempt) | Unbuilt | rec-5078 |
 | 10 | Producer diagnostics storage; deliberation loss counter; transcript-read access log and retention | Diagnostics storage, rejection record and halt signal on rec-4026; access log and 90-day window built (Decision 239 cl.4); text retention rec-4698; loss counter with the LiteLLM producer | rec-4026; rec-4698; rec-4028 note |
 
@@ -734,7 +735,7 @@ rec-4438, rec-5077, rec-5080, rec-4031, rec-4606, rec-4388, rec-4696, rec-5079 a
 |---|---|---|---|
 | rec-5077 | Design the loop record journal's writer: generalised kernel or dedicated verb; covers verdict records and, once its amending Decision exists, R2's settled kind | Medium | draft P2; R2 note |
 | rec-5078 | Ops homes: covered_by and fix_attempt stamps, close-time read, durable close_proposed | Medium | draft P3 |
-| rec-5079 | `input_key` on claude_code tool_call rows at the next parser bump | Low | draft P6; S3 |
+| rec-5079 | `input_key` on claude_code tool_call rows at the next parser bump (superseded 2026-11-20: read-side key on the stored digest) | Low | draft P6; S3 |
 | rec-5080 | Integer version per event verb beside the digest, lockstep check; a wave 3 prerequisite if R2's series is keyed on it; the digest's scope to narrow first | Low | S1 |
 | rec-5097 | Friction G1 absorb with absorbed count; G2 NULL-name closes out of repeat runs; classifier_version 2 | Medium | draft P5; R3 |
 | rec-4706 (note) | `component` stamp on the telemetry reader's request line | - | draft P4, folded |
@@ -845,7 +846,7 @@ confirms it (section 16).
 | X2 | ci-rca and every rec_episode filer stay separate filers, recorded as a dated exception and revisited when the loop's filer is planned; the loop's filer reuses their dedupe and adds no third. The route (scope reading or numbered Decision) is open (section 16) | 2026-11-12 | coordinator log; rec-4388 note |
 | S1 | Integer verb versions beside the digest (the digest's scope to narrow first, section 8) | 2026-11-11 | rec-5080 |
 | S2 | As a technical dependency, the content reader deploy is needed only for forensic deliberation reads; the operator's gate is unchanged | 2026-11-11 | rec-4696 note |
-| S3 | Producer `input_key` at the next parser bump | 2026-11-11 | rec-5079 |
+| S3 | Producer `input_key` at the next parser bump (superseded by the operator 2026-11-20: no new column, read what's stored) | 2026-11-11 | rec-5079 |
 | S4 | The gate's named list is the operator's 2026-11-10 list | 2026-11-11 | rec-4606 note |
 | S5 | rec-4031's versioned price table stays post-MVP until a metered lane joins this loop's budget; budget-k3 (a) (physical units, priced at read) and CD.50's priced-at-read clause stand | 2026-11-11, changed 2026-11-12 | rec-4031 note |
 | S6 | The nine other held session-to-merge columns (`plan_slug`, `pr_url`, `ci_outcome`, `files_changed`, `lines_added`, `lines_removed`, `scope_drift_files`, and `rec_id` on observations and transcripts) are decided at back-validation planning with `rec_ids` | 2026-11-12 | rec-4606 note |

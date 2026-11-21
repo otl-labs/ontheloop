@@ -56,6 +56,24 @@ def _check_storage_substrate(failed: list[str], path: Path) -> int:
     return len(data["tables"])
 
 
+_STEP_ZERO = "0 (existence first"
+_STEP_ONE = "1. Grain"
+
+
+def _walk_problem(walk: object) -> str:
+    """Empty when the walk carries the existence step before the grain step, else why not."""
+    if not isinstance(walk, str):
+        return "is absent or not a string"
+    zero, one = walk.find(_STEP_ZERO), walk.find(_STEP_ONE)
+    if zero < 0:
+        return f"lacks the {_STEP_ZERO!r} step"
+    if one < 0:
+        return f"lacks the {_STEP_ONE!r} step"
+    if zero > one:
+        return f"places step 0 after {_STEP_ONE!r}"
+    return ""
+
+
 def _check_standard_contract(failed: list[str], path: Path) -> int:
     """Returns the number of required sections judged (0 when the file never reached the judgment)."""
     data, err = _load_yaml(path)
@@ -69,7 +87,11 @@ def _check_standard_contract(failed: list[str], path: Path) -> int:
     if missing:
         failed.append(f"Data-model standard: {path} missing required section(s): {missing}")
     else:
-        print("  PASS: data-modeling-standard.yaml -- all required sections present.")
+        walk_problem = _walk_problem(data.get("design_time_walk"))
+        if walk_problem:
+            failed.append(f"Data-model standard: {path} design_time_walk {walk_problem}")
+        else:
+            print("  PASS: data-modeling-standard.yaml -- all required sections present, walk opens with step 0.")
     return len(_REQUIRED_STANDARD_SECTIONS)
 
 

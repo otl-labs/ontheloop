@@ -37,8 +37,11 @@ def test_codeowners_names_the_persona_image_channel() -> None:
 def test_ports_records_the_persona_image_row() -> None:
     data = yaml.safe_load((ROOT / "docs/contracts/ports.yaml").read_text(encoding="utf-8"))
     rows = data["structural_assumptions"]
-    last = rows[-1]
-    assert "config/persona_image.yaml" in last["assumption"]
+    image = [r for r in rows if "config/persona_image.yaml" in r["assumption"]]
+    assert len(image) == 1
+    row_id = image[0]["id"]
     numbers = [int(r["id"].removeprefix("SA-")) for r in rows]
-    assert numbers[-1] == max(numbers[:-1]) + 1 and last["id"] == f"SA-{numbers[-1]:02d}"
-    assert last["id"] in data["amendment_log"][0]["summary"]
+    idx = rows.index(image[0])
+    assert numbers[idx] == max(numbers[:idx]) + 1 and row_id == f"SA-{numbers[idx]:02d}"
+    assert [r["id"] for r in rows].count(row_id) == 1
+    assert any(row_id in e["summary"] and "PLAN-persona-image-channel" in e["summary"] for e in data["amendment_log"])

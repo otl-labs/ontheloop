@@ -285,14 +285,12 @@ def test_friction_vectors(vector: dict[str, Any]) -> None:
             )
         )
     db.insert_rows(con, "telemetry_observations", rows)
-    from src.common import ducklake_event_read_sql as sql  # noqa: PLC0415
-
     facts = ev.execute_entry(
         con,
         ev.EventRead(
             verb="friction_facts",
             tables=(),
-            sql=sql.FRICTION_FACTS_SQL,
+            sql=verbs.FRICTION_FACTS_SQL,
             params=("session_id",),
             binding="session",
             data=verbs.FRICTION_RULES,

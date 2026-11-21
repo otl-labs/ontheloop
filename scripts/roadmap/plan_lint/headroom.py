@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
+from scripts.contract_rules import parse_yaml
+
 if TYPE_CHECKING:
     from scripts.roadmap.plan_lint import Ctx
 
@@ -22,7 +24,7 @@ _PROSE_NOTE = (
 
 def _load(path: Path) -> Any:
     try:
-        return yaml.safe_load(path.read_text(encoding="utf-8"))
+        return parse_yaml(path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError):
         return None
 

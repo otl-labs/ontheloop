@@ -42,3 +42,15 @@ def session_marker_ref(session_ref: str, role: str = "open") -> str:
 
 def gate_event_ref(source_record_id: str, block_index: int, n: int) -> str:
     return role_ref(source_record_id, block_index, f"gate_event.{n}")
+
+
+def litellm_root_ref(host_run_ref: str) -> str:
+    return f"litellm:{host_run_ref}"
+
+
+def litellm_run_ref(session_ref: str) -> str:
+    return f"{session_ref}/run"
+
+
+def litellm_call_ref(session_ref: str, turn: int, position: int | str) -> str:
+    return f"{session_ref}/call/{turn}/{position}"

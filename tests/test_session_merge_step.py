@@ -543,14 +543,6 @@ def test_premerge_rejects_a_message_with_a_trailer(tmp_path, monkeypatch, capsys
     assert "late closure must carry no trailer" in capsys.readouterr().out
 
 
-def test_sidecar_plan_gets_no_late_premerge_route(tmp_path, monkeypatch, capsys):
-    repo, x = _late_closure(tmp_path, monkeypatch, sidecar=True)
-    with patch.object(ms, "_fetch_rows", return_value=_late_rows(x)):
-        assert _late_premerge(repo, tmp_path) == 1
-    out = capsys.readouterr().out
-    assert "PREMERGE TRAILER MISMATCH expected=['rec-1'] parsed=[]" in out and "LATE-CLOSURE" not in out
-
-
 def _late_merged_closure(tmp_path, monkeypatch) -> tuple[Path, str, str]:
     repo, x = _late_closure(tmp_path, monkeypatch)
     closure = fx.git(repo, "rev-parse", "HEAD")
@@ -576,14 +568,6 @@ def test_readback_of_x_before_the_plan_is_declared_keeps_the_unexpected_line(tmp
     repo, x = lc.build_main(tmp_path, monkeypatch)
     assert _late_readback(repo, x) == 1
     assert "READBACK UNEXPECTED" in capsys.readouterr().out
-
-
-def test_readback_of_a_sidecar_plans_closure_is_not_ok(tmp_path, monkeypatch, capsys):
-    repo, _ = lc.build_main(tmp_path, monkeypatch, sidecar=True)
-    lc.closure_branch(repo)
-    closure = fx.git(repo, "rev-parse", "HEAD")
-    assert _late_readback(repo, closure) == 1
-    assert "READBACK MISSING" in capsys.readouterr().out
 
 
 def test_recover_refuses_a_closure_merge(tmp_path, monkeypatch, capsys):

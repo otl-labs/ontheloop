@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, Callable
 
 import pytest
@@ -13,6 +14,7 @@ from scripts.telemetry_verify.monitor_compare import STAMP_COLUMNS
 from src.common import ducklake_event_reads as ev
 from src.common.ducklake_reader_client import VERB_FIELDS, ReaderInvokeError, ResponseTooLargeError
 from tests.fixtures import telemetry_golden_chain as g
+from tests.fixtures.telemetry_litellm_tree import litellm_batches
 
 duckdb = pytest.importorskip("duckdb", reason="env: duckdb is not installed in the fast tier")
 
@@ -435,3 +437,16 @@ def test_a_link_row_never_reads_as_moved(world: World) -> None:
     report = world.run(quiet_day=QUIET_DAY)
     assert report.tree_moved == 0
     assert (report.quiet, report.compared_trees) == (base.quiet, base.compared_trees)
+
+
+def test_a_litellm_tree_is_rederived_and_never_silent_checked(world: World) -> None:
+    baseline = world.run()
+    project = g.register_project(world.con, len(world.projects) + 1)
+    g.append_batches(world.con, SimpleNamespace(batches=litellm_batches(ended=False)), project=project)
+    world.calls.clear()
+    report = world.run()
+    assert report.compared_trees == baseline.compared_trees + 1
+    assert report.reader_calls == baseline.reader_calls + 6
+    assert all(agreeing == compared for agreeing, compared in report.agree.values())
+    assert report.agree["session_state_and_duration"][1] == baseline.agree["session_state_and_duration"][1] + 1
+    assert report.silent == baseline.silent

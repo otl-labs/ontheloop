@@ -23,6 +23,9 @@ VERBS = {
     "post": "post_verdict",
     "override-render": "override",
     "wake": "wake",
+    "egress-probe": "egress_probe",
+    "egress-self-check": "egress_self_check",
+    "egress-control": "egress_control",
 }
 EXIT_SNAPSHOT_ON_PATH = 3
 
