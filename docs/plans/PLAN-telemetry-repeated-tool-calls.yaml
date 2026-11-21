@@ -68,7 +68,9 @@ scope:
       (true when tool_name is in BOOKKEEPING_TOOLS). BOOKKEEPING_TOOLS = ("mcp__hearthbot__no_reply_needed",
       "ReadNotifications"), the two tools the 2026-11-19 probe found repeating by design (267 and 89 of 573 repeated calls).
       For the tools command the result gains repeat_totals {all, without_bookkeeping}, each the three sums over every
-      row read, 0 (never None) when no row was read.
+      row read, 0 (never None) when no row was read. A row lacking the repeat keys (rows from a reader not yet deployed
+      with this build, between merge and deploy) fails the command with a named error and exit 1, never a default of 0
+      and never a bare KeyError.
   - file: docs/contracts/ducklake_telemetry_reader.yaml
     action: Modify
     purpose: >-
@@ -76,7 +78,9 @@ scope:
       one amendment_log row appended last (change_class field_add, semantic_break false, naming model_usage_rollup,
       tool_use_rollup and session_startup_baseline, which test_reader_contract_declares_the_usage_verbs reads; its summary
       also says tool_use_rollup's derivation_conflicted and conflicted_grain_keys can now flip on a transcript-only
-      conflict, so the CLI's conflicted_rows for tools can grow with no observation change). Notice
+      conflict, so the CLI's conflicted_rows for tools can grow with no observation change; its migration_story: "Three
+      additive columns on an existing verb; no column removed; tree-level stamps may now report telemetry_transcripts
+      conflicts."). Notice
       class (Decision 279): no approved-text sidecar.
   - file: tests/common/test_ducklake_event_read_tool_usage.py
     action: Modify
@@ -113,14 +117,14 @@ acceptance_criteria:
   - "tool_use_rollup serves repeat_input_count, repeat_output_count and repeat_output_bytes, equal to the independent oracle on every golden tree and on hand-built repeats."
   - "A repeat is the same tool name in the same session with the same non-empty input digest (or the same output_sha256 on a latest close with output_bytes > 0) as an earlier call; the first call never counts, a withheld or empty digest never counts, and the same input in two sessions never counts."
   - "telemetry_usage tools prints the three sums per row, a bookkeeping flag, and repeat_totals with and without BOOKKEEPING_TOOLS."
-  - "The reader deploys through its governed channel and its smoke passes; a one-day and a three-day production read complete with no 504, and their times are reported against today's baseline."
+  - "The reader deploys through its governed channel and its smoke passes; a one-day and a three-day production read complete with no 504 (a 413 on the three-day read is rerun as three one-day reads), and their times are reported against today's baseline."
   - "rec-5079 and rec-5250 are closed."
 verification_plan:
   - step: 1
     phase: pre-deploy
     action: The three counts over the verb and the oracle, on every golden tree and the hand-built repeats.
     command: bin/venv-python -m pytest tests/common/test_ducklake_event_read_tool_usage.py -q
-    expected: exit 0 with every test passing; red before (the three new tests fail on the missing repeat_input_count key).
+    expected: exit 0 with every test passing; red before (the four new tests fail on the missing repeat_input_count key).
     fix_if: the verb and the oracle disagree, a first call counts, or a withheld or cross-session input counts
     hermetic: false
     graduation: graduate
@@ -199,7 +203,8 @@ verification_plan:
       halves the same way; row size grew by three integers), not a failure; a 504 read_deadline_exceeded or a 500 on either direct read: stop and tell the coordinator (the transcripts scan is
       the plan's open risk, and a 504 fires Decision 199's derived-read-too-costly reversal condition). The default remedy the coordinator weighs is the plan's rollback (revert the merge commit and
       let deploy-ducklake-lambdas ship it), since an existing verb is degraded; a narrower read is a separate plan, never a
-      deadline raise here. A repeat count above call_count:
+      deadline raise here. The CLI call exiting 1 (a one-day window still 413 or 504 after halving): the same as a direct
+      504, stop and tell the coordinator. A repeat count above call_count:
       fix the SQL
     hermetic: false
   - step: 6
@@ -272,7 +277,7 @@ constraints:
   - "No new column, no producer change, no friction rule change (classifier_version stays 3)."
   - "No row carries content (Decision 236 cl.3): the transcript CTE selects only the link key columns, purpose and content_sha256, never content, content_uri or content_bytes."
   - "The oracle stays independent code, never an import of the reader SQL."
-  - "ducklake_event_read_sql.py stays at or under 500 SLOC: re-measure at build start (452 on 5070cb63; other plans may land SQL first). If the edit would cross 500, stop and send a plan-defect report, never a raise: a split adds a module to the content reader's bundle, a protective manifest edit needing the operator (Decision 272 cl.1)."
+  - "ducklake_event_read_sql.py stays at or under 500 SLOC: re-measure at build start (452 on 5070cb63; other plans may land SQL first), and re-measure tests/test_telemetry_usage.py (442) and scripts/telemetry_usage.py (394) the same way. If the edit would cross 500, stop and send a plan-defect report, never a raise: a split adds a module to the content reader's bundle, a protective manifest edit needing the operator (Decision 272 cl.1)."
   - "BOOKKEEPING_TOOLS lives only in telemetry_usage.py; the verb counts every tool and judges nothing."
 context:
   - "Decision-scout r1: FLAGS_FOUND (WARN 79: the content reader and data-pipeline also bundle the reader modules, answered by VP 7 and infrastructure_dependencies; NOTE 272: a facade split would edit the content reader's protective set, answered by the SLOC constraint). CITE 79, 128, 199, 207, 236, 239, 249, 272, 279. RELATED 84, 88, 215, 200, 213, 255, 270, 125, 126, 254, 221, 210, 214. Decisions triaged: 228 of 228. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2. Serves: mission 3/5."
@@ -280,6 +285,7 @@ context:
   - "Why a separate count, not a friction rule change: the 2026-11-18/19 probe (72 roots) found every classifier_version 3 failure run had 3 distinct inputs, so an identical-input run key would zero the rework signal; operator chose the separate count on 2026-11-21."
   - "Partition choice: a repeat is per (session_id, tool name), the row's own grain; the total per (session, tool) is order-free (equal output_sha256 means equal bytes), but the row grain is finer (attribution_mcp_server comes from each call's own open), so the order decides which row a repeat lands in; it is pinned as (event_timestamp, coalesce(source_ordinal, -1), event_id) (NULL ordinal first, the module's and the oracle's _order convention). A tool_input row duplicated after dedupe keeps the first by the same order, so a link never fans out a call."
   - "Read-cost proxy before build: sessions_window, which already composes the transcripts dedupe, read 2026-11-14..20 in 36.1 s on 2026-11-21 (287 rows), inside the reader's 120 s function timeout; tool_use_rollup adds the same scan to a read that took 10.3 s over three days."
+  - "Why extend tool_use_rollup, not a new opt-in verb: same grain and stamps, no new registry, contract or smoke surface, and no SQL headroom for a duplicate _USAGE_TREE; the cost is that every tools read now carries the transcripts scan, which VP 5 measures and the rollback undoes. Presented to the operator as decided-with-notice on 2026-11-21 before 'write the plan'."
   - "Decision 207: adding TRANSCRIPTS to the verb's tables widens compose()'s conflicts union, so the tree-level stamps also report telemetry_transcripts conflicts; the contract text says so."
   - "Contract text (append after the tool_use_rollup sentence of the Usage verbs invariant): tool_use_rollup also reads telemetry_transcripts and carries repeat_input_count (calls whose tool_input row, reached by _joins.yaml ref_links.tool_call_open_to_tool_input, has a content_sha256 equal to an earlier call's of the same tool name in the same session; a call with no linked digest, or the empty-string digest of a withheld row, never counts and never anchors a repeat), repeat_output_count (calls whose latest close has a non-NULL output_sha256 with output_bytes above 0 equal to an earlier call's of the same tool name in the same session) and repeat_output_bytes (those calls' output_bytes summed); each is 0 when no call repeats; earlier is by the open row's event_timestamp, then source_ordinal with NULL first, then event_id, and each repeating call counts in its own row (so calls of one tool split by attribution_mcp_server can place a repeat in either row by that order). It projects and serves the digest only, never content, and its tree-level stamps also cover telemetry_transcripts conflicts."
   - "Notice-class files this plan changes (Decision 279): docs/contracts/ducklake_telemetry_reader.yaml and this plan."
@@ -293,6 +299,7 @@ gate_rounds:
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 6}
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 4}
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 4}
+  - {gate: plan-critique, round: 5, verdict: PROCEED, blocking: 0, nits: 5}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
