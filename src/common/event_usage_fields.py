@@ -40,6 +40,9 @@ TOOL_USE_FIELDS = (
     "error_count",
     "blocked_count",
     "interrupted_count",
+    "repeat_input_count",
+    "repeat_output_count",
+    "repeat_output_bytes",
     "session_count",
 )
 

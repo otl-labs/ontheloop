@@ -7,6 +7,7 @@ bump runs these body-shape tests too (Decision 135 data edge).
 from __future__ import annotations
 
 import dataclasses
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -241,3 +242,15 @@ class TestClassify:
         litellm = litellm_wire.load_litellm()
         assert classify(litellm.Timeout("t", "m", "p")) == "outage"
         assert classify(litellm.UnsupportedParamsError("u", "p", "m")) == "provider_error"
+
+
+class TestLoadLitellmOffline:
+    def test_sets_both_local_variables_and_keeps_a_callers_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("LITELLM_LOCAL_MODEL_COST_MAP", raising=False)
+        monkeypatch.delenv("LITELLM_LOCAL_ANTHROPIC_BETA_HEADERS", raising=False)
+        litellm_wire.load_litellm()
+        assert os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] == "True"
+        assert os.environ["LITELLM_LOCAL_ANTHROPIC_BETA_HEADERS"] == "True"
+        monkeypatch.setenv("LITELLM_LOCAL_ANTHROPIC_BETA_HEADERS", "False")
+        litellm_wire.load_litellm()
+        assert os.environ["LITELLM_LOCAL_ANTHROPIC_BETA_HEADERS"] == "False"

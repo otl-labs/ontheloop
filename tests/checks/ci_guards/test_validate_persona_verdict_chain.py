@@ -395,6 +395,52 @@ RED = [
     ),
     _red("wake-id-token", "holds id-token: write", lambda d: _jobs(d)["wake"]["permissions"].update({"id-token": "write"})),
     _red("wake-environment", "names an Environment", lambda d: _jobs(d)["wake"].update({"environment": "prod"})),
+    _red("keyed-job-missing", "exist together or not at all", lambda d: _jobs(d).pop("refusal")),
+    _red(
+        "local-uses-in-run-job",
+        "not pinned",
+        lambda d: _jobs(d)["run"]["steps"][0].update({"uses": "./.github/actions/aws-region"}),
+    ),
+    _red(
+        "keyprep-other-local-path",
+        "not pinned",
+        lambda d: _named(_jobs(d)["keyprep"], "Resolve the project region").update({"uses": "./.github/actions/other"}),
+    ),
+    _red(
+        "aws-region-action-in-smoke",
+        "not pinned",
+        lambda d: _jobs(d)["smoke"]["steps"].insert(1, {"id": "r", "uses": "./.github/actions/aws-region"}),
+    ),
+    _red(
+        "self-check-in-the-run-job",
+        "not the pinned run.py argv",
+        lambda d: _jobs(d)["run"]["steps"].insert(3, {"id": "s", "run": v.SELF_CHECK, "working-directory": v.WORKDIR}),
+    ),
+    _red(
+        "self-check-with-extra-words",
+        "not the pinned run.py argv",
+        lambda d: _set_run(_named(_jobs(d)["smoke"], "Check the egress filter"), v.SELF_CHECK + " && true"),
+    ),
+    _red(
+        "smoke-verb-in-the-run-job",
+        "not only in a keyed job",
+        lambda d: _set_run(_step(_jobs(d)["run"], "execute"), v.RUN_PREFIX + "inference-smoke"),
+    ),
+    _red(
+        "keyprep-id-token", "holds id-token: write", lambda d: _jobs(d)["keyprep"]["permissions"].update({"id-token": "write"})
+    ),
+    _red(
+        "third-id-token-job", "holds id-token: write", lambda d: _jobs(d)["post"]["permissions"].update({"id-token": "write"})
+    ),
+    _red(
+        "refusal-environment", "names an Environment", lambda d: _jobs(d)["refusal"].update({"environment": "persona-verdict"})
+    ),
+    _red("smoke-without-environment", "persona-verdict Environment", lambda d: _jobs(d)["smoke"].pop("environment")),
+    _red(
+        "other-secret-in-smoke",
+        "other than secrets.GITHUB_TOKEN",
+        lambda d: _named(_jobs(d)["smoke"], "Smoke the primary role")["env"].update({"K": "${{ secrets.OTHER }}"}),
+    ),
 ]
 
 
@@ -410,6 +456,10 @@ def test_green_on_an_unedited_copy(tmp_path: Path) -> None:
 def test_red_fixture_is_refused(tmp_path: Path, edit: Callable[[Docs], None], expect: str) -> None:
     problems, _ = v.check_tree(_tree(tmp_path, edit))
     assert any(expect in p for p in problems), problems
+
+
+def test_the_keyed_jobs_are_part_of_the_seven_job_set() -> None:
+    assert set(v.JOB_PERMISSIONS) == {"prepare", "run", "post", "wake", "keyprep", "smoke", "refusal"}
 
 
 def test_missing_files_are_refused(tmp_path: Path) -> None:

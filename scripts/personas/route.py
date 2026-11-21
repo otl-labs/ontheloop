@@ -198,12 +198,14 @@ def main(argv: list[str]) -> int:
     repo = os.environ["GITHUB_REPOSITORY"]
     routes: list[str] = []
     plans: list[str] = []
+    fixture = False
     if resolution.get("resolved") and not resolution.get("override"):
         files, unknown, merge_base = changed_files(repo, resolution["base_ref"], resolution["head_sha"], token)
         routes = route(files, unknown, bool(resolution["draft"]), repo, resolution["head_sha"], merge_base, token)
         plans = [str(f["filename"]) for f in plan_files(files)]
+        fixture = bool(probe_routes(files, unknown))
     ROUTES.parent.mkdir(parents=True, exist_ok=True)
     ROUTES.write_text(json.dumps({"routes": routes, "plan_paths": plans}, sort_keys=True), encoding="utf-8")
     print(f"PERSONA-VERDICT routes={len(routes)} {' '.join(routes)}".rstrip())
-    resolve_pr.write_output(routes=str(len(routes)))
+    resolve_pr.write_output(routes=str(len(routes)), fixture="true" if fixture else "false")
     return 0

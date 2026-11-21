@@ -31,6 +31,9 @@ def run(i: int, hour: int, conclusion: str = "success") -> dict[str, Any]:
         "head_branch": "main",
         "created_at": f"2026-11-11T{hour:02d}:10:00Z",
         "conclusion": conclusion,
+        "status": "completed",
+        "updated_at": f"2026-11-11T{hour:02d}:20:00Z",
+        "run_attempt": 1,
     }
 
 
@@ -184,6 +187,7 @@ def test_http_error_stops_without_retry() -> None:
     caller = FakeCaller(per_hour=2, fail_after=2)
     fetched = gh.fetch_runs_and_jobs(caller, SINCE, budget(), NOW, "o", "r")
     assert fetched.error == "HTTPError" and len(caller.urls) == 3 and fetched.coverage == SINCE
+    assert set(fetched.cache) == {"80"} and fetched.cache["80"]["jobs"][0]["name"] == "j"
 
 
 def test_artifact_redirect_is_fetched_without_authorization(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -213,3 +217,106 @@ def test_artifact_redirect_is_fetched_without_authorization(monkeypatch: pytest.
     monkeypatch.setattr(gh, "_open", fake_open)
     assert gh.make_artifact_fetcher("tok")("https://api.github.com/zip") == b"ZIPBYTES"
     assert seen[0][1] == "Bearer tok" and seen[1] == ("https://blob.example/zip?sig=1", None)
+
+
+def _hrun(i: int, hour: int, status: str = "completed", updated: str = "", attempt: int = 1) -> dict[str, Any]:
+    return {
+        **run(i, hour),
+        "status": status,
+        "updated_at": updated or f"2026-11-11T{hour:02d}:20:00Z",
+        "run_attempt": attempt,
+        "created_at": f"2026-11-11T{hour:02d}:05:00Z",
+    }
+
+
+class HourCaller:
+    def __init__(self, runs: dict[int, list[dict[str, Any]]]) -> None:
+        self.runs = runs
+        self.job_ids: list[int] = []
+
+    def __call__(self, url: str) -> Any:
+        decoded = urllib.parse.unquote(url)
+        if "/jobs" in decoded:
+            rid = int(decoded.split("/runs/")[1].split("/")[0])
+            self.job_ids.append(rid)
+            minute = rid % 50
+            return {
+                "jobs": [
+                    {
+                        "name": "main-validate",
+                        "run_id": rid,
+                        "created_at": "2026-11-11T10:05:00Z",
+                        "started_at": f"2026-11-11T10:{minute:02d}:30Z",
+                        "completed_at": f"2026-11-11T10:{minute + 3:02d}:30Z",
+                        "status": "completed",
+                        "conclusion": "success",
+                        "runner_id": 100 + rid,
+                        "runner_name": "GitHub Actions",
+                        "steps": [{"name": "dropped"}],
+                    }
+                ]
+            }
+        return {"workflow_runs": self.runs.get(int(decoded.split("created=2026-11-11T")[1][:2]), [])}
+
+
+def test_lead_in_skips_runs_finished_before_first_evaluated_hour() -> None:
+    first = SINCE + timedelta(hours=2)
+    runs = {
+        8: [_hrun(81, 8), _hrun(82, 8, status="in_progress")],
+        9: [_hrun(91, 9, updated="2026-11-11T09:58:00Z"), _hrun(92, 9, updated="2026-11-11T10:30:00Z", attempt=2)],
+        10: [_hrun(101, 10)],
+    }
+    caller = HourCaller(runs)
+    fetched = gh.fetch_runs_and_jobs(
+        caller, SINCE, budget(), SINCE + timedelta(hours=3, minutes=5), "o", "r", evaluate_from=first
+    )
+    assert caller.job_ids == [82, 91, 92, 101] and len(fetched.runs) == 5 and fetched.error is None
+
+
+def _chain(fetched: gh.Fetched) -> list[g.HourRow]:
+    runs, jobs = g.normalize(fetched)
+    return g.hour_table(jobs, runs, fetched.coverage, SINCE, NOW, CONTRACT)
+
+
+def test_jobs_cache_resumes_mid_hour_without_rereading() -> None:
+    first = SINCE + timedelta(hours=2)
+    runs = {10: [_hrun(101, 10), _hrun(102, 10), _hrun(103, 10)]}
+    tick1 = gh.fetch_runs_and_jobs(HourCaller(runs), SINCE, budget(limit=5), NOW, "o", "r", evaluate_from=first)
+    assert tick1.error == "request_budget" and set(tick1.cache) == {"101", "102"}
+    stored = json.loads(json.dumps(tick1.cache))
+    assert "steps" not in stored["101"]["jobs"][0] and stored["101"]["jobs"][0]["runner_id"] == 201
+    caller = HourCaller(runs)
+    tick2 = gh.fetch_runs_and_jobs(caller, SINCE, budget(), NOW, "o", "r", evaluate_from=first, cache=stored)
+    assert caller.job_ids == [103] and tick2.error is None and set(tick2.cache) == {"101", "102", "103"}
+    fresh = gh.fetch_runs_and_jobs(HourCaller(runs), SINCE, budget(), NOW, "o", "r", evaluate_from=first)
+    for a, b in zip(_chain(tick2), _chain(fresh)):
+        assert (a.slot_demand, a.job_minutes, a.peak_concurrency, a.queue_waits_s) == (
+            b.slot_demand,
+            b.job_minutes,
+            b.peak_concurrency,
+            b.queue_waits_s,
+        )
+    assert any(r.slot_demand > 0 and r.queue_waits_s for r in _chain(tick2))
+    for field_name, value in (("run_attempt", 2), ("updated_at", "2026-11-11T10:59:00Z")):
+        changed = json.loads(json.dumps(stored))
+        changed["101"][field_name] = value
+        again = HourCaller(runs)
+        gh.fetch_runs_and_jobs(again, SINCE, budget(), NOW, "o", "r", evaluate_from=first, cache=changed)
+        assert again.job_ids == [101, 103]
+
+
+def test_chain_survives_artifactless_runs() -> None:
+    good = {"table": [{"hour": "h"}], "generated_at": "x"}
+    calls: list[str] = []
+
+    def fetch(url: str) -> bytes:
+        calls.append(url)
+        return _zip(good) if len(calls) == 5 else b"not a zip"
+
+    bad_art = {i: [_art()] for i in range(1, 6)}
+    caller = ChainCaller([_main_run(i) for i in range(1, 6)], bad_art)
+    assert gh.previous_table(caller, fetch, budget(), "o", "r") == good
+    calls.clear()
+    none_first = ChainCaller([_main_run(i) for i in range(1, 6)], {5: [_art()]})
+    assert gh.previous_table(none_first, lambda url: _zip(good), budget(), "o", "r") == good
+    assert gh.PREVIOUS_CALL_CAP == 11

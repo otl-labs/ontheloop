@@ -26,7 +26,8 @@ MONITOR_LINE = re.compile(
     r"day_level_unread=\d+ tree_too_large=\d+ sessions_not_compared=\d+ session_verb_failed=\d+ verb_skew=\d+ agree=\S+ "
     r"window_agree=\d+/\d+ orphan_days=\d+ orphan_quiescent=\d+/\d+ orphan_pending=\d+ orphan_undercount=\d+/\d+ "
     r"rootless_trees=\d+ conflicted_keys=\d+ silent=\S+ reader_calls=\d+ run_level_s=\d+ elapsed_s=\d+ max_call_s=\d+ "
-    r"max_response_bytes=\d+ alarms=\S+"
+    r"max_response_bytes=\d+ workers=\d+ litellm_quiet=\d+ litellm_read=\d+ litellm_sampled_out=\d+ "
+    r"calls_over_10s=\d+ call_p95_s=\d+ alarms=\S+"
 )
 
 
@@ -285,3 +286,30 @@ def test_arrival_naive_as_of_is_utc_and_the_junit_directory_is_created(
         cli.main(["arrival", "--junit-xml", str(junit), "--as-of", "2026-01-10T12:00:00"], reader=FakeReader(), now=NOW) == 0
     )
     assert junit.is_file() and calls[0]["now"] == datetime(2026, 1, 10, 12, tzinfo=timezone.utc)
+
+
+def test_monitor_command_runs_two_workers(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[dict[str, Any]] = []
+
+    def recording(*a: Any, **k: Any) -> monitor.MonitorReport:
+        seen.append(k)
+        return _report()
+
+    monkeypatch.setattr(cli.monitor, "run_monitor", recording)
+    assert cli.main(["monitor", "--no-alarms"], reader=FakeReader(), now=NOW) == 0
+    assert seen[0]["workers"] == cli.monitor_capacity.MONITOR_WORKERS == 2
+
+
+def test_monitor_line_wires_each_new_field() -> None:
+    report = _report(workers=2, litellm_quiet=5, litellm_read=4, litellm_sampled_out=1, calls_over_10s=3, call_p95_s=12)
+    line = cli.monitor_line(report, {})
+    for pair in (
+        "workers=2",
+        "litellm_quiet=5",
+        "litellm_read=4",
+        "litellm_sampled_out=1",
+        "calls_over_10s=3",
+        "call_p95_s=12",
+    ):
+        assert f" {pair} " in line
+    assert MONITOR_LINE.fullmatch(line)

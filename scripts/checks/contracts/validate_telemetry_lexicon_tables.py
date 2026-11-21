@@ -8,10 +8,13 @@ an existing Class A contract (docs/contracts/<table>.yaml, contract.class == "A"
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import yaml
 
 from scripts.checks import _common, registry
+from scripts.contracts import ContractValidationError, load_contract, resolve_refs
+from scripts.telemetry_fact_index.contracts import parse_address
 
 _CONTRACT_NAME = "telemetry-lexicon.yaml"
 
@@ -40,6 +43,52 @@ def _resolves_to_class_a(target_dir: Path, table: str) -> bool:
     return contract.get("class") == "A" and contract.get("id") == table
 
 
+def _resolved_fields(target_dir: Path, table: str, cache: dict[str, object]) -> dict | None:
+    if table not in cache:
+        path = target_dir / f"{table}.yaml"
+        try:
+            cache[table] = resolve_refs(load_contract(path), target_dir) if path.is_file() else None
+        except ContractValidationError:
+            cache[table] = None
+    return cache[table]  # type: ignore[return-value]
+
+
+def _facts_errors(target_dir: Path, terms: object) -> tuple[list[str], int]:
+    """Errors and the number of facts entries examined: bare resolvable addresses, one discriminator, lower-case unique aka."""
+    errors: list[str] = []
+    examined = 0
+    cache: dict[str, object] = {}
+    for term in terms if isinstance(terms, list) else []:
+        name = term.get("term") if isinstance(term, dict) else None
+        aka: list[Any] = term["aka"] if isinstance(term, dict) and isinstance(term.get("aka"), list) else []
+        if any(not isinstance(a, str) or a != a.lower() for a in aka) or len(set(aka)) != len(aka):
+            errors.append(f"term {name!r}: aka words must be lower case and unique")
+        for entry in (term.get("facts") or []) if isinstance(term, dict) else []:
+            examined += 1
+            if not isinstance(entry, str):
+                errors.append(f"term {name!r}: facts entry {entry!r} is not a bare address string (Decision 95)")
+                continue
+            try:
+                table, column, _key, disc = parse_address(entry)
+            except ValueError:
+                errors.append(f"term {name!r}: facts entry {entry!r} is not a fact address")
+                continue
+            fields = _resolved_fields(target_dir, table, cache)
+            if fields is None or column not in fields:
+                errors.append(f"term {name!r}: facts entry {entry!r} names no resolved field {table}.{column}")
+                continue
+            if len(disc) > 1:
+                errors.append(f"term {name!r}: facts entry {entry!r} carries more than one discriminator")
+            for dname, value in disc.items():
+                spec = fields.get(dname)
+                accepted = ((getattr(spec, "dq_intent", None) or {}).get("accepted_values") or {}).get("values") or []
+                if spec is None or value not in [str(v) for v in accepted]:
+                    errors.append(
+                        f"term {name!r}: facts entry {entry!r}: {dname}={value} is not an accepted value of {table}.{dname}"
+                    )
+    return errors, examined
+
+
 @registry.register("validate_telemetry_lexicon_tables", owner="platform")
 def validate_telemetry_lexicon_tables(failed: list[str], *, contracts_dir: Path | None = None) -> None:
     """Fail if a canonical_tables entry does not resolve to a Class A contract, or a collapses
@@ -65,7 +114,9 @@ def validate_telemetry_lexicon_tables(failed: list[str], *, contracts_dir: Path 
         registry.skipped(f"{_CONTRACT_NAME} missing or empty 'lexicon.model.canonical_tables'")
         return
 
-    registry.examined(len(canonical), unit="canonical_tables")
+    facts_errors, facts_examined = _facts_errors(target_dir, _dig(data, "lexicon", "terms"))
+    registry.examined(len(canonical) + facts_examined, unit="canonical_tables and facts entries")
+    failed.extend(f"Telemetry-lexicon facts: {err}" for err in facts_errors)
     canonical_set = {t for t in canonical if isinstance(t, str)}
     unresolved = sorted(t for t in canonical if not (isinstance(t, str) and _resolves_to_class_a(target_dir, t)))
     if unresolved:
@@ -87,7 +138,7 @@ def validate_telemetry_lexicon_tables(failed: list[str], *, contracts_dir: Path 
             f"canonical table: {bad_collapses}"
         )
 
-    if not unresolved and not bad_collapses:
+    if not unresolved and not bad_collapses and not facts_errors:
         print(
             f"  PASS: {_CONTRACT_NAME} -- {len(canonical)} canonical_tables resolve to Class A contracts, "
             f"all collapses targets are canonical."
