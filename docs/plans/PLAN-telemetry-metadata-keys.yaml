@@ -1,0 +1,231 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: telemetry-metadata-keys
+intent: >-
+  Make every fact stored in telemetry_observations.metadata findable from the contracts, so a planner stops reading
+  producer code (or proposing a new column) to learn what the bag holds. The claude_code producer writes 29 keys and
+  litellm 2; the contract names one of the claude_code keys and lists STEP/PHASE/PROCESS_EVENT keys nothing writes
+  (audit TFC-01, audits/telemetry-field-consolidation-5a48cc4b7.yaml:2505). This plan adds a Class D registry,
+  docs/contracts/telemetry-metadata-keys.yaml (one row per producer, observation_type, event_kind and key, with its
+  meaning and the parser_version since which it is written), and a fast-tier check, validate_telemetry_metadata_keys,
+  that fails when any producer's golden rows and the registry disagree in either direction. The observations metadata
+  semantics becomes a pointer and stops calling exit_code absent from the bag (TFC-02, wording half). No parser bump,
+  no stored-field change, no schema change, no deploy.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-telemetry-metadata-keys.yaml
+phase: >-
+  T3.3 prerequisite (data inventory; field consolidation audit, plan C of the operator's 2026-11-20 breakdown). Closes
+  no exit criterion. V2: a contract, a pure check over the golden corpus and its tests; no Lambda-packaged file, no
+  Terraform, no deploy (config/lambda/ducklake/field_semantics.yaml projects no semantics prose).
+closes_criteria: []
+cites: [dec:59, dec:86, dec:168, dec:170, dec:199, dec:210, dec:275, dec:279]
+scope:
+  - file: docs/contracts/telemetry-metadata-keys.yaml
+    action: Create
+    purpose: >-
+      Class D registry (contract_version 1, status draft, subject telemetry-metadata-keys, evaluator check validate_telemetry_metadata_keys). Body `keys:`
+      is a LIST of flow mappings {producer, observation_type, event_kind, key, meaning, since}, one per (producer,
+      observation_type, event_kind, key) the golden corpus carries (31 rows today: 29 claude_code across tool_call
+      open/close, turn open/close, model_call point, process_event point; litellm error and loss on model_call point).
+      No leaf uses a Class A descriptor key (contract-population.yaml smuggling_detection). `meaning` says what the value
+      is and which writer emits it (process_event rows name their source: hook attachment, hook denial (rec-5211), gate
+      or status marker). `since` is the earliest parser_version of that producer whose golden corpus carries the key,
+      derived at build from git history (never guessed; an undatable key is recorded as the literal "<=N" with N the
+      first version the corpus history shows). A null-valued key counts as written. Meanings: execution step 1's table.
+      description says why this is Class D mechanism, not Class A fields: bag keys are not columns; the metadata
+      column's Class A obligations stay in telemetry_observations.yaml, and this file is the producers' key catalogue
+      checked against the golden corpus. procedure (one paragraph): a producer change that adds or drops a key edits this
+      file in the same parser_version bump; the registry is not a write-time rule source, and any bag-key rule a writer
+      enforces is declared in telemetry_observations.yaml (Decision 210 cl.3).
+  - file: docs/contracts/telemetry_observations.yaml
+    action: Modify
+    purpose: >-
+      fields.metadata.semantics becomes exactly: "Keys are declared one row each in telemetry-metadata-keys.yaml
+      (producer, row type, meaning, since parser_version), among them MODEL_CALL error and loss (litellm, envelope LL-4:
+      cancelled | usage_not_recorded), and checked against the golden rows. The high-value analytic fields are PROMOTED
+      to typed columns (provider, acceptance_passed, time_lost_seconds, the four token classes) and are NOT in this bag;
+      a hook run's exit code is the bag key exit_code until the claude_code parser_version that writes the typed
+      exit_code column. A definition hash is the typed telemetry_agents.definition_sha256, never a metadata key." (keeps
+      the loss substring tests/telemetry/test_litellm_producer_contract_notes.py pins; no prompt_hash). One field-level
+      amendment_log row, newest first: {date: <build date>, semantic_break: true, change_class: governance_note_add,
+      summary: "PLAN-telemetry-metadata-keys (rec-4733): key lists move to telemetry-metadata-keys.yaml; exit_code is a
+      hook bag key until its column is written.", migration_story: "No stored row changes: no producer writes the
+      dropped STEP, PHASE, PROCESS_EVENT or MODEL_CALL purpose_detail keys."}. fields.exit_code and the realization
+      block are NOT edited (they change with the parser v12 producer change). Measured on main: the edit alone is about
+      +270 bytes against 259 of headroom and adds up to two lines against 2 of headroom. Relief, re-measured at build:
+      compact the top-level 2026-10-17 field_add row (PLAN-telemetry-column-additions, with its migration_story) to a
+      terse row (Decision 275 cl.4), and keep the semantics in as few physical lines as the 2,000-character long-line
+      companion allows; never raise.
+  - file: scripts/checks/contracts/validate_telemetry_metadata_keys.py
+    action: Create
+    purpose: >-
+      Pure function metadata_key_errors(registry, corpora, registry_order, currents) plus a wrapper that loads them,
+      reusing validate_telemetry_field_realization.load_inputs for the golden corpus. Rules: K1 every (producer,
+      observation_type, event_kind, key) in a producer's golden metadata is a registry row; K2 every registry row is
+      carried by that producer's golden rows; K3 rows are unique and their producer is registered; K4 since is an int
+      in 1..current, or "<=N" with N in 1..current; K5 no row uses a Class A descriptor key. Each error names the row.
+      Declares examined(count, unit="key rows") through the Decision 170 output channel.
+      Holds the literal telemetry-metadata-keys.yaml in executable context (Decision 168 evaluator grammar).
+    new_imports: [scripts.checks.contracts.validate_telemetry_field_realization]
+  - file: scripts/checks/contracts/_manifest.py
+    action: Modify
+    purpose: >-
+      Register validate_telemetry_metadata_keys, pre=True, pre_globs: the registry, config/telemetry/parser_versions.yaml,
+      tests/fixtures/turn_capture/golden/**, scripts/checks/contracts/validate_telemetry_metadata_keys.py,
+      scripts/checks/contracts/validate_telemetry_field_realization.py, scripts/checks/_common.py,
+      scripts/checks/registry.py.
+  - file: tests/checks/contracts/test_validate_telemetry_metadata_keys.py
+    action: Create
+    purpose: >-
+      Real-tree test test_registry_matches_every_golden_key_set (rec-4733 acceptance) plus one red fixture per rule:
+      an undeclared key (K1), a declared key no golden row carries (K2), a duplicate row and an unregistered producer
+      (K3), since 0, since above current and a malformed "<=" (K4), a leaf with `description` (K5).
+  - file: tests/telemetry/test_hook_denial_contract_notes.py
+    action: Modify
+    purpose: >-
+      Add test_observations_contract_names_the_hook_denial_source (rec-5211 acceptance): the registry's
+      process_event rows for hook_event and marker_version name the hook-denial source (src/turn_capture/hook_denials.py),
+      and the observations metadata semantics points at the registry.
+  - file: config/ci_rca_taxonomy.yaml
+    action: Modify
+    purpose: function_to_category row validate_telemetry_metadata_keys -> schema_drift, beside validate_telemetry_field_realization.
+bundled_recommendations: [rec-4733, rec-5211]
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - docs/contracts/telemetry-metadata-keys.yaml holds exactly the (producer, observation_type, event_kind, key) set the golden corpora carry, each with meaning and since.
+  - validate_telemetry_metadata_keys runs in the fast tier, passes on the tree and fails on each red fixture.
+  - telemetry_observations.yaml metadata semantics is the pointer text in its scope row, no longer lists STEP or PHASE keys and no longer names exit_code as absent; it stays within its byte and line seeds without a raise.
+  - rec-4733 and rec-5211 close on their own acceptance commands.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The registry matches every producer's golden corpus both ways (rec-4733 acceptance).
+    command: bin/venv-python -m pytest tests/checks/contracts/test_validate_telemetry_metadata_keys.py::test_registry_matches_every_golden_key_set -q
+    expected: one test passes; before the build the node does not exist and pytest exits non-zero.
+    fix_if: an error names an undeclared golden key or a registry row no golden row carries
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: telemetry-metadata-keys-registry-matches-corpus
+  - step: 2
+    phase: pre-deploy
+    action: Each rule K1-K5 is red on its own fixture and the real tree is green.
+    command: bin/venv-python -m pytest tests/checks/contracts/test_validate_telemetry_metadata_keys.py -q
+    expected: every test passes, including one red-fixture test per rule.
+    fix_if: a red fixture passes or a rule has no fixture
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Whole-file re-run of a test file this plan creates; step 1's node is the standing guard and the fast tier's pytest diff selection already runs this file.
+  - step: 3
+    phase: pre-deploy
+    action: The check runs as its own module on the real tree.
+    command: bin/venv-python -m scripts.checks.contracts.validate_telemetry_metadata_keys
+    expected: exit 0 with a PASS line naming the row count.
+    fix_if: non-zero exit or an error line
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: Duplicates step 1's graduated test node and the check's own fast-tier registration.
+  - step: 4
+    phase: pre-deploy
+    action: The hook-denial source is named in the registry and the observations pointer (rec-5211 acceptance).
+    command: bin/venv-python -m pytest tests/telemetry/test_hook_denial_contract_notes.py::test_observations_contract_names_the_hook_denial_source -q
+    expected: one test passes; before the build the node does not exist.
+    fix_if: the registry rows for hook_event or marker_version do not name src/turn_capture/hook_denials.py
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: telemetry-metadata-keys-hook-denial-source
+  - step: 5
+    phase: pre-deploy
+    action: The other workspace's pinned loss substring and the prompt_hash absence still hold.
+    command: bin/venv-python -m pytest tests/telemetry/test_litellm_producer_contract_notes.py::test_observations_metadata_declares_the_loss_key tests/checks/contracts/test_persona_run_identity_contract.py -q
+    expected: every selected test passes.
+    fix_if: the pointer sentence lost the pinned substring or reintroduced prompt_hash
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: Both guards are already standing tests owned by their plans; graduating them again would duplicate them.
+  - step: 6
+    phase: pre-deploy
+    action: Full tier on the finished tree, including contract byte and line budgets, evaluator coverage and Class D smuggling detection.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: the full tier passes at HEAD.
+    fix_if: telemetry_observations.yaml over its byte or line seed (compact amendment_log), a smuggling or evaluator failure, or any other red
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: scripts/checks/contracts/validate_telemetry_metadata_keys.py
+    behavior: golden metadata key sets and the registry agree both ways; since and shape rules hold
+    verification_step: 2
+    test_selector: tests/checks/contracts/test_validate_telemetry_metadata_keys.py::test_registry_matches_every_golden_key_set
+    red_green_expectation: red before (node absent), green after
+constraints:
+  - No new stored field, column, metadata key or accepted value (operator ruling 2026-11-20); no parser_version bump; no producer change.
+  - Do not edit tests/telemetry/test_litellm_producer_contract_notes.py (another workspace's test).
+  - No budget raise (Decision 275); relief is amendment_log compaction.
+  - No rescue agents or workaround loops (Decision 55)
+context:
+  - "Decision-scout r2 NO_FLAGS (r1 FLAGS_FOUND, 2 NOTEs folded: dec-210 registry is not a write-rule source; dec-168 Class D rationale in the registry description). CITE: dec:86, dec:168, dec:170, dec:199, dec:210, dec:275, dec:279 (dec:59 kept as RELATED). Decisions triaged: 228 of 228. Roadmap items intersected: 4; CONFLICT: 0; RELATED: 4. Serves: NS.4 4/5."
+  - "Related-work check (red_overlap, 2026-11-21): blocked, rec-5468 rule slo_breached (notice-digest _ensure_issue race, scripts/ci/notice_digest.py), shared paths none; claimed and being fixed by another workspace. Deferral rationale: this plan-only PR repairs nothing there and touches none of its files; the build waits until rec-5468 closes or red_overlap reads clear."
+  - "Existing-data check (operator stopgap 2026-11-20): not triggered; this plan adds no stored field, key, column or accepted value, it declares keys already written."
+  - "Advice: /mnt/project-files/data-inventory/metadata-keys/advisor-brief/ADVICE.md (project files)."
+  - "Wording class (Decision 279 cl.1): both contract files are notice class under approval-routing.yaml lane rung sampled; written under the plan the operator confirmed, no approval run, no sidecar."
+  - "Kept graduated shard: telemetry-hook-denial-names-declared (tests/telemetry/test_hook_denial_contract_notes.py) is unchanged; this plan only adds a node to that file."
+  - "Follow-on plan D (claude_code parser v12, separately planned) stops the 11 copy keys and null keys, moves exit_code to its typed column and rewords fields.exit_code; it edits this registry in the same diff."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:161aec0c400242af1b4c2f9cfde9eb225c2c27dc96efe8f967be80e3ca763607"}
+  - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: "v1:fd800f4977ef5edd8194cd070ac9c148162572c34c622d7ce76c05a8e91b0f3b"}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - >-
+    1. Registry rows: one per line below as "<producer> <observation_type> <event_kind> <key>: <meaning>". Write each
+    meaning as given; adjust wording only to match the code it cites, never to add a fact. Re-run the golden key tally
+    first: if the corpus on main carries a row not listed here, or lacks one listed, the corpus wins and the difference
+    is reported in the PR body.
+  - |-
+    Meanings table (31 rows, counted on main 4232ed1e):
+    claude_code tool_call open caller_type: the tool_use block's caller.type, who issued the call (observations.py _tool_rows).
+    claude_code tool_call open attribution_mcp_server: the record's attributionMcpServer, the MCP server a tool call is attributed to; read by the reader's tool_use_rollup.
+    claude_code tool_call close tool_denial_kind: the tool_result record's toolDenialKind identifier when the call was denied (_result_meta).
+    claude_code tool_call close permission_decision_source: permissionDecision.source on the result record (hook, rule, user...), as an identifier.
+    claude_code tool_call close is_error: the tool_result block's is_error flag (true or false).
+    claude_code tool_call close interrupted: toolUseResult.interrupted, whether the tool run was interrupted.
+    claude_code tool_call close persisted_output: file name of the harness-saved full output sidecar, when the output was persisted.
+    claude_code tool_call close persisted_output_size: toolUseResult.persistedOutputSize in bytes.
+    claude_code tool_call close agent_id: toolUseResult.agentId of a spawned sub-agent run.
+    claude_code tool_call close is_async: toolUseResult.isAsync, true when the harness ran the spawned agent in the background.
+    claude_code tool_call close status: toolUseResult.status string (for example async_launched).
+    claude_code tool_call close synthetic: true on a close the producer synthesised for a tool call with no result (outcome interrupted, output_capture no_result).
+    claude_code turn open is_meta: true when the turn's first record is a harness meta record (isMeta).
+    claude_code turn open prompt_source: the first record's promptSource string.
+    claude_code turn open turn_origin: the first record's turnOrigin string.
+    claude_code turn close response_count: number of model responses in the turn window this close bounds.
+    claude_code turn close tool_call_count: number of tool calls in that window.
+    claude_code model_call point request_id: the API requestId of the response's owner record.
+    claude_code model_call point stop_reason: the response message's stop_reason.
+    claude_code model_call point block_count: total content blocks across the response's records.
+    claude_code process_event point hook_event: the hook event (PreToolUse, Stop...) of a hook attachment row, or the event taken from a hook denial's reasonCode (hook_denials.py).
+    claude_code process_event point hook_name: the hook attachment's hookName.
+    claude_code process_event point attachment_type: the hook attachment's type.
+    claude_code process_event point exit_code: a hook run's exit code from its attachment (severity derives from it); the typed exit_code column replaces it at the parser_version that writes that column.
+    claude_code process_event point duration_ms: the hook run's durationMs.
+    claude_code process_event point tool_use_id: the tool_use id the event belongs to (hook attachment, hook denial, gate or status marker).
+    claude_code process_event point command: the hook command, scrubbed.
+    claude_code process_event point stderr_head: the first 512 characters of the hook's stderr, scrubbed.
+    claude_code process_event point marker_version: the marker grammar version of a gate or status marker row (gate_events.py) or of a hook-denial name marker (hook_denials.py); null when the denial carried no marker.
+    litellm model_call point error: the provider attempt's outcome when usage was not recorded (litellm_producer.py).
+    litellm model_call point loss: why a model_call is incomplete, envelope LL-4: cancelled | usage_not_recorded.
+  - >-
+    2. since: for each producer, list the commits that change its current version in config/telemetry/parser_versions.yaml
+    (claude_code: src/turn_capture/record_turn.py PARSER_VERSION before the registry existed), extract the golden
+    metadata key set at each with the check's own extractor, and set since to the first version carrying the row;
+    "<=N" only where history before version N has no readable corpus. Record the derivation command in the PR body.
+  - 3. Write the check, its manifest row, the ci_rca_taxonomy row and the tests; then the observations pointer and its relief.
+  - Execute Verification Plan -- run each step; loop until pass
+  - 'Report: what was implemented, verification results'
