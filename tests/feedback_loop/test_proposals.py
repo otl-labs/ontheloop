@@ -15,7 +15,7 @@ from scripts.feedback_loop import friction, proposals
 from scripts.ops_portal.risk_scoring import _derive_computed_fields
 from scripts.ops_portal.write_validators import gate_write
 from src.common.ducklake_event_read_verbs import FRICTION_RULES
-from tests.fixtures import feedback_loop_rows as fx
+from tests import feedback_loop as fx
 
 ROOT = Path(__file__).resolve().parents[2]
 WINDOW = ("2026-11-14", "2026-11-20")

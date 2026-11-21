@@ -13,7 +13,7 @@ from scripts.feedback_loop import friction
 from scripts.feedback_loop.friction import COVERAGE, RECURRING
 from scripts.feedback_loop.friction import DETECTOR_PARAMS as P
 from src.common.ducklake_reader_client import ResponseTooLargeError
-from tests.fixtures import feedback_loop_rows as fx
+from tests import feedback_loop as fx
 
 FIRST, LAST = date(2026, 11, 14), date(2026, 11, 20)
 

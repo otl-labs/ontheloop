@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 
 from scripts.feedback_loop import friction, render
-from tests.fixtures import feedback_loop_rows as fx
+from tests import feedback_loop as fx
 
 FIRST, LAST = date(2026, 11, 14), date(2026, 11, 20)
 

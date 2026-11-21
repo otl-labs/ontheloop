@@ -16,7 +16,7 @@ import pytest
 from scripts.feedback_loop import __main__ as cli
 from scripts.feedback_loop import friction
 from src.common.ducklake_reader_client import ReaderInvokeError
-from tests.fixtures import feedback_loop_rows as fx
+from tests import feedback_loop as fx
 
 TODAY = date(2026, 11, 21)
 LINE = re.compile(

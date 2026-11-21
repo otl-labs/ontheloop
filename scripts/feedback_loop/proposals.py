@@ -28,8 +28,9 @@ def _manifest_modules() -> dict[str, str]:
         for node in ast.walk(ast.parse(manifest.read_text(encoding="utf-8"))):
             if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "Entry":
                 kw = {k.arg: k.value.value for k in node.keywords if isinstance(k.value, ast.Constant)}
-                if isinstance(kw.get("name"), str) and isinstance(kw.get("module"), str):
-                    modules[kw["name"]] = kw["module"]
+                name, module = kw.get("name"), kw.get("module")
+                if isinstance(name, str) and isinstance(module, str):
+                    modules[name] = module
     return modules
 
 
