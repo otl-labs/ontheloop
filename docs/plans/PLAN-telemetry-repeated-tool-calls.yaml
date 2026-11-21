@@ -30,13 +30,13 @@ scope:
       content_sha256 not the empty-string digest, the SHA-256 of zero bytes, hashlib.sha256(b'').hexdigest(), e3b0c442...,
       never the literal '') joined to each call's first open row by the declared link key
       (external_ref without '/tool_call_open', same tenant_id, project_id, producer, session_id, parser_version); window
-      counts per (session_id, tool name) ordered by (event_timestamp, source_ordinal, event_id) give repeat_input_count,
+      counts per (session_id, tool name) ordered by (event_timestamp, coalesce(source_ordinal, -1), event_id) give repeat_input_count,
       repeat_output_count and repeat_output_bytes (output_sha256 not NULL and output_bytes > 0 on the call's latest
       close); each count is coalesced to 0 when no call repeats, never NULL. A call whose open reaches no surviving
       tool_input row (withheld, empty or unlinked, so its digest is NULL after the LEFT JOIN) never counts and never
       anchors a repeat: the input flag is digest IS NOT NULL AND row_number() OVER (PARTITION BY session_id, name, digest
-      ORDER BY ...) > 1, mirroring the output side's output_sha256 IS NOT NULL. If dedupe leaves two tool_input rows on one
-      external_ref, the first by (event_timestamp, source_ordinal, event_id) is used. No CTE projects transcript text.
+      ORDER BY event_timestamp, coalesce(source_ordinal, -1), event_id) > 1, mirroring the output side's output_sha256 IS NOT NULL. If dedupe leaves two tool_input rows on one
+      external_ref, the first by (event_timestamp, coalesce(source_ordinal, -1), event_id) is used. No CTE this plan adds, and no served column, projects content, content_uri or content_bytes (compose()'s shared dedupe CTEs are unchanged).
       The edit fits the module's 48-SLOC headroom (452 of 500): no facade split,
       since a new module would change the content reader's bundled set (Decision 272 cl.1); if it would cross 500, stop
       and tell the coordinator, never a raise (Decision 128).
@@ -57,7 +57,7 @@ scope:
       external_ref to its tool_input transcript row by the link key (scope.tables[TRANSCRIPTS], which follows the verb's
       registered tables), then per (session_id, tool name) counts calls after the first holding the same non-empty
       digest (a call with no linked non-empty digest never repeats and never anchors one; of two tool_input rows on one
-      external_ref the first by (event_timestamp, source_ordinal, event_id) is used), and the same for the latest close's
+      external_ref the first by (event_timestamp, coalesce(source_ordinal, -1), event_id) is used), and the same for the latest close's
       output_sha256 with output_bytes > 0; all three are 0, never None, when
       nothing repeats (the module's _total NULL convention does not apply). Written from the contract note,
       never from the SQL; the module docstring's declared conventions gain one line for it.
@@ -81,12 +81,16 @@ scope:
   - file: tests/common/test_ducklake_event_read_tool_usage.py
     action: Modify
     purpose: >-
-      Three nodes over verb and oracle: test_repeat_input_count_same_tool_same_session (rec-5079 acceptance),
+      Four nodes over verb and oracle: test_repeat_input_count_same_tool_same_session (rec-5079 acceptance),
       test_repeat_output_count_and_bytes_on_latest_close (rec-5250 acceptance) and
       test_empty_withheld_and_cross_session_inputs_never_repeat: two withheld calls (empty-string digest) of one tool in
       one session, two opens of one tool with no tool_input row, and one input shared by two sessions, each asserting
       repeat_input_count == 0 (red against a NULL-partition implementation), and all three counts equal 0, not None, on
-      rows with no repeat. Each hand-built call replaces external_ref (its open, its tool_input row with the matching ref and its
+      rows with no repeat. The shared-input case (root and sub-agent session, two output rows) discriminates a session
+      partition from a tree- or name-wide one, not from a row-grain one. A fourth node,
+      test_repeat_order_places_null_ordinal_first, builds two same-timestamp opens of one new tool with one digest and
+      differing attribution_mcp_server, one with source_ordinal NULL, and asserts the NULL-ordinal call's row reads 0 and
+      the other 1, verb equal to oracle (red against a NULLS-LAST order). Each hand-built call replaces external_ref (its open, its tool_input row with the matching ref and its
       close), observation_id and event_id together, so a clone never links to the source call's input, and replaces name
       with a tool name the tree does not store (one per case), so each case reads its own row. Measured baseline
       (2026-11-21): verification:subagent_nonfinal_midstream's sub-agent session already holds two Bash calls (ca1#0,
@@ -104,7 +108,7 @@ infrastructure_dependencies:
   - "None: no IAM, Terraform or DDL. The telemetry reader already reads telemetry_transcripts (sessions_window and four other verbs compose all four tables)."
   - "ducklake_telemetry_reader (active): VP 4 (deploy-ducklake-lambdas deploy-telemetry and telemetry-smoke; the smoke asserts every usage row carries exactly VERB_FIELDS, so it proves the three columns)."
   - "Content reader (active; bundles ducklake_event_read_sql.py and ducklake_event_read_verbs.py, outside its protective set because no module is added): Decision 79's step is VP 7, read on the content channel's next operator-approved deploy (Decision 272 cl.1); the build never dispatches one. tool_use_rollup is not in its served set, so the change is inert there."
-  - "data-pipeline (active): affected only through src/common/event_usage_fields.py by its src/ wildcard (compute_affected_artifacts over this scope); no data-pipeline handler reads it and PROD_SOURCE_PATHSPECS does not watch it, so no build, deploy or smoke step is owed (precedent PLAN-telemetry-planning-cost-reads)."
+  - "data-pipeline (active): affected only through src/common/event_usage_fields.py by its src/ wildcard (compute_affected_artifacts over this scope); no data-pipeline handler reads VERB_FIELDS (scheduled_agent_handler's lazy import uses make_reader only) and PROD_SOURCE_PATHSPECS does not watch it, so no build, deploy or smoke step is owed (precedent PLAN-telemetry-planning-cost-reads)."
 acceptance_criteria:
   - "tool_use_rollup serves repeat_input_count, repeat_output_count and repeat_output_bytes, equal to the independent oracle on every golden tree and on hand-built repeats."
   - "A repeat is the same tool name in the same session with the same non-empty input digest (or the same output_sha256 on a latest close with output_bytes > 0) as an earlier call; the first call never counts, a withheld or empty digest never counts, and the same input in two sessions never counts."
@@ -181,14 +185,15 @@ verification_plan:
       from scripts.telemetry_capture.read_route import TelemetryReader as R; from scripts.aws_profile import resolve_aws_profile as p;
       a,b=sys.argv[1].split(':'); r=R(profile=p('agent_platform')); s=time.time(); rows=r.named('tool_use_rollup', day_from=a, day_to=b); e=time.time()-s;
       assert all(0<=x['repeat_input_count']<=x['call_count'] and 0<=x['repeat_output_count']<=x['call_count'] and x['repeat_output_bytes']>=0 for x in rows);
-      print('READ', a, b, len(rows), round(e,1), sum(x['repeat_input_count'] for x in rows), sum(x['repeat_output_count'] for x in rows), sum(x['repeat_output_bytes'] for x in rows))" "$w" || exit 1; done &&
+      print('READ', a, b, len(rows), round(e,1), sum(x['repeat_input_count'] for x in rows), sum(x['repeat_output_count'] for x in rows), sum(x['repeat_output_bytes'] for x in rows));
+      assert sum(x['repeat_input_count'] for x in rows)>0" "$w" || exit 1; done &&
       out=$(mktemp) && bin/venv-python -m scripts.telemetry_usage tools --from "$(date -u -d '7 days ago' +%F)" --to "$(date -u -d yesterday +%F)" > "$out" &&
-      bin/venv-python -c "import json,sys; d=json.load(open(sys.argv[1])); print('TOTALS', json.dumps(d['repeat_totals'], sort_keys=True))" "$out"
+      bin/venv-python -c "import json,sys; d=json.load(open(sys.argv[1])); t=d['repeat_totals']; print('TOTALS', json.dumps(t, sort_keys=True)); assert all(t['without_bookkeeping'][k]<=t['all'][k] for k in t['all'])" "$out"
     expected: >-
-      Two READ lines and one TOTALS line, exit 0. The 2026-11-19 line has a repeat_input_count sum above 0 (the probe's
-      573 is the order to expect, not an exact target). Each elapsed time is reported beside its baseline; under three
-      times the baseline (8 s and 31 s) passes, above it passes with the ratio reported to the coordinator as the read-cost
-      finding. TOTALS shows without_bookkeeping no larger than all.
+      Two READ lines and one TOTALS line, exit 0; the command asserts each window's repeat_input_count sum is above 0 (the
+      probe's 573 on 2026-11-19 is the order to expect, not an exact target) and that without_bookkeeping is no larger
+      than all. Elapsed times are reported, never gating: each is put beside its baseline, and a ratio above three (8 s and
+      31 s) goes to the coordinator as the read-cost finding.
     fix_if: >-
       a 413 response_too_large on the three-day read: report it and rerun that window as three one-day reads (the CLI
       halves the same way; row size grew by three integers), not a failure; a 504 read_deadline_exceeded or a 500 on either direct read: stop and tell the coordinator (the transcripts scan is
@@ -273,10 +278,10 @@ context:
   - "Decision-scout r1: FLAGS_FOUND (WARN 79: the content reader and data-pipeline also bundle the reader modules, answered by VP 7 and infrastructure_dependencies; NOTE 272: a facade split would edit the content reader's protective set, answered by the SLOC constraint). CITE 79, 128, 199, 207, 236, 239, 249, 272, 279. RELATED 84, 88, 215, 200, 213, 255, 270, 125, 126, 254, 221, 210, 214. Decisions triaged: 228 of 228. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2. Serves: mission 3/5."
   - "Existence check (operator rule 2026-11-20): the fact is already stored. Input fingerprint: telemetry_transcripts.content_sha256 on purpose tool_input rows, linked by _joins.yaml ref_links.tool_call_open_to_tool_input (PLAN-existence-step-and-tool-input-link, #2319; 19,694 of 19,694 opens matched over parsers 7-11). Output fingerprint: telemetry_observations.output_sha256 and output_bytes on tool_call closes. The dropped column plan and its blind consult: /mnt/project-files/parser-v12/columns-consult/."
   - "Why a separate count, not a friction rule change: the 2026-11-18/19 probe (72 roots) found every classifier_version 3 failure run had 3 distinct inputs, so an identical-input run key would zero the rework signal; operator chose the separate count on 2026-11-21."
-  - "Partition choice: a repeat is per (session_id, tool name), the row's own grain; order only picks which call is first, so counts and bytes do not depend on it (equal output_sha256 means equal bytes). A tool_input row duplicated after dedupe keeps the first by (event_timestamp, source_ordinal, event_id), so a link never fans out a call."
+  - "Partition choice: a repeat is per (session_id, tool name), the row's own grain; the total per (session, tool) is order-free (equal output_sha256 means equal bytes), but the row grain is finer (attribution_mcp_server comes from each call's own open), so the order decides which row a repeat lands in; it is pinned as (event_timestamp, coalesce(source_ordinal, -1), event_id) (NULL ordinal first, the module's and the oracle's _order convention). A tool_input row duplicated after dedupe keeps the first by the same order, so a link never fans out a call."
   - "Read-cost proxy before build: sessions_window, which already composes the transcripts dedupe, read 2026-11-14..20 in 36.1 s on 2026-11-21 (287 rows), inside the reader's 120 s function timeout; tool_use_rollup adds the same scan to a read that took 10.3 s over three days."
   - "Decision 207: adding TRANSCRIPTS to the verb's tables widens compose()'s conflicts union, so the tree-level stamps also report telemetry_transcripts conflicts; the contract text says so."
-  - "Contract text (append after the tool_use_rollup sentence of the Usage verbs invariant): tool_use_rollup also reads telemetry_transcripts and carries repeat_input_count (calls whose tool_input row, reached by _joins.yaml ref_links.tool_call_open_to_tool_input, has a content_sha256 equal to an earlier call's of the same tool name in the same session; a call with no linked digest, or the empty-string digest of a withheld row, never counts and never anchors a repeat), repeat_output_count (calls whose latest close has a non-NULL output_sha256 with output_bytes above 0 equal to an earlier call's of the same tool name in the same session) and repeat_output_bytes (those calls' output_bytes summed); each is 0 when no call repeats; earlier is by the open row's event_timestamp, source_ordinal and event_id. It projects and serves the digest only, never content, and its tree-level stamps also cover telemetry_transcripts conflicts."
+  - "Contract text (append after the tool_use_rollup sentence of the Usage verbs invariant): tool_use_rollup also reads telemetry_transcripts and carries repeat_input_count (calls whose tool_input row, reached by _joins.yaml ref_links.tool_call_open_to_tool_input, has a content_sha256 equal to an earlier call's of the same tool name in the same session; a call with no linked digest, or the empty-string digest of a withheld row, never counts and never anchors a repeat), repeat_output_count (calls whose latest close has a non-NULL output_sha256 with output_bytes above 0 equal to an earlier call's of the same tool name in the same session) and repeat_output_bytes (those calls' output_bytes summed); each is 0 when no call repeats; earlier is by the open row's event_timestamp, then source_ordinal with NULL first, then event_id, and each repeating call counts in its own row (so calls of one tool split by attribution_mcp_server can place a repeat in either row by that order). It projects and serves the digest only, never content, and its tree-level stamps also cover telemetry_transcripts conflicts."
   - "Notice-class files this plan changes (Decision 279): docs/contracts/ducklake_telemetry_reader.yaml and this plan."
   - "red_overlap (2026-11-21 ~15:10 UTC, main 5070cb63): blocked by rec-5468 (notice-digest issue create race, scripts/ci/notice_digest.py), past the 4 h SLO, shared files none; its fix has since landed (29aa11ee). Deferral: operator 2026-11-17, builds proceed past reds sharing no files; the build re-runs red_overlap before it starts."
   - "Rec re-key 2026-11-21: rec-5079's acceptance moved from the dropped producer test to test_repeat_input_count_same_tool_same_session and its file to the sql module; rec-5250's undecidable acceptance moved to test_repeat_output_count_and_bytes_on_latest_close."
@@ -287,6 +292,7 @@ gate_rounds:
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 1, nits: 6}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 6}
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 4}
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 4}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -295,7 +301,7 @@ pre_implementation_checklist:
   - Acceptance criteria understood and verifiable
   - "bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-telemetry-repeated-tool-calls.yaml re-run; a red sharing a scope file stops the build."
 execution_steps:
-  - "1. Tests first: the three nodes in the tool-usage test module (clone a Bash open, its tool_input transcript row and its close with chain.clone_row, each clone replacing external_ref, observation_id, event_id and name together, a tool name the tree does not store per case, then varying digest, session and output; the sub-agent Bash row's (1, 1, 3) baseline is asserted once) and the CLI test; confirm red."
+  - "1. Tests first: the four nodes in the tool-usage test module (clone a Bash open, its tool_input transcript row and its close with chain.clone_row, each clone replacing external_ref, observation_id, event_id and name together, a tool name the tree does not store per case, then varying digest, session and output; the sub-agent Bash row's (1, 1, 3) baseline is asserted once) and the CLI test; confirm red."
   - "2. Re-measure the sql module's SLOC on the rebased tree; then the SQL, the registry tables and description, the fields and the oracle."
   - "3. CLI sums, BOOKKEEPING_TOOLS and repeat_totals; the contract text from context and its amendment row with the build date."
   - "4. Execute VP 1-2, then VP 3; loop until pass. On an unrecoverable failure stop and RCA (Decision 55)."
