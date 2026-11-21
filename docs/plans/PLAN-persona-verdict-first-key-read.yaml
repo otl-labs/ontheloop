@@ -66,7 +66,8 @@ scope:
       using ./.github/actions/aws-region (validate_project_region's job_outputs_aws_region_via_action); any other ${{ in a
       filter input, a template in a non-host position, or more than one template per entry still fails. The host:port
       shape check (ENDPOINT, :26) runs on a row entry with {aws_region} replaced by one fixed placeholder label, so the
-      braces pass and nothing else does (red fixture: sts.{aws_region}x:443). The check never
+      braces pass and nothing else does; the token must fill a whole dot-delimited label (red fixtures:
+      sts.{aws-region}.amazonaws.com:443 refused by the shape check, sts.{aws_region}x:443 by the whole-label rule). The check never
       reads the region value (R2 unchanged). A row's provider hosts (entries outside sts/ssm and the filter-supplied set)
       must equal provider_hosts mapped from the default_model prefix of each litellm_tier_models row that a committed tier
       role's selection_ref names (today tier_1 and tier_2), for a job whose steps run the inference-smoke verb; a prefix
@@ -147,16 +148,19 @@ scope:
     action: Create
     purpose: >-
       Verb inference-smoke: the role from PERSONA_SMOKE_ROLE (one of the two tier roles, else fail); token, claims (sub
-      must end ':environment:persona-verdict', job_workflow_ref must equal the trust's string), assume ROLE through
-      oidc_assume, then a boto3.Session built from those credentials in memory and the region from PERSONA_AWS_REGION,
+      must end ':environment:persona-verdict', job_workflow_ref must equal the trust's string), printing the fixed line
+      OIDC-CLAIMS sub=<sub> job_workflow_ref=<ref> (both public, as key_refusal prints them) before the assume, then assume
+      ROLE through oidc_assume (its OIDC-ASSUME line); then sys.stdout.flush() and sys.stderr.flush() immediately before
+      the redirect below; then a boto3.Session built from those credentials in memory and the region from PERSONA_AWS_REGION,
       passed to scripts.smoke_test_inference_credentials.run(role, region=<PERSONA_AWS_REGION>, session=...), with file
       descriptors 1 and 2 redirected (os.dup2) to a temporary file under RUNNER_TEMP from before run() until the process
       ends: the marker line is written to a saved duplicate of the original fd 1, flushed, and the verb exits with
       os._exit(code), so no late writer (an atexit handler or a logging thread) reaches the log; the file is read once and deleted, and only a failure class from a closed set is taken from it, matched on the
       smoke's fixed FAIL prefixes: contract:<ExceptionType>, ssm:<ErrorCode>, cold_start:<ExceptionType>,
       assertion:<outcome>, empty_value, else unclassified (each name matched to ^[A-Za-z_]+$, else other). Prints only
-      INFERENCE-SMOKE role=<r> outcome=<PASS|FAIL> class=<class>; never a key, file text or exception text. The
-      job_workflow_ref check is key_refusal's.
+      INFERENCE-SMOKE role=<r> outcome=<PASS|FAIL> class=<class> after the OIDC-CLAIMS and OIDC-ASSUME lines; never a key,
+      token, file text or exception text. os._exit is reached only from inference_smoke.main(); the work is in an inner
+      function the in-process tests call.
   - file: scripts/personas/run.py
     action: Modify
     purpose: VERBS gains inference-smoke -> inference_smoke and key-refusal -> key_refusal.
@@ -243,7 +247,10 @@ scope:
       region_name (no real client is built): one role per process from PERSONA_SMOKE_ROLE, an unknown role fails; run()
       receives region equal to PERSONA_AWS_REGION;
       the boto3 session carries the assumed credentials and PERSONA_AWS_REGION's region; a sub without the persona-verdict
-      Environment or a foreign job_workflow_ref fails before any assume; only marker lines print (capfd, fd level); a real
+      Environment or a foreign job_workflow_ref fails before any assume; the in-process cases call the inner function
+      (os._exit never reached) and only marker lines print (capfd, fd level); a subprocess case with stdout as a pipe (as
+      on Actions) asserts the child's fd 1 holds, in order, exactly the OIDC-CLAIMS, OIDC-ASSUME ... got=ok and
+      INFERENCE-SMOKE lines; a real
       litellm completion against a stubbed transport answering 401 echoes no part of a planted key to fd 1 or 2, and a
       planted atexit print and a planted thread print reach neither (the verb run in a subprocess, its fds read).
   - file: tests/personas/test_run.py
@@ -471,13 +478,15 @@ verification_plan:
       and for warm_fetched_escape_hatch; refusal shows EGRESS-SELF-CHECK PASS, a sub with no environment part,
       OIDC-ASSUME expect=AccessDenied got=AccessDenied and KEY-REFUSAL PASS; the saved keyprep, smoke and refusal logs
       give zero matches (counts reported) for each of arn:aws:, \b[0-9]{12}\b, eyJ[A-Za-z0-9_-]{10,} (a JWT),
-      \b(AKIA|ASIA)[A-Z0-9]{16}\b and sk-[A-Za-z0-9] (the key prefixes); verdict_probe.proceed concludes success. An attempt that stops as UNSUPPORTED_PLACEMENT is re-run with
+      \b(AKIA|ASIA)[A-Z0-9]{16}\b and \bsk-[A-Za-z0-9]{8,} (the key prefixes); smoke shows OIDC-CLAIMS before
+      OIDC-ASSUME for each role; verdict_probe.proceed concludes success. An attempt that stops as UNSUPPORTED_PLACEMENT is re-run with
       mcp__github__actions_run_trigger(method="rerun_failed_jobs", run_id=<id>), at most 10 attempts, until smoke and
       refusal both pass; report the run id and attempt numbers to the plan owner and the coordinator as c1's first-key-read
       read-back and c7 ORDER's evidence.
     fix_if: >-
       Any FAIL line, a missing host (a filter block in the log), a refusal that got anything but AccessDenied, or no
-      passing attempt in 10 is a STOP to the plan owner with the log lines; never widen a list, drop a case or retry the
+      passing attempt in 10 is a STOP to the plan owner with the log lines; a non-zero scan count is a STOP to the plan
+      owner with the pattern name and line number, never the matched text; never widen a list, drop a case or retry the
       assume in code.
     hermetic: false
     graduation: not-applicable
@@ -612,7 +621,7 @@ context:
   - "boto3 1.44.4 and pyyaml are in docker/persona/requirements-persona.txt (via litellm), so one hash-locked set serves the smoke."
   - "Gotchas: fixture edit must rewrite, not append (PR #2327 appended, making the probe marker 'proceed\\n\\nproceed' and verdict_probe.proceed 'unparseable output' as designed); AWS-placed runners stop as UNSUPPORTED_PLACEMENT (rec-5455)."
   - "UNPROVEN until VP 9: litellm 1.109.1 reaches no host beyond the provider APIs with the two LITELLM_LOCAL_* variables set (importing it attempted no connect at planning, so any remote beta-headers fetch is lazy and shows first at VP 9); setup-python 3.12 resolves from the tool cache or GitHub hosts."
-  - "red_overlap at drafting: blocked, rec-5468 slo_breached (notice-digest race; Agents in GitHub's own build in flight). This plan touches none of its files; deferral: the build waits for rec-5468's merge (Decision 226 red_overlap rule 1)."
+  - "red_overlap: blocked at drafting by rec-5468 (notice-digest race); its fix merged as 29aa11ee (#2330) and red_overlap re-run 2026-11-21 returned clear (no reds). Start condition met; the build starts from main at or after 29aa11ee."
   - "Breadth: selection_budget predicted breadth_waived (30 paths, 250 tests selected, test half 227-866 s of an 866 s allowance); the fast-tier non-test half adds no hermetic VP replay beyond steps 3 and 4 (unit tests and four in-process checks)."
   - "Telemetry: this plan writes no telemetry row (the smoke passes no capture to cold_start_check, and no keyed list holds a telemetry writer host, so it cannot). PLAN-monitor-read-budget (#2329, 440eb295) must land before the first litellm row; that row comes with the plan that first sends verdict telemetry, not this one."
   - "Graduated shards kept: persona-trigger-policy, persona-verdict-chain-shape and persona-verdict-role keep their node ids and commands; the edited test files only add cases."
@@ -627,6 +636,7 @@ gate_rounds:
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 4, nits: 12}  # B1 keyprep aws-region local-action admission pinned + disclosed; B2 smoke rule narrowed to SSM and cold-start lines; B3 test__manifest.py Modify; B4 VP 2 reads terraform-github-apply preview; N1 VP 6 region ban bounded to AC3 paths; N2 keyed red fixtures; N3 test_run ALLOWED; N4 VP 5 through load_litellm; N5 expression-aware tokens; N6 TIER_ROLES literal, no data read; N7 job_workflow_ref from GITHUB_REPOSITORY; N8 failure class; N9 bool(probe_routes); N11 row order; N10, N12 accepted
   - {gate: decision-scout, round: 5, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:27759d591af88601b6db8bc0654d49665e3c19f7daf715f867a65549151a14a0'}
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 9}  # B1 session path takes region from PERSONA_AWS_REGION, never _default_region, plus test; N1 placeholder shape check; N2 KEYPREP_OK conjunct; N3 redirect to process end, os._exit; N4 VP 9 log pattern scan; N5 patched opener and fake session; N6 executable obligation command; N7 readers stand (context); N8 advances line; N9 import-name wording
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 5}  # B-A OIDC-CLAIMS line before the assume, flush before dup2, subprocess fd-1 order test; N-A whole-label token + discriminating fixture; N-B anchored sk- pattern + scan STOP; N-C os._exit only in main(); N-D accepted; N-E red_overlap clear after 29aa11ee
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
