@@ -131,3 +131,18 @@ def test_check_runs_in_the_fast_and_full_tiers() -> None:
         "scripts/contracts_schema.py",
     ):
         assert needed in globs
+
+
+def test_wrapper_reports_a_failing_registry(tmp_path: Path) -> None:
+    failed: list[str] = []
+    check.validate_telemetry_metadata_keys(failed, root=tmp_path)
+    assert len(failed) == 1 and "inputs unreadable" in failed[0]
+
+
+def test_wrapper_reports_row_errors(monkeypatch) -> None:
+    rows, corpus, order, cur = _world()
+    rows.append(_row(key="ghost"))
+    monkeypatch.setattr(check, "load_registry_inputs", lambda root: (rows, corpus, order, cur))
+    failed: list[str] = []
+    check.validate_telemetry_metadata_keys(failed, root=ROOT)
+    assert len(failed) == 1 and "ghost" in failed[0] and "(K2)" in failed[0]

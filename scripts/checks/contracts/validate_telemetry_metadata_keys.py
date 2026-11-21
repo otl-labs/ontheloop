@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 
@@ -79,7 +79,7 @@ def metadata_key_errors(
     golden = golden_key_rows(corpora)
     seen: set[RowKey] = set()
     for row in key_rows:
-        ident: RowKey = (row.get("producer"), row.get("observation_type"), row.get("event_kind"), row.get("key"))
+        ident = cast(RowKey, (row.get("producer"), row.get("observation_type"), row.get("event_kind"), row.get("key")))
         label = " ".join(str(part) for part in ident)
         leaked = sorted(_population._CLASS_A_DESCRIPTOR_KEYS & row.keys())
         if leaked:
