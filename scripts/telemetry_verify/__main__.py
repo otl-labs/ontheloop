@@ -19,7 +19,7 @@ from typing import Any, Callable, Mapping
 
 from scripts.rec_episode import find_recs
 from scripts.telemetry_capture import read_route
-from scripts.telemetry_verify import monitor, session_presence
+from scripts.telemetry_verify import monitor, monitor_capacity, session_presence
 from scripts.telemetry_verify.alarms import ALARM_SOURCE, raise_alarms
 from scripts.telemetry_verify.silent_checks import REPORT_ONLY_CHECKS
 
@@ -114,6 +114,12 @@ def monitor_line(report: monitor.MonitorReport, findings: Mapping[str, int]) -> 
         "elapsed_s": report.elapsed_s,
         "max_call_s": report.max_call_s,
         "max_response_bytes": report.max_response_bytes,
+        "workers": report.workers,
+        "litellm_quiet": report.litellm_quiet,
+        "litellm_read": report.litellm_read,
+        "litellm_sampled_out": report.litellm_sampled_out,
+        "calls_over_10s": report.calls_over_10s,
+        "call_p95_s": report.call_p95_s,
         "alarms": _alarms(findings),
     }
     return "MONITOR " + _fmt(pairs)
@@ -183,6 +189,7 @@ def run_monitor_command(
             as_of=now,
             budget=budget or monitor.Budget(),
             skip_trees=args.skip_trees,
+            workers=monitor_capacity.MONITOR_WORKERS,
         )
     except Exception as exc:  # noqa: BLE001 -- the class alone is printed
         print(f"MONITOR_STOP class={type(exc).__name__}")

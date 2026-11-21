@@ -7,7 +7,8 @@ only tolerated difference is a filled `{{N}}` or `{{DATE}}` placeholder.
 
 CLI:
   record --slug S                          print `digest=<hex> blocks=<n>`, `approved=<hex>` and `fingerprint=<words>`
-  verify --slug S [--base REF] [--expect H] check the working tree against the sidecar read AT THE BASE
+  verify --slug S [--base REF] [--expect H] check the working tree against the sidecar read AT THE BASE;
+                                           words already landed on the base pass with one LANDED line per file
 """
 
 from __future__ import annotations
@@ -293,7 +294,10 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     if state != "unchanged":
         print(f"APPROVED-TEXT SIDECAR {state}")
         return 1
-    failures = [f"APPROVED-TEXT MISMATCH {m}" for m in verify(sidecar, args.root, base)]
+    messages, landed = verify_landed(sidecar, args.slug, args.root, base)
+    for rel, sha in landed.items():
+        print(f"APPROVED-TEXT LANDED {rel} {sha}")
+    failures = [f"APPROVED-TEXT MISMATCH {m}" for m in messages]
     found = digest(sidecar)
     if args.expect and args.expect != found:
         failures.append(f"APPROVED-TEXT MISMATCH digest {found} != expected {args.expect}")
