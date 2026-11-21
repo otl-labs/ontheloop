@@ -1,0 +1,486 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "persona-verdict-first-key-read"
+intent: >-
+  Plan 3 of the verdict persona egress series (T4.32 c1's credential leg, c7 ORDER): the first job to assume the
+  persona-verdict OIDC role. On fixture PRs only, a smoke job in the persona-verdict Environment, behind the block-mode
+  egress filter and its self-check, assumes the role through GitHub's OIDC token and the project region's STS endpoint, reads each
+  tier role's inference key from SSM in its own process and runs that role's cold-start call (rec-5166); a sibling job
+  holding id-token: write without the Environment shows the role refuses it. Packages reach the keyed job only as a
+  hash-locked wheelhouse built by a keyless job from the image's own lock, so no package index sits beside a key. Serves
+  NS.9 (the first key read is contained and proven) and moves the credentialed smoke off sessions into CI.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-persona-verdict-first-key-read.yaml
+phase: >-
+  T4.32 (persona foundation): c1's credential leg, first live use; c7's ORDER clause (the first job to assume c1's role is
+  the inference credential smoke in CI and runs no container). Closes no criterion: c1 and c7 stay open.
+cites: [dec:101, dec:128, dec:173, dec:181, dec:202, dec:205, dec:212, dec:224, dec:263, dec:275]
+scope:
+  - file: .github/workflows/persona-verdict.yml
+    action: Modify
+    purpose: >-
+      prepare gains output fixture (from the route step). Three new jobs, each under one pinned condition KEYED_IF =
+      "!cancelled() && needs.prepare.result == 'success' && github.event.workflow_run.event == 'pull_request' &&
+      needs.prepare.outputs.allowlisted == 'true' && needs.prepare.outputs.fixture == 'true'":
+      (1) keyprep, keyless (contents: read): checkout of the workflow's own commit (no ref, no path,
+      persist-credentials false), ./.github/actions/aws-region (output aws_region), setup-python 3.12, `pip download
+      --require-hashes --no-deps --only-binary :all: -r docker/persona/requirements-persona.txt -d
+      "$RUNNER_TEMP/work/wheels"` and an upload of persona-verdict-wheels (retention 1 day); needs prepare.
+      (2) smoke: environment persona-verdict, permissions {contents: read, id-token: write}, needs [prepare, keyprep];
+      steps: the pinned filter (block; allowed-endpoints sts.${{ needs.keyprep.outputs.aws_region }}.amazonaws.com:443,
+      ssm.${{ needs.keyprep.outputs.aws_region }}.amazonaws.com:443, api.deepseek.com:443, api.anthropic.com:443; telemetry,
+      sudo and containers off), checkout of main to path main, mkdir, the egress self-check, setup-python 3.12, download of
+      persona-verdict-wheels, `pip install --no-index --find-links "$RUNNER_TEMP/work/wheels" --require-hashes --no-deps
+      --only-binary :all: -r "$GITHUB_WORKSPACE/main/docker/persona/requirements-persona.txt"`, then one run.py
+      inference-smoke step per tier role (PERSONA_SMOKE_ROLE primary, then warm_fetched_escape_hatch), each with env
+      AWS_ACCOUNT_ID from secrets.AWS_ACCOUNT_ID, PERSONA_AWS_REGION from ${{ needs.keyprep.outputs.aws_region }} (the one
+      shared region read, Decision 224 cl.5; R5 forbids the AWS_REGION names), PERSONA_SNAPSHOT and the work directory.
+      (3) refusal: no environment, permissions {contents: read, id-token: write}, needs [prepare, keyprep]; the filter
+      (sts.${{ needs.keyprep.outputs.aws_region }}.amazonaws.com:443 only), checkout of main, mkdir, self-check, then run.py key-refusal (env AWS_ACCOUNT_ID, PERSONA_AWS_REGION as smoke,
+      PERSONA_SNAPSHOT, work directory) on the system python; no pip. Every new run step carries an id. The header
+      comment's stale sentence (lines 7-8, "first assumed in PLAN-persona-verdict-egress") is corrected to name this plan
+      and the three jobs.
+  - file: config/persona_verdict_egress.yaml
+    action: Modify
+    purpose: >-
+      jobs gains .github/workflows/persona-verdict.yml rows smoke [sts.{aws_region}.amazonaws.com:443,
+      ssm.{aws_region}.amazonaws.com:443, api.deepseek.com:443, api.anthropic.com:443] and refusal
+      [sts.{aws_region}.amazonaws.com:443]; new top-level provider_hosts {deepseek/: api.deepseek.com:443, anthropic/:
+      api.anthropic.com:443} (core-owned, keyed by LiteLLM model prefix). The header names the two derived forms:
+      {aws_region} resolves from config/aws-region's home through a keyless job's aws-region output; provider hosts
+      resolve from docs/contracts/inference-provider.yaml litellm_tier_models through provider_hosts. No region id,
+      account id or wildcard is added.
+  - file: scripts/checks/misc/validate_persona_verdict_egress.py
+    action: Modify
+    purpose: >-
+      Replace the blanket refusal of an expression in the filter's with: by one admitted form: a row entry holding the
+      token {aws_region} matches the workflow entry with that token replaced by exactly
+      ${{ needs.<job>.outputs.aws_region }}, where <job> is in the covered job's needs and binds aws_region to a step
+      using ./.github/actions/aws-region (validate_project_region's job_outputs_aws_region_via_action); any other ${{ in a
+      filter input, a template in a non-host position, or more than one template per entry still fails. The check never
+      reads the region value (R2 unchanged). A row's provider hosts (entries outside sts/ssm and the filter-supplied set)
+      must equal provider_hosts mapped from every model prefix in inference-provider.yaml litellm_tier_models, for a job
+      whose steps run the inference-smoke verb; a prefix with no provider_hosts entry fails.
+    new_imports: [scripts.checks.ci_guards.validate_project_region]
+  - file: scripts/checks/ci_guards/validate_project_region.py
+    action: Modify
+    purpose: >-
+      Rename _job_outputs_aws_region_via_action to public job_outputs_aws_region_via_action (one caller added); no rule
+      changes.
+    new_imports: []
+  - file: scripts/checks/ci_guards/_persona_verdict_keyed.py
+    action: Create
+    purpose: >-
+      The keyed-job pins the chain check calls: keyprep, smoke and refusal exist together or not at all; each carries
+      exactly KEYED_IF and its pinned needs; smoke names exactly environment persona-verdict, refusal and keyprep none;
+      id-token: write on smoke and refusal only; permissions maps exact; secrets.AWS_ACCOUNT_ID only as the env key
+      AWS_ACCOUNT_ID of an inference-smoke or key-refusal step, after the self-check; those steps' PERSONA_AWS_REGION is
+      exactly ${{ needs.keyprep.outputs.aws_region }}; smoke's run.py steps are exactly the
+      self-check then one inference-smoke step per tier role with PERSONA_SMOKE_ROLE pinned; refusal's are exactly the
+      self-check then key-refusal; keyprep runs no python and no run.py verb; exact pip download and pip install lines;
+      smoke downloads only persona-verdict-wheels and uploads nothing; no keyed job has continue-on-error, a container,
+      services, a docker command or a configure-aws-credentials step. Imports nothing from scripts/personas/.
+  - file: scripts/checks/ci_guards/validate_persona_verdict_chain.py
+    action: Modify
+    purpose: >-
+      Table edits and one call: the job set adds keyprep, smoke and refusal (the four-job equality becomes seven);
+      JOB_PERMISSIONS and PIP_SETS gain the three (pip handled by the keyed helper's exact lines); VERBS adds
+      inference-smoke and key-refusal; _common_problems' environments argument admits smoke and its id-token rule admits
+      smoke and refusal; the python-step rule exempts exactly the self-check line in a job the egress list covers (it
+      takes no env or working-directory there, matching validate_persona_verdict_egress); the secrets rule admits only
+      what the keyed helper allows; ARTIFACT_DIRS gains persona-verdict-wheels: wheels; verdict_problems calls the keyed
+      helper. Stays under 500 effective lines (437 raw on main).
+    new_imports: [scripts.checks.ci_guards._persona_verdict_keyed]
+  - file: scripts/checks/ci_guards/_persona_llm_signatures.py
+    action: Modify
+    purpose: >-
+      A step is also an LLM step when it runs the run.py inference-smoke verb or scripts/smoke_test_inference_credentials,
+      or when its job names an Environment in KEY_ENVIRONMENTS ({persona-verdict}, the Environment whose role reads the
+      inference keys), so the trigger policy's pull_request-event conjunct binds the smoke (it reads its key in-process,
+      which no current signature matches).
+    new_imports: []
+  - file: scripts/personas/oidc_assume.py
+    action: Create
+    purpose: >-
+      Stdlib only. token(): GET $ACTIONS_ID_TOKEN_REQUEST_URL with audience=sts.amazonaws.com and the bearer request
+      token, refusing a URL whose host is not under actions.githubusercontent.com; claims(): decode the JWT payload (no
+      verification; for printing sub and job_workflow_ref only). assume(role_name, token): unsigned POST of
+      AssumeRoleWithWebIdentity (Version 2011-06-15, DurationSeconds 900, RoleSessionName persona-verdict-<run id>) to
+      https://sts.<region>.amazonaws.com/ (region from PERSONA_AWS_REGION, keyprep's aws-region output, the same value the
+      filter list uses; a missing or malformed value fails before any call; no new reader of config/aws-region), the ARN built from AWS_ACCOUNT_ID and role_name in memory and never printed; returns
+      credentials on 200, or an outcome naming the HTTP status and STS Error Code. Prints only fixed marker lines
+      (OIDC-ASSUME role=<name> expect=<e> got=<code>); never a token, credential, body, ARN or account id. ROLE =
+      agent-platform-github-ci-persona-verdict.
+  - file: scripts/personas/key_refusal.py
+    action: Create
+    purpose: >-
+      Verb key-refusal: ATTEMPTS, a table of (role name, expected code) rows, today one row (ROLE, AccessDenied); a later
+      plan (PLAN-persona-verdict-app-post) adds rows. Prints sub and job_workflow_ref; requires sub to carry no
+      ':environment:' part and job_workflow_ref to equal the role trust's string; passes only when every attempt returns
+      HTTP 403 with code AccessDenied; a URLError, timeout, 200 or any other code fails. Exit 0 PASS, 1 FAIL, with
+      KEY-REFUSAL PASS|FAIL.
+  - file: scripts/personas/inference_smoke.py
+    action: Create
+    purpose: >-
+      Verb inference-smoke: the role from PERSONA_SMOKE_ROLE (one of the two tier roles, else fail); token, claims (sub
+      must end ':environment:persona-verdict', job_workflow_ref must equal the trust's string), assume ROLE through
+      oidc_assume, then a boto3.Session built from those credentials in memory and the region from PERSONA_AWS_REGION,
+      passed to scripts.smoke_test_inference_credentials.run(role, session=...). Prints only INFERENCE-SMOKE role=<r>
+      outcome=<PASS|FAIL> code=<code>; never a key or exception text.
+  - file: scripts/personas/run.py
+    action: Modify
+    purpose: VERBS gains inference-smoke -> inference_smoke and key-refusal -> key_refusal.
+  - file: scripts/personas/route.py
+    action: Modify
+    purpose: >-
+      main() also writes output fixture=true when the routes are probe routes (every changed path under PROBE_DIR, the
+      existing probe_routes rule), else fixture=false.
+  - file: scripts/smoke_test_inference_credentials.py
+    action: Modify
+    purpose: >-
+      run() gains an optional session parameter (default: the profile session, unchanged for the CloudShell fallback);
+      failure lines print the SSM error code or the exception type only, never exception text (an AccessDenied message
+      carries ARNs); the docstring drops the CC-web agent_platform line (rec-5166) and names the CI verb as the
+      credentialed route with CloudShell as fallback.
+  - file: scripts/llm/litellm_wire.py
+    action: Modify
+    purpose: >-
+      load_litellm() also sets LITELLM_LOCAL_ANTHROPIC_BETA_HEADERS=True (setdefault), so importing litellm fetches no
+      raw.githubusercontent.com file, which the filter does not allow.
+  - file: docs/contracts/github-actions-evidence.yaml
+    action: Modify
+    purpose: >-
+      artifact_uploads gains persona-verdict.yml keyprep's persona-verdict-wheels row (ephemeral_handoff, 1-day
+      retention, the class minimum); one terse amendment_log row. NEAR_CAP (498 of 500 effective lines on main bbe094f9):
+      the build pays the added lines by compacting older full amendment_log rows to terse rows (contract-population.yaml
+      amendment_log_retention), measured against main at build time.
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: One r3 row per new inline run body in persona-verdict.yml (keyprep, smoke and refusal steps), each at its line count.
+  - file: docs/contracts/ports.yaml
+    action: Modify
+    purpose: >-
+      SA-14 also names GitHub's OIDC token-request shape (the {value} JSON) and STS's AssumeRoleWithWebIdentity query
+      shape (XML Credentials and Error Code) as assumptions of scripts/personas/, Decision 212 cl.3. The file is at its
+      Decision 275 byte seed (50168 of 50251 on main bbe094f9): the build pays every added byte by shortening SA-14's or
+      PC-12's description by citation (never a protected log row), measured against main at build time, and adds no
+      line: the amendment_log entry replaces the oldest full row's text with a terse row naming both changes (498 of 500
+      effective lines on main).
+  - file: tests/scripts/test_smoke_inference_credentials_ci.py
+    action: Create
+    purpose: >-
+      rec-5166's acceptance. test_credentialed_run_is_a_ci_job: the live persona-verdict.yml's smoke job names the
+      persona-verdict Environment, holds id-token: write, runs one run.py inference-smoke step per tier role in
+      tier_selection, and its condition carries the pull_request-event, allowlisted and fixture conjuncts; plus the
+      smoke script's failure lines carry no exception text (a botocore ClientError whose message holds an ARN is not
+      printed).
+  - file: tests/personas/test_oidc_assume.py
+    action: Create
+    purpose: >-
+      Real shapes: the token response {"count": 1, "value": "<jwt>"} and STS 200 XML Credentials and 403 ErrorResponse
+      (Code AccessDenied) bodies served by a local stub; refuses a non-Actions host; never prints token, credential, ARN or
+      account id (capsys); timeout and URLError are outcomes, never a pass.
+  - file: tests/personas/test_key_refusal.py
+    action: Create
+    purpose: >-
+      Pass only on 403 AccessDenied for every row; fails on 200, on another code, on URLError, on a sub with an
+      environment part, on a job_workflow_ref other than the trust's; ROLE equals the role name in
+      terraform/personal/oidc_persona_verdict_role.tf.
+  - file: tests/personas/test_inference_smoke.py
+    action: Create
+    purpose: >-
+      With oidc_assume and the transport stubbed: one role per process from PERSONA_SMOKE_ROLE, an unknown role fails;
+      the boto3 session carries the assumed credentials and PERSONA_AWS_REGION's region; a sub without the persona-verdict
+      Environment or a foreign job_workflow_ref fails before any assume; only marker lines print.
+  - file: tests/personas/test_run.py
+    action: Modify
+    purpose: The two new verbs dispatch to their modules.
+  - file: tests/personas/test_route.py
+    action: Modify
+    purpose: fixture=true for a probe-only diff, false for a mixed or non-probe diff.
+  - file: tests/checks/ci_guards/test_persona_verdict_keyed.py
+    action: Create
+    purpose: >-
+      Red fixtures, each a mutation of the live persona-verdict.yml: smoke without the Environment; refusal with it; a
+      third id-token job; KEYED_IF less each conjunct; another secret, or AWS_ACCOUNT_ID before the self-check; a
+      configure-aws-credentials step; the pip install without --no-index or --require-hashes; an upload in smoke; a
+      download in smoke of another artifact; keyprep running a run.py verb; a missing tier-role step; each fails, and the
+      live file passes.
+  - file: tests/checks/ci_guards/test_validate_persona_verdict_chain.py
+    action: Modify
+    purpose: The seven-job set and the self-check exemption (only in a covered job, only the exact line).
+  - file: tests/checks/misc/test_validate_persona_verdict_egress.py
+    action: Modify
+    purpose: >-
+      Template red fixtures: a literal region in the row or the workflow; a foreign expression; a needs job not in
+      needs; a needs job whose aws_region is not bound to the aws-region action; two templates in one entry; an extra
+      host; a provider host off the tier-model prefixes; a prefix with no provider_hosts entry; the live tree passes.
+  - file: tests/checks/ci_guards/test__persona_llm_signatures.py
+    action: Modify
+    purpose: An inference-smoke step and a step in a persona-verdict-Environment job are LLM steps; the refusal and keyprep steps are not.
+  - file: tests/checks/ci_guards/test_validate_project_region.py
+    action: Modify
+    purpose: The renamed helper keeps R4's behaviour (an existing case through the public name).
+  - file: tests/checks/iam_tf/test_persona_verdict_role.py
+    action: Modify
+    purpose: >-
+      The stale docstring at :159 names this plan; the fence also refuses the role name, the inference-smoke and
+      key-refusal verbs and the persona-verdict Environment in any workflow other than persona-verdict.yml.
+  - file: tests/test_llm_litellm_wire_offline.py
+    action: Create
+    purpose: >-
+      load_litellm sets LITELLM_LOCAL_ANTHROPIC_BETA_HEADERS and LITELLM_LOCAL_MODEL_COST_MAP (keeping a caller's value).
+      A new file because tests/test_llm_litellm_transport.py is at 479 of 500 SLOC.
+bundled_recommendations: [rec-5041]
+followon_recs: []
+closes_criteria: []
+infrastructure_dependencies:
+  - "No terraform change. Uses the live role agent-platform-github-ci-persona-verdict (created 2026-11-16, trust read back this session) and the persona-verdict Environment (terraform/github, applied by #2002 888f5b56)."
+acceptance_criteria:
+  - On a fixture PR after merge, one persona-verdict run on main's definition shows smoke PASS for both tier roles (INFERENCE-SMOKE outcome=PASS, a sub ending environment:persona-verdict) and refusal KEY-REFUSAL PASS (AccessDenied, a sub with no environment part), each after EGRESS-SELF-CHECK PASS on an eth0-placed runner.
+  - The smoke job holds no package index host; its packages come only from a hash-checked wheelhouse of docker/persona/requirements-persona.txt.
+  - No AWS account id, ARN, region id or wildcard is committed under .github/ or in config/persona_verdict_egress.yaml; no public log line carries a key, token, credential, ARN or account id.
+  - validate_persona_verdict_egress, validate_persona_verdict_chain, validate_persona_trigger_policy and validate_project_region pass on the live tree and refuse each red fixture.
+  - rec-5166's acceptance node passes; rec-5041's acceptance is tightened to node ids before the merge's Resolves trailer.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: Live read-back of the role trust before any job assumes it.
+    command: >-
+      aws iam get-role --role-name agent-platform-github-ci-persona-verdict --profile agent_platform --query
+      'Role.AssumeRolePolicyDocument.Statement[0].Condition.StringEquals."token.actions.githubusercontent.com:job_workflow_ref"'
+      --output text
+    expected: Prints otl-labs/ontheloop/.github/workflows/persona-verdict.yml@refs/heads/main.
+    fix_if: A different string or an error is a STOP to the plan owner; no workflow edit merges until the role matches.
+    hermetic: false
+    graduation: not-applicable
+  - step: 2
+    phase: pre-deploy
+    action: Live read-back that the persona-verdict Environment matches its HCL (the session proxy refuses the environments API).
+    command: >-
+      mcp__github__actions_list(method="list_workflow_runs", owner="otl-labs", repo="ontheloop",
+      resource_id="terraform-github-plan.yml", workflow_runs_filter={branch: "main", status: "completed"}) for the newest
+      run, then mcp__github__get_job_logs(job_id=<plan job>, return_content=true).
+    expected: >-
+      The newest completed plan on main shows no pending change to github_repository_environment.persona_verdict or its
+      deployment policy; report its run id. Step 9's smoke sub (environment:persona-verdict) is the second read-back.
+    fix_if: A pending Environment change is a STOP to the plan owner until it is applied through terraform-github-apply.
+    hermetic: false
+    graduation: not-applicable
+  - step: 3
+    phase: pre-deploy
+    action: Unit tests for the new verbs, the checks and the smoke.
+    command: >-
+      bin/venv-python -m pytest tests/personas/test_oidc_assume.py tests/personas/test_key_refusal.py
+      tests/personas/test_inference_smoke.py tests/personas/test_run.py tests/personas/test_route.py
+      tests/checks/ci_guards/test_persona_verdict_keyed.py tests/checks/ci_guards/test_validate_persona_verdict_chain.py
+      tests/checks/misc/test_validate_persona_verdict_egress.py tests/checks/ci_guards/test__persona_llm_signatures.py
+      tests/checks/ci_guards/test_validate_project_region.py tests/checks/iam_tf/test_persona_verdict_role.py
+      tests/scripts/test_smoke_inference_credentials_ci.py tests/test_smoke_test_inference_credentials.py
+      tests/test_llm_litellm_wire_offline.py tests/ci/test_persona_verdict_egress.py tests/ci/test_persona_verdict_isolation.py -q
+    expected: All tests pass.
+    expected_literals: [passed]
+    fix_if: A test fails; fix the code inside scope, never the assertion (Decision 235).
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: persona-verdict-first-key-read-units
+  - step: 4
+    phase: pre-deploy
+    action: The registered checks pass on the live tree.
+    command: >-
+      bin/venv-python -c "from scripts.checks.misc.validate_persona_verdict_egress import validate_persona_verdict_egress as a; from scripts.checks.ci_guards.validate_persona_verdict_chain import validate_persona_verdict_chain as b; from scripts.checks.ci_guards.validate_persona_trigger_policy import validate_persona_trigger_policy as c; from scripts.checks.ci_guards.validate_project_region import validate_project_region as d; f=[]; [g(f) for g in (a,b,c,d)]; assert not f, f; print('KEYED_CHECKS_OK')"
+    expected: Prints the ok marker.
+    expected_literals: [KEYED_CHECKS_OK]
+    fix_if: A rule refuses the live workflow; fix the workflow or file to the scope row's shape.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      Duplicates four registered checks the fast and full tiers run on every PR and on main, so a graduated copy adds no
+      guard.
+  - step: 5
+    phase: pre-deploy
+    action: The wheelhouse installs offline from the image's lock, and litellm imports with no network.
+    command: >-
+      d=$(mktemp -d) && bin/venv-python -m pip download --require-hashes --no-deps --only-binary :all: --python-version 3.12
+      --platform manylinux2014_x86_64 --platform manylinux_2_17_x86_64 --platform manylinux_2_28_x86_64 --platform any
+      --implementation cp -r docker/persona/requirements-persona.txt -d "$d" -q && echo WHEELHOUSE_OK $(ls "$d" | wc -l)
+    expected: Prints WHEELHOUSE_OK with a non-zero count (every pin has a cp312 manylinux or pure wheel).
+    fix_if: A pin without a cp312 wheel is a STOP to the plan owner (the wheelhouse form needs a replacement lock).
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: pre-deploy
+    action: No account id, ARN or region id was committed.
+    command: >-
+      git diff origin/main...HEAD -- .github config scripts tests docs | grep -E '^\+' | grep -nE '[0-9]{12}|arn:aws:|(eu|us|ap|ca|sa|me|af)-(west|east|north|south|central|northeast|southeast)-[0-9]' ; test $? -eq 1 && echo NO_LEAK
+    expected: Prints NO_LEAK.
+    fix_if: Any match is removed before push; a test fixture uses a placeholder account id such as 000000000000 only if the pre-commit never-commit hook admits it, else a synthetic non-12-digit value.
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: pre-deploy
+    action: Fast tier, then the full tier before handoff.
+    command: >-
+      bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.validate &&
+      bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: >-
+      Both tiers pass and --verify-head confirms the head. The full tier outlasts the foreground cap: start it as a
+      harness-tracked background run with a 2 h limit from the top-level session; the verdict is --verify-head.
+    fix_if: A failure in scope is fixed; one outside scope is a STOP to the plan owner (main reds owned elsewhere are deferred).
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: pre-deploy
+    action: Tighten rec-5041's acceptance to node ids before the merge's Resolves trailer.
+    command: >-
+      bin/venv-python -m scripts.ops_data_portal --update-rec rec-5041 --acceptance "bin/venv-python -m pytest
+      tests/ci/test_persona_verdict_egress.py::test_the_live_tree_passes_check_tree
+      tests/ci/test_persona_verdict_isolation.py tests/checks/ci_guards/test_persona_verdict_keyed.py::test_live_file_passes -q"
+      && read back with the ducklake-reads recs_by_ids verb for rec-5041.
+    expected: >-
+      The read-back shows the new acceptance; its context is appended with "container leg moves to
+      PLAN-persona-verdict-fixture-run" (T4.32 hint). Run that acceptance command locally: it passes.
+    fix_if: A write that fails loudly is re-filed after connectivity returns (Decision 84 I-4); never drop the trailer instead.
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: post-deploy
+    action: >-
+      Proof on main: after merge, on the build branch restarted from main, commit one head that REWRITES (>, never
+      appends) tests/fixtures/persona_verdict/fixture_pr/proceed.txt with printf '\n%s\n' proceed and nothing else; run the
+      full tier and --verify-head; push once (cancel-in-progress cancels on a second push) and open one draft fixture PR.
+    command: >-
+      mcp__github__actions_list(method="list_workflow_runs", owner="otl-labs", repo="ontheloop",
+      resource_id="persona-verdict.yml") for the run on the fixture head, then list_workflow_jobs with
+      workflow_jobs_filter {filter: "all"} and mcp__github__get_job_logs(job_id=<id>, return_content=true) for keyprep,
+      smoke and refusal; then mcp__github__update_pull_request(state="closed") for the fixture PR.
+    expected: >-
+      keyprep, smoke and refusal concluded success in one run on main's definition; smoke shows EGRESS-SELF-CHECK PASS,
+      a printed sub ending environment:persona-verdict, OIDC-ASSUME got=ok and INFERENCE-SMOKE outcome=PASS for primary
+      and for warm_fetched_escape_hatch; refusal shows EGRESS-SELF-CHECK PASS, a sub with no environment part,
+      OIDC-ASSUME expect=AccessDenied got=AccessDenied and KEY-REFUSAL PASS; neither log shows a key, token, ARN or
+      account id; verdict_probe.proceed concludes success. An attempt that stops as UNSUPPORTED_PLACEMENT is re-run with
+      mcp__github__actions_run_trigger(method="rerun_failed_jobs", run_id=<id>), at most 10 attempts, until smoke and
+      refusal both pass; report the run id and attempt numbers to the plan owner and the coordinator as c1's first-key-read
+      read-back and c7 ORDER's evidence.
+    fix_if: >-
+      Any FAIL line, a missing host (a filter block in the log), a refusal that got anything but AccessDenied, or no
+      passing attempt in 10 is a STOP to the plan owner with the log lines; never widen a list, drop a case or retry the
+      assume in code.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: scripts/personas/oidc_assume.py
+    behavior: Token and assume calls use the real shapes, refuse a foreign token host and print no secret.
+    verification_step: 3
+    test_selector: tests/personas/test_oidc_assume.py
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/personas/key_refusal.py
+    behavior: Passes only on 403 AccessDenied with an Environment-free sub and the trust's job_workflow_ref.
+    verification_step: 3
+    test_selector: tests/personas/test_key_refusal.py
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/personas/inference_smoke.py
+    behavior: One role per process, claims checked before the assume, the assumed session reaches the smoke.
+    verification_step: 3
+    test_selector: tests/personas/test_inference_smoke.py
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/personas/run.py
+    behavior: The two new verbs dispatch.
+    verification_step: 3
+    test_selector: tests/personas/test_run.py
+    red_green_expectation: red before, green after
+  - source: scripts/personas/route.py
+    behavior: fixture output true only for a probe-only diff.
+    verification_step: 3
+    test_selector: tests/personas/test_route.py
+    red_green_expectation: red before, green after
+  - source: scripts/smoke_test_inference_credentials.py
+    behavior: Accepts an injected session; failure lines carry no exception text.
+    verification_step: 3
+    test_selector: tests/scripts/test_smoke_inference_credentials_ci.py
+    red_green_expectation: red before (file absent), green after
+  - source: scripts/llm/litellm_wire.py
+    behavior: load_litellm disables the remote beta-headers fetch.
+    verification_step: 3
+    test_selector: tests/test_llm_litellm_wire_offline.py
+    red_green_expectation: red before, green after
+  - source: scripts/checks/ci_guards/_persona_verdict_keyed.py
+    behavior: Each keyed-job mutation fails; the live file passes.
+    verification_step: 3
+    test_selector: tests/checks/ci_guards/test_persona_verdict_keyed.py
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/checks/ci_guards/validate_persona_verdict_chain.py
+    behavior: The seven-job set and the exact self-check exemption.
+    verification_step: 3
+    test_selector: tests/checks/ci_guards/test_validate_persona_verdict_chain.py
+    red_green_expectation: red before, green after
+  - source: scripts/checks/misc/validate_persona_verdict_egress.py
+    behavior: Only the bound aws_region expression is admitted; provider hosts derive from the tier models.
+    verification_step: 3
+    test_selector: tests/checks/misc/test_validate_persona_verdict_egress.py
+    red_green_expectation: red before, green after
+  - source: scripts/checks/ci_guards/_persona_llm_signatures.py
+    behavior: The smoke is an LLM step.
+    verification_step: 3
+    test_selector: tests/checks/ci_guards/test__persona_llm_signatures.py
+    red_green_expectation: red before, green after
+  - source: scripts/checks/ci_guards/validate_project_region.py
+    behavior: The renamed helper keeps R4.
+    verification_step: 3
+    test_selector: tests/checks/ci_guards/test_validate_project_region.py
+    red_green_expectation: red before (name absent), green after
+  - source: .github/workflows/persona-verdict.yml
+    behavior: The smoke is a CI job in the Environment on fixture PRs only.
+    verification_step: 3
+    test_selector: tests/scripts/test_smoke_inference_credentials_ci.py::test_credentialed_run_is_a_ci_job
+    red_green_expectation: red before, green after
+  - source: config/persona_verdict_egress.yaml
+    behavior: The keyed jobs' rows equal their filters.
+    verification_step: 3
+    test_selector: tests/ci/test_persona_verdict_egress.py::test_the_live_tree_passes_check_tree
+    red_green_expectation: red before (no rows for the new jobs), green after
+constraints:
+  - No AWS account id, ARN or region id committed; no public log line carries a key, token, credential, ARN or account id (Decision 101).
+  - No package index host on a keyed job's list; no wildcard added; no list widened to obtain green (Decisions 181, 235).
+  - No job assumes the role before the smoke and refusal land together; no container in any id-token job (c7 ORDER).
+  - No keyed job writes telemetry or lists a telemetry writer host.
+  - Nothing in this plan forbids PLAN-persona-verdict-app-post adding attempt rows to key_refusal.ATTEMPTS or an app-role attempt to the smoke (its consult F5).
+  - "500-SLOC limit (Decision 128): decompose, never raise."
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - "Decision-scout r1 FLAGS_FOUND; CITE 101, 128, 173, 181, 202, 205, 212, 224, 263, 275; CONTRADICT none; SPIRIT NOTE 202 (global STS) adopted as regional STS. Scout r2 FLAGS_FOUND, same CITE; CONTRADICT NOTE 224 cl.5 (in-process config/aws-region readers) adopted: the region reaches the verbs only as keyprep's aws-region output (PERSONA_AWS_REGION). Decisions triaged: 228 of 228. Roadmap items intersected: 5; CONFLICT: 0; RELATED: 4. Serves: NS.9 3/5."
+  - "Brief: /mnt/project-files/persona-verdict-egress/BRIEF-plans-2-5.md row 3; blind consult /mnt/project-files/persona-verdict-first-key-read/advisor-brief/ADVICE.md (F1-F8 adopted)."
+  - "Start condition met: shell-deny Amendment 5 #2322; restated VP 7 green on main's definition, fixture run 44896522489 (attempt 1 AWS UNSUPPORTED_PLACEMENT, attempt 2 Azure PASS)."
+  - "Primary rec rec-5166; bundles rec-5041 (parts 2-3; part 1 done by PLAN-persona-verdict-chain); its acceptance tightened by VP 8 before the trailer."
+  - "Regional STS and SSM for both keyed jobs (scout r1 SPIRIT NOTE on Decision 202 adopted: global-STS credentials fail in an opt-in region), each host by the one template form; no region id under .github/ (R2). The egress probe keeps the global host."
+  - "The smoke reads its key in-process (boto3 under the assumed session); PC-12's 'the workflow shell, not the persona process, reads the keys' holds: the smoke is a shell step, the litellm adapter still assumes no AWS identity."
+  - "boto3 1.44.4 and pyyaml are in docker/persona/requirements-persona.txt (via litellm), so one hash-locked set serves the smoke."
+  - "Gotchas: fixture edit must rewrite, not append (PR #2327 appended, making the probe marker 'proceed\\n\\nproceed' and verdict_probe.proceed 'unparseable output' as designed); AWS-placed runners stop as UNSUPPORTED_PLACEMENT (rec-5455)."
+  - "UNPROVEN until VP 9: litellm 1.109.1 reaches no host beyond the provider APIs with the two LITELLM_LOCAL_* variables set; setup-python 3.12 resolves from the tool cache or GitHub hosts."
+  - "red_overlap at drafting: blocked, rec-5468 slo_breached (notice-digest race; Agents in GitHub's own build in flight). This plan touches none of its files; deferral: the build waits for rec-5468's merge (Decision 226 red_overlap rule 1)."
+  - "Breadth: selection_budget predicted breadth_waived (30 paths, 250 tests selected, test half 227-866 s of an 866 s allowance); the fast-tier non-test half adds no hermetic VP replay beyond steps 3 and 4 (unit tests and four in-process checks)."
+  - "Telemetry: this plan writes no telemetry row (the smoke passes no capture to cold_start_check, and no keyed list holds a telemetry writer host, so it cannot). PLAN-monitor-read-budget (#2329, 440eb295) must land before the first litellm row; that row comes with the plan that first sends verdict telemetry, not this one."
+  - "Owner: this planning session (thread 'Plan verdict persona first key read E3')."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:ceede9564b1b21a7037c01920e13f4c917dfe6c3020e845aab112c5435a32431'}
+  - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:1941c998bfed1b284d1907a2a8501052f15adafa1e27e55a6d36b4064ee70e6e'}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - VP 1 and VP 2 read-backs first; STOP on either.
+  - scripts/personas oidc_assume.py, key_refusal.py, inference_smoke.py, run.py, route.py; scripts/smoke_test_inference_credentials.py; scripts/llm/litellm_wire.py -- as their scope rows.
+  - Checks -- _persona_verdict_keyed.py, validate_persona_verdict_chain.py, validate_persona_verdict_egress.py, _persona_llm_signatures.py, validate_project_region.py rename.
+  - persona-verdict.yml, config/persona_verdict_egress.yaml, github-actions-evidence.yaml, composite_action_body_baseline.yaml, ports.yaml (relief measured on main).
+  - Tests per scope rows.
+  - Execute Verification Plan -- run each step; loop until pass; on unrecoverable V3 failure stop and RCA (Decision 55).
+  - 'Report: what was implemented, verification results, VP 9 run id and attempts'
+rollback: >-
+  Revert the build PR: the three jobs disappear and the role stays unassumed; no infrastructure changes.
