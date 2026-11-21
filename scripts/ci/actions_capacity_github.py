@@ -29,7 +29,19 @@ PER_CALL_TIMEOUT_S = 30
 JOB_TIMEOUT_MINUTES = 10
 RESERVE_S = 90
 PREVIOUS_RUNS = 5
-PREVIOUS_CALL_CAP = 8
+PREVIOUS_CALL_CAP = 1 + 2 * PREVIOUS_RUNS
+LEAD_IN_MARGIN = timedelta(minutes=5)
+_JOB_KEYS = (
+    "name",
+    "run_id",
+    "created_at",
+    "started_at",
+    "completed_at",
+    "status",
+    "conclusion",
+    "runner_id",
+    "runner_name",
+)
 _NO_TOKEN = "GH_TOKEN is not set"
 
 Caller = Callable[[str], Any]
@@ -231,6 +243,7 @@ class Fetched:
     calls: int
     elapsed_s: float
     error: Optional[str] = None
+    cache: dict[str, Any] = field(default_factory=dict)
 
 
 def _hour_floor(moment: datetime) -> datetime:
@@ -244,9 +257,13 @@ def fetch_runs_and_jobs(
     now: datetime,
     owner: Optional[str] = None,
     repo: Optional[str] = None,
+    evaluate_from: Optional[datetime] = None,
+    cache: Optional[dict[str, Any]] = None,
 ) -> Fetched:
     """Read runs created in [since, last closed hour end] forward one hour at a time, oldest first, then each kept run's
-    jobs (every attempt). coverage is the end of the newest hour read in full (since when none was)."""
+    jobs (every attempt). coverage is the end of the newest hour read in full (since when none was). A completed run
+    created before evaluate_from that finished before it (less LEAD_IN_MARGIN) is kept but its jobs are not read; a
+    completed run whose cache entry has the same run_attempt and updated_at reuses the cached jobs with no call."""
     owner, repo = repo_identity.resolve(owner, repo)
     base = f"{API}/repos/{owner}/{repo}/actions"
     cursor = _hour_floor(since)
@@ -256,6 +273,9 @@ def fetch_runs_and_jobs(
     jobs: list[dict[str, Any]] = []
     calls0 = budget.calls
     error: Optional[str] = None
+    kept = {
+        k: v for k, v in (cache or {}).items() if isinstance(v, dict) and (parse_ts(v.get("created_at")) or since) >= since
+    }
     try:
         while cursor < end:
             hour_end = cursor + timedelta(hours=1)
@@ -263,23 +283,54 @@ def fetch_runs_and_jobs(
             for run in hour_runs:
                 if run.get("conclusion") == "skipped":
                     continue
+                if _is_lead_in(run, evaluate_from):
+                    runs.append(run)
+                    continue
+                entry = kept.get(str(run["id"])) or {}
+                if run.get("status") == "completed" and _cache_hit(entry, run):
+                    runs.append(run)
+                    jobs.extend({**j, "_run": run} for j in entry["jobs"])
+                    continue
                 if not budget.take():
                     raise _Stop(budget.stopped or "budget")
                 data = caller(f"{base}/runs/{run['id']}/jobs?filter=all&per_page=100")
                 run_jobs = [j for j in (data or {}).get("jobs", []) if isinstance(j, dict)]
                 runs.append(run)
                 jobs.extend({**j, "_run": run} for j in run_jobs)
+                if run.get("status") == "completed":
+                    kept[str(run["id"])] = {
+                        "created_at": run.get("created_at"),
+                        "run_attempt": run.get("run_attempt"),
+                        "updated_at": run.get("updated_at"),
+                        "jobs": [{k: j[k] for k in _JOB_KEYS if k in j} for j in run_jobs],
+                    }
             coverage = hour_end
             cursor = hour_end
     except _Stop as stop:
         error = str(stop)
     except Exception as exc:  # noqa: BLE001
         error = f"{type(exc).__name__}"
-    return Fetched(runs, jobs, coverage, budget.calls - calls0, budget.elapsed_s, error)
+    return Fetched(runs, jobs, coverage, budget.calls - calls0, budget.elapsed_s, error, kept)
 
 
 class _Stop(Exception):
     pass
+
+
+def _is_lead_in(run: dict[str, Any], evaluate_from: Optional[datetime]) -> bool:
+    if evaluate_from is None or run.get("status") != "completed":
+        return False
+    created, updated = parse_ts(run.get("created_at")), parse_ts(run.get("updated_at"))
+    return bool(created and updated and created < evaluate_from and updated < evaluate_from - LEAD_IN_MARGIN)
+
+
+def _cache_hit(entry: Any, run: dict[str, Any]) -> bool:
+    return (
+        isinstance(entry, dict)
+        and isinstance(entry.get("jobs"), list)
+        and entry.get("run_attempt") == run.get("run_attempt")
+        and entry.get("updated_at") == run.get("updated_at")
+    )
 
 
 def _read_hour(caller: Caller, base: str, start: datetime, end: datetime, budget: Budget) -> list[dict[str, Any]]:
