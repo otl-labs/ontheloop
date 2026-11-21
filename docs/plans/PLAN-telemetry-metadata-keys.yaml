@@ -27,7 +27,7 @@ scope:
     action: Create
     purpose: >-
       Class D registry (contract_version 1, status draft, subject telemetry-metadata-keys, evaluator check validate_telemetry_metadata_keys). Body `keys:`
-      is a LIST of flow mappings {producer, observation_type, event_kind, key, meaning, since}, one per (producer,
+      is a LIST of flow mappings {producer, observation_type, event_kind, key, meaning, since, until (optional)}, one per (producer,
       observation_type, event_kind, key) the golden corpus carries (31 rows today: 29 claude_code across tool_call
       open/close, turn open/close, model_call point, process_event point; litellm error and loss on model_call point).
       No leaf uses a Class A descriptor key (contract-population.yaml smuggling_detection). `meaning` says what the value
@@ -38,8 +38,11 @@ scope:
       first version the corpus history shows). A null-valued key counts as written. Meanings: execution step 1's table.
       description says why this is Class D mechanism, not Class A fields: bag keys are not columns; the metadata
       column's Class A obligations stay in telemetry_observations.yaml, and this file is the producers' key catalogue
-      checked against the golden corpus. procedure (one paragraph): a producer change that adds or drops a key edits this
-      file in the same parser_version bump; the registry is not a write-time rule source, and any bag-key rule a writer
+      checked against the golden corpus. `until` is the last parser_version that wrote a key the producer has stopped
+      writing: stored rows are append-only (Decision 199), so a dropped key keeps its row and meaning with until set,
+      and the registry explains every key any stored row can carry. No row carries until at birth. procedure (one
+      paragraph): a producer change that adds a key adds its row, and one that drops a key sets that row's until, in
+      the same parser_version bump (plan D is the first to use until); the registry is not a write-time rule source, and any bag-key rule a writer
       enforces is declared in telemetry_observations.yaml (Decision 210 cl.3). A top-level amendment_log opens with the
       creation row (change_class field_add, summary "created with 31 key rows (PLAN-telemetry-metadata-keys, rec-4733)"),
       as telemetry-writer-principals.yaml does.
@@ -70,12 +73,16 @@ scope:
     purpose: >-
       Pure function metadata_key_errors(registry, corpora, registry_order, currents) plus a wrapper that loads them,
       reusing validate_telemetry_field_realization.load_inputs for the golden corpus. Rules: K1 every (producer,
-      observation_type, event_kind, key) in a producer's golden metadata is a registry row; K2 every registry row is
-      carried by that producer's golden rows; K3 rows are unique and their producer is registered; K4 since is an int
-      in 1..current, or "<=N" with N in 1..current; K5 no row uses a Class A descriptor key. Each error names the row.
+      observation_type, event_kind, key) in a producer's golden metadata is a registry row; K2 every registry row without until is
+      carried by that producer's golden rows, and a row with until by none; K3 rows are unique and their producer is registered; K4 since is an int
+      in 1..current, or "<=N" with N in 1..current, and until, when present, is an int with since <= until < current; K5
+      no row uses a Class A descriptor key (the set imported from scripts.checks.contracts._population, the
+      contract-population smuggling detector, never a copy). Each error names the row.
       Declares examined(count, unit="key rows") through the Decision 170 output channel.
-      Holds the literal telemetry-metadata-keys.yaml in executable context (Decision 168 evaluator grammar).
-    new_imports: [scripts.checks.contracts.validate_telemetry_field_realization]
+      Holds the literal telemetry-metadata-keys.yaml in executable context (Decision 168 evaluator grammar). Known
+      coupling: load_inputs also parses field_semantics.yaml, the roadmap and the telemetry contracts, so a failure in
+      one of those fails this check too; a golden-only loader would edit the realization module, out of scope here.
+    new_imports: [scripts.checks.contracts.validate_telemetry_field_realization, scripts.checks.contracts._population]
   - file: scripts/checks/contracts/_manifest.py
     action: Modify
     purpose: >-
@@ -84,14 +91,16 @@ scope:
       config/telemetry/parser_versions.yaml, tests/fixtures/turn_capture/golden/**,
       config/lambda/ducklake/field_semantics.yaml, docs/ROADMAP-PLATFORM.yaml,
       scripts/checks/contracts/validate_telemetry_metadata_keys.py,
-      scripts/checks/contracts/validate_telemetry_field_realization.py, scripts/checks/_common.py,
-      scripts/checks/registry.py (every input load_inputs reads).
+      scripts/checks/contracts/validate_telemetry_field_realization.py, scripts/checks/contracts/_population.py,
+      scripts/checks/_common.py, scripts/checks/registry.py (every input load_inputs reads, plus K5's key source).
   - file: tests/checks/contracts/test_validate_telemetry_metadata_keys.py
     action: Create
     purpose: >-
       Real-tree test test_registry_matches_every_golden_key_set (rec-4733 acceptance) plus one red fixture per rule:
       an undeclared key (K1), a declared key no golden row carries (K2), a duplicate row and an unregistered producer
-      (K3), since 0, since above current and a malformed "<=" (K4), a leaf with `description` (K5); and
+      (K3), since 0, since above current, a malformed "<=" and until at or above current or below since (K4), a row
+      with until that a golden row still carries (K2), a leaf with `description` (K5); the real-tree test also pins
+      since 1 on both litellm rows (that producer has had one version); and
       test_check_runs_in_the_fast_and_full_tiers (the manifest entry is in registry.pre_sequence() and full_sequence(),
       and its pre_globs cover every path load_inputs reads, as test__manifest.py's test_pre_globs_cover_the_inputs does
       for the realization check).
@@ -216,7 +225,7 @@ test_obligations:
     test_selector: tests/checks/ci_guards/test_validate_ci_rca_taxonomy.py::TestValidateCiRcaTaxonomy::test_complete_map_passes
     red_green_expectation: green before; red once the check is registered without its row; green after
   - source: scripts/checks/contracts/validate_telemetry_metadata_keys.py
-    behavior: each rule K1-K5 fires on its own red fixture (undeclared key, unwritten row, duplicate and unregistered producer, since out of range or malformed, Class A descriptor key) and the real tree is green
+    behavior: each rule K1-K5 fires on its own red fixture (undeclared key, unwritten row, duplicate and unregistered producer, since or until out of range or malformed, a retired row still written, Class A descriptor key) and the real tree is green
     verification_step: 2
     test_selector: tests/checks/contracts/test_validate_telemetry_metadata_keys.py
     red_green_expectation: red before (file absent), green after; each red fixture asserts its rule's error
@@ -234,7 +243,8 @@ context:
   - "rec-5211 asks for the hook-denial source in the observations contract; by design it lives in the registry, which the observations metadata semantics points at (say so in the PR body)."
   - "Kept graduated shard: telemetry-hook-denial-names-declared (tests/telemetry/test_hook_denial_contract_notes.py) is unchanged; this plan only adds a node to that file."
   - "Known gap (critique r2 Frame Q1): the check compares the registry with the golden corpus only, so a producer key outside corpus coverage stays invisible until a golden row carries it; a write-time key-set rule (Decision 210 cl.1, declared in telemetry_observations.yaml) or a DQ monitor is the later home, not this plan."
-  - "Follow-on plan D (claude_code parser v12, separately planned) stops the 11 copy keys and null keys, moves exit_code to its typed column and rewords fields.exit_code; it edits this registry in the same diff."
+  - "Related-work check re-read 2026-11-21 after critique r4: rec-5468's fix merged on main as 29aa11ee (#2330) but red_overlap still reads blocked (rec-5468 open, shared paths none); re-run it at build, the deferral may then be clear."
+  - "Follow-on plan D (claude_code parser v12, separately planned) stops the 11 copy keys and null keys, moves exit_code to its typed column and rewords fields.exit_code; it edits this registry in the same diff, setting until on each dropped key's row."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:161aec0c400242af1b4c2f9cfde9eb225c2c27dc96efe8f967be80e3ca763607"}
   - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: "v1:fd800f4977ef5edd8194cd070ac9c148162572c34c622d7ce76c05a8e91b0f3b"}
@@ -242,6 +252,7 @@ gate_rounds:
   - {gate: decision-scout, round: 3, verdict: NO_FLAGS, scout_input_fingerprint: "v1:f66073f50d1db58d7ab979fb0c29da63c7edbf1059a855741b9d35a4a763dda5"}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 5, nits: 5}
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 6}
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 6}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
