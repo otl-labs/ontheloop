@@ -313,3 +313,107 @@ def test_monitor_line_wires_each_new_field() -> None:
     ):
         assert f" {pair} " in line
     assert MONITOR_LINE.fullmatch(line)
+
+
+class OwnersReader(FakeReader):
+    def __init__(self, status: str = "open", error: Exception | None = None, drop: str | None = None) -> None:
+        super().__init__(error=error)
+        self.status, self.drop = status, drop
+        self.asked: list[str] = []
+
+    def named(self, verb: str, **params: Any) -> list[dict[str, Any]]:
+        if self.error is not None:
+            raise self.error
+        if verb != "recs_by_ids":
+            return []
+        ids = params["ids"].split(",")
+        self.asked = ids
+        text = " ".join(self._fields(ids))
+        return [
+            {"id": i, "status": self.status, "title": text, "context": "", "acceptance": ""} for i in ids if i != self.drop
+        ]
+
+    @staticmethod
+    def _fields(ids: list[str]) -> list[str]:
+        from scripts.checks.contracts import validate_telemetry_field_realization as realization
+
+        names: list[str] = []
+        for table in realization.TABLES:
+            block = realization.load_contracts(Path(__file__).resolve().parents[2])[table]["realization"]
+            for placement in ("unproduced", "retired"):
+                for fields in (block.get(placement) or {}).values():
+                    names.extend(fields)
+        return names
+
+
+def _live_owner_ids() -> list[str]:
+    from scripts.checks.contracts import validate_telemetry_field_realization as realization
+
+    return realization.owner_recs(realization.load_contracts(Path(__file__).resolve().parents[2]))
+
+
+def test_owners_command_green_prints_the_owner_line(capsys: pytest.CaptureFixture[str]) -> None:
+    reader, portal = OwnersReader(), Portal()
+    assert cli.main(["owners"], reader=reader, now=NOW, portal=portal) == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    assert out == [f"OWNERS status=green examined={len(reader.asked)} findings=0"]
+    assert reader.asked == _live_owner_ids() and not portal.calls
+
+
+def test_owners_command_red_files_one_alarm(capsys: pytest.CaptureFixture[str]) -> None:
+    portal = Portal()
+    assert cli.main(["owners"], reader=OwnersReader(status="closed"), now=NOW, portal=portal) == 0
+    out = capsys.readouterr().out
+    assert "OWNERS status=red" in out and "OWNERS_FINDING telemetry_sessions.steps_total rec-4599" in out
+    ((action, fields),) = portal.calls
+    assert action == "file" and fields["source"] == "telemetry_verify"
+    assert "finding_class=field_owner" in fields["context"] and fields["acceptance"] == cli.OWNERS_ACCEPTANCE
+
+
+def test_owners_command_no_alarms_red_exits_1() -> None:
+    portal = Portal()
+    assert cli.main(["owners", "--no-alarms"], reader=OwnersReader(drop="rec-4599"), now=NOW, portal=portal) == 1
+    assert not portal.calls
+
+
+def test_owners_command_reader_error_stops(capsys: pytest.CaptureFixture[str]) -> None:
+    portal = Portal()
+    for err in (ReaderInvokeError("named_read", 502, PLANTED, {"error": PLANTED}), OSError(PLANTED)):
+        assert cli.main(["owners"], reader=OwnersReader(error=err), now=NOW, portal=portal) == 1
+        out = capsys.readouterr().out.strip()
+        assert out == f"OWNERS_STOP class={type(err).__name__}" and "PLANTED" not in out
+    assert not portal.calls
+
+
+def test_owners_assert_green_exits_0_only_when_green(capsys: pytest.CaptureFixture[str]) -> None:
+    argv = ["owners", "--no-alarms", "--assert-green"]
+    assert cli.main(argv, reader=OwnersReader(), now=NOW) == 0
+    assert cli.main(argv, reader=OwnersReader(status="closed"), now=NOW) == 2
+    assert cli.main(argv, reader=OwnersReader(error=OSError("x")), now=NOW) == 2
+    capsys.readouterr()
+
+
+def test_owners_zero_owners_is_skipped_never_green(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli.realization, "owner_recs", lambda contracts: [])
+    assert cli.main(["owners", "--assert-green"], reader=OwnersReader(), now=NOW) == 2
+    assert capsys.readouterr().out.strip() == "OWNERS status=skipped examined=0 findings=0"
+
+
+def test_owners_failed_filing_exits_1(capsys: pytest.CaptureFixture[str]) -> None:
+    portal = Portal(RuntimeError("x"))
+    assert cli.main(["owners"], reader=OwnersReader(status="closed"), now=NOW, portal=portal) == 1
+    assert "ALARMS_FAILED class=RuntimeError" in capsys.readouterr().out
+
+
+def test_owners_acceptance_lints_decidable() -> None:
+    assert lint_acceptance_command(cli.OWNERS_ACCEPTANCE, require_decidable=True) == (True, None)
+    assert "--no-alarms" in cli.OWNERS_ACCEPTANCE and "--assert-green" in cli.OWNERS_ACCEPTANCE
+
+
+def test_owners_builds_the_routed_reader(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    built: list[Any] = []
+    monkeypatch.setattr(read_route, "make_routed_reader", lambda *a, **k: built.append((a, k)) or OwnersReader())
+    assert cli.main(["owners", "--no-alarms"], now=NOW) == 0
+    assert capsys.readouterr().out.startswith("OWNERS status=green") and built == [((), {})]
