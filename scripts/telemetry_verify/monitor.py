@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
 
-from scripts.telemetry_verify import derive, monitor_compare, orphans, silent_checks
+from scripts.telemetry_verify import derive, monitor_capacity, monitor_compare, orphans, silent_checks
 from scripts.telemetry_verify.dedupe import normalise_row, parse_timestamp
 from scripts.telemetry_verify.derive import Scope
 from scripts.telemetry_verify.joins import load_telemetry_joins
@@ -34,7 +36,7 @@ MAX_SESSIONS_PER_TREE = 6
 MONITOR_BUDGET_S = 2000
 CALL_WORST_CASE_S = 450
 FILING_RESERVE_S = 1450
-MAX_READER_CALLS = 800
+MAX_READER_CALLS = 3000
 MAX_TREE_CALLS = 60
 PAGE_ROWS = 2000
 _VERB_CALLS_PER_TREE = 4 + 2 * (MAX_SESSIONS_PER_TREE - 1)
@@ -82,34 +84,49 @@ class Budget:
 class _Gate:
     def __init__(self, named: Named, budget: Budget) -> None:
         self._named, self.budget = named, budget
+        self._lock = threading.Lock()
+        self.stats = monitor_capacity.CallStats()
         self.calls = 0
         self.max_call_s = 0.0
         self.max_bytes = 0
 
-    def open(self) -> bool:
+    def _open(self) -> bool:
         return self.calls + 1 < MAX_READER_CALLS and self.budget.remaining() >= 2 * CALL_WORST_CASE_S
 
+    def open(self) -> bool:
+        return self._open()
+
+    def _finish(self, began: float, size: int = 0) -> None:
+        seconds = self.budget.elapsed() - began
+        self.stats.record(seconds)
+        with self._lock:
+            self.max_call_s = max(self.max_call_s, seconds)
+            self.max_bytes = max(self.max_bytes, size)
+
     def __call__(self, verb: str, **params: Any) -> list[dict[str, Any]]:
-        if not self.open():
-            raise _Refused
-        self.calls += 1
-        began = self.budget.elapsed()
+        with self._lock:
+            if not self._open():
+                raise _Refused
+            self.calls += 1
+            began = self.budget.elapsed()
         try:
             page = self._named(verb, **params)
-        finally:
-            self.max_call_s = max(self.max_call_s, self.budget.elapsed() - began)
-        self.max_bytes = max(self.max_bytes, len(json.dumps(page, default=str)))
+        except BaseException:
+            self._finish(began)
+            raise
+        self._finish(began, len(json.dumps(page, default=str)))
         return page
 
     def describe(self, describe: Callable[[], Mapping[str, Any]]) -> Mapping[str, Any]:
-        self.calls += 1
-        began = self.budget.elapsed()
+        with self._lock:
+            self.calls += 1
+            began = self.budget.elapsed()
         try:
             return describe()
         except Exception as exc:  # noqa: BLE001 -- the class alone is reported
             raise MonitorIncomplete(type(exc).__name__) from None
         finally:
-            self.max_call_s = max(self.max_call_s, self.budget.elapsed() - began)
+            self._finish(began)
 
 
 class _TreeCalls:
@@ -198,6 +215,12 @@ class MonitorReport:
     elapsed_s: int = 0
     max_call_s: int = 0
     max_response_bytes: int = 0
+    workers: int = 1
+    litellm_quiet: int = 0
+    litellm_read: int = 0
+    litellm_sampled_out: int = 0
+    calls_over_10s: int = 0
+    call_p95_s: int = 0
 
     @property
     def coverage_incomplete(self) -> int:
@@ -251,6 +274,7 @@ def rotation_days(day: date) -> list[str]:
 def _root_row(row: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "session_id": row["session_id"],
+        "entity_ref": row.get("entity_ref"),
         "session_started_at": parse_timestamp(row["session_started_at"]),
         "last_event_timestamp": parse_timestamp(row["last_event_timestamp"]),
     }
@@ -404,6 +428,7 @@ def run_monitor(
     as_of: datetime,
     budget: Budget,
     skip_trees: int = 0,
+    workers: int = 1,
 ) -> MonitorReport:
     gate = _Gate(named, budget)
     as_of = as_of.replace(microsecond=as_of.microsecond // 1000 * 1000)  # the reader keeps milliseconds only
@@ -430,7 +455,7 @@ def run_monitor(
         key=lambda r: (r["session_started_at"], r["session_id"]),
     )
     report.quiet = len(quiet)
-    to_read = quiet[skip_trees:]
+    to_read = monitor_capacity.read_order(quiet)[skip_trees:]
 
     wanted_days = sorted({r["session_started_at"].strftime("%Y-%m-%d") for r in to_read})
     rotation = rotation_days(day)
@@ -453,7 +478,8 @@ def run_monitor(
     report.day_level_unread = len(day_unread)
     report.orphan_days = len(orphan_rows)
 
-    outcomes = [_process(gate, root, as_of) for root in to_read]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        outcomes = list(pool.map(lambda root: _process(gate, root, as_of), to_read))
     report.next_skip = skip_trees + next(
         (i for i, o in enumerate(outcomes) if _stops(o, day_unread, run_unread)), len(outcomes)
     )
@@ -463,13 +489,20 @@ def run_monitor(
     report.skewed, report.verb_skew = tuple(sorted(skewed)), len(skewed)
     report.reader_calls = gate.calls
     report.max_call_s, report.max_response_bytes = int(math.ceil(gate.max_call_s)), gate.max_bytes
+    report.workers = workers
+    report.calls_over_10s, report.call_p95_s = gate.stats.calls_over_10s, gate.stats.call_p95_s
 
     compared = [o for o in outcomes if o.status == "compared"]
     report.trees_read = sum(1 for o in outcomes if o.status in ("compared", "moved", "collision"))
     report.tree_moved = sum(1 for o in outcomes if o.status == "moved")
     report.tree_collision = sum(1 for o in outcomes if o.status == "collision")
     report.tree_read_failed = sum(1 for o in outcomes if o.status == "read_failed")
-    report.not_read_budget = sum(1 for o in outcomes if o.status == "budget")
+    statuses = [o.status for o in outcomes]
+    flags = [monitor_capacity.is_litellm(root) for root in to_read]
+    report.litellm_quiet = sum(flags)
+    report.litellm_read = monitor_capacity.litellm_read(statuses, flags)
+    report.litellm_sampled_out = monitor_capacity.sampled_out(statuses, flags, monitor_capacity.LITELLM_FLOOR)
+    report.not_read_budget = statuses.count("budget") - report.litellm_sampled_out
     report.tree_too_large = sum(1 for o in outcomes if o.status == "too_large")
     report.session_verb_failed = sum(o.verb_failed for o in outcomes)
     report.sessions_not_compared = sum(o.not_compared for o in compared)
