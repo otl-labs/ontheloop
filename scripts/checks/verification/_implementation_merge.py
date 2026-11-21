@@ -1,9 +1,11 @@
 """Late-closure resolver shared by validate_merge_step, validate_verification_registry and
 scripts.session.merge_step (docs/contracts/git-ops.yaml resolves_trailer LATE CLOSURE).
 
-A rec-bundling plan's closure (implementation_declared plus its graduated registry shards) may land in its
+A plan's closure (implementation_declared plus its graduated registry shards) may land in its
 own PR after the implementation PR has squash-merged. The implementation merge X is read from git alone;
 there is no plan field naming it. A closure-only change with a resolved X is the sole evidence-bound route.
+The resolver serves every plan, not only rec-bundling ones: a plan bundling no recs resolves X as the commit that
+landed its approved-text sidecar's words.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ import yaml
 from scripts.checks import _common
 from scripts.ops_portal import closure_gate, trailer_closure_gate
 from scripts.rec_trailer import parse_resolves_trailer
+from scripts.roadmap import approved_text
 
 _ENTRIES_PREFIX = "config/agent/verification_registry/entries/"
 
@@ -107,6 +110,28 @@ def find_implementation_merge(plan_rel: str, root: Path, ref: str) -> Implementa
     return ImplementationMerge(sha=sha, parent=parent) if parent else None
 
 
+def sidecar_landing_merge(plan_rel: str, root: Path, ref: str) -> ImplementationMerge | None:
+    """X for a plan with no bundled recs: the one commit that landed its approved-text sidecar's words, or None.
+
+    approved_text.verify_landed reads the bound files from the working tree, even when late_closure_route runs in
+    head mode, so a caller whose checkout differs from head sees that dependency. Any message (no landing commit,
+    competing landing commits) gives None; validate_merge_step reports them on the same PR."""
+    slug = Path(plan_rel).stem.removeprefix("PLAN-")
+    try:
+        sidecar = approved_text.load_sidecar_at(ref, slug, root)
+        if sidecar is None:
+            return None
+        messages, landed = approved_text.verify_landed(sidecar, slug, root, ref)
+    except approved_text.ApprovedTextError:
+        return None
+    shas = set(landed.values())
+    if messages or len(shas) != 1:
+        return None
+    sha = shas.pop()
+    parent = (_git(root, "rev-parse", f"{sha}^") or "").strip()
+    return ImplementationMerge(sha=sha, parent=parent) if parent else None
+
+
 def _changed(root: Path, base: str, head: str | None) -> set[str] | None:
     if head is not None:
         out = _git(root, "diff", "--name-only", f"{base}..{head}")
@@ -145,5 +170,5 @@ def late_closure_route(plan_rel: str, root: Path, base: str, head: str | None = 
     if trailers is None or any(parse_resolves_trailer(m) for m in trailers.split("\0")):
         return None
     if not _bundled(base_plan):
-        return None
+        return sidecar_landing_merge(plan_rel, root, base)
     return find_implementation_merge(plan_rel, root, base)
