@@ -23,6 +23,7 @@ _COMPLETE_STANDARD = {
     "write_modes": {"scd2": {}, "append_only": {}},
     "indexes": [{"target": "docs/contracts/storage-substrate.yaml"}],
     "arrival_expectations": {"kinds": {}, "tables": {}},
+    "design_time_walk": "0 (existence first; rulings). Before step 1 ... 1. Grain: one row per ___.",
 }
 
 
@@ -148,6 +149,38 @@ class TestStandardContractGate:
         )
 
         assert failed == []
+
+
+class TestExistenceStep:
+    def _run(self, tmp_path: Path, data: dict[str, object]) -> list[str]:
+        _write_yaml(tmp_path / "data-modeling-standard.yaml", data)
+        failed: list[str] = []
+        validate_data_model_standard(
+            failed, contracts_dir=tmp_path, changed_files=["docs/contracts/data-modeling-standard.yaml"]
+        )
+        return failed
+
+    def test_walk_absent_fails(self, tmp_path: Path) -> None:
+        data = {k: v for k, v in _COMPLETE_STANDARD.items() if k != "design_time_walk"}
+        assert any("design_time_walk" in f for f in self._run(tmp_path, data))
+
+    def test_step_zero_missing_fails(self, tmp_path: Path) -> None:
+        data = {**_COMPLETE_STANDARD, "design_time_walk": "1. Grain: one row per ___."}
+        assert any("existence first" in f for f in self._run(tmp_path, data))
+
+    def test_grain_step_missing_fails(self, tmp_path: Path) -> None:
+        data = {**_COMPLETE_STANDARD, "design_time_walk": "0 (existence first) only"}
+        assert any("1. Grain" in f for f in self._run(tmp_path, data))
+
+    def test_step_zero_after_grain_fails(self, tmp_path: Path) -> None:
+        data = {**_COMPLETE_STANDARD, "design_time_walk": "1. Grain first, then 0 (existence first"}
+        assert any("after" in f for f in self._run(tmp_path, data))
+
+    def test_live_contract_passes(self) -> None:
+        live = Path(__file__).resolve().parents[3] / "docs" / "contracts"
+        failed: list[str] = []
+        validate_data_model_standard(failed, contracts_dir=live, changed_files=["docs/contracts/data-modeling-standard.yaml"])
+        assert failed == [], failed
 
 
 class TestDiffGate:

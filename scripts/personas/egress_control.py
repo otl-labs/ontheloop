@@ -1,6 +1,6 @@
 """Verb egress-control: the unfiltered control job (PLAN-persona-verdict-shell-deny).
 
-Every refusal the filtered probe shows must be the filter's, so each probe case except ipv6, dns_tcp_azure and
+Every refusal the filtered probe shows must be the filter's, so each probe case except ipv6, dns_tcp_azure, default_iface and
 agent_binary is expected reached here (ipv6 and dns_tcp_azure are reported, not asserted; agent_binary is skipped: no
 agent runs here). It then fetches the vendor's host list, normalises it as config/persona_verdict_egress.yaml's
 filter_supplied is, and fails if the vendor's list holds a host the file's snapshot lacks.
@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "config" / "persona_verdict_egress.yaml"
 VENDOR_LIST = "https://agent.api.stepsecurity.io/v1/github/meta"
 STORE_NAME = re.compile(r"^productionresultssa\d+(\.blob\.core\.windows\.net)$")
-REPORTED = ("ipv6", "dns_tcp_azure")
+REPORTED = ("ipv6", "dns_tcp_azure", "default_iface")
 SKIPPED = ("agent_binary",)
 
 
@@ -56,6 +56,7 @@ def vendor_widening(served: Iterable[str], snapshot: Iterable[str]) -> list[str]
 
 
 def main(argv: Sequence[str]) -> int:
+    egress_probe.emit_placement()
     cases = [case for case in egress_probe.CASES if case[0] not in SKIPPED]
     expect = {case[0]: "reported" if case[0] in REPORTED else "reached" for case in cases}
     results = egress_probe.run_cases(cases, expect)
