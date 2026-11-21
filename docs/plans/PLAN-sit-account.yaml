@@ -20,7 +20,7 @@ scope:
   - file: terraform/organization/policies/organization_admin.json.tftpl
     action: Modify
     purpose: >-
-      PR 1, three changes to OrganizationAdminOps and nothing else. (a) A new Sid AccountCreate allowing only
+      PR 1, four changes to OrganizationAdminOps and nothing else. (a) A new Sid AccountCreate allowing only
       organizations:CreateAccount on Resource "*" (it takes no resource ARN). DescribeCreateAccountStatus is already
       covered by OrgRead's organizations:Describe*, and the provider's CreateAccount tags need organizations:TagResource,
       which OrgManage already has. A Sid of its own lets rec-5065's PR remove it as an in-place policy update
@@ -30,17 +30,24 @@ scope:
       allowing only sts:AssumeRoot on Resource "*", with Condition StringEquals sts:TaskPolicyArn
       arn:aws:iam::aws:policy/root-task/IAMAuditRootUserCredentials (the operator's card
       cmsg_01DE2cGfmCsT1URMgE9SxkYhUamneiMzhqXQLUpNPaKF3q). It holds no account id, so it lands before the account
-      exists. No cloudtrail write verb (test_cloudtrail_write_grant_scoped.py reads every template). Measured
-      with the grant test's stand-ins: 5,710 characters today, 6,026 with all three, against the 7,000 and 10,240 caps.
+      exists. (d) A new Sid TfvarsWrite allowing only ssm:PutParameter on exactly
+      arn:aws:ssm:${region}:${account_id}:parameter/secret/agent-platform-terraform-organization-tfvars, TfvarsRead's
+      one ARN (Decision 237 cl.2). OrganizationAdmin can only read that parameter today, so step 4 has no way to add
+      sit_account_email without a root sign-in. It is permanent: rec-5065's PROD e-mail and any later tfvars edit use it
+      too. No cloudtrail write verb (test_cloudtrail_write_grant_scoped.py reads every template). Measured with the
+      grant test's stand-ins: 5,710 characters today, 6,203 with all four, against the 7,000 and 10,240 caps.
   - file: tests/checks/iam_tf/test_organization_admin_grant.py
     action: Modify
     purpose: >-
-      PR 1: sid_set_problems pins AccountCreate as exactly {organizations:CreateAccount} and RootAudit as exactly
-      {sts:AssumeRoot}. A new predicate checks three things: RootAudit's Condition is exactly that StringEquals
+      PR 1: sid_set_problems pins AccountCreate as exactly {organizations:CreateAccount}, RootAudit as exactly
+      {sts:AssumeRoot} and TfvarsWrite as exactly {ssm:PutParameter}. grant_problems checks TfvarsWrite's Resource
+      is the one literal parameter ARN, as it does for TfvarsRead, with red cases for a widened Resource (a trailing *)
+      and ssm:PutParameter added to any other Sid. A new predicate checks three things: RootAudit's Condition is exactly that StringEquals
       sts:TaskPolicyArn on the IAMAuditRootUserCredentials ARN; organizations:MoveAccount is in OrgManage; and
       CreateAccount appears in no Sid but AccountCreate. It has a red case for each: the condition dropped, a second
       task policy, MoveAccount dropped and CreateAccount added to OrgManage. sid_set_problems gets red cases for a
-      widened AccountCreate (organizations:CloseAccount added) and a widened RootAudit (sts:AssumeRole added). The
+      widened AccountCreate (organizations:CloseAccount added), a widened RootAudit (sts:AssumeRole added) and a
+      widened TfvarsWrite (ssm:DeleteParameter added). The
       existing operator-only, Delete-verb and size checks run unchanged over the larger policy.
   # ------------------------------------------------------------ PR 2: SIT is created (irreversible)
   - file: terraform/organization/variables.tf
@@ -49,7 +56,7 @@ scope:
       PR 2: sit_account_email, sensitive, no default. A validation block requires a lowercase address (condition
       var.sit_account_email == lower(var.sit_account_email)): the e-mail is ForceNew
       under prevent_destroy, so a case mismatch with AWS's stored value must never plan a replace. Its value lives only
-      in the tfvars SecureString, which the operator edits in the console (Decision 237).
+      in the tfvars SecureString, which the operator's step 4 block writes through TfvarsWrite (Decision 237).
   - file: terraform/organization/accounts.tf
     action: Modify
     purpose: >-
@@ -72,8 +79,8 @@ scope:
       prevent_destroy, billing DENY, the role name, ignore_changes exactly those two, both depends_on entries, email
       from var.sit_account_email, and sit_account_email sensitive with no default and carrying the lowercase validation
       (its condition compares the value with lower(var.sit_account_email)). It has red cases for the lowercase validation
-      dropped, the parent
-      changed to the root, close_on_deletion true, prevent_destroy dropped, each depends_on entry dropped and the
+      dropped, sensitive = true dropped, billing DENY changed to ALLOW, the parent changed to the root,
+      close_on_deletion true, prevent_destroy dropped, each depends_on entry dropped and the
       ignore_changes widened. The name-family check also covers the account: _NAME_ATTRS gains
       aws_organizations_account name and _FIXED_NAMES gains "SIT", with a red case for an account name outside both.
   # ------------------------------------------------------------ PR 3: bookkeeping
@@ -88,11 +95,11 @@ followon_recs: []
 infrastructure_dependencies:
   - "terraform/organization applied (rec-5026, merge ae53954b, step 7 read-back on PR 2296): the Organization with centralized root access, the sit OU with the baseline SCP attached, OrganizationAdmin and its CloudShell lane."
   - "Two operator sittings of terraform/organization in AWS CloudShell, as org-admin-operator switched to role OrganizationAdmin (Decision 256 cl.3, Decision 252 cl.7 and its 2026-11-20 Update), one each for PR 1 and PR 2, each after its pre-merge plan block. One at a time project-wide. PR 3 has no apply."
-  - "The SIT root e-mail: a company mailbox never used for any AWS account and receiving mail. Before PR 2's pre-merge block, the operator adds it to the SecureString /secret/agent-platform-terraform-organization-tfvars in the console as sit_account_email = \"...\" (a new parameter Version)."
-  - "Running cost: $0 a month (an empty account; IAM, Organizations and root sessions cost nothing). Each apply sitting fires the foundation's role-switch and policy-change alarms by design."
+  - "The SIT root e-mail: a company mailbox never used for any AWS account and receiving mail. After PR 1's apply and before PR 2's pre-merge block, the operator's step 4 block appends it to the SecureString /secret/agent-platform-terraform-organization-tfvars as sit_account_email = \"...\" (a new parameter Version), typed at a prompt that does not echo it."
+  - "Running cost: $0 a month (an empty account; IAM, Organizations, SSM standard parameters and root sessions cost nothing). Every sitting fires the foundation's role-switch alarm, and PR 1's apply also fires the policy-change alarm, by design. PR 2's sitting, step 4's PutParameter and step 8's AssumeRoot fire no alarm of their own; each sits inside an alarmed role switch."
 acceptance_criteria:
   - "rec-5064's acceptance node tests/checks/iam_tf/test_organization_baseline.py::test_sit_account_in_sit_ou_without_close_on_deletion passes, with every other case in the three organization test files (step 1)."
-  - "After PR 1's apply (step 7): OPS_NEW_SIDS reads AccountCreate RootAudit, MOVE_ACCOUNT True, ROOT_AUDIT_TASK the IAMAuditRootUserCredentials ARN, SIT_ACCOUNTS 0 and ORG_PLAN_EXIT 0."
+  - "After PR 1's apply (step 7): OPS_NEW_SIDS reads AccountCreate RootAudit TfvarsWrite, MOVE_ACCOUNT True, ROOT_AUDIT_TASK the IAMAuditRootUserCredentials ARN, SIT_ACCOUNTS 0 and ORG_PLAN_EXIT 0."
   - "After PR 2's apply (steps 7 and 8): SIT_ACCOUNTS 1 and ORG_PLAN_EXIT 0. Step 8 then reads STATE ACTIVE, PARENT_OU sit, OU_POLICIES FullAWSAccess baseline, ACCOUNT_POLICIES FullAWSAccess, ROOT_FEATURES RootCredentialsManagement RootSessions, and ROOT_LOGIN_PROFILE 0, ROOT_ACCESS_KEYS 0 and ROOT_SIGNING_CERTS 0, with ROOT_PASSWORD 0 (or None only when ROOT_LOGIN_PROFILE reads 0)."
   - "PR 2's step 7 block is posted only after the operator's own words naming the SIT account's creation, and step 9's comment on PR 2 quotes that message's id."
   - "rec-5064 reads closed by PR 3's Resolves trailer, and T2.57 c11 reads met; both happen only after step 9 has posted step 8's lines."
@@ -141,21 +148,41 @@ verification_plan:
   - step: 4
     phase: pre-deploy
     action: >-
-      PR 2 only, before its step 5 block. The operator acts in the console and confirms two things in words (always_ask). The SIT mailbox is a company mailbox never used for any AWS account,
-      and it receives mail. sit_account_email = "<that address>" has been added to the SecureString
-      /secret/agent-platform-terraform-organization-tfvars in the config/aws-region region, typed in the console and
-      never in a shell. The block below proves the key is there without printing the value.
+      OPERATOR STEP for PR 2, after step 9 posted PR 1's step 7 lines (TfvarsWrite is live) and before PR 2's step 5
+      block. The operator first confirms in words (always_ask) that the SIT mailbox is a company mailbox never used for
+      any AWS account, and that it receives mail. The build announces the sitting in the thread (the role switch;
+      terraform/organization/CLAUDE.md), writes config/aws-region's value in (BLOCK_NOT_FILLED otherwise) and posts
+      this block, pasted into CloudShell in the OrganizationAdmin role session. It checks the identity and reads the
+      tfvars. If sit_account_email is already a key it prints SIT_EMAIL_ALREADY_SET and writes nothing. Otherwise it
+      asks for the address at a prompt that does not echo it (read -rs, so it reaches neither the screen nor the shell
+      history), refuses anything but one lowercase address of letters, digits and ._+- (SIT_EMAIL_REJECTED), appends
+      sit_account_email = "<address>" to the value in a file only the operator can read, and writes it back as a
+      SecureString with put-parameter --overwrite (TFVARS_WRITE_FAILED otherwise). It then prints TFVARS_VERSION and
+      SIT_EMAIL_KEY, never the value. The parameter is taken to use the default aws/ssm key, as a console-created
+      SecureString does (inferred). An EXIT trap deletes the file; errors go to ${TMPDIR:-/tmp}/sit-email.err, read in
+      CloudShell only. The paste is the direction.
     command: >-
-      ( set -o pipefail; R=__REGION__; case "$R" in *__*) echo BLOCK_NOT_FILLED; exit 1 ;; esac; unset AWS_PROFILE; N=/secret/agent-platform-terraform-organization-tfvars; L="${TMPDIR:-/tmp}/sit-email.err"; : > "$L";
+      ( set -o pipefail; umask 077; export LC_ALL=C; R=__REGION__; case "$R" in *__*) echo BLOCK_NOT_FILLED; exit 1 ;; esac; unset AWS_PROFILE; export AWS_REGION="$R" AWS_DEFAULT_REGION="$R";
+      N=/secret/agent-platform-terraform-organization-tfvars; W="${TMPDIR:-/tmp}/sit-email"; L="${TMPDIR:-/tmp}/sit-email.err"; rm -rf "$W"; mkdir -p "$W"; : > "$L"; trap 'rm -rf "$W"' EXIT;
       printf 'caller-arn check: '; case "$(aws sts get-caller-identity --query Arn --output text 2>> "$L")" in *:assumed-role/OrganizationAdmin/*) echo ADMIN_CHAIN_OK ;; *) echo ADMIN_CHAIN_ABSENT; exit 1 ;; esac;
-      echo "TFVARS_VERSION $(aws ssm get-parameter --region "$R" --name $N --query Parameter.Version --output text 2>> "$L")";
-      V=$(aws ssm get-parameter --region "$R" --name $N --with-decryption --query Parameter.Value --output text 2>> "$L"); test -n "$V" || { echo TFVARS_READ_FAILED; exit 1; };
-      echo "SIT_EMAIL_KEY $(printf '%s\n' "$V" | grep -c '^[[:space:]]*sit_account_email[[:space:]]*=')"; unset V )
+      V=$(aws ssm get-parameter --name $N --with-decryption --query Parameter.Value --output text 2>> "$L") && test -n "$V" || { echo TFVARS_READ_FAILED; exit 1; };
+      if printf '%s\n' "$V" | grep -q '^[[:space:]]*sit_account_email[[:space:]]*='; then echo SIT_EMAIL_ALREADY_SET; else
+      read -rs -p 'SIT root e-mail (not shown): ' E; echo; case "$E" in ''|*[!a-z0-9._+@-]*|*@*@*) echo SIT_EMAIL_REJECTED; exit 1 ;; ?*@?*.?*) ;; *) echo SIT_EMAIL_REJECTED; exit 1 ;; esac;
+      printf '%s\nsit_account_email = "%s"\n' "$V" "$E" > "$W/new.tfvars"; unset E;
+      aws ssm put-parameter --name $N --type SecureString --overwrite --value "file://$W/new.tfvars" > /dev/null 2>> "$L" || { echo TFVARS_WRITE_FAILED; exit 1; }; echo SIT_EMAIL_WRITTEN; fi; unset V;
+      echo "TFVARS_VERSION $(aws ssm get-parameter --name $N --query Parameter.Version --output text 2>> "$L")";
+      echo "SIT_EMAIL_KEY $(aws ssm get-parameter --name $N --with-decryption --query Parameter.Value --output text 2>> "$L" | grep -c '^[[:space:]]*sit_account_email[[:space:]]*=')" )
     expected: >-
-      The operator's words for the mailbox, then, from this read-only block pasted in the OrganizationAdmin role
-      session (the build writes config/aws-region's value in), caller-arn check: ADMIN_CHAIN_OK, TFVARS_VERSION <n> and SIT_EMAIL_KEY 1; step 5 then
-      prints the same SIT_EMAIL_KEY and TFVARS_VERSION.
-    fix_if: ADMIN_CHAIN_ABSENT -- switch role and reopen CloudShell in the role; SIT_EMAIL_KEY 0 -- the key is missing or misspelled in the parameter; the operator fixes it in the console and re-pastes; an empty TFVARS_VERSION or TFVARS_READ_FAILED -- read ${TMPDIR:-/tmp}/sit-email.err in CloudShell
+      The operator's words for the mailbox, then caller-arn check: ADMIN_CHAIN_OK, SIT_EMAIL_WRITTEN (or
+      SIT_EMAIL_ALREADY_SET on a re-paste), TFVARS_VERSION <n> and SIT_EMAIL_KEY 1. Step 5 then prints the same
+      SIT_EMAIL_KEY and TFVARS_VERSION. The operator sends the lines to the build thread.
+    fix_if: >-
+      BLOCK_NOT_FILLED -- the build re-posts it filled; ADMIN_CHAIN_ABSENT -- switch role and reopen CloudShell in the
+      role; SIT_EMAIL_REJECTED -- nothing was written: re-paste and type the address in lowercase; TFVARS_READ_FAILED or
+      TFVARS_WRITE_FAILED -- read ${TMPDIR:-/tmp}/sit-email.err in CloudShell: an AccessDenied on ssm or kms is a grant
+      defect (STOP, report; the parameter may use another key); SIT_EMAIL_KEY 2 or more -- STOP, the key is duplicated;
+      SIT_EMAIL_ALREADY_SET on the first paste -- STOP, report: a key the operator did not write is there, and this
+      block never prints or replaces it
     hermetic: false
     graduation: not-applicable
   - step: 5
@@ -163,8 +190,9 @@ verification_plan:
     action: >-
       OPERATOR STEP, PRE-MERGE GATE (ADMIN) and ENVIRONMENT CHECK (deploy-paths.yaml pre_merge_live_plan) for PR 1 and
       for PR 2, at each PR's CI-green head. The operator pastes one block into CloudShell in the OrganizationAdmin role
-      session. It is the foundation's step 5 block without the state-bucket and metric-filter parts, and the build writes
-      the head sha in (BLOCK_NOT_FILLED otherwise). In order, it:
+      session. It is the foundation's step 5 block without the state-bucket and metric-filter parts. The build announces
+      the sitting in the thread first (the role switch; terraform/organization/CLAUDE.md) and writes the head sha in
+      (BLOCK_NOT_FILLED otherwise). In order, it:
       - checks the identity and prints caller-arn check: ADMIN_CHAIN_OK only for an assumed-role/OrganizationAdmin/ session;
       - fetches the head into ${TMPDIR:-/tmp} and installs config/terraform-version's terraform, checked against
         HashiCorp's SHA256SUMS;
@@ -198,7 +226,7 @@ verification_plan:
       caller-arn check: ADMIN_CHAIN_OK, TF_VERSION <config/terraform-version>, TFVARS_VERSION <n>, SIT_ACCOUNTS 0,
       ROOT_TREE <hash>, AWS_PROVIDER 5.100.0 (the committed lock), PLAN_DIGEST <hex>, EXIT 2 and HEAD <head sha>. PR 1: COUNTS
       {'update aws_iam_role_policy': 1}, CHANGED [('aws_iam_role_policy.organization_admin_ops', ['policy'])],
-      ADDED_SIDS ['AccountCreate', 'RootAudit'] and REMOVED_SIDS [] (SIT_EMAIL_KEY is not gated for PR 1). PR 2:
+      ADDED_SIDS ['AccountCreate', 'RootAudit', 'TfvarsWrite'] and REMOVED_SIDS [] (SIT_EMAIL_KEY is not gated for PR 1). PR 2:
       SIT_EMAIL_KEY 1, COUNTS {'create aws_organizations_account': 1}, CHANGED [], ADDED_SIDS [] and REMOVED_SIDS
       []. Nothing to destroy or
       replace in either. The operator sends the printed lines to the build thread.
@@ -220,9 +248,9 @@ verification_plan:
       labelled operator-reported from the operator's CloudShell. No AWS credential is used.
     command: >-
       mcp__github__pull_request_read(method="get", owner="otl-labs", repo="ontheloop", pullNumber=<PR>) -> head sha equals
-      the HEAD line; then mcp__github__add_issue_comment on the PR with the lines above
+      the HEAD line (after a TREE_MISMATCH re-run of step 5 at the merge sha, HEAD equals that merge sha instead); then mcp__github__add_issue_comment on the PR with the lines above
     expected: Every line matches step 5's expected, compared with whitespace collapsed (text output joins lists with tabs); HEAD equals the PR's current head sha; the comment carries names, counts, hashes and shas only.
-    fix_if: a line differs -- do not post success; report the exact line to the operator; HEAD differs from the current head -- step 5 is re-posted for the new head
+    fix_if: a line differs -- do not post success; report the exact line to the operator; HEAD differs from the current head (or from the merge sha on a TREE_MISMATCH re-run) -- step 5 is re-posted for the right sha
     hermetic: false
     graduation: not-applicable
   - step: 7
@@ -230,6 +258,8 @@ verification_plan:
     action: >-
       OPERATOR STEP after each merge: one block pasted into CloudShell in the OrganizationAdmin role session. It is the
       foundation's step 7 block, with a read-back for this plan. Before posting it the build:
+      - announces the sitting in the thread (the role switch, and for PR 1 the policy write and its alarm;
+        terraform/organization/CLAUDE.md);
       - writes in the merge sha and step 6's four pins;
       - checks locally that git rev-parse <merge sha>:terraform/organization equals ROOT_TREE;
       - for PR 2, posts it only after the operator's own words naming the SIT account's creation (an approve line or a
@@ -255,23 +285,25 @@ verification_plan:
       ( cd "$W" && grep " $Z\$" sums | sha256sum -c --quiet - ) && unzip -qo "$W/$Z" -d "$W/bin"; } >> "$L" 2>&1 || { echo TERRAFORM_INSTALL_FAILED; exit 1; }; export PATH="$W/bin:$PATH";
       N=/secret/agent-platform-terraform-organization-tfvars; [ "$(aws ssm get-parameter --name $N --query Parameter.Version --output text 2>> "$L")" = "$XV" ] || { echo TFVARS_VERSION_CHANGED; exit 1; };
       aws ssm get-parameter --name "$N:$XV" --with-decryption --query Parameter.Value --output text > "$W/vars.tfvars" 2>> "$L" && test -s "$W/vars.tfvars" || { echo TFVARS_ABSENT; exit 1; }; O="$W/repo/terraform/organization";
-      PRE=$(aws organizations list-accounts --query "length(Accounts[?Name=='SIT'])" --output text 2>> "$L"); IP=$(aws organizations list-create-account-status --states IN_PROGRESS --query 'length(CreateAccountStatuses)' --output text 2>> "$L"); [ "$PRE" = 0 ] && [ "$IP" = 0 ] || { echo "SIT_PRESENT_BEFORE_APPLY $PRE $IP"; exit 1; };
+      PRE=$(aws organizations list-accounts --query "length(Accounts[?Name=='SIT'])" --output text 2>> "$L") || { echo SIT_READ_FAILED; exit 1; }; IP=$(aws organizations list-create-account-status --states IN_PROGRESS --query 'length(CreateAccountStatuses)' --output text 2>> "$L") || { echo CREATE_STATUS_READ_FAILED; exit 1; }; [ "$PRE" = 0 ] && [ "$IP" = 0 ] || { echo "SIT_PRESENT_BEFORE_APPLY $PRE $IP"; exit 1; };
       terraform -chdir="$O" init -input=false -lockfile=readonly -backend-config="region=$R" > /dev/null 2>> "$L" || { echo INIT_FAILED; exit 1; };
       terraform -chdir="$O" plan -input=false -no-color -detailed-exitcode -var-file="$W/vars.tfvars" -out="$W/merge.bin" > /dev/null 2>> "$L"; rc=$?; echo "MERGE_PLAN_EXIT $rc";
       D=$(terraform -chdir="$O" show -json "$W/merge.bin" 2>> "$L" | python3 -c "import json,sys,hashlib; rc=[r for r in json.load(sys.stdin).get('resource_changes', []) if r['change']['actions'] != ['no-op'] or r['change'].get('importing')]; k=lambda r: ('import ' if r['change'].get('importing') else '') + '+'.join(r['change']['actions']); print(hashlib.sha256('\n'.join(sorted(k(r) + ' ' + r['address'] for r in rc)).encode()).hexdigest())" 2>> "$L");
       if [ "$rc" = 2 ] && [ "$D" = "$XD" ]; then terraform -chdir="$O" apply -input=false -no-color "$W/merge.bin" 2>> "$L" | grep -E '^Apply complete!'; echo "APPLY_EXIT $?";
       terraform -chdir="$O" plan -input=false -no-color -detailed-exitcode -var-file="$W/vars.tfvars" > /dev/null 2>> "$L"; echo "ORG_PLAN_EXIT $?";
       { Q="aws iam get-role-policy --role-name OrganizationAdmin --policy-name OrganizationAdminOps --output text --query";
-      echo "OPS_NEW_SIDS $($Q "PolicyDocument.Statement[?Sid=='AccountCreate' || Sid=='RootAudit'].Sid")"; echo "MOVE_ACCOUNT $($Q "contains(PolicyDocument.Statement[?Sid=='OrgManage'].Action[], 'organizations:MoveAccount')")";
+      echo "OPS_NEW_SIDS $($Q "PolicyDocument.Statement[?Sid=='AccountCreate' || Sid=='RootAudit' || Sid=='TfvarsWrite'].Sid")"; echo "MOVE_ACCOUNT $($Q "contains(PolicyDocument.Statement[?Sid=='OrgManage'].Action[], 'organizations:MoveAccount')")";
       echo "ROOT_AUDIT_TASK $($Q "PolicyDocument.Statement[?Sid=='RootAudit'].Condition.StringEquals.\"sts:TaskPolicyArn\"")"; echo "SIT_ACCOUNTS $(aws organizations list-accounts --query "length(Accounts[?Name=='SIT'])" --output text)"; echo "CREATE_IN_PROGRESS $(aws organizations list-create-account-status --states IN_PROGRESS --query 'length(CreateAccountStatuses)' --output text)"; } 2>> "$L";
       else echo APPLY_SKIPPED; [ "$rc" = 2 ] && terraform -chdir="$O" show -json "$W/merge.bin" 2>> "$L" | python3 -c "import json,sys,collections; rc=json.load(sys.stdin).get('resource_changes', []); print('COUNTS', dict(sorted(collections.Counter(('import ' if r['change'].get('importing') else '') + '+'.join(r['change']['actions']) + ' ' + r['type'] for r in rc if r['change']['actions'] != ['no-op'] or r['change'].get('importing')).items())))" 2>> "$L"; fi; echo "MERGE_SHA $M" )
     expected: >-
       caller-arn check: ADMIN_CHAIN_OK, MERGE_PLAN_EXIT 2, "Apply complete!" with step 5's counts, APPLY_EXIT 0,
-      ORG_PLAN_EXIT 0, OPS_NEW_SIDS AccountCreate RootAudit (either order), MOVE_ACCOUNT True, ROOT_AUDIT_TASK
+      ORG_PLAN_EXIT 0, OPS_NEW_SIDS AccountCreate RootAudit TfvarsWrite (any order), MOVE_ACCOUNT True, ROOT_AUDIT_TASK
       arn:aws:iam::aws:policy/root-task/IAMAuditRootUserCredentials and MERGE_SHA <merge sha>. SIT_ACCOUNTS is 0 after
       PR 1 and 1 after PR 2; CREATE_IN_PROGRESS 0. The operator sends the lines to the build thread.
     fix_if: >-
-      BLOCK_NOT_FILLED -- the build re-posts it filled; SIT_PRESENT_BEFORE_APPLY -- nothing was planned or applied:
+      BLOCK_NOT_FILLED -- the build re-posts it filled; SIT_READ_FAILED or CREATE_STATUS_READ_FAILED -- nothing was
+      planned: read ${TMPDIR:-/tmp}/sit-merge-tf.err in CloudShell, fix and re-paste; SIT_PRESENT_BEFORE_APPLY -- nothing
+      was planned or applied:
       STOP, an account named SIT exists or a create is running, so read step 8's block and take the matching recovery,
       never a create; TREE_MISMATCH, TF_VERSION_CHANGED or TFVARS_VERSION_CHANGED --
       nothing was planned: step 5 re-runs at the merge sha and the build re-posts this block with the new pins;
@@ -280,9 +312,10 @@ verification_plan:
       (PR 2 does not start); APPLY_EXIT not 0 on PR 2 with SIT_ACCOUNTS 0, CREATE_IN_PROGRESS 0 and a FailureReason
       in the err file (for example EMAIL_ALREADY_EXISTS or an account limit) -- CreateAccount failed and created
       nothing: STOP and report, the operator decides; APPLY_EXIT not 0 on PR 2 with CREATE_IN_PROGRESS above 0 or a
-      timeout in the err file -- the create may still finish outside state: wait, re-paste step 8's read-only block
-      until it reads STATE ACTIVE or SIT_ABSENT holds with CREATE_IN_PROGRESS 0, then recovery (2) if the account
-      exists, never a second create; any other PR 2 combination -- STOP and report; APPLY_EXIT not 0 on PR 2 after the account exists (a move failure leaves it tainted in state, or it
+      timeout in the err file -- the create may still finish outside state: STOP and report, and the operator decides.
+      They may re-paste step 8's read-only block until it reads STATE ACTIVE, or SIT_ABSENT with CREATE_IN_PROGRESS 0;
+      recovery (2) runs only on their direction if the account exists. Step 7 is never re-pasted to retry a create
+      without the operator's fresh words naming it; any other PR 2 combination -- STOP and report; APPLY_EXIT not 0 on PR 2 after the account exists (a move failure leaves it tainted in state, or it
       is missing from state) -- STOP, the operator reads ${TMPDIR:-/tmp}/sit-merge-tf.err in CloudShell only, and only
       the matching recovery in context runs on the operator's direction; ORG_PLAN_EXIT 2 after an apply -- STOP and
       report; never apply a plan that replaces or destroys aws_organizations_account.sit
@@ -291,8 +324,9 @@ verification_plan:
   - step: 8
     phase: post-deploy
     action: >-
-      OPERATOR STEP after PR 2's step 7. A read-only block pasted into CloudShell in the OrganizationAdmin role session;
-      the build writes config/aws-region's value in (BLOCK_NOT_FILLED otherwise). It reads SIT's id by name into a
+      OPERATOR STEP after PR 2's step 7. A read-only block pasted into CloudShell in the OrganizationAdmin role session,
+      after the build announces the sitting in the thread (the role switch; terraform/organization/CLAUDE.md); the build
+      writes config/aws-region's value in (BLOCK_NOT_FILLED otherwise). It reads SIT's id by name into a
       shell variable that is never printed, then reads from the management account:
       - STATE (the Account State field; Status is retired);
       - PARENT_OU (the parent's name) and OU_POLICIES;
@@ -310,7 +344,7 @@ verification_plan:
       ( set -o pipefail; R=__REGION__; case "$R" in *__*) echo BLOCK_NOT_FILLED; exit 1 ;; esac; export AWS_REGION="$R" AWS_DEFAULT_REGION="$R"; L="${TMPDIR:-/tmp}/sit-audit.err"; : > "$L"; unset AWS_PROFILE;
       printf 'caller-arn check: '; case "$(aws sts get-caller-identity --query Arn --output text 2>> "$L")" in *:assumed-role/OrganizationAdmin/*) echo ADMIN_CHAIN_OK ;; *) echo ADMIN_CHAIN_ABSENT; exit 1 ;; esac;
       echo "CREATE_IN_PROGRESS $(aws organizations list-create-account-status --states IN_PROGRESS --query 'length(CreateAccountStatuses)' --output text 2>> "$L")";
-      A=$(aws organizations list-accounts --query "Accounts[?Name=='SIT'].Id" --output text 2>> "$L"); case "$A" in [0-9]*) ;; *) echo SIT_ABSENT; exit 1 ;; esac; case "$A" in *[!0-9]*) echo SIT_NOT_UNIQUE; exit 1 ;; esac;
+      A=$(aws organizations list-accounts --query "Accounts[?Name=='SIT'].Id" --output text 2>> "$L") || { echo SIT_READ_FAILED; exit 1; }; case "$A" in [0-9]*) ;; *) echo SIT_ABSENT; exit 1 ;; esac; case "$A" in *[!0-9]*) echo SIT_NOT_UNIQUE; exit 1 ;; esac;
       echo "STATE $(aws organizations describe-account --account-id "$A" --query Account.State --output text 2>> "$L")";
       read -r PT PI <<< "$(aws organizations list-parents --child-id "$A" --query 'Parents[0].[Type,Id]' --output text 2>> "$L")";
       if [ "$PT" = ORGANIZATIONAL_UNIT ]; then echo "PARENT_OU $(aws organizations describe-organizational-unit --organizational-unit-id "$PI" --query OrganizationalUnit.Name --output text 2>> "$L")"; echo "OU_POLICIES $(aws organizations list-policies-for-target --target-id "$PI" --filter SERVICE_CONTROL_POLICY --query 'sort(Policies[].Name)' --output text 2>> "$L")"; else echo "PARENT_OU $PT"; fi;
@@ -326,7 +360,8 @@ verification_plan:
       with no password cannot hold an MFA device, so the three credential lines decide. The operator sends the lines
       to the build thread.
     fix_if: >-
-      BLOCK_NOT_FILLED -- the build re-posts it filled; SIT_ABSENT -- step 7 did not create it: read step 7's lines;
+      BLOCK_NOT_FILLED -- the build re-posts it filled; SIT_READ_FAILED -- read ${TMPDIR:-/tmp}/sit-audit.err in
+      CloudShell, fix and re-paste; SIT_ABSENT -- step 7 did not create it: read step 7's lines;
       SIT_NOT_UNIQUE -- STOP, two accounts named SIT; STATE PENDING_ACTIVATION -- not a failure, re-paste later and
       report if it is not ACTIVE within the hour; PARENT_OU ROOT -- step 7's ORG_PLAN_EXIT decides: 1 (prevent_destroy
       refusing a tainted replace) means the account is in state, recovery (1); 2 (a fresh create planned) means it is
@@ -369,15 +404,15 @@ test_obligations:
     test_selector: tests/checks/iam_tf/test_organization_baseline.py::test_sit_account_in_sit_ou_without_close_on_deletion
     red_green_expectation: red before PR 2 (no account resource), green after
   - source: terraform/organization/variables.tf
-    behavior: sit_account_email sensitive with no default, with the lowercase validation (red when dropped)
+    behavior: sit_account_email sensitive with no default, with the lowercase validation (red when either is dropped); billing DENY (red when ALLOW)
     verification_step: 1
     test_selector: tests/checks/iam_tf/test_organization_baseline.py::test_sit_account_in_sit_ou_without_close_on_deletion
     red_green_expectation: red before PR 2
   - source: terraform/organization/policies/organization_admin.json.tftpl
-    behavior: AccountCreate exactly CreateAccount, MoveAccount in OrgManage, RootAudit exactly sts:AssumeRoot under the one task-policy condition; operator-only verbs still absent; under the size caps
+    behavior: AccountCreate exactly CreateAccount, MoveAccount in OrgManage, RootAudit exactly sts:AssumeRoot under the one task-policy condition, TfvarsWrite exactly ssm:PutParameter on the one parameter ARN; operator-only verbs still absent; under the size caps
     verification_step: 1
     test_selector: tests/checks/iam_tf/test_organization_admin_grant.py
-    red_green_expectation: the AccountCreate, RootAudit and MoveAccount cases red before PR 1
+    red_green_expectation: the AccountCreate, RootAudit, TfvarsWrite and MoveAccount cases red before PR 1
   - source: tests/checks/iam_tf/test_organization_admin_grant.py
     behavior: the new pinned sets and their red cases
     verification_step: 1
@@ -407,20 +442,21 @@ context:
   - "Advisor (blind Fable consult 2026-11-11, /mnt/project-files/sit-account-create/ADVICE.md). Still adopted: grant first in its own PR, then the account; no quota pre-check (over quota CreateAccount creates nothing); two named recoveries; ignore_changes on the attributes that reads never return. Superseded by Decision 256 cl.3: the agent-run helper in scripts/aws_identity.py and its proxy STS client. The read-back is now an operator block, and no repo code changes outside terraform/organization and its tests."
   - "Provider fact (hashicorp/aws v5.100.0, the committed lock; internal/service/organizations/account.go read 2026-11-21). CreateAccount, with default_tags as account tags, is followed by DescribeCreateAccountStatus polling (create timeout 10 min), d.SetId, then ListParents and MoveAccount when parent_id differs. So SIT sits seconds in the root under FullAWSAccess, with no credentials and no workload, and a failed move leaves the account tainted in state. Only FinalizingOrganizationException is retried, never AccessDenied, which is why the grant is applied and read back first. email, role_name and iam_user_access_to_billing are ForceNew; name is updated in place through account:PutAccountName, which is not granted. The read still sets the computed status from the retired Account Status (an empty value, no diff)."
   - "AWS facts (docs.aws.amazon.com/IAM/latest/UserGuide/id_root-user-privileged-task.html and STS API_AssumeRoot, read 2026-11-21). AssumeRoot must go to a regional STS endpoint; TargetPrincipal takes the member account id; the session lasts at most 900 seconds. The IAMAuditRootUserCredentials task policy denies everything but ListAccessKeys, ListSigningCertificates, GetLoginProfile, ListMFADevices, GetAccountSummary, GetUser and GetAccessKeyLastUsed, all but GetAccountSummary only on the root resource. Root credentials of an account created under RootCredentialsManagement are asserted by step 8's read, not assumed."
-  - "PR shape: three PRs under one plan. PR 1 (grant and grant tests; reversible) and PR 2 (variable, account, acceptance node; irreversible) do not declare the plan, and step 3 is their scope check. PR 3 (bookkeeping only, after step 9 posted step 8's lines) declares it, flips c11 and carries 'Resolves: rec-5064'. It is one plan rather than an atomic grant plan, because the grant has no purpose without the account (the advisor's two-PR answer; the foundation's rec-5066 uses the same non-declaring seam). If PR 2's apply fails, rec-5064 and c11 stay open and PR 3 waits for the recovery and a passing step 8. Operator pastes: steps 5 and 7 for each of PR 1 and PR 2, and step 8 once."
+  - "PR shape: three PRs under one plan. PR 1 (grant and grant tests; reversible) and PR 2 (variable, account, acceptance node; irreversible) do not declare the plan, and step 3 is their scope check. PR 3 (bookkeeping only, after step 9 posted step 8's lines) declares it, flips c11 and carries 'Resolves: rec-5064'. It is one plan rather than an atomic grant plan, because the grant has no purpose without the account (the advisor's two-PR answer; the foundation's rec-5066 uses the same non-declaring seam). If PR 2's apply fails, rec-5064 and c11 stay open and PR 3 waits for the recovery and a passing step 8. Operator pastes: steps 5 and 7 for each of PR 1 and PR 2, step 4 and step 8 once each."
   - "Approvals at build start: none -- no agent session runs an admin step or holds an admin profile here (Decision 256 cl.3), so the hook asks no admin-credential, secret-read or tf-state-change line in any session of this build. The operator's paste of each CloudShell block (steps 5, 7 and 8) is the direction for it (Decision 126 cl.1; the rec-5026 precedent). In the build session: the final-diff word on PR 1 and PR 2 (IAM text) and step 10's rec read, which needs no approval."
-  - "Asked at the step, not at build start: the operator's step 4 mailbox words and console edit; their own words naming the SIT account's creation before PR 2's step 7 block is posted; the final-diff word on PR 1 and PR 2."
+  - "Asked at the step, not at build start: the operator's step 4 mailbox words and their paste of step 4's write block; their own words naming the SIT account's creation before PR 2's step 7 block is posted; the final-diff word on PR 1 and PR 2."
   - "V3 resolution: the posted step 6 evidence (the operator's step 5 block at each PR's current head) substitutes for pre-merge post-deploy evidence. The behavioural acceptance is steps 7 and 8 after merge, posted counts-only by step 9 on each merged PR. PR 3 has no terraform diff and carries no step 5 evidence; its V3 evidence is step 8's lines posted on PR 2."
   - "LAMBDA-DEPLOY DEFERRED (Decision 79): compute_affected_artifacts(scope) = {'data-pipeline': ['docs/ROADMAP-PLATFORM.yaml']}, a packaged asset of the active artifact. No build, deploy or smoke test is owed: the change is c11's status only, and the asset refreshes with the next governed deploy (rec-2910 over-inclusion). Precedent: PLAN-sit-organization, PLAN-sit-decision."
   - "Wording (Decision 279, lane sampled since 2026-11-16): no scope file is in docs/contracts/approval-routing.yaml's gated set (no CLAUDE.md, Decision, contract key or CODEOWNERS), and the plan drafts no Decision, so no sidecar or approval run is needed. Decision 275's contract byte caps do not apply: no docs/contracts file is in scope."
   - "Sequencing. rec-5465 (the baseline policy's depends_on, open with no PR on 2026-11-21) also edits test_organization_baseline.py and terraform/organization. The build checks it at start: if its PR is open, this build waits for it to merge and for any sitting it needs; if it lands between this build's step 5 and step 7, TREE_MISMATCH stops step 7, and step 5 re-runs on the new tree. rec-5466 (OrganizationAdmin can widen its own grant) may remove SelfRole's iam:PutRolePolicy. Both PR 1's apply and rec-5065's removal of AccountCreate rely on that verb, so if it is gone before PR 1 applies, STOP for an amendment."
   - "Recoveries, here and not in terraform/organization/CLAUDE.md (that file is gated, Decision 279, and the procedure is one-shot). (1) A failed move leaves the account tainted in state. On the operator's direction the build posts a filled block that runs terraform untaint aws_organizations_account.sit in the role session with step 7's identity check, fetch and pins; then step 5 and step 7 apply only a plan with exactly one in-place parent_id update. (2) An account created but not saved to state, where a re-apply would fail on the duplicate e-mail. A further non-declaring PR inside the variables.tf and accounts.tf scope rows adds var.sit_account_id (sensitive, no default) and an import block whose id is that variable, with its own steps 1-3 and a red/green case in test_organization_baseline.py (the import id is var.sit_account_id, the variable is sensitive, no literal id). In its step 5 and step 7 blocks the operator's shell sets TF_VAR_sit_account_id from organizations list-accounts by name, never a literal, and the expected plan is 1 import, plus the in-place parent_id update if the move had not run. Those blocks keep plan stdout at /dev/null and apply stdout behind the ^Apply complete! grep, as steps 5 and 7 do, because terraform prints an import's id ('Preparing import... [id=...]') even when the variable is sensitive. Anything wider is a plan amendment. Never apply a replace or destroy of the account; a later removal from state is a removed block with destroy = false."
   - "Carried (update_rec 2026-11-21 ~14:58Z, each read back): rec-5064's scope now names RootAudit instead of AssumeRole into OrganizationAccountAccessRole, with AccountCreate and MoveAccount in OrganizationAdminOps; rec-5065's carried note changes to an in-place removal of Sid AccountCreate through PutRolePolicy (no iam:DeleteRolePolicy needed; MoveAccount already granted); rec-5027's items (5) and (7) are superseded (no agent session reaches the management account, and OrganizationAdmin gets no AssumeRole into SIT here, so rec-5027 brings its own path into SIT and still narrows or removes OrganizationAccountAccessRole)."
-  - "Residual: SIT's activity is on no Terraform-owned trail until rec-5059's organisation trail; until then only SIT's 90-day Event history. RootAudit's Resource '*' lets OrganizationAdmin audit any member's root (PROD too once rec-5065 joins it); it is read-only by the task policy."
+  - "Residual: SIT's activity is on no Terraform-owned trail until rec-5059's organisation trail; until then only SIT's 90-day Event history. RootAudit's Resource '*' lets OrganizationAdmin audit any member's root (PROD too once rec-5065 joins it); it is read-only by the task policy. TfvarsWrite lets OrganizationAdmin overwrite the organization tfvars; every later plan still reads them at a pinned Version, and parameter history keeps each earlier Version."
   - "Related-work check (red_overlap, 2026-11-21 15:18Z): clear, no reds. Earlier that day it was blocked only by SLO-breached rec-5468, whose fix merged (#2330). The build re-runs red_overlap before it starts and waits for any red that blocks it (Decision 226)."
   - "Critique r4 (REVISE, 2 blocking, 8 nits; the first round on the rewrite), dispositions: B1 the OU_POLICIES literal follows sort()'s order (FullAWSAccess baseline) in step 8 and AC3; B2 step 4 is a read-only block printing TFVARS_VERSION and SIT_EMAIL_KEY; N1 PR 1's SIT_EMAIL_KEY is not gated; N2 step 7 names PR 1's apply failure and PR 2's create failure; N3 disputed: step 2's literal chain is what validate_handoff_full_tier reads, and its action and expected say the full tier runs backgrounded (the foundation's precedent); N4 accepted, five criteria on one c11 (the foundation's c4 shape); N5 two widening red cases; N6 related-work line refreshed; N7 step 5 prints ADDED_SIDS and REMOVED_SIDS; N8 the recovery blocks keep the import id off stdout. Rounds r1-r3 were on the superseded management-environment draft."
   - "Critique r5 (REVISE, 2 blocking, 6 nits), dispositions: B1 the lowercase e-mail validation is asserted with a red case and named in the variables.tf obligation; B2 step 7 reads CREATE_IN_PROGRESS and PR 2's create failure splits into failed (nothing created), still running or timed out (wait, then recovery (2)) and other (STOP); N1 step 4 checks the role session first; N2 steps 6 and 9 compare with whitespace collapsed; N3 STATE None or empty fails closed; N4 carried as accepted (r4 N4); N5 PLAN_DIGEST in step 5's expected; N6 the import recovery PR carries its own red/green case."
   - "Critique r6 (PROCEED, 0 blocking, 5 nits), folded: N1 step 8 also reads get-login-profile (ROOT_LOGIN_PROFILE), so a missing summary key has a forward path; N2 step 7 refuses with SIT_PRESENT_BEFORE_APPLY unless no account is named SIT and no create is running; N3 step 8's PARENT_OU ROOT branch picks the recovery from step 7's ORG_PLAN_EXIT; N4 step 4 sets pipefail and fails closed on an empty read; N5 carried (five criteria on one c11)."
+  - "Critique r7 (REVISE, 1 blocking, 6 nits), dispositions: B1 OrganizationAdmin could only read the tfvars, so the console edit in step 4 was impossible without root; PR 1 adds Sid TfvarsWrite (ssm:PutParameter on the one parameter ARN) and step 4 is now the operator's write block with a no-echo prompt. Benjamin was asked on card cmsg_01DE2cGfmCsT1URMgE9SxkYh9dYKmf5EiVwXFwBnUJPtWE (write grant, recommended, or a one-time root console sign-in); this plan does not merge until he answers, and a root sign-in answer removes TfvarsWrite and turns step 4 back into a console edit plus a read-only check. N1 steps 7 and 8 fail closed (SIT_READ_FAILED, CREATE_STATUS_READ_FAILED) when a read fails; N2 a timed-out create stops for the operator, and step 7 is never re-pasted to retry a create; N3 the alarm claim is per sitting and each sitting is announced in the thread first; N4 red cases for sensitive dropped and billing ALLOW; N5 carried (five criteria on one c11); N6 step 6 compares HEAD with the merge sha after a TREE_MISMATCH re-run."
   - "Out of scope: PROD joining (rec-5065), PROD's baseline (rec-5066), the organisation trail (rec-5059), SIT bootstrap and SIT's alternate contacts (rec-5027), the baseline policy's depends_on (rec-5465), OrganizationAdmin's self-widening and MFA age (rec-5466, rec-5467)."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND}
@@ -432,6 +468,7 @@ gate_rounds:
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 2, nits: 8}
   - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 2, nits: 6}
   - {gate: plan-critique, round: 6, verdict: PROCEED, blocking: 0, nits: 5}
+  - {gate: plan-critique, round: 7, verdict: REVISE, blocking: 1, nits: 6}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -440,7 +477,7 @@ pre_implementation_checklist:
   - All files in scope located and readable
 execution_steps:
   - "PR 1: the template and the grant test. Steps 1-3; open PR 1; at CI green the build posts step 5's block and runs step 6 on the operator's lines; merge on code review PROCEED, green CI, the operator's final-diff word and step 6's comment; then step 7's block and step 9."
-  - "PR 2: variables, accounts and the baseline test. Steps 1-3; step 4 (the operator's console edit and words); at CI green step 5 and step 6; merge on the same gates; then, after the operator's own words naming the creation, step 7; then step 8 and step 9."
+  - "PR 2: variables, accounts and the baseline test. Steps 1-3; step 4 (the operator's words and write block); at CI green step 5 and step 6; merge on the same gates; then, after the operator's own words naming the creation, step 7; then step 8 and step 9."
   - "PR 3 (bookkeeping): only after step 9 posted step 8's lines; set implementation_declared: true in this plan and flip T2.57 c11 in the bookkeeping walk on that evidence; 'Resolves: rec-5064' in the squash body; then step 10."
   - >-
     CLOSURE, for each of the three PRs, each outcome reported separately: readiness, parent-validator evidence, postflight
@@ -455,7 +492,7 @@ execution_steps:
   - "Report: what was implemented, verification results, each CLOSURE outcome on its own line, never inferred from a prior step."
 rollback: >-
   PR 1 is reversible: a revert PR with its own steps 5 and 7, whose plan is one in-place update of OrganizationAdminOps
-  (the three additions leave). After PR 2, SIT exists and only the operator can close it, with a 90-day
+  (the four additions leave). After PR 2, SIT exists and only the operator can close it, with a 90-day
   suspension. prevent_destroy and close_on_deletion false stop a revert from attempting that, and removal from state
   is a removed block with destroy = false. Undoing billing DENY means replacing it in the console: it needs a root
   password created through a root session (IAMCreateRootUserPassword) and a temporary detach of the sit OU's
