@@ -1,0 +1,211 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: claude-p-wrapper-stdout-only
+intent: >-
+  Fix CI RCA's filing check at the root (rec-5492): scripts/ci/claude_p_retry.sh writes only claude's stdout into the
+  output file and keeps stderr apart, so a CLI stderr line (such as CLI 2.1.323's untrusted-workspace warning) can
+  never again corrupt the JSON envelope that scripts/ci_rca/filing.py and scripts/ci/review_verdict.py parse, and CI
+  RCA's mark-RCA'd and PR-comment steps run whenever the agent files.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-claude-p-wrapper-stdout-only.yaml
+phase: >-
+  ad_hoc_rec (soft-warn exception category: rec-5492, High, a regression from #2311; no tier_item claimed, so the
+  Tier Item Freshness Gate is skipped; closes no criterion). Only CI scripts and tests change; nothing is deployed, so
+  V2.
+cites: [dec:55, dec:72, dec:74, dec:201]
+scope:
+  - file: scripts/ci/claude_p_retry.sh
+    action: Modify
+    purpose: >-
+      Each attempt runs claude -p with stdout to "$OUTPUT_FILE" and stderr to a new STDERR_FILE="${OUTPUT_FILE}.stderr"
+      (both truncated per attempt) instead of "> $OUTPUT_FILE 2>&1". After each attempt the wrapper copies STDERR_FILE to
+      its own stderr (cat >&2, failure ignored) so the job log still shows every CLI diagnostic. _is_transient reads
+      stdout and stderr content together (the same bytes the merged file held), so retry behaviour is unchanged
+      (Decision 55, 73, 92 parity with _TRANSIENT_CLAUDE_SIGNATURES). Header comment states the new output contract:
+      the output file holds stdout only. Session-id, manifest and exit-code behaviour are unchanged.
+  - file: scripts/ci_rca/filing.py
+    action: Modify
+    purpose: >-
+      Parsing is unchanged: a file that is not one JSON envelope still falls back to a raw-text scan and still yields no
+      marker from inside an escaped JSON string (no tolerant envelope search is added). New: when the file is non-empty
+      and json.loads fails, _extract_text prints one stderr line "ci_rca.filing: <path> is not a single claude -p JSON
+      envelope (<JSONDecodeError msg>); scanning raw text", so a future break names its cause instead of only "filed no
+      recommendation". Return values and stdout output are unchanged. The docstring line claiming stderr-polluted
+      output "is still searchable" is corrected.
+  - file: tests/test_ci_claude_p_retry.py
+    action: Modify
+    purpose: >-
+      Two stub behaviours added to _STUB_CLAUDE (existing ones unchanged): stderr_warning_json (prints the exact CLI
+      2.1.323 warning line to stderr and a result envelope to stdout, exit 0) and stderr_transient_then_proceed (attempt
+      1 prints "API Error: 500 Internal server error" to stderr only and exits 1; attempt 2 prints PROCEED, exit 0). New
+      node test_stderr_never_enters_output_file: the output file json.loads cleanly and holds no warning text; the
+      .stderr file and the wrapper's stderr both hold the warning. New node
+      test_transient_signature_on_stderr_still_retries: exactly 2 attempts, exit 0.
+  - file: tests/ci_rca/test_filing_stderr_preamble.py
+    action: Create
+    purpose: >-
+      rec-5492's acceptance. Node test_ci_rca_filing_finds_marker_behind_cli_stderr_warning runs the real wrapper with a
+      stub claude that replays the real CLI 2.1.323 output of job 136971171676: the warning line verbatim on stderr, and
+      on stdout a one-line envelope with that run's top-level key set (type, subtype, is_error, stop_reason,
+      session_id, num_turns, result, total_cost_usd, usage, permission_denials) whose result keeps the run's real final
+      lines ending "FILED: rec-5491 environment" (long values trimmed), then runs bin/venv-python -m scripts.ci_rca.filing --all and the single
+      form on the output file, asserting "rec-5491,environment" and "rec-5491".
+  - file: tests/test_ci_rca_filing.py
+    action: Modify
+    purpose: >-
+      New node test_non_envelope_output_names_the_cause_on_stderr: a file holding a non-JSON line before an envelope
+      yields no pairs (unchanged) and the CLI's stderr carries the "is not a single claude -p JSON envelope" line; a
+      clean envelope prints no such line.
+bundled_recommendations: [rec-5492]
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - claude_p_retry.sh's output file holds claude's stdout only; a stderr line is kept in <output_file>.stderr and shown on the wrapper's stderr.
+  - A transient signature printed only on stderr still triggers the bounded retry; a substantive verdict still runs once.
+  - With CLI 2.1.323's warning on stderr, scripts.ci_rca.filing --all finds "rec-5491,environment" in the wrapper's output file.
+  - filing.py names a non-envelope output file on stderr and otherwise behaves as before.
+  - Every existing test of the wrapper, the plan reviewer wiring, review_verdict and filing stays green unchanged.
+  - rec-5492 closes on the build's merge.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: "Wrapper keeps stderr out of the output file (red before: the node does not exist; with it but the old wrapper, the output file starts with the warning and json.loads fails)."
+    command: bin/venv-python -m pytest "tests/test_ci_claude_p_retry.py::test_stderr_never_enters_output_file" -q
+    expected: exit 0, 1 passed
+    fix_if: the output file holds the warning, or the .stderr file or wrapper stderr lacks it
+    hermetic: true
+    expected_literals: ["1 passed"]
+    graduation: graduate
+    graduation_check_id: claude-p-retry-stdout-only-output
+  - step: 2
+    phase: pre-deploy
+    action: "A stderr-only transient error still retries (red before: node absent)."
+    command: bin/venv-python -m pytest "tests/test_ci_claude_p_retry.py::test_transient_signature_on_stderr_still_retries" -q
+    expected: exit 0, 1 passed
+    fix_if: one attempt only (transient check no longer sees stderr) or three attempts
+    hermetic: true
+    expected_literals: ["1 passed"]
+    graduation: graduate
+    graduation_check_id: claude-p-retry-stderr-transient-retry
+  - step: 3
+    phase: pre-deploy
+    action: "rec-5492's acceptance end to end through the real wrapper and filing CLI (red before: file absent; with it but the old wrapper, --all prints nothing)."
+    command: bin/venv-python -m pytest "tests/ci_rca/test_filing_stderr_preamble.py::test_ci_rca_filing_finds_marker_behind_cli_stderr_warning" -q
+    expected: exit 0, 1 passed
+    fix_if: filing prints no pair or a different pair
+    hermetic: true
+    expected_literals: ["1 passed"]
+    graduation: graduate
+    graduation_check_id: ci-rca-filing-behind-cli-stderr
+  - step: 4
+    phase: pre-deploy
+    action: "filing.py names a non-envelope file on stderr (red before: node absent)."
+    command: bin/venv-python -m pytest "tests/test_ci_rca_filing.py::test_non_envelope_output_names_the_cause_on_stderr" -q
+    expected: exit 0, 1 passed
+    fix_if: no stderr line, or pairs are now found in a non-envelope file (no tolerant parsing is in scope)
+    hermetic: true
+    expected_literals: ["1 passed"]
+    graduation: waive
+    graduation_waiver_reason: Diagnostic wording, not a correctness guard; the parse result it also checks is already pinned by the existing filing nodes and by VP 3's graduated end-to-end node.
+  - step: 5
+    phase: pre-deploy
+    action: Whole-file re-runs of every test file that drives the wrapper or parses its output, existing cases unchanged.
+    command: bin/venv-python -m pytest tests/test_ci_claude_p_retry.py tests/test_subagent_review_wiring.py tests/test_review_verdict.py tests/test_ci_rca_filing.py tests/ci_rca/test_filing_stderr_preamble.py -q
+    expected: exit 0, no failures
+    fix_if: an existing case fails (fix the code, never loosen an assertion, Decision 235)
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Whole-file re-run of files this plan modifies or that already run in the --pre affected set; VP 1-3 graduate the new guards.
+  - step: 6
+    phase: pre-deploy
+    action: >-
+      Fast tier, then the full tier before handoff (handoff_policy): bin/venv-python -m scripts.validate --pre in the
+      foreground (exit 0), then this command as its own backgrounded run with a 2 h limit from the top-level session.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: "--pre exited 0 first; this command exits 0 for HEAD"
+    fix_if: a failure in this plan's files is fixed at root and the full tier rerun; a failure only in another project's open red goes to the operator as the implement skill's go/no-go
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: post-deploy
+    action: Confirm rec-5492 closed after the squash merge (Resolves trailer).
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import make_reader;
+      r=make_reader(profile='agent_platform').named('recs_by_ids', ids='rec-5492')[0]; print(r['status']); assert r['status']=='closed'"
+    expected: rec-5492 status closed
+    fix_if: still open after ci.yml's closure job ran; close it with update_rec citing the merge SHA
+    hermetic: false
+  - step: 8
+    phase: post-deploy
+    action: >-
+      Live proof on main. The operator fires the dispatch himself from the Actions page (Decision 205 cl.1: a
+      workflow_dispatch qualifies only when a maintainer's own identity issues it, so the build never fires it):
+      ci-rca.yml on main, run_id 44945189064 (the telemetry-arrival red the failed run diagnosed), force_rca true. When
+      rec-5494's build has also merged, this one run proves both fixes. The build then reads the run: it must conclude
+      success with the Run ci-rca agent and Mark failure as RCA'd steps both success, which also posts the
+      ci-rca/telemetry-arrival/<category> status on 3ba93b00 that run 44945298668 skipped. The rec it files duplicates
+      rec-5491; the build marks it superseded by rec-5491 with update_rec and reads it back.
+    command: >-
+      echo 'READ VIA MCP after the operator dispatch: mcp__github__actions_list(method="list_workflow_runs", owner="otl-labs",
+      repo="ontheloop", resource_id="ci-rca.yml") for the workflow_dispatch run, then mcp__github__actions_get(method="list_workflow_jobs")
+      for its step conclusions'
+    expected: the operator's dispatch run concludes success; steps Run ci-rca agent and Mark failure as RCA'd are success; the duplicate rec is superseded and read back
+    fix_if: >-
+      the run fails at the filing check (read the log via mcp__github__get_job_logs; a stderr line in the output file
+      means the fix did not take; report to the planner) or fails elsewhere (file a rec naming the run id; this plan's
+      fix is proven only if the filing check passed)
+    hermetic: false
+test_obligations:
+  - source: scripts/ci/claude_p_retry.sh
+    behavior: The output file holds claude's stdout only; stderr is kept apart and shown; a stderr-only transient error still retries.
+    verification_step: 1
+    test_selector: tests/test_ci_claude_p_retry.py::test_stderr_never_enters_output_file
+    red_green_expectation: red before (node absent; with the node but the old wrapper, json.loads of the output file fails on the warning line), green after.
+  - source: scripts/ci_rca/filing.py
+    behavior: A non-envelope output file is named on stderr; parse results are unchanged.
+    verification_step: 4
+    test_selector: tests/test_ci_rca_filing.py::test_non_envelope_output_names_the_cause_on_stderr
+    red_green_expectation: red before (node absent; with the node but old filing.py, stderr has no diagnostic line), green after.
+constraints:
+  - No tolerant JSON search is added to filing.py; the root fix is the wrapper's output contract.
+  - _is_transient's signature list is unchanged (rec-2336 owns tightening it).
+  - The workflow files and composite actions that call the wrapper are untouched.
+  - Every existing assertion stays (Decision 235).
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - "Decision-scout verdict FLAGS_FOUND (round 1): one NOTE on Decision 226 cl.3 (rule 5 overlap with rec-5491 also blocks the build dispatch, not only rule 1). Disposition: the red_overlap context line now says so. CITE: Decision 55 (bounded transient retry kept; root fix, no workaround), Decision 72 (the ci-rca file-a-rec path repaired), Decision 74 (CLI pin and the workflow_dispatch run_id/force_rca escape hatch used by VP 8), Decision 201 (decidable acceptance gates the Resolves closure). Decisions triaged: 228 of 228. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2 (T1.13 on filing.py, no criterion touched; T4.23 on the tests/ prefix). Serves: mission 3/5."
+  - "Evidence: CI RCA run 44945298668, job 136971171676 log line 999 is the CLI 2.1.323 warning printed by cat /tmp/ci-rca-output.json before the JSON envelope; the envelope's result ends FILED: rec-5491 environment; rec-5491 is open (filed). Diagnosis: /mnt/project-files/ci-rca-failure/RESUME.md."
+  - "History: rec-2658 hit the same merge in the plan reviewer and was fixed by a tolerant parser in scripts/ci/review_verdict.py (_iter_json_objects). It stays as is; after this change it simply sees clean JSON."
+  - "Callers checked: ci-rca.yml rca_agent step (cat of the output file then filing), .github/actions/subagent-plan-review/review.sh (review_verdict.py, _stats, archive_transcripts.sh copies review.json and review_retry.json by name, so the new .stderr file is never archived), telemetry-ci-capture (reads the .sessions.jsonl manifest only). None reads stderr from the output file."
+  - "Prototype (scratch worktree of origin/main faf62a68, not committed): the wrapper edit plus a stub printing the warning gives a clean output file and filing --all prints rec-5491,environment; the existing 156 nodes of the five VP 5 files (minus the new one) pass."
+  - "Stderr is shown in the job log after each attempt ends, not live; the CLI writes little to stderr in -p json mode."
+  - "Separate defect, not in scope: the same warning means the CLI ignores .claude/settings.json allow entries, so the agent was denied mcp__ducklake-reads__ tools (job 136971171676 permission_denials). Filed as rec-5494 (High), read back."
+  - "Related, not bundled: rec-5493 (CI RCA smoke run; depends on this landing), rec-4678 (fallback rec when the agent files nothing), rec-4677 (prompt vs --allowedTools), rec-2336 (tighten the overloaded signature)."
+  - "Ownership: Agents in GitHub owns rec-5492 (operator 2026-11-21 21:41Z; coordinator log #1963 comments 7069561227 and 7069673280). No open PR touches these files."
+  - "Graduated shards kept: claude-p-retry-session-manifest and syspath-injection-test-under-polluted-path pin nodes of tests/test_ci_claude_p_retry.py that this plan leaves unchanged and green; their entry files are untouched."
+  - "plan_obligations lists docs/plans/PLAN-telemetry-claude-p-capture-adapter.yaml as unbuilt on the same files; it was built in #1856 (3e2eef70), so there is no ordering edge."
+  - "rec-5492 acceptance updated to a ::node_id selector so it is decidable (Decision 201); read back."
+  - "red_overlap verdict (2026-11-21 22:45Z, plan file on the branch): blocked, rule 5 overlap with rec-5491 (product_regression, age 2.36h) and rec-5497 (Critical, product_regression, age 0.18h), both on tests/test_ci_claude_p_retry.py, tests/checks/ci_guards/test_validate_claude_p_retry_wrapper.py, tests/checks/ci_guards/test_validate_workflow_agent_safety.py (slo_hours 4). Deferral rationale: rec-5491 is the telemetry reader Lambda out-of-memory red (Feedback Loop), a live-workflow red with no failing test; rec-5497 is a full-tier xdist worker crash in tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_gates.py (cause unobserved, file scripts/checks/_scaffolding.py). The shared paths are fast-tier selection neighbours only; this plan edits none of either red's files, neither repairs nor worsens them, and fixes the CI RCA alarm that files reds. The build dispatch is subject to the same check (Decision 226 cl.3): rule 5 holds it while either red stays open, and rule 1 too once a red passes its SLO, unless the operator overrides at dispatch, recorded against these shared paths."
+  - "Relayed consult for rec-5493 (2026-11-21 21:58Z): stderr kept out of the output file (this plan); a parser test on real 2.1.323 output (VP 3's replayed envelope); a portal-written filing receipt instead of parsing agent prose is a different outcome across ops_data_portal and ci-rca.yml, filed as rec-5495 (High, depends on rec-5492), read back. rec-5493's smoke mode later widens filing.py's marker for a non-rec test id and builds after this plan."
+  - "Order edge: rec-5494's plan (draft /mnt/project-files/ci-rca-permissions/PLAN-draft.yaml) also edits scripts/ci/claude_p_retry.sh (adds --setting-sources user and refuses it as a caller flag) and builds after this plan, rebasing on it; its planner shares VP 8's one operator-fired dispatch."
+  - "VP 8 fork settled by the operator 2026-11-21 22:39 UTC (card option: You fire one CI RCA run): he fires the dispatch himself after merge; the build reads it."
+  - "Operator said write the plan 2026-11-21 22:39 UTC; the plan PR merges on green and the build merges on green (rulings 2026-11-12, 2026-11-16). He gave no red_overlap override; that stays a dispatch-time question."
+  - "No approved-text sidecar: scripts and tests are neither gated nor notice (approval-routing.yaml); the plan file itself is notice-class."
+  - "Owning planning thread: 'Fix CI RCA filing check rec-5492' (Agents in GitHub). Plan defects go to the coordinator, which forwards them here."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:4148b9dff126eb1ab1cf5ee3ee06dce4dfa206a1deb780fc5f7f6f559faf1ad8'}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - scripts/ci/claude_p_retry.sh -- split stdout and stderr per scope row 1
+  - scripts/ci_rca/filing.py -- stderr diagnostic and docstring per scope row 2
+  - tests -- the three test files per scope rows 3-5
+  - Execute Verification Plan -- run each step; loop until pass; on unrecoverable failure stop and RCA (Decision 55)
+  - 'Report: what was implemented, verification results'
