@@ -1,0 +1,81 @@
+name: feedback-loop
+
+# The feedback loop's daily deterministic detectors (feedback-loop wave 2, PLAN-friction-daily-detector). The friction detector
+# reads the last seven UTC days of friction_signature_counts through the deployed telemetry reader, derives findings under
+# versioned params and prints a counts line to the log and a public-safe findings table to the job summary. It is propose-only: it
+# files nothing and stores nothing (Decision 199 cl.1). Drafts and the review sheet come only from the same command run in an
+# agent session and are refused under GitHub Actions. Not a gate and never a required check (Decision 83).
+#
+# Triggers: a daily cron in the every-N-hours shape scripts/convergence_health/sensor_liveness.py classifies as 86,400 s, and
+# dispatch on main only. No push trigger.
+#
+# Invariants: no writer URL, no file_rec, no artifact upload, no terraform, apply, deploy or dispatch of another workflow. The role
+# is the CI branch role, which already invokes the telemetry reader and the shared reader.
+
+on:
+  schedule:
+    - cron: '17 */24 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: feedback-loop
+  cancel-in-progress: false
+
+jobs:
+  friction:
+    if: (github.event_name != 'workflow_dispatch' || github.actor != 'otl-workflow-dispatcher[bot]') && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      id-token: write  # OIDC token minting for assume-role
+      contents: read
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/aws-region
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies (venv)
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --quiet --upgrade pip
+          .venv/bin/pip install -r requirements.txt
+
+      - name: Configure AWS credentials (OIDC -- github_ci_branch role, DuckLake reader invoke)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        env:
+          MASK_AWS_ROLE_ID_ACCOUNT_PART: ${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-branch
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve DuckLake reader Function URLs
+        # Same resolution as telemetry-verification without the writer; each URL and its bare host are masked (Decision 101).
+        run: |
+          set -euo pipefail
+          for role in reader telemetry_reader; do
+            URL=$(aws lambda get-function-url-config --function-name "agent-platform-ducklake-${role//_/-}" --region "$AWS_REGION" --query FunctionUrl --output text)
+            if [ -z "$URL" ] || [ "$URL" = "None" ]; then
+              echo "::error::Could not resolve the ${role} Function URL via get-function-url-config." >&2
+              exit 1
+            fi
+            HOST="${URL#https://}"
+            HOST="${HOST%%/*}"
+            echo "::add-mask::${URL}"
+            echo "::add-mask::${HOST}"
+            echo "DUCKLAKE_${role^^}_URL=${URL}" >> "$GITHUB_ENV"
+            echo "Resolved DUCKLAKE_${role^^}_URL (masked)."
+          done
+
+      - name: Run the friction detector
+        run: |
+          set -euo pipefail
+          .venv/bin/python -m scripts.feedback_loop friction --summary "$GITHUB_STEP_SUMMARY"

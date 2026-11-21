@@ -35,6 +35,7 @@ class TestScannedPaths:
             "scripts/ci/actions_capacity_alarm.py",
             "scripts/convergence_health/dispatch_integrity.py",
             "scripts/preflight/reversal_reviews.py",
+            "scripts/feedback_loop/proposals.py",
         }
         assert required <= set(SCANNED_PATHS)
 
@@ -130,6 +131,30 @@ class TestCheckSourceRegistry:
             failed: list[str] = []
             check_source_registry(failed)
         assert failed == [], f"Expected no failures but got: {failed}"
+
+    def test_real_feedback_loop_proposals_literal_is_seen_by_the_guard(self, tmp_path: Path) -> None:
+        """The guard really sees proposals.py's source literal: unregistered fails naming it, registered passes."""
+
+        real = Path(__file__).resolve().parents[3] / "scripts" / "feedback_loop" / "proposals.py"
+        (tmp_path / "scripts" / "feedback_loop").mkdir(parents=True)
+        (tmp_path / "scripts" / "feedback_loop" / "proposals.py").write_text(
+            real.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        (tmp_path / "scripts" / "ops_data_portal.py").write_text("", encoding="utf-8")
+        (tmp_path / "config" / "agent" / "data_quality").mkdir(parents=True)
+        registry = tmp_path / "config" / "agent" / "data_quality" / "source_registry.yaml"
+
+        registry.write_text(yaml.dump({"entries": [_mk_entry("manual")]}), encoding="utf-8")
+        with patch("scripts.checks._common.ROOT", tmp_path):
+            failed: list[str] = []
+            check_source_registry(failed)
+        assert "Source registry CI guard" in failed
+
+        registry.write_text(yaml.dump({"entries": [_mk_entry("manual"), _mk_entry("feedback_loop")]}), encoding="utf-8")
+        with patch("scripts.checks._common.ROOT", tmp_path):
+            failed = []
+            check_source_registry(failed)
+        assert failed == [], failed
 
     def test_real_repo_backlog_health_literals_are_registered(self) -> None:
         """Integration check against the real repo (no tmp_path fixture): the four
