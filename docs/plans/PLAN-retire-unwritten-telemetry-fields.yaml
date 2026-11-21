@@ -17,7 +17,7 @@ phase: >-
   Maintenance of met T3.20:c7 (telemetry schema accuracy; the rec-4589 field-realization prevention line; audit
   telemetry-field-consolidation TFC-06 and TFC-07). Closes no exit criterion, so closes_criteria is empty.
 closes_criteria: []
-cites: [dec:66, dec:170, dec:210, dec:215, dec:244, dec:254, dec:275, dec:279]
+cites: [dec:66, dec:170, dec:210, dec:215, dec:244, dec:250, dec:254, dec:275, dec:279]
 scope:
   - file: docs/contracts/telemetry_sessions.yaml
     action: Modify
@@ -74,13 +74,10 @@ scope:
       contain each owned field name as a whole word (regex (?<![\w-])<name>(?![\w-]), so "provider" never matches
       "inference-provider"). (f) New registered wrapper validate_telemetry_field_owners(failed, *, root=None,
       fetch=None): loads the four contracts, reads the owner recs once through fetch_recs_by_ids(make_reader(), ids)
-      (imported inside the function), and declares registry.examined(<owner recs>, unit="owner recs"). Reader failures
-      split (Decision 170 cl.2's classifier precedent): reader unavailable (scripts.checks._scaffolding's
-      _is_credentials_unavailable, a ReaderInvokeError whose status is None or 500 and above, or an OSError) declares
-      registry.skipped("reader unavailable: <exception type>") and prints it, so a warehouse outage never reddens main
-      or pauses deploys (Decision 254 cl.5), including a deploy that fixes the reader; every other failure (a 4xx such as
-      a missing grant or 413, a malformed row, a row without status, a missing rec) appends to failed (Decision 215: an
-      absent signal is never read as a pass). Docstring rules list gains the new rules.
+      (imported inside the function), and declares registry.examined(<owner recs>, unit="owner recs"). The try wraps
+      only the fetch call; any reader exception appends one fail-closed message naming its type to failed, never
+      registry.skipped (Decisions 215 cl.2, 250 cl.2; no new skip site, so Decision 155 cl.3 is not engaged). A missing
+      rec, a row without status, or a closed or non-naming owner also fails. Docstring rules list gains the new rules.
     new_imports: [src.common.ducklake_reader_client]
   - file: scripts/checks/contracts/_manifest.py
     action: Modify
@@ -114,8 +111,8 @@ scope:
       test_closed_rec_owner_is_reported (rec-4606's acceptance; a closed owner row yields an error naming table, field
       and rec), test_rec_owner_must_name_each_field, test_missing_owner_rec_is_reported,
       test_owner_wrapper_fails_closed_on_reader_error (injected fetch raises; failed non-empty, no skipped),
-      test_owner_wrapper_skips_when_reader_unavailable (injected fetch raises ReaderInvokeError status 503; skipped
-      declared, failed empty), test_owner_wrapper_fails_on_reader_refusal (status 403; failed non-empty),
+      test_owner_wrapper_fails_closed_on_reader_error (injected fetch raises ReaderInvokeError status 503, then
+      OSError; failed non-empty, no skip declared),
       test_owner_wrapper_passes_on_open_naming_rows (injected fetch), test_live_retired_columns_are_stubs (a lasting
       rule, so the drop plans never retire it (Decision 244 cl.4-5): each of the 14 names is either absent from its
       contract's fields, or listed under retired with its table's rec and populated_by starting "retired: <that rec>";
@@ -151,9 +148,8 @@ acceptance_criteria:
     mutations fail).
   - config/lambda/ducklake/field_semantics.yaml is unchanged, so the writer and the deployed artifacts are unchanged.
   - >-
-    The full-tier owner check passes on the live warehouse; fails on a closed owner rec, a rec that does not name its
-    field, a missing rec, a reader refusal or a malformed response; and declares skipped (never pass) when the reader is
-    unavailable.
+    The full-tier owner check passes on the live warehouse, and fails on a closed owner rec, a rec that does not name its
+    field, a missing rec, or any reader error.
   - rec-4606 closes through the merge's Resolves trailer.
 verification_plan:
   - step: 1
@@ -185,7 +181,8 @@ verification_plan:
       bin/venv-python -m pytest tests/checks/contracts/test_validate_telemetry_field_realization.py tests/test_contracts_schema.py
       tests/checks/contracts/test__manifest.py tests/checks/contracts/test_telemetry_top_level_agent_run.py
       tests/checks/contracts/test_telemetry_event_journal_contracts.py tests/telemetry/test_contract_lifecycle_friction.py
-      tests/telemetry/test_annotate_link_row_write.py tests/checks/contracts/test_write_time_enforcement_conformance.py -q
+      tests/telemetry/test_annotate_link_row_write.py tests/checks/contracts/test_write_time_enforcement_conformance.py
+      tests/checks/ci_guards/test_validate_ci_rca_taxonomy.py::TestValidateCiRcaTaxonomy::test_complete_map_passes -q
     expected: exit 0 (the friction pin on time_lost_seconds and the coverage_after required_when pin pass unchanged).
     fix_if: a planted defect passes, a stub lost the rules-file sentence or its 2026-10-05 row, or coverage_after's dq_intent changed
     hermetic: true
@@ -257,7 +254,7 @@ verification_plan:
     graduation: not-applicable
 test_obligations:
   - source: scripts/checks/contracts/validate_telemetry_field_realization.py
-    behavior: retired placement, the hold label refused, criterion and rec owners must name their fields, closed owners fail, reader refusals fail and outages skip
+    behavior: retired placement, the hold label refused, criterion and rec owners must name their fields, closed owners fail, reader errors fail closed
     verification_step: 1
     test_selector: tests/checks/contracts/test_validate_telemetry_field_realization.py::test_closed_rec_owner_is_reported
     red_green_expectation: red before (the test and owner_errors do not exist), green after
@@ -271,6 +268,11 @@ test_obligations:
     verification_step: 1
     test_selector: tests/checks/contracts/test__manifest.py::TestTelemetryFieldOwnersRegistered
     red_green_expectation: red before (no entry), green after
+  - source: config/ci_rca_taxonomy.yaml
+    behavior: the new registered owner check has a failure category row (the live map stays total over registered checks)
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test_validate_ci_rca_taxonomy.py::TestValidateCiRcaTaxonomy::test_complete_map_passes
+    red_green_expectation: green before; red during the build if the check is registered without its row; green after
   - source: docs/contracts/telemetry_sessions.yaml
     behavior: the six sessions columns are retired under rec-4599 and the link columns have a naming owner
     verification_step: 1
@@ -309,11 +311,10 @@ constraints:
   - "No rescue agents or workaround loops (Decision 55)."
 context:
   - >-
-    Decision-scout r2: FLAGS_FOUND. CITE 66, 170, 210, 215, 275, 279. r2 WARN 169 (segment full_after_ensure_fresh_dq
-    lists only verification) answered: the entry uses full_after_lint. r1 WARN 163 answered by VP 6. NOTE 222 answered on the owner recs: each drop rec's context says its drop is Decision 222's
-    change-beyond-additive case and drafts the migration Decision then, and the contract entry and live column go
-    together. RELATED 84, 199, 221, 230, 236, 244, 235, 201, 103, 247, 128, 250. Decisions triaged: 228 of 228. Roadmap
-    items intersected: 4; CONFLICT: 0; RELATED: 4. Serves: NS.5 3/5.
+    Decision-scout r3: FLAGS_FOUND. CITE 66, 170, 210, 215, 244, 254, 275, 279. WARN 155 (new outage-skip site) answered:
+    no skip, reads fail closed. NOTE 250 answered: cited; its cl.2 (cannot read, fails) now holds. SPIRIT 254 answered by
+    the cost line. Earlier: r2 WARN 169 (full_after_lint), r1 WARN 163 (VP 6), NOTE 222 (drop recs own the migration).
+    Decisions triaged: 228 of 228. Roadmap items intersected: 5; CONFLICT: 0; RELATED: 5. Serves: NS.5 3/5.
   - >-
     Operator rulings: 2026-11-20 21:11Z "i agree with all recommendations" (audit review section 3, plan E: retire the
     four held loop fields; stubs now; drop at each table's next column change); 2026-11-21 14:34Z "write the plan".
@@ -343,13 +344,15 @@ context:
   - "Kept graduated shards (assertions additive only, node ids unchanged): telemetry-field-realization, actions-capacity-evaluator-and-steps, contract-pointer-evaluators-mirror-tests, ducklake-partition-spec-preglob-closure, contract-per-write-attribute, none-grandfathered-kind-unrepresentable; and telemetry-top-level-run-shape, whose rec-4711 assertion moves to retired (weakening_dispositions)."
   - "No schema change (data-model walk: no table, grain, write mode, partition or rule change). Contracts are notice class (Decision 279): no approval run."
   - >-
-    Decision 254 cost: a closed or non-naming owner reddens main and pauses code deploys (cl.5), with no culprit (cl.3),
-    until fixed: rec-4606's intended alarm. A drop plan closing its rec removes the entries in the same change. Reader
-    outages and absent credentials (also a later per-PR full tier, rec-5019) skip instead.
+    Cost (Decisions 203, 254): a closed or non-naming owner, or a reader outage, reddens every full tier (main pauses
+    code deploys, cl.5, with no culprit, cl.3; session pre-push runs stall) until fixed: rec-4606's intended alarm. A
+    reader outage already does so through the DQ runner. A plan closing an owner moves its fields in the same change.
   - "red_overlap: blocked only by rec-5468 past its SLO (notice-digest, shared files none); deferred, not bundled: Agents in GitHub owns it (coordinator log 2026-11-20 22:09Z; plan #2326), and this plan shares no file with it."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:4e18deedf6eb67fddff2786a7109a3521165f994d125a4bdf35f0950a773c74f"}  # pragma: allowlist secret
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:123070532f651d072b4b8faf9e17a6cf8fd7cd782505c3f1b37730117cb75652"}  # pragma: allowlist secret
+  - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:63e15581fe8028b8cd2c32c3fc48d7aaf5297bd0cc4ff8e46ef5ad8de27f9580"}  # pragma: allowlist secret
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 9, nits: 4}  # B1 one-line stub logs, measured sizes; B2 pre_globs widen; B3 taxonomy row; B4 setdefault; B5 _with_retired; B6 outage skips, 254 cost; B7 lasting rule; B8 VP 2, 5 waived; B9 VP 3 size check; N1 phase c7; N2 regex; N3 grep -I
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
