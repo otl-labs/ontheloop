@@ -58,6 +58,8 @@ ENTRIES: tuple[Entry, ...] = (
             ".github/workflows/persona-verdict*.yml",
             "config/persona_verdict_egress.yaml",
             "scripts/checks/misc/validate_persona_verdict_egress.py",
+            "scripts/checks/ci_guards/validate_project_region.py",
+            "docs/contracts/inference-provider.yaml",
             "scripts/checks/_common.py",
             "scripts/checks/registry.py",
         ),

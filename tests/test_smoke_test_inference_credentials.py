@@ -56,6 +56,38 @@ def _run(role: str, client: MagicMock, cold: MagicMock | None = None, region: st
         return smoke.run(role, region=region)
 
 
+class TestSession:
+    def test_a_given_session_is_used_and_the_profile_never_built(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = _client()
+        session = MagicMock()
+        session.client.return_value = client
+        cold = MagicMock(return_value=_result("primary", "asserted"))
+        with (
+            patch.object(smoke.boto3, "Session", side_effect=AssertionError("profile session built")),
+            patch.object(smoke, "_default_region", side_effect=AssertionError("region file read")),
+            patch.object(smoke.litellm_transport, "cold_start_check", cold),
+        ):
+            assert smoke.run("primary", region="xx-test-1", session=session) == 0
+        session.client.assert_called_once_with("ssm", region_name="xx-test-1")
+        monkeypatch.delenv(_row("primary")["variable"], raising=False)
+
+    @pytest.mark.parametrize("region", [None, ""])
+    def test_a_session_without_a_region_fails_before_any_client_call(self, region: str | None) -> None:
+        session = MagicMock()
+        with patch.object(smoke, "_default_region", side_effect=AssertionError("region file read")):
+            assert smoke.run("primary", region=region, session=session) == 1
+        session.client.assert_not_called()
+
+    def test_an_ssm_error_line_carries_the_code_and_no_message(self, capsys: pytest.CaptureFixture[str]) -> None:
+        client = MagicMock()
+        client.get_parameter.side_effect = ClientError(
+            {"Error": {"Code": "AccessDeniedException", "Message": "arn:aws:iam::123:role/x"}}, "GetParameter"
+        )
+        assert _run("primary", client) == 1
+        err = capsys.readouterr().err
+        assert "SSM error (AccessDeniedException)" in err and "arn:aws" not in err
+
+
 class TestParseArgs:
     def test_role_required_and_parsed(self) -> None:
         with pytest.raises(SystemExit):
@@ -124,7 +156,8 @@ class TestRun:
     def test_transport_exception(self, capsys: pytest.CaptureFixture[str], monkeypatch) -> None:
         cold = MagicMock(side_effect=RuntimeError("boom"))
         assert _run("primary", _client(), cold) == 1
-        assert "boom" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "cold start raised RuntimeError" in err and "boom" not in err
         monkeypatch.delenv(_row("primary")["variable"], raising=False)
 
     def test_missing_row(self, capsys: pytest.CaptureFixture[str]) -> None:

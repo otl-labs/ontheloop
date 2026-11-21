@@ -195,7 +195,7 @@ def _steps(container: Any) -> list[Any]:
     return steps if isinstance(steps, list) else []
 
 
-def _job_outputs_aws_region_via_action(job: Any) -> bool:
+def job_outputs_aws_region_via_action(job: Any) -> bool:
     outputs = job.get("outputs") if isinstance(job, dict) else None
     if not isinstance(outputs, dict) or "aws_region" not in outputs:
         return False
@@ -249,7 +249,7 @@ def _signin_region_ok(jobs: dict[str, Any], job: Any, step_index: int) -> bool:
         if needed_job_id not in _needs_list(job):
             return False
         needed_job = jobs.get(needed_job_id)
-        return isinstance(needed_job, dict) and _job_outputs_aws_region_via_action(needed_job)
+        return isinstance(needed_job, dict) and job_outputs_aws_region_via_action(needed_job)
 
     return False
 

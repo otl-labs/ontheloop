@@ -3,7 +3,11 @@
 A job in .github/workflows/persona-verdict*.yml is covered when it holds id-token: write, references a secret other than
 its GITHUB_TOKEN, inherits the caller's secrets, or has a row in config/persona_verdict_egress.yaml. Every covered job
 starts with the SHA-pinned block-mode filter whose list equals its row, then a behavioural self-check before any step that
-can reach a credential. Reads YAML and text only; imports nothing from scripts/personas/.
+can reach a credential. Reads YAML and text only; imports nothing from scripts/personas/. Two derived forms are admitted
+(PLAN-persona-verdict-first-key-read): a row entry holding {aws_region}, matched by the workflow's one
+${{ needs.<job>.outputs.aws_region }} expression, and provider hosts derived from the committed tier models. The module is
+imported by ci_guards/_persona_verdict_keyed.py (misc is upstream of ci_guards; validate_project_region imports only
+_common and registry, so there is no cycle).
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ from typing import Any
 import yaml
 
 from scripts.checks import _common, registry
+from scripts.checks.ci_guards.validate_project_region import job_outputs_aws_region_via_action
 
 LIST_FILE = "config/persona_verdict_egress.yaml"
 WORKFLOW_GLOB = ".github/workflows/persona-verdict*.yml"
@@ -25,6 +30,14 @@ HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 ENDPOINT = re.compile(r"^[A-Za-z0-9*.-]+:\d+$")
 EXPRESSION = re.compile(r"\$\{\{(.*?)\}\}", re.S)
+REGION_TOKEN = "{aws_region}"
+REGION_EXPR = re.compile(r"\s*needs\.([\w-]+)\.outputs\.aws_region\s*")
+REGION_LABEL = re.compile(r"(?:^|\.)[a-z]{2}(?:-[a-z]+)+-[0-9]+(?:\.|:|$)")
+WHOLE_LABEL = re.compile(r"(?:^|\.)\{aws_region\}(?:\.|:|$)")
+DOCKER_TOKEN = re.compile(r"""(^|[\s;&|(`"'/\\])(sudo\s+)?docker([\s"']|$)""")
+INFERENCE_SMOKE_RUN = re.compile(r"\binference-smoke\b")
+GLOBAL_STS = "sts.amazonaws.com:443"
+INFERENCE_PROVIDER = "docs/contracts/inference-provider.yaml"
 SECRET_REF = re.compile(r"(?<![\w.])secrets\b(?!\.GITHUB_TOKEN\b)", re.I)
 CHECKOUT = re.compile(r"^actions/checkout@[0-9a-f]{40}$")
 MKDIR = 'mkdir -p "$RUNNER_TEMP/work"'
@@ -49,6 +62,23 @@ PROBE_STEPS = {
         ("control-egress", PROBE_PREFIX + "egress-control"),
     ],
 }
+
+
+def _strip_comment(line: str) -> str:
+    quote = ""
+    for i, ch in enumerate(line):
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "#" and (i == 0 or line[i - 1].isspace()):
+            return line[:i]
+    return line
+
+
+def _logical_lines(run: str) -> list[str]:
+    return [_strip_comment(line) for line in run.replace("\\\n", " ").splitlines()]
 
 
 def _flag(value: Any, want: str) -> bool:
@@ -96,16 +126,28 @@ def _load_list(root: Path, out: list[str]) -> dict[str, Any] | None:
     if not isinstance(data.get("jobs"), dict):
         out.append(f"{LIST_FILE}: jobs must be a mapping")
         return None
+    hosts = data.get("provider_hosts", {})
+    if not isinstance(hosts, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in hosts.items()):
+        out.append(f"{LIST_FILE}: provider_hosts must map a LiteLLM prefix to a host:port")
+        return None
     return data
 
 
 def _endpoint_problems(where: str, hosts: list[Any], residuals: list[Any], uses_artifact: bool) -> list[str]:
     out: list[str] = []
     for endpoint in map(str, hosts):
-        host = endpoint.rsplit(":", 1)[0]
-        if not ENDPOINT.match(endpoint):
+        if endpoint.count(REGION_TOKEN) > 1:
+            out.append(f"{where}: endpoint {endpoint} holds more than one {REGION_TOKEN}")
+            continue
+        shaped = endpoint.replace(REGION_TOKEN, "regionx")
+        host = shaped.rsplit(":", 1)[0]
+        if not ENDPOINT.match(shaped):
             out.append(f"{where}: endpoint {endpoint} is not host:port with a numeric port")
             continue
+        if REGION_TOKEN in endpoint and not WHOLE_LABEL.search(endpoint):
+            out.append(f"{where}: endpoint {endpoint}: {REGION_TOKEN} must fill a whole dot-delimited label")
+        if REGION_LABEL.search(endpoint):
+            out.append(f"{where}: endpoint {endpoint} names a region id")
         try:
             ipaddress.ip_address(host)
             out.append(f"{where}: endpoint {endpoint} is an IP literal")
@@ -118,12 +160,82 @@ def _endpoint_problems(where: str, hosts: list[Any], residuals: list[Any], uses_
     return out
 
 
+def _needs(job: dict[str, Any]) -> list[str]:
+    needs = job.get("needs")
+    return [needs] if isinstance(needs, str) else [str(n) for n in needs] if isinstance(needs, list) else []
+
+
+def _tokenised_endpoints(where: str, raw: str, workflow: dict[str, Any], job: dict[str, Any]) -> tuple[set[str], list[str]]:
+    """The filter's endpoints with each admitted aws_region expression replaced by the row token; problems for the rest."""
+    out: list[str] = []
+    jobs = workflow.get("jobs") or {}
+
+    def admit(match: re.Match[str]) -> str:
+        found = REGION_EXPR.fullmatch(match.group(1))
+        if not found:
+            out.append(
+                f"{where}: the filter's allowed-endpoints holds an expression other than needs.<job>.outputs.aws_region"
+            )
+            return match.group(0)
+        needed = found.group(1)
+        if needed not in _needs(job) or not job_outputs_aws_region_via_action(jobs.get(needed)):
+            out.append(f"{where}: needs.{needed}.outputs.aws_region is not an aws-region action output of a needed job")
+        return REGION_TOKEN
+
+    return set(EXPRESSION.sub(admit, raw).split()), out
+
+
+def _provider_hosts_expected(root: Path, data: dict[str, Any]) -> tuple[set[str], list[str]]:
+    try:
+        doc = yaml.safe_load((root / INFERENCE_PROVIDER).read_text(encoding="utf-8"))
+        tiers = doc["tier_model"]["tiers"]
+        models = doc["model_id_formats"]["litellm_tier_models"]
+    except (OSError, yaml.YAMLError, KeyError, TypeError) as exc:
+        return set(), [f"{INFERENCE_PROVIDER} does not give the tier models: {type(exc).__name__}"]
+    out: list[str] = []
+    hosts: set[str] = set()
+    for tier in tiers:
+        if not isinstance(tier, dict) or str(tier.get("state", "")).startswith("Deferred"):
+            continue
+        name = str(tier.get("selection_ref", "")).rsplit(".", 1)[-1]
+        default = str((models.get(name) or {}).get("default_model", ""))
+        prefix = default.split("/", 1)[0] + "/" if "/" in default else ""
+        host = data.get("provider_hosts", {}).get(prefix)
+        if host is None:
+            out.append(f"{LIST_FILE}: provider_hosts has no entry for the LiteLLM prefix {prefix!r} of tier row {name}")
+        else:
+            hosts.add(host)
+    return hosts, out
+
+
+def _row_host_problems(where: str, root: Path, data: dict[str, Any], row: list[Any], steps: list[Any]) -> list[str]:
+    allowed = {GLOBAL_STS, f"sts.{REGION_TOKEN}.amazonaws.com:443", f"ssm.{REGION_TOKEN}.amazonaws.com:443"}
+    supplied = {str(h) for h in data["filter_supplied"]}
+    rest = {str(e) for e in row} - allowed
+    rest = {e for e in rest if e.rsplit(":", 1)[0] not in supplied and e not in map(str, data["wildcard_residuals"])}
+    smoke = any(isinstance(s, dict) and INFERENCE_SMOKE_RUN.search(str(s.get("run", ""))) for s in steps)
+    if not smoke:
+        return [f"{where}: host {e} is outside sts and ssm for a job that runs no inference-smoke verb" for e in sorted(rest)]
+    want, out = _provider_hosts_expected(root, data)
+    if rest != want:
+        out.append(f"{where}: provider hosts {sorted(rest)} differ from the committed tier models' {sorted(want)}")
+    return out
+
+
 def _uses_comment_ok(text: str, uses: str, version: str) -> bool:
     lines = [ln.strip().removeprefix("- ").strip() for ln in text.splitlines() if f"uses: {uses}" in ln]
     return bool(lines) and all(re.fullmatch(rf"uses: {re.escape(uses)}\s+#\s*{re.escape(version)}", ln) for ln in lines)
 
 
-def _step0_problems(where: str, step: dict[str, Any], filt: dict[str, Any], row: list[Any], text: str) -> list[str]:
+def _step0_problems(
+    where: str,
+    step: dict[str, Any],
+    filt: dict[str, Any],
+    row: list[Any],
+    text: str,
+    workflow: dict[str, Any],
+    job: dict[str, Any],
+) -> list[str]:
     out: list[str] = []
     uses = f"{filt['action']}@{filt['sha']}"
     if step.get("uses") != uses:
@@ -142,9 +254,11 @@ def _step0_problems(where: str, step: dict[str, Any], filt: dict[str, Any], row:
         out.append(f"{where}: disable-telemetry must be true")
     if not _flag(with_["disable-sudo-and-containers"], "true"):
         out.append(f"{where}: disable-sudo-and-containers must be true")
-    if any("${{" in str(v) for v in with_.values()):
-        out.append(f"{where}: a filter with: value holds an expression")
-    if set(str(with_["allowed-endpoints"]).split()) != set(map(str, row)):
+    if any("${{" in str(v) for k, v in with_.items() if k != "allowed-endpoints"):
+        out.append(f"{where}: a filter with: value other than allowed-endpoints holds an expression")
+    listed, problems = _tokenised_endpoints(where, str(with_["allowed-endpoints"]), workflow, job)
+    out.extend(problems)
+    if listed != set(map(str, row)):
         out.append(f"{where}: allowed-endpoints differ from the job's row in {LIST_FILE}")
     return out
 
@@ -198,7 +312,7 @@ def _order_problems(where: str, steps: list[Any], probe: bool) -> list[str]:
     return out
 
 
-def _job_problems(rel: str, name: str, workflow: dict[str, Any], data: dict[str, Any], text: str) -> list[str]:
+def _job_problems(rel: str, name: str, workflow: dict[str, Any], data: dict[str, Any], text: str, root: Path) -> list[str]:
     out: list[str] = []
     where, probe, job, row = f"{rel}::{name}", rel == PROBE, workflow["jobs"][name], data["jobs"][rel][name]
     steps = job.get("steps") or []
@@ -208,13 +322,14 @@ def _job_problems(rel: str, name: str, workflow: dict[str, Any], data: dict[str,
         out.append(f"{where}: a covered job has a job-level uses:, container: or services:")
     if job.get("runs-on") != "ubuntu-latest":
         out.append(f"{where}: runs-on must be exactly ubuntu-latest")
-    if re.search(r"\bdocker\b", json.dumps([s.get("run", "") for s in steps if isinstance(s, dict)])):
+    if any(DOCKER_TOKEN.search(line) for s in steps if isinstance(s, dict) for line in _logical_lines(str(s.get("run", "")))):
         out.append(f"{where}: a covered job runs a docker command")
     if _has_secret({"job_env": job.get("env"), "workflow_env": workflow.get("env")}):
         out.append(f"{where}: the job's or the workflow's env: holds a secrets expression")
     if not steps or not isinstance(steps[0], dict):
         return [*out, f"{where}: no steps"]
-    out.extend(_step0_problems(where, steps[0], data["filter"], row, text))
+    out.extend(_step0_problems(where, steps[0], data["filter"], row, text, workflow, job))
+    out.extend(_row_host_problems(where, root, data, row, steps))
     out.extend(_order_problems(where, steps, probe))
     uses_artifact = any(
         isinstance(s, dict) and str(s.get("uses", "")).startswith(("actions/upload-artifact@", "actions/download-artifact@"))
@@ -282,7 +397,7 @@ def check_tree(root: Path) -> tuple[list[str], int]:
             if not has_row:
                 out.append(f"{rel}::{name}: a covered job has no row in {LIST_FILE}")
                 continue
-            out.extend(_job_problems(rel, name, workflow, data, text))
+            out.extend(_job_problems(rel, name, workflow, data, text, root))
     return out, len(files)
 
 

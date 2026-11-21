@@ -142,3 +142,13 @@ def test_live_tree_every_flagged_step_of_the_agent_safety_scan_is_an_llm_step() 
         for step in safety._iter_run_steps(doc) if isinstance(doc, dict) else []:
             if safety._CLAUDE_INVOCATION.search(step["run"]):
                 assert _llm(step), f"{path.name}: {step.get('name')}"
+
+
+def test_the_inference_smoke_verb_and_the_smoke_module_are_llm_steps() -> None:
+    run_py = 'python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py"'
+    assert _llm({"run": f"{run_py} inference-smoke"})
+    assert _llm({"run": "bin/venv-python -m scripts.smoke_test_inference_credentials --role primary"})
+    assert not _llm({"run": f"{run_py} key-refusal"})
+    assert not _llm({"run": f"{run_py} egress-self-check"})
+    assert not _llm({"run": 'pip download -r docker/persona/requirements-persona.txt -d "$RUNNER_TEMP/work/wheels"'})
+    assert not _llm({"run": "# run.py inference-smoke is only named in a comment"})
