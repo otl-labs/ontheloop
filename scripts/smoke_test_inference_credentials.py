@@ -1,9 +1,10 @@
 """Credentialed smoke test for each inference tier role (T4.32 c1, rec-3222).
 
 Takes the role's SSM parameter name and key variable from the project-configuration rows
-(ports.run_persona.litellm.api_key.<role>, this_repository.current_home), fetches the value with the ambient
-credential chain (agent_platform profile in CC-web; OIDC on CI), puts it in this process's environment under the row's
-variable, and runs the role's cold-start assertion through the transport. The model comes from the contracts alone.
+(ports.run_persona.litellm.api_key.<role>, this_repository.current_home), fetches the value with the session it is
+given (the persona-verdict CI job's assumed role, via the run.py inference-smoke verb) or, from CloudShell as the
+fallback, the agent_platform profile, puts it in this process's environment under the row's variable, and runs the
+role's cold-start assertion through the transport. The model comes from the contracts alone.
 
 The InferenceCredentialsRead IAM grant is exercised on every run: a missing or misconfigured grant surfaces as
 AccessDenied from SSM, failing the test with a clear diagnostic. The key value is never printed.
@@ -55,8 +56,11 @@ def _row(role: str) -> dict[str, Any]:
 
 # envelope_id (not secret_id) names the SSM parameter name deliberately: it is a non-sensitive resource name, and the
 # "envelope" term avoids CodeQL's sensitive-name heuristic flagging the identifier (scripts/ci/redaction_check.py).
-def run(role: str, region: str | None = None) -> int:
-    """Fetch the role's key and run its cold start through the transport. Return 0 on success, 1 on failure."""
+def run(role: str, region: str | None = None, session: Any = None) -> int:
+    """Fetch the role's key and run its cold start through the transport. Return 0 on success, 1 on failure.
+
+    With a session the region must be given (PERSONA_AWS_REGION) and the profile and config/aws-region are never read.
+    """
     try:
         row = _row(role)
         envelope_id = str(row["this_repository"]["current_home"])
@@ -65,13 +69,19 @@ def run(role: str, region: str | None = None) -> int:
         print(f"FAIL [{role}] contract load raised {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     print(f"[{role}] Fetching parameter: {envelope_id}")
-    client = boto3.Session(profile_name=resolve_aws_profile()).client("ssm", region_name=region or _default_region())
+    if session is not None:
+        if not region:
+            print(f"FAIL [{role}] a session needs an explicit region", file=sys.stderr)
+            return 1
+        client = session.client("ssm", region_name=region)
+    else:
+        client = boto3.Session(profile_name=resolve_aws_profile()).client("ssm", region_name=region or _default_region())
 
     try:
         response = client.get_parameter(Name=envelope_id, WithDecryption=True)
     except ClientError as exc:
         code = exc.response["Error"]["Code"]
-        print(f"FAIL [{role}] SSM error ({code}): {exc}", file=sys.stderr)
+        print(f"FAIL [{role}] SSM error ({code})", file=sys.stderr)
         if code == "AccessDeniedException":
             print(
                 f"  -> InferenceCredentialsParameterRead IAM grant not applied or not propagated;"
@@ -95,7 +105,7 @@ def run(role: str, region: str | None = None) -> int:
     try:
         result = litellm_transport.cold_start_check(role)
     except Exception as exc:  # intentionally broad so any failure prints a diagnostic and returns 1
-        print(f"FAIL [{role}] cold start raised {type(exc).__name__}: {exc}", file=sys.stderr)
+        print(f"FAIL [{role}] cold start raised {type(exc).__name__}", file=sys.stderr)
         return 1
 
     if result.outcome == "asserted" and result.record is not None:

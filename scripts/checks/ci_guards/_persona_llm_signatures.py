@@ -2,7 +2,8 @@
 
 T4.26 c3 can re-point the claude -p guards onto it. A parsed workflow step is an LLM step when it (a) names, as an env
 key or a secrets.<NAME> reference, the variable of a project-configuration.yaml secret row for the run_persona port,
-(b) runs claude with -p or --print, scripts/ci/claude_p_retry.sh or the run_persona entrypoint, or (c) uses
+(b) runs claude with -p or --print, scripts/ci/claude_p_retry.sh, the run_persona entrypoint or the run.py inference-smoke
+verb (the smoke reads its key in-process, so no env key or secrets reference names it), or (c) uses
 anthropics/claude-code-action or a local composite action or reusable workflow (one hop) one of whose steps matches
 (a) or (b). Installing or probing the CLI is not an LLM step: no prompt runs and no credential is read.
 """
@@ -20,6 +21,7 @@ PERSONA_INDEX = Path("docs/contracts/executor-personas.yaml")
 CLAUDE_INVOCATION = re.compile(r"\bclaude\s+(?:-p|--print)\b")
 RETRY_WRAPPER = re.compile(r"\bclaude_p_retry\.sh\b")
 RUN_PERSONA = re.compile(r"\brun_persona\b")
+INFERENCE_SMOKE = re.compile(r"\brun\.py\"?\s+inference-smoke\b|\bsmoke_test_inference_credentials\b")
 COMPUTE_HOST = re.compile(r"\bpersona_compute_host\b")
 ECS_RUN_TASK = re.compile(r"\baws\s+ecs\s+run-task\b")
 CLAUDE_CODE_ACTION = "anthropics/claude-code-action"
@@ -102,7 +104,12 @@ def _direct_llm(step: dict[str, Any], variables: frozenset[str]) -> bool:
     run = strip_comments(str(step.get("run") or ""))
     return (
         _names_secret(step, variables)
-        or bool(CLAUDE_INVOCATION.search(run) or RETRY_WRAPPER.search(run) or RUN_PERSONA.search(run))
+        or bool(
+            CLAUDE_INVOCATION.search(run)
+            or RETRY_WRAPPER.search(run)
+            or RUN_PERSONA.search(run)
+            or INFERENCE_SMOKE.search(run)
+        )
         or str(step.get("uses") or "").startswith(CLAUDE_CODE_ACTION)
     )
 
