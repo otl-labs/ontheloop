@@ -283,14 +283,15 @@ EVENT_READS: dict[str, EventRead] = {
         ),
         EventRead(
             verb="tool_use_rollup",
-            tables=(sql.OBSERVATIONS, sql.SESSIONS, sql.AGENTS),
+            tables=(sql.OBSERVATIONS, sql.SESSIONS, sql.AGENTS, sql.TRANSCRIPTS),
             sql=sql.TOOL_USE_ROLLUP_SQL,
             params=("day_from", "day_to"),
             binding="window",
             max_window_days=MAX_WINDOW_DAYS,
             description=_derived_rows_note(
-                "Tool-call counts, one row per tree, root or sub-agent, agent name, workflow, tool name and MCP server"
-                + _TREE_NOTE
+                "Tool-call counts, one row per tree, root or sub-agent, agent name, workflow, tool name and MCP server, "
+                "with repeat_input_count, repeat_output_count and repeat_output_bytes for calls repeating an earlier call's "
+                "input or output" + _TREE_NOTE
             ),
         ),
         EventRead(

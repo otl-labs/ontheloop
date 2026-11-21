@@ -19,6 +19,10 @@ SHA = "1d88384fd173af6ecb012dfd0264a306b711241a"  # pragma: allowlist secret
 CHECKOUT = "actions/checkout@" + "a" * 40
 SELF_CHECK = v.RUN_PREFIX + "egress-self-check"
 Docs = dict[str, Any]
+STS_T = "sts.{aws_region}.amazonaws.com:443"
+SSM_T = "ssm.{aws_region}.amazonaws.com:443"
+DEEPSEEK, ANTHROPIC = "api.deepseek.com:443", "api.anthropic.com:443"
+SMOKE_RUN = v.RUN_PREFIX + "inference-smoke"
 
 
 def _filter_step() -> dict[str, Any]:
@@ -67,6 +71,9 @@ def _tree(tmp_path: Path, edit: Callable[[Docs], None] | None = None) -> Path:
     if edit:
         edit(docs)
     (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    for rel in (v.INFERENCE_PROVIDER, ".github/workflows/persona-verdict.yml"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text((LIVE / rel).read_text(encoding="utf-8"), encoding="utf-8")
     (tmp_path / v.LIST_FILE).write_text(yaml.safe_dump(docs["cfg"]), encoding="utf-8")
     wf = tmp_path / ".github/workflows"
     wf.mkdir(parents=True, exist_ok=True)
@@ -141,6 +148,29 @@ def _drop_self_check(d: Docs) -> None:
 
 def _prefixless(d: Docs) -> None:
     _job(d)["steps"][3] = {"run": v.PROBE_PREFIX + "egress-self-check"}
+
+
+def _templated(row: list[str] | None = None, filt: str | None = None, smoke: bool = False) -> Callable[[Docs], None]:
+    """Give the keyed job a keyprep sibling whose aws_region output comes from the action, and a templated filter."""
+
+    def edit(d: Docs) -> None:
+        d["keyed"]["jobs"]["keyprep"] = {
+            "runs-on": "ubuntu-latest",
+            "outputs": {"aws_region": "${{ steps.region.outputs.aws_region }}"},
+            "steps": [{"id": "region", "uses": "./.github/actions/aws-region"}],
+        }
+        _job(d)["needs"] = ["keyprep"]
+        want = row or [STS_T]
+        _step0(d)["with"]["allowed-endpoints"] = filt if filt is not None else "\n".join(_expr(h) for h in want)
+        d["cfg"]["jobs"][KEYED]["smoke"] = want
+        if smoke:
+            _job(d)["steps"].insert(4, {"id": "s", "run": SMOKE_RUN})
+
+    return edit
+
+
+def _expr(host: str) -> str:
+    return host.replace("{aws_region}", "${{ needs.keyprep.outputs.aws_region }}")
 
 
 def _stale_row(d: Docs) -> None:
@@ -260,7 +290,93 @@ RED = [
         "without the filter",
         lambda d: _probe_job(d, "egress-control")["steps"].insert(0, _filter_step()),
     ),
+    _red(
+        "template-literal-region-in-row",
+        "names a region id",
+        _templated(["sts.eu-west-2.amazonaws.com:443"], "sts.eu-west-2.amazonaws.com:443"),
+    ),
+    _red(
+        "template-literal-region-in-workflow", "differ from the job's row", _templated(None, "sts.eu-west-2.amazonaws.com:443")
+    ),
+    _red(
+        "template-foreign-expression",
+        "expression other than needs",
+        _templated(None, "sts.${{ vars.REGION }}.amazonaws.com:443"),
+    ),
+    _red(
+        "template-job-not-in-needs",
+        "not an aws-region action output of a needed job",
+        lambda d: (_templated()(d), _job(d).update({"needs": []})),
+    ),
+    _red(
+        "template-output-not-bound-to-the-action",
+        "not an aws-region action output of a needed job",
+        lambda d: (_templated()(d), d["keyed"]["jobs"]["keyprep"]["outputs"].update({"aws_region": "eu-west-2"})),
+    ),
+    _red(
+        "template-two-in-one-entry",
+        "more than one {aws_region}",
+        _templated(["sts.{aws_region}.{aws_region}.amazonaws.com:443"]),
+    ),
+    _red("template-shape-check", "host:port", _templated(["sts.{aws-region}.amazonaws.com:443"], "sts.x.amazonaws.com:443")),
+    _red("template-whole-label", "whole dot-delimited label", _templated(["sts.{aws_region}x:443"])),
+    _red("template-extra-host", "outside sts and ssm", _templated([STS_T, "example.com:443"])),
+    _red(
+        "template-provider-host-off-the-tier-models",
+        "provider hosts",
+        _templated([STS_T, SSM_T, DEEPSEEK, "api.openai.com:443"], smoke=True),
+    ),
+    _red("template-provider-host-missing", "provider hosts", _templated([STS_T, SSM_T, DEEPSEEK], smoke=True)),
+    _red(
+        "template-prefix-without-an-entry",
+        "no entry for the LiteLLM prefix",
+        lambda d: (
+            _templated([STS_T, SSM_T, DEEPSEEK, ANTHROPIC], smoke=True)(d),
+            d["cfg"]["provider_hosts"].pop("anthropic/"),
+        ),
+    ),
+    _red("template-anthropic-in-a-job-without-the-smoke", "outside sts and ssm", _templated([STS_T, ANTHROPIC])),
+    _red("docker-after-and", "docker command", _insert(4, {"run": "x && docker build ."})),
+    _red("docker-sudo", "docker command", _insert(4, {"run": "sudo docker ps"})),
+    _red("docker-bash-c", "docker command", _insert(4, {"run": 'bash -c "docker run x"'})),
+    _red("docker-sh-c", "docker command", _insert(4, {"run": "sh -c 'docker ps'"})),
+    _red("docker-absolute-path", "docker command", _insert(4, {"run": "/usr/bin/docker run x"})),
+    _red("docker-quoted", "docker command", _insert(4, {"run": '"docker" ps'})),
+    _red("docker-backslash", "docker command", _insert(4, {"run": "\\docker ps"})),
+    _red("docker-after-a-hash-in-quotes", "docker command", _insert(4, {"run": 'echo "#"; docker ps'})),
+    _red("docker-on-a-continued-line", "docker command", _insert(4, {"run": "echo a \\\n  && docker ps"})),
 ]
+
+
+def test_a_malformed_provider_hosts_map_is_refused(tmp_path: Path) -> None:
+    problems = _problems(tmp_path, lambda d: d["cfg"].update({"provider_hosts": {"deepseek/": 1}}))
+    assert any("provider_hosts must map" in p for p in problems)
+
+
+def test_a_missing_inference_provider_contract_is_refused_for_a_smoke_job(tmp_path: Path) -> None:
+    root = _tree(tmp_path, _templated([STS_T, SSM_T, DEEPSEEK, ANTHROPIC], smoke=True))
+    (root / v.INFERENCE_PROVIDER).unlink()
+    assert any("does not give the tier models" in p for p in v.check_tree(root)[0])
+
+
+def test_a_filter_with_value_other_than_endpoints_may_not_hold_an_expression(tmp_path: Path) -> None:
+    problems = _problems(tmp_path, _set_with("egress-policy", "${{ inputs.p }}"))
+    assert any("other than allowed-endpoints holds an expression" in p for p in problems)
+
+
+def test_a_docker_path_segment_is_not_a_docker_command(tmp_path: Path) -> None:
+    run = 'pip install -r "$GITHUB_WORKSPACE/main/docker/persona/requirements-persona.txt"'
+    assert _problems(tmp_path, _insert(4, {"run": run})) == []
+    assert _problems(tmp_path, _insert(4, {"run": "echo hi  # docker ps"})) == []
+
+
+def test_the_templated_fixture_base_is_green(tmp_path: Path) -> None:
+    assert _problems(tmp_path, _templated()) == []
+    assert _problems(tmp_path, _templated([STS_T, SSM_T, DEEPSEEK, ANTHROPIC], smoke=True)) == []
+
+
+def test_a_refusal_row_with_the_anthropic_host_is_red(tmp_path: Path) -> None:
+    assert any("outside sts and ssm" in p for p in _problems(tmp_path, _templated([STS_T, ANTHROPIC])))
 
 
 def test_the_live_tree_is_green() -> None:

@@ -81,6 +81,13 @@ class TestPromotedGateClosures:
             "scripts/checks/_common.py",
             "scripts/checks/registry.py",
         ),
+        "validate_persona_verdict_egress": (
+            "scripts/checks/ci_guards/validate_project_region.py",
+            "docs/contracts/inference-provider.yaml",
+            "scripts/checks/misc/validate_persona_verdict_egress.py",
+            "scripts/checks/_common.py",
+            "scripts/checks/registry.py",
+        ),
         "validate_scheduled_agent_logs": (
             "logs/.recommendations-log.jsonl",
             "logs/agents/20260101T000000Z.jsonl",

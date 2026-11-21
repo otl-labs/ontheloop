@@ -319,10 +319,20 @@ def cli(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
         def __init__(self, token: str) -> None:
             pass
 
-    def fetch(caller: Any, since: datetime, budget: Any, now: datetime, owner: Any = None, repo: Any = None) -> gh.Fetched:
+    def fetch(
+        caller: Any,
+        since: datetime,
+        budget: Any,
+        now: datetime,
+        owner: Any = None,
+        repo: Any = None,
+        evaluate_from: Any = None,
+        cache: Any = None,
+    ) -> gh.Fetched:
+        state["fetch_args"] = {"since": since, "evaluate_from": evaluate_from, "cache": cache}
         if state["raise_fetch"]:
             return gh.Fetched([], [], since, 0, 0.0, "HTTPError")
-        return gh.Fetched([], [], g._floor(now), 3, 0.2)
+        return gh.Fetched([], [], g._floor(now), 3, 0.2, None, state.get("fetch_cache", {}))
 
     def act(*a: Any, **k: Any) -> str:
         state["act_calls"] += 1
@@ -401,3 +411,82 @@ def test_status_line_shape(cli: dict[str, Any], capsys: pytest.CaptureFixture[st
         r"late_start_minutes=[\d.]+ alarm=\S+ rate_remaining=\S+ read_failed_ticks=\d+$"
     )
     assert re.match(pattern, line), line
+
+
+def _api_job(**kw: Any) -> dict[str, Any]:
+    base = {
+        "name": "approve",
+        "run_id": 1,
+        "created_at": "2026-11-11T11:00:00Z",
+        "started_at": "2026-11-11T11:00:00Z",
+        "completed_at": None,
+        "status": "waiting",
+        "conclusion": None,
+    }
+    return {**base, **kw}
+
+
+def test_runnerless_jobs_count_no_minutes() -> None:
+    done = {"status": "completed", "completed_at": "2026-11-11T11:30:00Z"}
+    raw = [
+        _api_job(),
+        _api_job(conclusion="cancelled", runner_id=0, **done),
+        _api_job(conclusion="skipped", runner_id=None, **done),
+        _api_job(conclusion="success", runner_id=7, runner_name="GitHub Actions 7", **done),
+        _api_job(conclusion="success", runner_name="GitHub Actions 8", **done),
+        _api_job(conclusion="success", runner_id=9, status="completed", completed_at=None),
+    ]
+    run_row = {"id": 1, "path": CI, "event": "push", "created_at": "2026-11-11T11:00:00Z"}
+    jobs = g.normalize(gh.Fetched([], [{**j, "_run": run_row} for j in raw], g._floor(NOW), 0, 0.0))[1]
+    assert [j.runner for j in jobs] == [False, False, False, True, True, True]
+    spans = [g._span(j, NOW) for j in jobs]
+    assert [s is not None for s in spans] == [False, False, False, True, True, False]
+    row = next(
+        r for r in g.hour_table(jobs[:3], [], g._floor(NOW), H0 - timedelta(hours=2), NOW, CONTRACT) if r.hour == gh.iso(H0)
+    )
+    assert row.slot_demand == 0 and row.peak_concurrency == 0 and row.evaluated
+    both = g.hour_table(jobs[3:5], [], g._floor(NOW), H0 - timedelta(hours=2), NOW, CONTRACT)
+    assert next(r for r in both if r.hour == gh.iso(H0)).peak_concurrency == 2
+
+
+def test_never_evaluable_hole_does_not_starve_newest_hours() -> None:
+    floor = g._floor(NOW)
+    two = timedelta(hours=2)
+
+    def rows(hole_hours: list[int], newest: int = 1, oldest: int = 60) -> list[g.HourRow]:
+        return [g.HourRow(gh.iso(floor - timedelta(hours=h)), h not in hole_hours) for h in range(newest, oldest)]
+
+    assert g.start_hour(rows([40]), NOW, CONTRACT) == floor - timedelta(hours=1) + timedelta(hours=1) - two
+    assert g.start_hour(rows([40, 10]), NOW, CONTRACT) == floor - timedelta(hours=10) - two
+    stale = [g.HourRow(gh.iso(floor - timedelta(hours=h)), True) for h in range(72, 100)]
+    assert g.start_hour(stale, NOW, CONTRACT) == floor - timedelta(hours=26)
+    prev: Optional[list[g.HourRow]] = rows([40])
+    for k in range(6):
+        now = NOW + timedelta(hours=k)
+        start = g.start_hour(prev, now, CONTRACT)
+        assert start >= g._floor(now) - timedelta(hours=26)
+        fresh = [g.HourRow(gh.iso(g._floor(now) - timedelta(hours=1)), True)]
+        prev = g.merge_tables(prev or [], fresh, CONTRACT)
+    old = next(r for r in prev or [] if r.hour == gh.iso(floor - timedelta(hours=40)))
+    assert not old.evaluated and (prev or [])[-1].hour == gh.iso(g._floor(NOW + timedelta(hours=5)) - timedelta(hours=1))
+
+
+def test_older_version_reading_is_not_chained(cli: dict[str, Any], capsys: pytest.CaptureFixture[str]) -> None:
+    row = asdict_row(g.HourRow(gh.iso(g._floor(NOW) - timedelta(hours=3)), True))
+    cli["prev"] = {"contract_version": 1, "table": [row], "read_failed_ticks": 4, "jobs_cache": {"1": {}}}
+    cli["open"] = None
+    g.main(["--reading-out", str(cli["out"])])
+    assert "chained=0" in capsys.readouterr().out
+    assert cli["fetch_args"]["cache"] is None and json.loads(cli["out"].read_text())["read_failed_ticks"] == 5
+    cli["prev"] = {"contract_version": 2, "table": [row], "jobs_cache": {"1": {}}}
+    g.main(["--reading-out", str(cli["out"])])
+    assert "chained=1" in capsys.readouterr().out and cli["fetch_args"]["cache"] == {"1": {}}
+    assert g.CONTRACT_VERSION == CONTRACT.contract.contract_version
+
+
+def test_main_passes_evaluate_from_and_writes_jobs_cache(cli: dict[str, Any]) -> None:
+    cli["fetch_cache"] = {"5": {"jobs": []}}
+    g.main(["--reading-out", str(cli["out"])])
+    args = cli["fetch_args"]
+    assert args["evaluate_from"] == args["since"] + timedelta(hours=CONTRACT.window.overlap_hours)
+    assert json.loads(cli["out"].read_text())["jobs_cache"] == {"5": {"jobs": []}}
