@@ -27,17 +27,20 @@ scope:
     purpose: >-
       Pure capacity helpers, standard library only: MONITOR_WORKERS = 2; LITELLM_FLOOR = 60; LITELLM_ROOT_PREFIX =
       "litellm:" (a literal: the oracle never imports producer code; a test pins it to src.turn_capture.refs);
-      is_litellm(root) on the root row's entity_ref; read_order(quiet) = every non-litellm root in the given order,
+      is_litellm(root) on the root row's entity_ref (monitor._root_row now carries entity_ref, which
+      telemetry_root_sessions already returns); read_order(quiet) = every non-litellm root in the given order,
       then litellm roots sorted by sha256(session_id) hex; sampled_out(statuses, litellm_flags, floor) returning the
       unread-by-budget litellm trees excused (non-zero only when no non-litellm tree is unread by budget and at least
-      min(floor, litellm trees to read) litellm trees were read); CallStats, a lock-guarded recorder of call seconds with
+      min(floor, litellm trees to read) litellm trees were compared; moved or collided trees are not clean samples and
+      do not count toward the floor); CallStats, a lock-guarded recorder of call seconds with
       calls_over_10s and call_p95_s (whole seconds, ceil).
   - file: scripts/telemetry_verify/monitor.py
     action: Modify
     purpose: >-
       MAX_READER_CALLS 800 -> 3000. _Gate takes one threading.Lock over the open() check and the count increment (so two
       workers never pass the cap or start a call past the time rule) and over max_call_s/max_bytes, and records each
-      call's seconds in a CallStats. run_monitor gains workers: int = MONITOR_WORKERS; to_read is
+      call's seconds in a CallStats. _root_row keeps entity_ref. run_monitor gains workers: int = 1 (so every existing
+      caller and test stays sequential; only __main__ passes MONITOR_WORKERS); to_read is
       read_order(quiet)[skip_trees:] (quiet sorted as today first, so skip_trees and next_skip stay positional over the
       new order); the tree phase runs _process over to_read on a ThreadPoolExecutor(max_workers=workers) with map, so
       outcomes keep input order (workers=1 is today's sequential behaviour). The report gains workers, litellm_quiet,
@@ -49,14 +52,22 @@ scope:
     action: Modify
     purpose: >-
       monitor_line adds workers, litellm_quiet, litellm_read, litellm_sampled_out, calls_over_10s and call_p95_s after
-      max_response_bytes and before alarms (counts and whole seconds only, Decision 101).
+      max_response_bytes and before alarms (counts and whole seconds only, Decision 101); run_monitor_command passes
+      workers=monitor_capacity.MONITOR_WORKERS to run_monitor.
   - file: tests/telemetry_verify/test_monitor_capacity.py
     action: Create
-    purpose: rec-5385 acceptance (named nodes in test_obligations); pure nodes need no duckdb, golden-world nodes importorskip duckdb inside the test.
+    purpose: >-
+      rec-5385 acceptance (named nodes in test_obligations); pure nodes need no duckdb; golden-world nodes call
+      pytest.importorskip("duckdb", reason="env: duckdb is not installed in the fast tier") inside the test. Its World
+      serialises named() with one threading.Lock (the DuckDB connection, the before/after hooks and the clock), since a
+      shared DuckDB connection is not thread-safe.
   - file: tests/telemetry_verify/test_main.py
     action: Modify
-    purpose: MONITOR_LINE regex gains the six new fields in their order (fullmatch).
-bundled_recommendations: [rec-5420]
+    purpose: >-
+      MONITOR_LINE regex gains the six new fields in their order (fullmatch); new node
+      test_monitor_command_runs_two_workers asserts run_monitor_command passes workers=MONITOR_WORKERS (a recording fake
+      run_monitor).
+bundled_recommendations: [rec-5385, rec-5420]
 followon_recs: []
 infrastructure_dependencies: []
 acceptance_criteria:
@@ -64,7 +75,10 @@ acceptance_criteria:
   - >-
     A session monitor run on the latest quiet day exits 0 under --no-alarms --assert-zero monitor_coverage_incomplete
     and prints workers=2 not_read_budget=0 litellm_sampled_out=0 (rec-5420's acceptance, its zero from capacity, not sampling).
-  - With workers=1 run_monitor's report equals today's on the golden world; with workers=2 every count but the timing fields is identical.
+  - >-
+    The existing tests/telemetry_verify/test_monitor.py and tests/telemetry/test_parent_observation_orphan_monitor.py
+    pass unchanged (run_monitor defaults to workers=1), and on the golden world workers=1 and workers=2 reports are equal
+    excluding the timing fields and the workers field.
   - No call starts once MAX_READER_CALLS calls are made or fewer than 2 x CALL_WORST_CASE_S of MONITOR_BUDGET_S remain, at either worker count.
 verification_plan:
   - step: 1
@@ -81,8 +95,11 @@ verification_plan:
       tests/telemetry_verify/test_monitor_capacity.py::test_litellm_prefix_matches_the_producer_root_ref
     expected: >-
       Exit 0, seven nodes pass. Red before on main: the file and scripts/telemetry_verify/monitor_capacity.py do not
-      exist, so collection fails; with monitor_capacity.py present but _Gate unlocked, the gate node fails (two threads
-      over a counting fake pass the cap). On a simulated build all seven pass.
+      exist, so collection fails. The gate node is deterministic: MAX_READER_CALLS monkeypatched to 2 (so exactly one call
+      may start), a Budget whose clock sleeps 0.05 s on every read (widening the window between open() and the count
+      increment), and two threads released together by a threading.Barrier each attempting one gate call; it asserts one
+      call reached named() and the other raised _Refused. With _Gate unlocked both pass open() inside the sleep and two
+      calls reach named(), so the node is red. On a simulated build all seven pass.
     expected_literals:
       - 7 passed
     fix_if: A failure is the helper or the gate lock; fix the source, never the test. The prefix node failing means the producer's root ref changed; STOP to the plan owner.
@@ -98,11 +115,12 @@ verification_plan:
     expected: >-
       Exit 0 in a session with duckdb. The golden-world nodes: workers 1 and 2 give equal reports on the golden world
       (timing fields excluded); with LITELLM_FLOOR monkeypatched to 0 and a per-call cost that refuses the litellm tree,
-      every non-litellm tree is compared, litellm_sampled_out is 1, not_read_budget 0 and monitor_coverage_incomplete
-      absent from findings(); with the floor at 1 the same run raises monitor_coverage_incomplete 1; on an oversize day
+      every non-litellm tree is compared, litellm_sampled_out is 1, not_read_budget 0, monitor_coverage_incomplete
+      absent from findings(), and the orphan_* and rederivation_mismatch:sessions_window classes equal the full-read run's;
+      with the floor at 1 the same run raises monitor_coverage_incomplete 1; on an oversize day
       trees_read + tree_too_large + tree_read_failed + not_read_budget + litellm_sampled_out equals quiet - skip_trees,
       and a second run with skip_trees = next_skip reads the rest. Red before: those nodes fail (no workers parameter, no
-      litellm_sampled_out). test_main fails before the regex edit once the line gains fields.
+      litellm_sampled_out); the new regex and test_monitor_command_runs_two_workers fail against main's line and CLI.
     fix_if: A golden-world mismatch between worker counts is a thread-safety or ordering defect in monitor.py; fix the source. A changed existing assertion is a STOP to the plan owner.
     hermetic: false
     graduation: waive
@@ -132,7 +150,7 @@ verification_plan:
     action: rec-5420's acceptance on merged main from the session (agent_platform profile), backgrounded with a 2 h limit, on the latest quiet day.
     command: >-
       set -o pipefail; AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_verify monitor --no-alarms --assert-zero
-      monitor_coverage_incomplete 2>&1 | tee /tmp/monitor-read-budget-vp4.log; grep -E '^MONITOR .* not_read_budget=0 .*
+      monitor_coverage_incomplete 2>&1 | tee /tmp/monitor-read-budget-vp4.log && grep -E '^MONITOR .* not_read_budget=0 .*
       workers=2 litellm_quiet=0 litellm_read=0 litellm_sampled_out=0 ' /tmp/monitor-read-budget-vp4.log
     expected: >-
       The monitor exits 0 and grep prints the MONITOR line. Record reader_calls, elapsed_s, max_call_s, calls_over_10s
@@ -155,18 +173,19 @@ verification_plan:
     expected: >-
       Prints the daily throttle sums; record them with the same call for metric Invocations in the closure report. The
       7-day baseline before this plan (11-13..11-19) averaged about 1,370 invocations a day (max 2,622) with 7 throttles on
-      11-17 and 1 on 11-20.
-    fix_if: Throttles rising on the run's day beyond the pre-plan level is a STOP to the plan owner (drop to one worker or amend), never a reserved-concurrency change in the build.
+      11-17 and 1 on 11-20. Pass: no day's throttle sum above 7.
+    fix_if: A day's throttle sum above 7 is a STOP to the plan owner (drop to one worker or amend), never a reserved-concurrency change in the build.
     hermetic: false
     graduation: not-applicable
   - step: 7
     phase: post-deploy
-    action: Both recs closed. rec-5385 by the squash merge's Resolves trailer; rec-5420 by update_rec after step 5 (its acceptance needs the warehouse, which the CI closure job lacks).
+    action: Both recs closed and rec-4439 carries residual (9). rec-5385 by the squash merge's Resolves trailer; rec-5420 by update_rec after step 5 (its acceptance needs the warehouse, which the CI closure job lacks).
     command: >-
       bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader;
-      rows,_=fetch_recs_by_ids(make_reader(),['rec-5385','rec-5420']); s={r['id']: r['status'] for r in rows}; print(s);
-      assert s=={'rec-5385':'closed','rec-5420':'closed'}"
-    expected: Prints both ids with status closed.
+      rows,_=fetch_recs_by_ids(make_reader(),['rec-5385','rec-5420','rec-4439']); s={r['id']: r['status'] for r in rows};
+      print(s); assert s['rec-5385']==s['rec-5420']=='closed';
+      assert 'litellm_sampled_out' in next(r['context'] for r in rows if r['id']=='rec-4439')"
+    expected: Prints the three statuses; rec-5385 and rec-5420 closed and rec-4439's context names residual (9) litellm_sampled_out.
     fix_if: rec-5385 open means the trailer was missing or its acceptance failed in the closure job; rec-5420 open means update_rec was not run with step 5's MONITOR line as closure artifact.
     hermetic: false
     graduation: not-applicable
@@ -185,7 +204,7 @@ test_obligations:
     behavior: the MONITOR line carries the six new counts in order
     verification_step: 2
     test_selector: tests/telemetry_verify/test_main.py
-    red_green_expectation: red before (fullmatch fails once the line gains fields without the regex), green after
+    red_green_expectation: red before (the new regex fails to fullmatch main's line, and the two-worker node fails on main's CLI), green after
 constraints:
   - "Counts only in logs and rec text (Decision 101): no session id, entity ref, ARN, Function URL host or row value on the MONITOR line."
   - Alarm, never a gate (Decision 210 cl.2); the workflow stays a non-required check.
@@ -233,12 +252,17 @@ context:
     Graduated shards kept: telemetry-verify-commands-monitor-arrival-counts-only (fullmatches MONITOR_LINE) and
     telemetry-read-clients-build-the-routed-reader; no test_main.py node is renamed or removed.
   - >-
-    Unbuilt plans on the same files (whichever builds second rebases): PLAN-merge-annotate-contract-reader
-    (monitor.py), PLAN-telemetry-claude-p-capture-adapter (__main__.py, test_main.py).
+    Unbuilt plan on the same files (whichever builds second rebases): PLAN-telemetry-claude-p-capture-adapter
+    (__main__.py, test_main.py). closes_criteria is empty: a rec-driven leg of T4.32 c1, not follow-on mode.
   - "Owner: this planning thread (Size monitor read budget rec-5385) takes STOPs and amendments."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:ef56a4aec0dc890f7a5043c2b7cd80f56d387fef0e28940bebd06820715f5987"}
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:bf5b0f7041fe2b79f02f70b860e9b0749ecede0f608f829224b01d1b36f9a74e"}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 4, nits: 9}
+weakening_dispositions:
+  - candidate: "[constant-changed] scripts/telemetry_verify/monitor.py::MAX_READER_CALLS"
+    disposition: planned-change
+    cite: "acceptance_criteria[3]"
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -263,7 +287,7 @@ execution_steps:
     body (not rec-5420).
   - >-
     After merge: step 5 (backgrounded, 2 h limit), step 6, then update_rec rec-5420 closed with step 5's MONITOR line as
-    closure artifact, update_rec rec-4439 with residual (9), and step 7. A failed live step stops and goes to the plan
+    closure artifact, update_rec rec-4439 with residual (9), and step 7 (which also reads rec-4439's context back). A failed live step stops and goes to the plan
     owner (Decision 55).
   - 'Report: what was implemented, verification results, step 5 MONITOR counts and step 6 throttle/invocation sums.'
 rollback: Revert the squash commit; the monitor returns to one worker and 800 calls with no data or infrastructure to undo.
