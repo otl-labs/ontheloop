@@ -1,0 +1,284 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: telemetry-repeated-tool-calls
+intent: >-
+  Let the feedback loop see repeated agent work from data already stored, with no new column (operator 2026-11-20
+  existence-first rule; 2026-11-21 card "Separate repeated-call count"). The existing tool_use_rollup verb (one row per
+  tree, session kind, agent, workflow, tool and MCP server) gains three counts: repeat_input_count, the calls whose
+  stored input fingerprint (the tool_input transcript row's content_sha256, reached through _joins.yaml
+  ref_links.tool_call_open_to_tool_input) equals an earlier call's of the same tool in the same session (rec-5079);
+  repeat_output_count and repeat_output_bytes, the calls whose latest close carries an output_sha256 equal to an earlier
+  call's of the same tool in the same session, with the output bytes fetched again (rec-5250). Empty and withheld
+  digests and empty outputs never count. The verb counts every tool; the telemetry_usage tools summary adds a repeat
+  total that leaves out a declared bookkeeping-tool list (acknowledgement and notification calls whose inputs repeat by
+  design). The friction failure-run rule (classifier_version 3) is unchanged.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-telemetry-repeated-tool-calls.yaml
+phase: >-
+  T3.3 prerequisite (feedback-loop wave 2). Reader-only: the telemetry reader Lambda ships the changed SQL through its
+  governed deploy channel; no producer, contract column or catalog change.
+closes_criteria: []
+cites: [dec:79, dec:128, dec:199, dec:207, dec:236, dec:239, dec:249, dec:272, dec:279]
+scope:
+  - file: src/common/ducklake_event_read_sql.py
+    action: Modify
+    purpose: >-
+      TOOL_USE_ROLLUP_SQL composes telemetry_transcripts too: a CTE of tool_input rows (purpose tool_input,
+      content_sha256 not the empty-string digest) joined to each call's first open row by the declared link key
+      (external_ref without '/tool_call_open', same tenant_id, project_id, producer, session_id, parser_version); window
+      counts per (session_id, tool name) ordered by (event_timestamp, source_ordinal, event_id) give repeat_input_count,
+      repeat_output_count and repeat_output_bytes (output_sha256 not NULL and output_bytes > 0 on the call's latest
+      close). No CTE projects transcript text. The edit fits the module's 48-SLOC headroom (452 of 500): no facade split,
+      since a new module would change the content reader's bundled set (Decision 272 cl.1); if it would cross 500, stop
+      and tell the coordinator, never a raise (Decision 128).
+  - file: src/common/ducklake_event_read_verbs.py
+    action: Modify
+    purpose: >-
+      tool_use_rollup's EventRead tables become (OBSERVATIONS, SESSIONS, AGENTS, TRANSCRIPTS); its description adds one
+      clause naming the three counts. The description keeps "one tree is the rows sharing" (the _TREE_NOTE) and never
+      contains the word "excluded" (test_usage_verbs_are_registered_agent_facing_window_verbs).
+  - file: src/common/event_usage_fields.py
+    action: Modify
+    purpose: TOOL_USE_FIELDS gains repeat_input_count, repeat_output_count, repeat_output_bytes after interrupted_count, before session_count.
+    new_imports: []
+  - file: scripts/telemetry_verify/derive_usage.py
+    action: Modify
+    purpose: >-
+      The independent oracle's tool_use_rollup derives the same three counts from the deduped rows: it maps each open's
+      external_ref to its tool_input transcript row by the link key (scope.tables[TRANSCRIPTS], which follows the verb's
+      registered tables), then per (session_id, tool name) counts calls after the first holding the same non-empty
+      digest, and the same for the latest close's output_sha256 with output_bytes > 0. Written from the contract note,
+      never from the SQL; the module docstring's declared conventions gain one line for it.
+  - file: scripts/telemetry_usage.py
+    action: Modify
+    purpose: >-
+      tools sums repeat_input_count, repeat_output_count and repeat_output_bytes per output row and adds bookkeeping
+      (true when tool_name is in BOOKKEEPING_TOOLS). BOOKKEEPING_TOOLS = ("mcp__hearthbot__no_reply_needed",
+      "ReadNotifications"), the two tools the 2026-11-19 probe found repeating by design (267 and 89 of 573 repeated calls).
+      For the tools command the result gains repeat_totals {all, without_bookkeeping}, each the three sums over every
+      row read.
+  - file: docs/contracts/ducklake_telemetry_reader.yaml
+    action: Modify
+    purpose: >-
+      The "Usage verbs" audit invariant gains, after the tool_use_rollup sentence, the text in context (Contract text);
+      one amendment_log row appended last (change_class field_add, semantic_break false, naming model_usage_rollup,
+      tool_use_rollup and session_startup_baseline, which test_reader_contract_declares_the_usage_verbs reads). Notice
+      class (Decision 279): no approved-text sidecar.
+  - file: tests/common/test_ducklake_event_read_tool_usage.py
+    action: Modify
+    purpose: >-
+      Three nodes over verb and oracle: test_repeat_input_count_same_tool_same_session (rec-5079 acceptance),
+      test_repeat_output_count_and_bytes_on_latest_close (rec-5250 acceptance) and
+      test_empty_withheld_and_cross_session_inputs_never_repeat. The existing golden-tree oracle test covers the new
+      columns unchanged.
+  - file: tests/test_telemetry_usage.py
+    action: Modify
+    purpose: >-
+      test_tools_sums_repeat_counts_and_totals_without_bookkeeping; the existing tool fixture row in
+      test_by_root_and_by_agent_widen_the_key gains the three keys (fixture growth, its assertions unchanged).
+bundled_recommendations: [rec-5079, rec-5250]
+followon_recs: []
+infrastructure_dependencies:
+  - "None: no IAM, Terraform or DDL. The telemetry reader already reads telemetry_transcripts (sessions_window and four other verbs compose all four tables)."
+  - "ducklake_telemetry_reader (active): VP 4 (deploy-ducklake-lambdas deploy-telemetry and telemetry-smoke; the smoke asserts every usage row carries exactly VERB_FIELDS, so it proves the three columns)."
+  - "Content reader (active; bundles ducklake_event_read_sql.py and ducklake_event_read_verbs.py, outside its protective set because no module is added): Decision 79's step is VP 7, read on the content channel's next operator-approved deploy (Decision 272 cl.1); the build never dispatches one. tool_use_rollup is not in its served set, so the change is inert there."
+  - "data-pipeline (active): bundles both reader modules as reader-bundle only (manifest comment, rec-4291) and event_usage_fields.py by its src/ wildcard; no data-pipeline handler serves a telemetry verb, so no build, deploy or smoke step is owed (precedent PLAN-telemetry-planning-cost-reads)."
+acceptance_criteria:
+  - "tool_use_rollup serves repeat_input_count, repeat_output_count and repeat_output_bytes, equal to the independent oracle on every golden tree and on hand-built repeats."
+  - "A repeat is the same tool name in the same session with the same non-empty input digest (or the same output_sha256 on a latest close with output_bytes > 0) as an earlier call; the first call never counts, a withheld or empty digest never counts, and the same input in two sessions never counts."
+  - "telemetry_usage tools prints the three sums per row, a bookkeeping flag, and repeat_totals with and without BOOKKEEPING_TOOLS."
+  - "The reader deploys through its governed channel and its smoke passes; a one-day and a three-day production read complete with no 504, and their times are reported against today's baseline."
+  - "rec-5079 and rec-5250 are closed."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The three counts over the verb and the oracle, on every golden tree and the hand-built repeats.
+    command: bin/venv-python -m pytest tests/common/test_ducklake_event_read_tool_usage.py -q
+    expected: exit 0 with every test passing; red before (the three new tests fail on the missing repeat_input_count key).
+    fix_if: the verb and the oracle disagree, a first call counts, or a withheld or cross-session input counts
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: telemetry-tool-use-repeat-counts
+  - step: 2
+    phase: pre-deploy
+    action: Field registration, the verb's registry entry, the contract note, the smoke column check and the CLI sums.
+    command: >-
+      bin/venv-python -m pytest tests/test_event_usage_fields.py tests/ducklake_neon_smoke_test/test_lambda_telemetry_reader_gates.py
+      tests/test_telemetry_usage.py::test_usage_verbs_are_registered_agent_facing_window_verbs
+      tests/test_telemetry_usage.py::test_reader_contract_declares_the_usage_verbs
+      tests/test_telemetry_usage.py::test_tools_sums_repeat_counts_and_totals_without_bookkeeping
+      tests/test_telemetry_usage.py::test_by_root_and_by_agent_widen_the_key -q
+    expected: exit 0; red before (test_tools_sums_repeat_counts_and_totals_without_bookkeeping is absent).
+    fix_if: the field order, the description words, the latest amendment row or the bookkeeping exclusion is wrong
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: graduate
+    graduation_check_id: telemetry-usage-repeat-totals
+  - step: 3
+    phase: pre-deploy
+    action: Full tier, then HEAD attestation, after the build commit and rebase and before the push; started from the top-level session, backgrounded with a 2 h limit.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: the full tier exits 0 and the validation result attests the current HEAD's tree
+    fix_if: any failure; fix and rerun the full tier from the start
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion), and steps 1-2 carry the durable regressions.
+  - step: 4
+    phase: post-deploy
+    action: The governed deploy shipped the telemetry reader with the merge and its smoke passed (Decision 79; last-green ref, Decision 254 cl.5).
+    command: >-
+      git fetch -q origin main && build=$(git log -1 --format=%H -E --grep='^Resolves: .*rec-5079([^0-9]|$)' origin/main) &&
+      test -n "$build" && ok= && for id in $(gh api
+      'repos/otl-labs/ontheloop/actions/workflows/deploy-ducklake-lambdas.yml/runs?status=success&per_page=100' --jq '.workflow_runs[].id'); do jobs=$(gh api "repos/otl-labs/ontheloop/actions/runs/$id/jobs" --jq '.jobs[] |
+      select((.name=="deploy-telemetry" or .name=="telemetry-smoke") and .conclusion=="success") | .name + " " + (.id|tostring)');
+      echo "$jobs" | grep -q '^telemetry-smoke ' || continue; job=$(echo "$jobs" | sed -n 's/^deploy-telemetry //p'); deployed=$(gh
+      api "repos/otl-labs/ontheloop/actions/jobs/$job/logs" | grep -oE 'LAMBDA_ARTIFACT_SHA: [0-9a-f]{40}' | head -1 | cut -d' '
+      -f2); echo "run $id deployed $deployed"; if git merge-base --is-ancestor "$build" "$deployed"; then echo contains; ok=1;
+      fi; break; done; test -n "$ok"
+    expected: >-
+      "run <id> deployed <sha>" and contains, exit 0: the newest deploy-ducklake-lambdas run whose deploy-telemetry and
+      telemetry-smoke jobs both succeeded (the smoke reads tool_use_rollup and asserts exactly VERB_FIELDS), and the commit
+      it deployed contains the build commit (the one squash commit carrying "Resolves: rec-5079, rec-5250"; the plan's own
+      commits carry no such trailer). The report names the run id (the same read through mcp__github__actions_list and
+      get_job_logs where gh is unavailable).
+    fix_if: >-
+      no qualifying run contains the build: in a main worktree read bin/venv-python -m
+      scripts.checks.ops_governance.validate_reconcile_pending_gate --telemetry-hold (held=true: wait, never bypass it);
+      held=false: either no main commit containing the build has a green full tier yet (Decision 249 cl.1; wait) or the run
+      that shipped it ended red (read its deploy-telemetry and telemetry-smoke jobs and log)
+    hermetic: false
+  - step: 5
+    phase: post-deploy
+    action: >-
+      Production read cost and live counts: tool_use_rollup over 2026-11-19 alone and over 2026-11-17 to 2026-11-19, timed,
+      then the CLI over the last 7 full UTC days. Baseline before the change (2026-11-21, warm reader, same calls): one day
+      758 rows in 2.7 s, three days 6,034 rows in 10.3 s, seven days answered 413 response_too_large at 41 s (the CLI halves
+      it). The 2026-11-19 probe found 573 same-session repeated calls in that day's 20 real roots.
+    command: >-
+      for w in 2026-11-19:2026-11-19 2026-11-17:2026-11-19; do PYTHONPATH=. bin/venv-python -c "import sys,time;
+      from scripts.telemetry_capture.read_route import TelemetryReader as R; from scripts.aws_profile import resolve_aws_profile as p;
+      a,b=sys.argv[1].split(':'); r=R(profile=p('agent_platform')); s=time.time(); rows=r.named('tool_use_rollup', day_from=a, day_to=b); e=time.time()-s;
+      assert all(0<=x['repeat_input_count']<=x['call_count'] and 0<=x['repeat_output_count']<=x['call_count'] and x['repeat_output_bytes']>=0 for x in rows);
+      print('READ', a, b, len(rows), round(e,1), sum(x['repeat_input_count'] for x in rows), sum(x['repeat_output_count'] for x in rows), sum(x['repeat_output_bytes'] for x in rows))" "$w" || exit 1; done &&
+      bin/venv-python -m scripts.telemetry_usage tools --from "$(date -u -d '7 days ago' +%F)" --to "$(date -u -d yesterday +%F)" > /tmp/tools-repeat.json &&
+      bin/venv-python -c "import json; d=json.load(open('/tmp/tools-repeat.json')); print('TOTALS', json.dumps(d['repeat_totals'], sort_keys=True))"
+    expected: >-
+      Two READ lines and one TOTALS line, exit 0. The 2026-11-19 line has a repeat_input_count sum above 0 (the probe's
+      573 is the order to expect, not an exact target). Each elapsed time is reported beside its baseline; under three
+      times the baseline (8 s and 31 s) passes, above it passes with the ratio reported to the coordinator as the read-cost
+      finding. TOTALS shows without_bookkeeping no larger than all.
+    fix_if: >-
+      a 504 read_deadline_exceeded or a 500 on either direct read: stop and tell the coordinator (the transcripts scan is
+      the plan's open risk; the remedy is a separate plan, never a deadline raise here); a repeat count above call_count:
+      fix the SQL
+    hermetic: false
+  - step: 6
+    phase: post-deploy
+    action: rec-5079 and rec-5250 closed by the merge's Resolves trailer.
+    command: >-
+      AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import
+      fetch_recs_by_ids,make_reader;r,m=fetch_recs_by_ids(make_reader(profile='agent_platform'),['rec-5079','rec-5250']);
+      print(sorted((x['id'],x['status']) for x in r) if r else m)"
+    expected: "[('rec-5079', 'closed'), ('rec-5250', 'closed')]"
+    fix_if: >-
+      still open; check the closure job's run on the merge commit (once PLAN-trailer-range-closure is built, closure waits
+      for the covering full-tier run on main, so read that run first)
+    hermetic: false
+  - step: 7
+    phase: post-deploy
+    action: >-
+      Decision 79 for the content reader: its next deploy-telemetry-content run that the operator approves (Decision 272
+      cl.1; this build never dispatches one) is on a commit that contains this build. Waits on the operator; the build
+      reports it pending with this step named, and the coordinator keeps it on the waiting list.
+    command: >-
+      git fetch -q origin main && build=$(git log -1 --format=%H -E --grep='^Resolves: .*rec-5079([^0-9]|$)' origin/main) && test -n
+      "$build" && ok= && for id in $(gh api
+      'repos/otl-labs/ontheloop/actions/workflows/deploy-telemetry-content.yml/runs?status=success&per_page=100' --jq
+      '.workflow_runs[].id'); do job=$(gh api "repos/otl-labs/ontheloop/actions/runs/$id/jobs" --jq '.jobs[] |
+      select(.name=="record" and .conclusion=="success") | .id'); [ -n "$job" ] || continue; deployed=$(gh api
+      "repos/otl-labs/ontheloop/actions/jobs/$job/logs" | grep -oE 'LAMBDA_ARTIFACT_SHA: [0-9a-f]{40}' | head -1 | cut -d' '
+      -f2); echo "run $id deployed $deployed"; if git merge-base --is-ancestor "$build" "$deployed"; then echo contains; ok=1;
+      fi; break; done; test -n "$ok"
+    expected: >-
+      "run <id> deployed <sha>" then contains, exit 0: the newest deploy-telemetry-content run whose record job succeeded,
+      and the commit it deployed contains the build commit. The report names the run id.
+    fix_if: no approved run since the merge yet (wait, never dispatch), or the run failed (the content channel's own recovery)
+    hermetic: false
+test_obligations:
+  - source: src/common/ducklake_event_read_sql.py
+    behavior: the three repeat counts by same tool, same session and same non-empty digest, equal to the oracle
+    verification_step: 1
+    test_selector: tests/common/test_ducklake_event_read_tool_usage.py::test_repeat_input_count_same_tool_same_session
+    red_green_expectation: red before (KeyError repeat_input_count), green after
+  - source: src/common/ducklake_event_read_verbs.py
+    behavior: tool_use_rollup reads telemetry_transcripts and its description keeps the usage-verb words
+    verification_step: 2
+    test_selector: tests/test_telemetry_usage.py::test_usage_verbs_are_registered_agent_facing_window_verbs
+    red_green_expectation: >-
+      green before and after (the registry shape is unchanged); the tables change is proven red-green by step 1, whose
+      oracle follows the registered tables and whose hand-built repeats need the transcript rows
+  - source: scripts/telemetry_verify/derive_usage.py
+    behavior: the oracle derives the same three counts from raw rows
+    verification_step: 1
+    test_selector: tests/common/test_ducklake_event_read_tool_usage.py::test_repeat_output_count_and_bytes_on_latest_close
+    red_green_expectation: red before (no repeat keys in the oracle rows), green after
+  - source: src/common/event_usage_fields.py
+    behavior: the three columns precede the stamps, are unique and carry no content, cost or summed total
+    verification_step: 2
+    test_selector: tests/test_event_usage_fields.py
+    red_green_expectation: green before and after (shape rules); the new names are proven by step 1's verb-versus-oracle equality and the smoke column check
+  - source: scripts/telemetry_usage.py
+    behavior: tools sums the three counts and repeat_totals leaves out BOOKKEEPING_TOOLS
+    verification_step: 2
+    test_selector: tests/test_telemetry_usage.py::test_tools_sums_repeat_counts_and_totals_without_bookkeeping
+    red_green_expectation: red before (KeyError repeat_totals), green after
+  - source: docs/contracts/ducklake_telemetry_reader.yaml
+    behavior: the usage-verbs invariant and its latest amendment row
+    verification_step: 2
+    test_selector: tests/test_telemetry_usage.py::test_reader_contract_declares_the_usage_verbs
+    red_green_expectation: green before and after (the latest row must keep naming the three usage verbs); the note's words are prose describing step 1's SQL
+constraints:
+  - "No new column, no producer change, no friction rule change (classifier_version stays 3)."
+  - "No row carries content (Decision 236 cl.3): the transcript CTE selects only the link key columns, purpose and content_sha256, never content, content_uri or content_bytes."
+  - "The oracle stays independent code, never an import of the reader SQL."
+  - "ducklake_event_read_sql.py stays at or under 500 SLOC: re-measure at build start (452 on 5070cb63; PLAN-billing-shape-local, PLAN-merge-annotate-contract-reader and PLAN-telemetry-claude-p-capture-adapter are unbuilt on the same file). If the edit would cross 500, stop and send a plan-defect report, never a raise: a split adds a module to the content reader's bundle, a protective manifest edit needing the operator (Decision 272 cl.1)."
+  - "BOOKKEEPING_TOOLS lives only in telemetry_usage.py; the verb counts every tool and judges nothing."
+context:
+  - "Decision-scout r1: FLAGS_FOUND (WARN 79: the content reader and data-pipeline also bundle the reader modules, answered by VP 7 and infrastructure_dependencies; NOTE 272: a facade split would edit the content reader's protective set, answered by the SLOC constraint). CITE 79, 128, 199, 207, 236, 239, 249, 272, 279. RELATED 84, 88, 215, 200, 213, 255, 270, 125, 126, 254, 221, 210, 214. Decisions triaged: 228 of 228. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2. Serves: mission 3/5."
+  - "Existence check (operator rule 2026-11-20): the fact is already stored. Input fingerprint: telemetry_transcripts.content_sha256 on purpose tool_input rows, linked by _joins.yaml ref_links.tool_call_open_to_tool_input (PLAN-existence-step-and-tool-input-link, #2319; 19,694 of 19,694 opens matched over parsers 7-11). Output fingerprint: telemetry_observations.output_sha256 and output_bytes on tool_call closes. The dropped column plan and its blind consult: /mnt/project-files/parser-v12/columns-consult/."
+  - "Why a separate count, not a friction rule change: the 2026-11-18/19 probe (72 roots) found every classifier_version 3 failure run had 3 distinct inputs, so an identical-input run key would zero the rework signal; operator chose the separate count on 2026-11-21."
+  - "Partition choice: a repeat is per (session_id, tool name), the row's own grain; order only picks which call is first, so counts and bytes do not depend on it (equal output_sha256 means equal bytes). A tool_input row duplicated after dedupe keeps the first by (event_timestamp, source_ordinal, event_id), so a link never fans out a call."
+  - "Decision 207: adding TRANSCRIPTS to the verb's tables widens compose()'s conflicts union, so the tree-level stamps also report telemetry_transcripts conflicts; the contract text says so."
+  - "Contract text (append after the tool_use_rollup sentence of the Usage verbs invariant): tool_use_rollup also reads telemetry_transcripts and carries repeat_input_count (calls whose tool_input row, reached by _joins.yaml ref_links.tool_call_open_to_tool_input, has a content_sha256 equal to an earlier call's of the same tool name in the same session; the empty-string digest of a withheld row never counts), repeat_output_count (calls whose latest close has a non-NULL output_sha256 with output_bytes above 0 equal to an earlier call's of the same tool name in the same session) and repeat_output_bytes (those calls' output_bytes summed); earlier is by the open row's event_timestamp, source_ordinal and event_id. It reads the digest only, never content, and its tree-level stamps also cover telemetry_transcripts conflicts."
+  - "Notice-class files this plan changes (Decision 279): docs/contracts/ducklake_telemetry_reader.yaml and this plan."
+  - "red_overlap (2026-11-21 ~15:10 UTC, main 5070cb63): blocked by rec-5468 (notice-digest issue create race, scripts/ci/notice_digest.py), past the 4 h SLO, shared files none; PLAN-notice-digest-create-number is its fix. Deferral: operator 2026-11-17, builds proceed past reds sharing no files; the build re-runs red_overlap before it starts."
+  - "Rec re-key 2026-11-21: rec-5079's acceptance moved from the dropped producer test to test_repeat_input_count_same_tool_same_session and its file to the sql module; rec-5250's undecidable acceptance moved to test_repeat_output_count_and_bytes_on_latest_close."
+  - "Kept graduated shards (assertions additive only): friction-signature-registration-and-cli, telemetry-usage-cli-fails-closed, telemetry-usage-verbs-registered."
+  - "Headroom (plan_obligations, 5070cb63): sql 452/500, verbs 389/500, telemetry_usage.py 394/500, tests/test_telemetry_usage.py 442/500 (two short tests fit), contract 18,619 of 49,152 B."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:5338aeda44f5e01ca2887d3595d95552252a03b0b1a8bf68971baf947b172209"}  # pragma: allowlist secret
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+  - "bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-telemetry-repeated-tool-calls.yaml re-run; a red sharing a scope file stops the build."
+execution_steps:
+  - "1. Tests first: the three nodes in the tool-usage test module (clone a Bash open, its tool_input transcript row and its close with chain.clone_row, varying digest, session and output) and the CLI test; confirm red."
+  - "2. Re-measure the sql module's SLOC on the rebased tree; then the SQL, the registry tables and description, the fields and the oracle."
+  - "3. CLI sums, BOOKKEEPING_TOOLS and repeat_totals; the contract text from context and its amendment row with the build date."
+  - "4. Execute VP 1-2, then VP 3; loop until pass. On an unrecoverable failure stop and RCA (Decision 55)."
+  - >-
+    5. Commit Flow (implement skill and git-ops.yaml handoff_sequence): readiness, rebase, VP 3 on the rebased clean HEAD,
+    postflight evidence, git push -u origin HEAD as its own call, PR with the VP compliance table, subscribe; merge on code
+    review PROCEED and green CI (standing authorisation; no gated text) as a squash whose subject starts
+    feat(telemetry-repeated-tool-calls) and whose body carries "Resolves: rec-5079, rec-5250".
+  - "6. Post-deploy VP 4-6 once deploy-ducklake-lambdas ships the reader for a green main commit containing the merge; VP 7 is reported pending until the operator's next approved content reader deploy."
+  - "Report: what was implemented, verification results, the merge SHA, the deploy run id and VP 5's READ and TOTALS lines with the time ratios."
+rollback: >-
+  Nothing is stored: revert the merge commit and let deploy-ducklake-lambdas ship the reverted reader; the three columns and
+  the CLI totals leave with it.
