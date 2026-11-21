@@ -92,6 +92,20 @@ def test_lexicon_concepts_carry_their_facts(lexicon: dict[str, Any]) -> None:
     assert len(terms["digest"]["facts"]) == 4 and len(terms["skill name"]["facts"]) == 3
 
 
+def test_render_marks_a_retired_row(tmp_path: Path) -> None:
+    from scripts.telemetry_fact_index import contracts, sources
+    from scripts.telemetry_fact_index.verb_outputs import VerbOutput
+    from tests.telemetry_fact_index import make_root
+
+    built = contracts.project_contracts(make_root(tmp_path), set())
+    blob = VerbOutput("blob", ("telemetry_observations",), ("dropped",))
+    sources.add_serving(built, {"blob": blob})
+    row = next(r for r in built if r.address == "telemetry_observations.dropped")
+    assert row.kind == "retired" and [s.verb for s in row.serving] == ["blob"]
+    assert "owner: retired, dropped by rec-2" in telemetry_facts.render(row)
+    assert telemetry_facts._KIND_RANK["retired"] == 7
+
+
 def test_render_shows_each_row_kind(rows: list[Any]) -> None:
     by_address = {r.address: r for r in rows}
     surface = telemetry_facts.render(by_address["telemetry_sessions.surface"])

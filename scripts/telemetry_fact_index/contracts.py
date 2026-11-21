@@ -108,11 +108,14 @@ def _kind_of(
         return "read_derived", "", [], str(derivation.get("derived_by") or "")
     produced = [k for k, names in ((realization.get("produced") or {}).items()) if name in (names or [])]
     owners = [k for k, names in ((realization.get("unproduced") or {}).items()) if name in (names or [])]
+    dropped_by = [k for k, names in ((realization.get("retired") or {}).items()) if name in (names or [])]
     if produced:
         return "stored", "", produced, ""
     if owners:
         return "unproduced", owners[0], [], ""
-    raise ValueError(f"{table}.{name}: stored field is in neither realization.produced nor unproduced")
+    if dropped_by:
+        return "retired", dropped_by[0], [], ""
+    raise ValueError(f"{table}.{name}: stored field is in none of realization.produced, unproduced or retired")
 
 
 def _required_when_address(table: str, name: str, required_when: dict[str, Any]) -> str:

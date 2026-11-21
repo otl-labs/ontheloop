@@ -10,7 +10,7 @@ import yaml
 
 from scripts.telemetry_fact_index.contracts import FactRow, Serving, condition_of, parse_address, tokens
 
-_SERVED_KINDS = ("stored", "unproduced", "payload_key", "metadata_key")
+_SERVED_KINDS = ("stored", "unproduced", "retired", "payload_key", "metadata_key")
 _REGISTRY_REL = "docs/contracts/telemetry-metadata-keys.yaml"
 _LEXICON_REL = "docs/contracts/telemetry-lexicon.yaml"
 _JOINS_REL = "docs/contracts/_joins.yaml"
