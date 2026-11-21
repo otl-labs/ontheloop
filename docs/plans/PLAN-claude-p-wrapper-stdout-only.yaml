@@ -22,7 +22,10 @@ scope:
     purpose: >-
       Each attempt runs claude -p with stdout to "$OUTPUT_FILE" and stderr to a new STDERR_FILE="${OUTPUT_FILE}.stderr"
       (both truncated per attempt) instead of "> $OUTPUT_FILE 2>&1". After each attempt the wrapper copies STDERR_FILE to
-      its own stderr (cat >&2, failure ignored) so the job log still shows every CLI diagnostic. _is_transient reads
+      its own stderr (cat >&2, failure ignored), before the exit 0 path, so the job log still shows every CLI
+      diagnostic. The combined read for _is_transient is guarded (OUTPUT_CONTENT="$(cat "$OUTPUT_FILE" "$STDERR_FILE"
+      2>/dev/null || true)") so a missing file never aborts under set -euo pipefail; a failed stderr redirection makes
+      bash skip claude with exit 1, which stays non-transient (no retry), as an unwritable output file does today. _is_transient reads
       stdout and stderr content together (the same bytes the merged file held), so retry behaviour is unchanged
       (Decision 55, 73, 92 parity with _TRANSIENT_CLAUDE_SIGNATURES). Header comment states the new output contract:
       the output file holds stdout only. Session-id, manifest and exit-code behaviour are unchanged.
@@ -66,7 +69,7 @@ scope:
       test_single_prints_id (plain "FILED: rec-42" prints rec-42 and nothing on stderr); test_single_no_marker_exits_1;
       test_non_envelope_output_names_the_cause_on_stderr (a non-JSON line before an envelope: no pairs on stdout and the
       "is not a single claude -p JSON envelope" line on stderr; a clean envelope prints nothing on stderr);
-      test_missing_file_is_silent; test_non_string_result_falls_back_to_raw (envelope with empty result yields no
+      test_missing_file_is_silent (--all mode on an absent file: no output and nothing on stderr); test_non_string_result_falls_back_to_raw (envelope with empty result yields no
       pairs). Together they bring filing.py to 100% line coverage. Existing nodes unchanged.
 bundled_recommendations: [rec-5492]
 followon_recs: []
@@ -165,7 +168,7 @@ verification_plan:
       echo 'READ VIA MCP after the operator dispatch: mcp__github__actions_list(method="list_workflow_runs", owner="otl-labs",
       repo="ontheloop", resource_id="ci-rca.yml") for the workflow_dispatch run, then mcp__github__actions_get(method="list_workflow_jobs")
       for its step conclusions'
-    expected: the operator's dispatch run concludes success; steps Run ci-rca agent and Mark failure as RCA'd are success; the duplicate rec is superseded and read back
+    expected: run conclusion success; job rca steps "Run ci-rca agent" and "Mark failure as RCA'd" each conclusion success; the duplicate rec reads back status superseded
     fix_if: >-
       the run fails at the filing check (read the log via mcp__github__get_job_logs; a stderr line in the output file
       means the fix did not take; report to the planner) or fails elsewhere (file a rec naming the run id; this plan's
@@ -196,9 +199,9 @@ constraints:
 context:
   - "Decision-scout verdict FLAGS_FOUND (round 1): one NOTE on Decision 226 cl.3 (rule 5 overlap with rec-5491 also blocks the build dispatch, not only rule 1). Disposition: the red_overlap context line now says so. CITE: Decision 55 (bounded transient retry kept; root fix, no workaround), Decision 72 (the ci-rca file-a-rec path repaired), Decision 74 (CLI pin and the workflow_dispatch run_id/force_rca escape hatch used by VP 8), Decision 201 (decidable acceptance gates the Resolves closure). Decisions triaged: 228 of 228. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2 (T1.13 on filing.py, no criterion touched; T4.23 on the tests/ prefix). Serves: mission 3/5."
   - "Evidence: CI RCA run 44945298668, job 136971171676 log line 999 is the CLI 2.1.323 warning printed by cat /tmp/ci-rca-output.json before the JSON envelope; the envelope's result ends FILED: rec-5491 environment; rec-5491 is open (filed). Stream verified: the CLI bundle emits the trust warning through console.error, i.e. stderr (critic greps of the 2.1.323 linux-x64 package and the local 2.1.330 binary, plan-critique rounds 1-2). Diagnosis: /mnt/project-files/ci-rca-failure/RESUME.md."
-  - "History: rec-2658 hit the same merge in the plan reviewer and was fixed by a tolerant parser in scripts/ci/review_verdict.py (_iter_json_objects). It stays as is; after this change it simply sees clean JSON. Known leftover, not in scope: review_verdict.py:18-24 and tests/test_review_verdict.py's docstring and line 107 describe the wrapper's 2>&1 merge as rec-2658's root cause; they stay as that rec's history (editing review_verdict.py would pull it into the full tier's per-file coverage gate for a prose change), and the tolerant parser stays as defence for the reviewer; rec-5492's build PR body names the stale sentence."
+  - "History: rec-2658 hit the same merge in the plan reviewer and was fixed by a tolerant parser in scripts/ci/review_verdict.py (_iter_json_objects). It stays as is; after this change it simply sees clean JSON. Known leftover, not in scope: review_verdict.py:18-24 and tests/test_review_verdict.py's docstring and line 107 describe the wrapper's 2>&1 merge as rec-2658's root cause; they stay as that rec's history (editing review_verdict.py would pull it into the full tier's per-file coverage gate for a prose change), and the tolerant parser stays as defence for the reviewer; tracked as rec-5498 (Low, depends on rec-5492), read back."
   - "Coverage gate (critique round 2, re-measured 72.4% on main): a prototype of the TestMainInProcess nodes plus the main() diagnostic gives check_per_file_coverage == [] (100%) and 43 passed in tests/test_ci_rca_filing.py."
-  - "Callers checked: ci-rca.yml rca_agent step (cat of the output file then filing), .github/actions/subagent-plan-review/review.sh (review_verdict.py, _stats, archive_transcripts.sh copies review.json and review_retry.json by name, so the new .stderr file is never archived: a stalled reviewer's CLI stderr, which used to ride inside review.json, now lives only in the job log, a small loss of archived evidence accepted here), telemetry-ci-capture (reads the .sessions.jsonl manifest only). None reads stderr from the output file."
+  - "Callers checked: ci-rca.yml rca_agent step (cat of the output file then filing), .github/actions/subagent-plan-review/review.sh (review_verdict.py, _stats, archive_transcripts.sh copies review.json and review_retry.json by name, so the new .stderr file is never archived: a stalled reviewer's CLI stderr, which used to ride inside review.json, now lives only in the job log, a small loss of archived evidence accepted here; that stderr now also reaches the public job log, within Decision 101's boundary because review.sh runs claude under env -i with no AWS keys, the OAuth token is a masked secret, and the digest holds public literals only), telemetry-ci-capture (reads the .sessions.jsonl manifest only). None reads stderr from the output file."
   - "Prototype (scratch worktree of origin/main faf62a68, not committed): the wrapper edit only, plus a stub printing the warning, gives a clean output file and filing --all prints rec-5491,environment; the existing 156 nodes of the four existing VP 5 files pass. The narrowed filing.py diagnostic, prototyped from main() as well, keeps all 156 green (test_cli_exits_0_and_prints_id's stderr == '' included) and names a warning-plus-envelope file."
   - "Stderr is shown in the job log after each attempt ends, not live; the CLI writes little to stderr in -p json mode."
   - "Separate defect, not in scope: the same warning means the CLI ignores .claude/settings.json allow entries, so the agent was denied mcp__ducklake-reads__ tools (job 136971171676 permission_denials). Filed as rec-5494 (High), read back."
@@ -218,6 +221,7 @@ gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:4148b9dff126eb1ab1cf5ee3ee06dce4dfa206a1deb780fc5f7f6f559faf1ad8'}
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 1, nits: 4}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 4}
+  - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 6}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -229,4 +233,4 @@ execution_steps:
   - scripts/ci_rca/filing.py -- stderr diagnostic and docstring per scope row 2
   - tests -- the three test files per scope rows 3-5
   - Execute Verification Plan -- run each step; loop until pass; on unrecoverable failure stop and RCA (Decision 55)
-  - 'Report: what was implemented, verification results'
+  - 'Report: what was implemented, verification results, the build PR number and its squash-merge SHA'
