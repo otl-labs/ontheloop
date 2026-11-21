@@ -33,12 +33,14 @@ scope:
       unread-by-budget litellm trees excused (non-zero only when no non-litellm tree is unread by budget and at least
       min(floor, litellm trees to read) litellm trees were compared; moved or collided trees are not clean samples and
       do not count toward the floor); CallStats, a lock-guarded recorder of call seconds with
-      calls_over_10s and call_p95_s (whole seconds, ceil).
+      calls_over_10s and call_p95_s (whole seconds, ceil) over every gated call and both describes (the calls
+      reader_calls counts).
   - file: scripts/telemetry_verify/monitor.py
     action: Modify
     purpose: >-
       MAX_READER_CALLS 800 -> 3000. _Gate takes one threading.Lock over the open() check and the count increment (so two
-      workers never pass the cap or start a call past the time rule) and over max_call_s/max_bytes, and records each
+      workers never pass the cap; the time rule already holds under concurrency, since each in-flight call started with
+      at least 900 s left and lasts at most 450 s) and over max_call_s/max_bytes, and records each
       call's seconds in a CallStats. _root_row keeps entity_ref. run_monitor gains workers: int = 1 (so every existing
       caller and test stays sequential; only __main__ passes MONITOR_WORKERS); to_read is
       read_order(quiet)[skip_trees:] (quiet sorted as today first, so skip_trees and next_skip stay positional over the
@@ -103,8 +105,8 @@ verification_plan:
       increment), and two threads released together by a threading.Barrier each attempting one gate call; it asserts one
       call reached named() and the other raised _Refused. With _Gate unlocked both pass open() inside the sleep and two
       calls reach named(), so the node is red. Its time leg: the cap patched large, a Budget of 2 x CALL_WORST_CASE_S +
-      0.5 s whose clock advances 1 s per read, two threads released together: no call starts once fewer than
-      2 x CALL_WORST_CASE_S remain. On a simulated build all seven pass.
+      2.5 s whose clock advances 1 s per read, two threads released together: exactly one call starts, and every recorded
+      start saw at least 2 x CALL_WORST_CASE_S remaining. On a simulated build all seven pass.
     expected_literals:
       - 7 passed
     fix_if: A failure is the helper or the gate lock; fix the source, never the test. The prefix node failing means the producer's root ref changed; STOP to the plan owner.
@@ -128,7 +130,7 @@ verification_plan:
       trees_read + tree_too_large + tree_read_failed + not_read_budget + litellm_sampled_out equals quiet - skip_trees,
       and a second run with skip_trees = next_skip reads the rest. Red before: those nodes fail (no workers parameter, no
       litellm_sampled_out); the new regex and test_monitor_command_runs_two_workers fail against main's line and CLI.
-    fix_if: A golden-world mismatch between worker counts is a thread-safety or ordering defect in monitor.py; fix the source. A changed existing assertion is a STOP to the plan owner.
+    fix_if: A golden-world mismatch between worker counts is a thread-safety or ordering defect in monitor.py; fix the source. An excused run whose orphan_* or sessions_window classes differ from the full-read run's means an unread litellm tree leaks into the day-level comparison; fix the source (judge only compared trees). A changed existing assertion is a STOP to the plan owner.
     hermetic: false
     graduation: waive
     graduation_waiver_reason: The fast-tier runner has no duckdb, so these nodes cannot replay there; the full tier runs them on every merge, which is the standing guard for the golden-world behaviour.
@@ -162,11 +164,13 @@ verification_plan:
     expected: >-
       The monitor exits 0 and grep prints the MONITOR line. Record reader_calls, elapsed_s, max_call_s, calls_over_10s
       and call_p95_s verbatim in the closure report (counts only). elapsed_s well under 2,000 (about 600 s expected for
-      about 880 calls at 0.64 s).
+      about 880 calls at 0.64 s; recorded, not asserted).
     fix_if: >-
       not_read_budget above 0 at workers=2 means the measured speedup did not hold on a full run; tree_read_failed above
       0 with throttles in step 6 means two workers contend for the reader's 4 reserved slots. Either is a STOP to the plan
-      owner (the fallback, a second credential session, is a plan amendment), never a cap edit in the build.
+      owner (the fallback, a second credential session, is a plan amendment), never a cap edit in the build. If the persona egress plan (E3) has already written litellm
+      rows, the litellm_quiet=0 litellm_read=0 literals fail for that reason alone: a STOP to re-scope the assertion, not a
+      build defect.
     hermetic: false
     graduation: not-applicable
   - step: 6
@@ -293,6 +297,7 @@ gate_rounds:
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:bf5b0f7041fe2b79f02f70b860e9b0749ecede0f608f829224b01d1b36f9a74e"}
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 4, nits: 9}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 3, nits: 10}
+  - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 6}
 weakening_dispositions:
   - candidate: "[constant-changed] scripts/telemetry_verify/monitor.py::MAX_READER_CALLS"
     disposition: planned-change
