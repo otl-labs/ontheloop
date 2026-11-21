@@ -29,9 +29,10 @@ scope:
   - file: scripts/telemetry_fact_index/__init__.py
     action: Create
     purpose: >-
-      Facade (Decision 80/104/124 pattern) re-exporting FactRow and project(root, lexicon=None, verb_outputs=None),
-      which returns every fact row from the sources at call time; the lexicon and verb_outputs parameters are the
-      seams tests use to pass an in-memory lexicon copy or a stub verb-output map.
+      Facade (Decision 80/104/124 pattern) re-exporting FactRow and project(root, lexicon=None, verb_outputs=None,
+      probe=True), which returns every fact row from the sources at call time; lexicon and verb_outputs are the seams
+      tests use to pass an in-memory lexicon copy or a stub verb-output map, and probe=False skips the live verb probe
+      even where duckdb is installed (the hermetic tests pass it, so they never probe in the full tier).
   - file: scripts/telemetry_fact_index/contracts.py
     action: Create
     purpose: >-
@@ -55,14 +56,19 @@ scope:
       own (a link is followed by reading its two ends). The lexicon's terms (term, aka, facts): every facts address with
       no contract-projected row of the same address materializes its own row, kind payload_key when it carries a #key
       suffix, else the base column's kind with the base column's serving verbs, and the term's words attach to it.
-      Metadata keys as rows of kind metadata_key (address telemetry_observations.metadata#<key>[observation_type=<value>])
-      from the keys present in the expected_rows of the producer's golden files (tests/fixtures/turn_capture/golden/*.json
-      read as data; files with no expected_rows, such as index.json, skipped), marked undeclared; the audit review's
-      plan C repoints this source at its key registry when that lands. Serving from verb outputs: a verb serves a row
-      when one of its output columns equals the row's base column and the row's table is in the verb's EventRead
-      tables; a verb returning row_json serves every compared_columns(table) column (src/common/ducklake_event_reads.py:198)
-      of each of its tables; payload_key and metadata_key rows are served by their base column's verbs; output columns
-      matching no row become verb-only rows (verb:<verb>.<column>).
+      Metadata keys as rows of kind metadata_key (address telemetry_observations.metadata#<key>[observation_type=<value>],
+      with the producers that emit it) from every producer's registered golden corpus: for each producer in
+      config/telemetry/parser_versions.yaml with a golden_index, read that index's cases and their expected_rows, the
+      same walk as validate_telemetry_field_realization.load_inputs (mirrored, since that function also reads the
+      roadmap and field semantics), and json.loads each observation row's metadata string (claude_code and litellm
+      today; litellm adds error and loss on model_call). Marked undeclared; the audit review's plan C repoints this
+      source at its key registry when that lands. Serving from verb outputs: a verb serves a row when one of its output
+      columns equals the row's base column and the row's table is the verb's only table, or the column exists in no
+      other of the verb's tables; a same-named column on a verb reading several tables that hold it is attached to each
+      such row marked ambiguous, never to a table lacking the column. A verb returning row_json serves every
+      compared_columns(table) column (src/common/ducklake_event_reads.py:198) of each of its tables, a rule applied only
+      from probed or declared outputs (no SQL text matching). payload_key and metadata_key rows are served by their
+      base column's verbs; output columns matching no row become verb-only rows (verb:<verb>.<column>).
   - file: scripts/telemetry_fact_index/verb_outputs.py
     action: Create
     purpose: >-
@@ -71,18 +77,24 @@ scope:
       rt.resolve_table_spec("ops_projects").current_table under rt.TELEMETRY_CATALOG_ALIAS (the rendered SQL joins
       {projects}; the same table set tests/fixtures/telemetry_read_db.create_tables builds, mirrored and not imported),
       and returns the cursor's column names per verb with agent_facing (about 0.7 s for all 20 verbs, measured
-      2026-11-21). duckdb imported inside the function only; returns None when duckdb is not installed. A verb that
-      cannot run on that catalog takes its outputs from a hand-declared exception map, today exactly
-      {telemetry_health_count} (it reads DuckLake metadata tables). rec-5439 replaces the probe with declared outputs.
+      2026-11-21). duckdb imported inside the function only; returns None when duckdb is not installed. A verb whose
+      cursor columns are not what it returns takes its outputs from a hand-declared exception map, today exactly four:
+      telemetry_health_count (it reads DuckLake metadata tables and cannot run on the catalog); transcript_content (its
+      rows go through serve_content, so its outputs are the _envelope keys, src/common/ducklake_event_content.py:82-96);
+      transcript_row_masked (masked.serve_row's keys, src/lambdas/ducklake_telemetry_content_reader/masked.py:61-107);
+      and session_transcript_masked (masked.serve_session's envelope keys plus its rows' _row_out keys, masked.py:114-205).
+      None of the three content verbs lists content_uri or raw content (masked.py never returns content_uri, Decision
+      101). rec-5439 replaces the probe and the map with declared outputs.
   - file: scripts/session/telemetry_facts.py
     action: Create
     purpose: >-
       Lookup: `bin/venv-python -m scripts.session.telemetry_facts <term> [<term> ...]`, calling project(). Tokens are
-      lower case, split on underscore, dot, #, brackets, =, |, comma and whitespace; a row's tokens are its address,
+      lower case, split on every run of characters outside [a-z0-9]; a row's tokens are its address,
       kind name (ref_link gives ref and link), description words, populated_by, discriminator values and the words of
       every term whose facts name it. Each query term expands to itself plus every lexicon aka set it belongs to and
       matches a row by token equality; a row matches when every query term matches. Rank, primary key first: match
-      source (concept fact, then address token, then description), then kind (stored, unproduced, read_derived,
+      source, the weakest across the query's terms (concept fact, then address token, then description), then kind
+      (stored, unproduced, read_derived,
       payload_key, metadata_key, ref_link, verb-only), then address. Prints at most ten facts (address, kind, type,
       discriminator condition, one-line description, producer or unproduced owner, join or ref link ids and the link's
       from and to, serving verbs with agent_facing, labelled registered and never deployed, or unserved, contract
@@ -95,7 +107,8 @@ scope:
       Also prove each term's facts entries: a bare address string (a mapping, or text carrying a description, type or
       rule, fails, keeping the lexicon term-level, Decision 95); the base address resolves to a resolved field of a
       telemetry contract, loading only the contracts its facts entries name; at most one discriminator, as the
-      term_facts text states, a field of that table with the value in its accepted_values; aka words are lower case
+      term_facts text states, a field of that table with the value in its dq_intent.accepted_values.values; aka words
+      are lower case
       and unique within a term. Keeps reading the lexicon's canonical_tables (Decision 168 cl.2); declares examined()
       once, counting both units (the registry holds one slot).
   - file: docs/contracts/telemetry-lexicon.yaml
@@ -134,8 +147,9 @@ scope:
       (keys date, semantic_break, change_class, summary of at most 160 characters; Decision 275 cl.4). AT CAP
       (500 of 500 effective lines, 45,115 B on main 5070cb63). Valve 1 frees nothing: every top-level amendment_log row
       is already one line and no row may be dropped (contract-population.yaml amendment_log_retention.rule). Relief is
-      valve 2 (Decision 275 cl.3, move detail to its owner by citation): the overseer-dispatch-contract route's
-      seven-line description, which lists what its target contract holds, becomes exactly "Overseer dispatch model
+      valve 2 (Decision 275 cl.3, move detail to its owner by citation; the owner here is the route's target,
+      docs/contracts/overseer-dispatch.yaml, which already holds every item the description lists): the
+      overseer-dispatch-contract route's seven-line description becomes exactly "Overseer dispatch model
       (Design B relief valve, Decision 86/127), relocated from .claude/skills/overseer/SKILL.md; its target lists what
       it holds." on one line, freeing six lines for the two this edit adds; the amendment row names the move.
       Re-measured against main at build; if that route is gone by then, the same valve on the longest remaining
@@ -151,7 +165,8 @@ scope:
   - file: tests/test_session_telemetry_facts.py
     action: Create
     purpose: >-
-      The lookup's mapped test (Decision 131 home), hermetic (no duckdb; verb_outputs passed as None). Golden queries:
+      The lookup's mapped test (Decision 131 home), hermetic (project(..., probe=False), one projection shared per
+      module through a fixture). Golden queries:
       test_tool_input_digest_finds_stored_column (tool input digest and tool input hash list
       telemetry_transcripts.content_sha256[purpose=tool_input] in the first three, matched through the digest concept;
       with the digest term removed from an in-memory lexicon copy passed to project(), tool input hash does not list
@@ -172,17 +187,21 @@ scope:
   - file: tests/telemetry_fact_index/test_sources.py
     action: Create
     purpose: >-
-      Joins, ref_links, golden-row metadata keys (index.json skipped), serving from a stub verb-output map (column and
-      table match, row_json serving compared columns, a same-named column on another table not served), verb-only
-      rows, and lexicon facts: each of the seven digest and skill name addresses has a row.
+      Joins, ref_links, golden-row metadata keys from both registered corpora (telemetry_observations.metadata#loss[observation_type=model_call]
+      has a row naming litellm; metadata#stop_reason[observation_type=model_call] names claude_code), serving from a
+      stub verb-output map (single-table match, a same-named column across several tables marked ambiguous, row_json
+      serving compared columns), verb-only rows, and lexicon facts: each of the seven digest and skill name addresses
+      has a row.
   - file: tests/telemetry_fact_index/test_verb_outputs.py
     action: Create
     purpose: >-
       Live probe (pytest.importorskip("duckdb", reason="env: duckdb absent from the fast-tier CI environment")): every
-      EVENT_READS and CONTENT_READS verb outside the exception map runs on the catalog, the map is exactly
-      {telemetry_health_count} and that verb still fails; with live outputs the lookup shows session_transcript_masked
-      serving telemetry_transcripts.content_sha256[purpose=tool_input] and every output column of every verb lands on a
-      row; fails once any EventRead declares an outputs attribute (rec-5439 replaces the probe).
+      EVENT_READS and CONTENT_READS verb outside the exception map runs on the catalog; the map's keys are exactly
+      {telemetry_health_count, transcript_content, transcript_row_masked, session_transcript_masked} and
+      telemetry_health_count still fails; no content verb serves telemetry_transcripts.content_uri; with live outputs
+      the lookup shows session_transcript_masked serving telemetry_transcripts.content_sha256[purpose=tool_input] and
+      the named verb-only row verb:session_transcript_masked.next_offset exists; fails once any EventRead declares an
+      outputs attribute (rec-5439 replaces the probe).
   - file: tests/checks/contracts/test_validate_telemetry_lexicon_tables.py
     action: Modify
     purpose: >-
@@ -195,7 +214,8 @@ acceptance_criteria:
   - The lookup for "tool input digest" and for "tool input hash" lists telemetry_transcripts.content_sha256[purpose=tool_input] in its first three rows; with the digest term removed from the lexicon, "tool input hash" does not list it.
   - The lookup for "skill name" lists telemetry_transcripts.content#skill[purpose=tool_input] (a payload fact); for "stop reason" a metadata_key row on model_call; for "tool call input link" the row ref_link:tool_call_open_to_tool_input with its from and to; each fact row shows its registered serving verbs or unserved.
   - A read-derived fact is shown served only when its derived_by verb is registered; telemetry_sessions.surface (no verb) shows unserved while the realized flag is false on every field.
-  - Every resolved field of the five telemetry contracts has at least one row; with duckdb installed, every output column of every reader verb lands on a row.
+  - Every resolved field of the five telemetry contracts has at least one row; with duckdb installed, the three content verbs show their response envelope fields (never content_uri) and verb:session_transcript_masked.next_offset is a verb-only row.
+  - Metadata keys come from every producer's registered golden corpus, so telemetry_observations.metadata#loss[observation_type=model_call] (litellm) has a row.
   - Nothing derived from the contracts is committed; a field added to a contract shows in the lookup with no other file changed.
   - A lexicon facts entry that is not a bare address, or names a missing field, a missing discriminator, two discriminators or a value outside accepted_values, fails validate_telemetry_lexicon_tables.
   - No Lambda-packaged file changes (scripts.lambda_manifest --list-patterns matches none of the scope files).
@@ -229,7 +249,7 @@ verification_plan:
     action: Live verb outputs (needs duckdb, so not hermetic under the fast-tier environment).
     command: bin/venv-python -m pytest tests/telemetry_fact_index/test_verb_outputs.py -q
     expected: exit 0; red before (the test file does not exist).
-    fix_if: a verb outside the exception map fails, an exception-map verb now runs, or an output column lands on no row
+    fix_if: a verb outside the exception map fails, telemetry_health_count now runs, a content verb serves content_uri, or the named verb-only row is missing
     hermetic: false
     graduation: graduate
     graduation_check_id: telemetry-verb-outputs-live
@@ -286,7 +306,7 @@ test_obligations:
     test_selector: tests/telemetry_fact_index/test_contracts.py
     red_green_expectation: red before (no package), green after
   - source: scripts/telemetry_fact_index/verb_outputs.py
-    behavior: every verb outside the exception map runs and its columns land on rows
+    behavior: every verb outside the exception map runs; content verbs report their response envelope, never content_uri
     verification_step: 3
     test_selector: tests/telemetry_fact_index/test_verb_outputs.py
     red_green_expectation: red before (no module), green after
@@ -323,9 +343,10 @@ context:
   - "Resolves rec-5438 (this plan is its whole deliverable; rec-5439 and rec-5472 stay open as their own plans). Its acceptance was re-filed to the single node test_tool_input_digest_finds_stored_column so the trailer closure can decide it. Squash body carries Resolves: rec-5438."
   - "Computed at call time, not committed (plan-critique r2 B4): a committed index would turn red on any later plan's telemetry contract, _joins, lexicon or golden-fixture edit, and its regeneration would sit outside that plan's scope (no implement-scope-boundary sanction row covers it). Projection inputs load in about 0.3 s and all 20 verbs probe in about 0.7 s (measured 2026-11-21). This drops the drafted config/telemetry/fact_index.yaml, verb_outputs.yaml, the drift gate and its _manifest.py and ci_rca_taxonomy.yaml rows; the lexicon term_facts sentence and the file-router row name the lookup instead of the dropped file (notice class, Decision 279 cl.1)."
   - "Served means the derived_by or returning verb is registered in EVENT_READS or CONTENT_READS (operator ruling on TFC-10), not that a function is deployed: transcript_content is registered and served by no deployed function (Decision 236 cl.3), so the lookup prints registered with agent_facing."
+  - "Plan-critique r3 nit N6 kept as-is: the skill name definition's per-session clause simplifies the producer's WA-1..WA-3 rule (src/turn_capture/sessions.py:135-146); the operator confirmed the text and the Class A contract holds the rule."
   - "Plan-critique r1 nits kept as-is: the digest definition's general wording stays as the operator confirmed it, the Class A contracts hold the omission and withheld cases; telemetry_agents.definition_sha256 is found through the column-name token sha256 and the digest aka expansion, so it needs no facts entry."
   - "Existence check (this plan stores no telemetry field): no new stored field; nothing is written to the warehouse or committed as derived data."
-  - "Red overlap: blocked (exit 1) by rec-5468 only (slo_breached, notice-digest workflow, shared paths none); its repair plan PLAN-notice-digest-create-number merged bbe094f9, build pending. Deferral: plan-only PR; the build checks red_overlap again at start and follows the halt rule (operator 2026-11-17: builds may proceed past reds sharing no files)."
+  - "Red overlap: at plan time blocked only by rec-5468 (notice-digest workflow, no shared paths), since closed by its fix on main (29aa11ee). The build checks red_overlap again at start and follows the halt rule (operator 2026-11-17: builds may proceed past reds sharing no files)."
   - "Selection budget: breadth_waived (16-path scope), declared here rather than discovered in CI."
   - "Decision-scout r5 FLAGS_FOUND (after critique r2 dropped the committed index): CITE dec:95, dec:168, dec:170, dec:275, dec:279 (dec:166 no longer cited: nothing generated is committed). NOTE dec:95 on the digest definition, accepted as in r4. NOTE dec:275 cl.4 fixed: the lexicon and file-router amendment rows are terse. SPIRIT NS.5: the verb-output probe retires in rec-5439, and test_verb_outputs fails once any EventRead declares outputs. Decisions triaged: 228 of 228. Roadmap items intersected: 3; CONFLICT: 0; RELATED: 3. Serves: NS.4 4/5."
   - "Decision-scout r4 FLAGS_FOUND (written plan): same CITE set; NOTE dec:95 on the digest definition naming columns accepted as-is: lexicon definitions already name the columns a term denotes (transcript, tool_output), the text says where the concept is stored and no rule, and the operator confirmed this exact text 2026-11-21; NOTE NS.5 as below. Decisions triaged: 228 of 228. Roadmap items intersected: 4; CONFLICT: 0; RELATED: 4. Serves: NS.4 4/5."
@@ -338,6 +359,7 @@ gate_rounds:
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 5, nits: 4}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 4, nits: 8}
   - {gate: decision-scout, round: 5, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:9012d7bc3cac04387d2de8583da1025b2a486c368e902104f7967f823ad9a6e8"}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 2, nits: 10}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
