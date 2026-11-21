@@ -362,6 +362,23 @@ def test_live_retired_columns_are_stubs() -> None:
                 assert all(row.get(name) is None for row in corpus["rows"].get(table, [])), (table, name)
 
 
+def test_criterion_text_unparseable_block_reads_as_none() -> None:
+    broken = "  - id: T1.1\n    exit_criteria:\n      - id: c1\n        text: [unclosed\n        status: open\n"
+    assert check.criterion_text(broken, "T1.1:c1") is None
+    assert check.criterion_text(_ROADMAP, "rec-9") is None
+
+
+def test_retired_duplicates_and_two_retired_owners_are_refused() -> None:
+    world = _world()
+    _with_retired(world)
+    _block(world)["retired"]["rec-9"].append("x")
+    assert any("retired.rec-9 lists a field more than once" in e for e in check.realization_errors(world)[0])
+    world = _world()
+    _with_retired(world)
+    _block(world)["retired"]["rec-10"] = ["x"]
+    assert any("more than one retired owner" in e for e in check.realization_errors(world)[0])
+
+
 def test_normalised_out_column_passes_r4_by_membership() -> None:
     errors, _ = check.realization_errors(_world())
     assert not any(".h:" in e for e in errors)
