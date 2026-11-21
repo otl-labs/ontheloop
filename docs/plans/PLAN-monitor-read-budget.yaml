@@ -45,8 +45,8 @@ scope:
       caller and test stays sequential; only __main__ passes MONITOR_WORKERS); to_read is
       read_order(quiet)[skip_trees:] (quiet sorted as today first, so skip_trees and next_skip stay positional over the
       new order); the tree phase runs _process over to_read on a ThreadPoolExecutor(max_workers=workers) with map, so
-      outcomes keep input order (workers=1 is today's sequential behaviour). The report gains workers, litellm_quiet,
-      litellm_read, litellm_sampled_out, calls_over_10s and call_p95_s; not_read_budget counts only unexcused budget
+      outcomes keep input order (workers=1 is today's sequential behaviour). The report gains workers, litellm_quiet (litellm
+      trees in to_read), litellm_read (litellm trees compared; the floor's count), litellm_sampled_out, calls_over_10s and call_p95_s; not_read_budget counts only unexcused budget
       outcomes (budget outcomes minus litellm_sampled_out), so coverage_incomplete's formula is unchanged and an excused
       litellm tree never raises monitor_coverage_incomplete. MONITOR_BUDGET_S, CALL_WORST_CASE_S, FILING_RESERVE_S,
       MAX_TREE_CALLS, the run-level and day-level phases (still sequential) and _stops are unchanged. monitor.py reads
@@ -84,7 +84,9 @@ acceptance_criteria:
     The existing tests/telemetry_verify/test_monitor.py and tests/telemetry/test_parent_observation_orphan_monitor.py
     pass unchanged (run_monitor defaults to workers=1), and on the golden world workers=1 and workers=2 reports are equal
     excluding run_level_s, elapsed_s, max_call_s, calls_over_10s, call_p95_s and workers.
-  - No call starts once MAX_READER_CALLS calls are made or fewer than 2 x CALL_WORST_CASE_S of MONITOR_BUDGET_S remain, with two concurrent callers.
+  - >-
+    No call starts once MAX_READER_CALLS - 1 calls are made (one kept for the closing describe) or fewer than
+    2 x CALL_WORST_CASE_S of MONITOR_BUDGET_S remain, with two concurrent callers.
 verification_plan:
   - step: 1
     phase: pre-deploy
@@ -105,8 +107,9 @@ verification_plan:
       increment), and two threads released together by a threading.Barrier each attempting one gate call; it asserts one
       call reached named() and the other raised _Refused. With _Gate unlocked both pass open() inside the sleep and two
       calls reach named(), so the node is red. Its time leg: the cap patched large, a Budget of 2 x CALL_WORST_CASE_S +
-      2.5 s whose clock advances 1 s per read, two threads released together: exactly one call starts, and every recorded
-      start saw at least 2 x CALL_WORST_CASE_S remaining. On a simulated build all seven pass.
+      1.5 s on a lock-guarded fake clock that returns 0 at Budget creation and advances 1 s per read, two threads released
+      together: only the first read after creation leaves 2 x CALL_WORST_CASE_S (900.5 s) and every later read leaves less,
+      so exactly one call starts and the other raises _Refused under any thread scheduling. On a simulated build all seven pass.
     expected_literals:
       - 7 passed
     fix_if: A failure is the helper or the gate lock; fix the source, never the test. The prefix node failing means the producer's root ref changed; STOP to the plan owner.
@@ -236,6 +239,12 @@ constraints:
   - No IAM, Terraform, Lambda, reserved-concurrency or workflow change; MONITOR_BUDGET_S, CALL_WORST_CASE_S, FILING_RESERVE_S and the 3,600 s role session unchanged.
   - The oracle never imports producer code (test_package_boundary unchanged); the litellm prefix is a literal pinned by a test.
   - No rescue agents or workaround loops (Decision 55); a failed live step is a STOP to the plan owner.
+  - >-
+    The tree pool starts only after the start describe and the sequential run-level and day-level phases, which populate
+    RoutedReader's lazy catalog and event-reader state (read_route.py), so two workers never race its initialisation.
+  - >-
+    If validate_weakening_candidates also flags the not_read_budget netting, the build records a planned-change
+    disposition citing acceptance_criteria[2] and the Decision 235 operator choice in context.
 context:
   - >-
     Decision-scout r2 FLAGS_FOUND; CITE dec:101, dec:181, dec:210, dec:235. Decisions triaged: 228 of 228. Roadmap items
@@ -298,6 +307,7 @@ gate_rounds:
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 4, nits: 9}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 3, nits: 10}
   - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 6}
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 1, nits: 6}
 weakening_dispositions:
   - candidate: "[constant-changed] scripts/telemetry_verify/monitor.py::MAX_READER_CALLS"
     disposition: planned-change
