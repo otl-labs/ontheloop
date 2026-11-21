@@ -212,7 +212,7 @@ def test_by_root_and_by_agent_widen_the_key() -> None:
         "root_session_id": "a", "harness_session_key": "k", "session_started_at": "2026-10-01T10:00:00+00:00",
         "is_root": False, "agent_name": "Explore", "tool_name": "mcp__github__x", "mcp_server": "github",
         "call_count": 2, "error_count": 1, "blocked_count": 0, "interrupted_count": 0, "session_count": 1,
-        "derivation_conflicted": True,
+        "repeat_input_count": 0, "repeat_output_count": 0, "repeat_output_bytes": 0, "derivation_conflicted": True,
     }  # fmt: skip
     root_tool = {**tool, "is_root": True, "agent_name": None, "call_count": 3}
     narrow = _run(["tools", "--from", "2026-10-01", "--to", "2026-10-01"], FakeReader([tool, root_tool]))[1]
@@ -544,3 +544,43 @@ def test_reader_contract_declares_the_friction_signature_verb() -> None:
     assert len(logged) == 1
     assert logged[0]["change_class"] == "field_add" and logged[0]["semantic_break"] is False
     assert "friction_signature_counts" in logged[0]["summary"]
+
+
+_TOOL_ARGV = ["tools", "--from", "2026-10-01", "--to", "2026-10-01"]
+
+
+def _tool_row(name: str, **over: Any) -> dict[str, Any]:
+    row = {
+        "root_session_id": "a", "harness_session_key": "k", "session_started_at": "2026-10-01T10:00:00+00:00",
+        "is_root": True, "agent_name": None, "tool_name": name, "mcp_server": None, "call_count": 5, "error_count": 0,
+        "blocked_count": 0, "interrupted_count": 0, "session_count": 1, "repeat_input_count": 2, "repeat_output_count": 1,
+        "repeat_output_bytes": 7, "derivation_conflicted": False,
+    }  # fmt: skip
+    return {**row, **over}
+
+
+def test_tools_sums_repeat_counts_and_totals_without_bookkeeping() -> None:
+    rows = [
+        _tool_row("Bash"),
+        _tool_row("Bash", root_session_id="b"),
+        _tool_row(cli.BOOKKEEPING_TOOLS[0], repeat_input_count=9),
+    ]
+    code, result, _ = _run(_TOOL_ARGV, FakeReader(rows))
+    assert code == 0 and result is not None
+    by_tool = {r["tool_name"]: r for r in result["rows"]}
+    assert (by_tool["Bash"]["repeat_input_count"], by_tool["Bash"]["repeat_output_bytes"], by_tool["Bash"]["bookkeeping"]) == (
+        4,
+        14,
+        False,
+    )
+    assert by_tool[cli.BOOKKEEPING_TOOLS[0]]["bookkeeping"] is True
+    assert result["repeat_totals"]["all"] == {"repeat_input_count": 13, "repeat_output_count": 3, "repeat_output_bytes": 21}
+    assert result["repeat_totals"]["without_bookkeeping"]["repeat_input_count"] == 4
+    assert _run(_TOOL_ARGV, FakeReader([]))[1]["repeat_totals"]["all"] == dict.fromkeys(cli.REPEAT_KEYS, 0)  # type: ignore[index]
+
+
+def test_tools_fails_closed_on_rows_without_repeat_keys() -> None:
+    old = {k: v for k, v in _tool_row("Bash").items() if k != "repeat_input_count"}
+    code, result, err = _run(_TOOL_ARGV, FakeReader([old]))
+    assert code == 1 and result is None
+    assert "repeat_input_count" in err and "Traceback" not in err and "KeyError" not in err
