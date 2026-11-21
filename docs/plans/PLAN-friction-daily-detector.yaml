@@ -55,11 +55,13 @@ scope:
       coverage first, then session_count desc, fact_count desc, subject_key. rec_states(reader): one scoped read of
       ops_recommendations rows with source feedback_loop (the current_state row_filter scripts.rec_episode.find_recs
       uses, all statuses kept; the source is proposals.SOURCE, the package's one literal), and every returned row must
-      carry id, status, source, created_timestamp and context_v2_json or the read raises (find_recs'
+      carry id, status, source, created_timestamp, last_updated_timestamp and context_v2_json or the read raises (find_recs'
       _assert_rows_carry_keys shape: a projection change can never read as "new"); a row whose context_v2_json is null
       or not a JSON object is skipped and counted (unparsed_recs), never a match; for each finding the newest matching rec (created_timestamp, then id) whose parsed
       context_v2_json carries the same detector_id and subject_key gives its state: open filed, declined rejected,
-      superseded covered, closed or failed recurred (proposed again, naming the old rec); no match is new. A failed read
+      superseded covered, closed or failed recurred (proposed again, naming the old rec) only when window_from is after
+      that rec's last_updated_timestamp date, else closing (decided: the window still holds friction from before the
+      close); no match is new. A failed read
       raises (Decision 215: never read as no recs). friction_trees = distinct (root_session_id, harness_session_key,
       session_started_at) among the window's rows at V. The verb lists only trees holding at least one friction fact (it
       joins the facts to the trees), so min_trees is a floor on classified friction traffic at V, not on activity; rows at
@@ -69,19 +71,24 @@ scope:
     action: Create
     purpose: >-
       draft(finding, window, params) -> {fields, context_v2_json} for scripts.ops_data_portal.file_rec. fields: title
-      (friction_recurring "Friction: <label> on <signature> in <S> sessions (<F> times), <from>..<to>"; friction_coverage
-      "Friction coverage: <pct>% of process-event failures unnamed at classifier version <V>, <from>..<to>"), file (hook:X
+      (friction_recurring "Recurring friction: <signature>"; friction_coverage "Friction coverage: <pct>% of process-event
+      failures unnamed at classifier version <V>"; label, rule, counts and window go in context, because a shared template
+      with counts and dates makes two drafts on one file read as duplicates under rec_relevance's title Jaccard 0.7: the
+      measured pair "Recurring friction: gate:lint" / "Recurring friction: gate:pytest_diff" scores 0.5), file (hook:X
       -> the first existing .claude/hooks/X.py or X.sh; gate:X -> the first sorted match of scripts/checks/**/X.py;
       precommit:X -> .pre-commit-config.yaml; anything else, a hook or gate name with no matching file (gate:lint,
       gate:pytest_diff, gate:precommit_changed today) and coverage -> src/common/ducklake_event_read_verbs.py, the rules
-      that labelled it), status open, source feedback_loop, priority Low, effort S, risk Low, context (counts, window, trees, both versions, the label's
+      that labelled it), status open, source feedback_loop, priority Low, effort S (no risk or automatable: file_rec derives both from file and
+      effort, and its formula overrides any caller value), context (counts, window, trees, both versions, the label's
       rule, the local command that lists examples, and the sentence that the acceptance probe is evidence the friction
       stopped, not proof a fix worked: a proof close stays with back-validation, Decision 221's judge), acceptance
       "AWS_PROFILE=agent_platform bin/venv-python -m scripts.feedback_loop friction --assert-quiet <detector_id>
       <shlex-quoted subject_key> --classifier-version <V>". The source literal is written once, as "source": "feedback_loop"
       in the module's base-fields dict literal (the form check_source_registry's pattern matches; a bare constant would
       make the scan vacuous), and SOURCE is read from that dict for friction.py's rec read; proposals imports friction
-      only under TYPE_CHECKING. context_v2_json: detector_id, subject_key, classifier_version, detector_version,
+      only under TYPE_CHECKING. The file lookup's paths are this repository's own layout and a miss falls back to the
+      rules file; the package is not executor, adapter or port code, so Decision 212's ports.yaml record is not owed.
+      context_v2_json: detector_id, subject_key, classifier_version, detector_version,
       window_from, window_to, fact_count, session_count, probe_role "evidence_not_proof".
   - file: scripts/feedback_loop/render.py
     action: Create
@@ -111,9 +118,15 @@ scope:
       rows= friction_trees= process_event_facts= unmapped= coverage=finding|ok|unmeasurable findings= proposed= decided=
       unparsed_recs= other_version_rows= elapsed_s= (counts, version numbers and class words only, Decision 101). Exit 0 after a
       completed run whatever the findings (never a gate); 1 with one FRICTION_STOP stage=window|recs error_type=<word>
-      status=<int|none> line when a window or the rec read failed (error_type is WindowFailed's error_type word, which
-      telemetry_usage takes from the reader's error body or the exception class, never its message; status the HTTP
-      status when the reader error carries one). --assert-quiet requires --classifier-version (the rec's
+      status=<int|none> line when a window or the rec read failed. Extraction, since telemetry_usage.py is not in scope:
+      for stage=window, error_type is the error_type= word parsed from str(WindowFailed) (telemetry_usage takes it from
+      the reader's error body or the exception class, never a message) and status is getattr(exc.__context__, "status",
+      None) (raise ... from None keeps __context__); for stage=recs, telemetry_usage._error_type(exc) and getattr(exc,
+      "status", None). Any other exception prints FRICTION_STOP stage=internal error_type=<class name> status=none and
+      exits 1, with no traceback under GITHUB_ACTIONS (a traceback can carry a row value; locally it goes to stderr).
+      --json writes {"window": {"from", "to"}, "versions": {"detector_version", "classifier_version"}, "counts": {the
+      counts line's keys}, "findings": [{"detector_id", "subject_key", "state", "rec_id" (null when none),
+      "draft": {"fields", "context_v2_json"}}]}: every finding, proposed or decided, carries its draft. --assert-quiet requires --classifier-version (the rec's
       context_v2_json value, which the draft's acceptance carries), skips the rec read and fails closed: it exits 0 only
       after a completed run in which N equals the checkout's classifier_version V, friction_trees >= min_trees, the
       subject's detector was measurable (for coverage, process_event_facts >= min_process_event_facts) and that detector
@@ -149,7 +162,8 @@ scope:
       one {tier, ci_rca, owner, rationale} line). Relief (the config class's "compact resolved rows" valve,
       config/structural_size_budgets.yaml): if the row would take the file past 500 effective lines measured on main at
       build, first fold telemetry-verification's seven-line block row into the same two-line flow form with its rationale
-      text unchanged (telemetry-causal-chain's shape), measured again; never a raise.
+      text unchanged (telemetry-causal-chain's shape), measured again; if still over, fold further block rows the same
+      way, each rationale unchanged; if none is left to fold, stop with a plan defect; never a raise.
   - file: config/composite_action_body_baseline.yaml
     action: Modify
     purpose: >-
@@ -186,11 +200,17 @@ scope:
       deterministic detectors, friction first (a T4 schedule home per CD.27 stays open)" and
       ".github/workflows/feedback-loop.yml    # new", replacing the telemetry_analysis_agent Lambda and
       scheduled-telemetry-analysis.yml lines; and, because Decision 136 forbids a touched tier_item from keeping bare-string
-      criteria, its two exit_criteria become {id: c1, text: <unchanged>, status: open} and {id: c2, text: <unchanged>,
-      status: open} in their current order (the ledger's load-time ids). intent, status and every other key unchanged.
+      criteria, its two exit_criteria become {id: c1, text: <c1 re-grounded, below>, status: open} and {id: c2, text:
+      <unchanged>, status: open} in their current order (the ledger's load-time ids). intent, status and every other key
+      unchanged.
       Headroom: the file is 9,153 raw lines of validate_platform_roadmap's 10,000 ceiling on main 29aa11ee, and the edit
-      adds about four lines. c1's "via log-rec" names the retired log-rec path (ducklake_writer replaced it); the text
-      stays as approved here and the filer plan (wave 3) re-grounds it when it applies its staged criteria text.
+      adds about six lines. c1 names the retired log-rec path (ducklake_writer replaced the six-Lambda model,
+      docs/contracts/ducklake_writer.yaml), which the stale-reference check requires re-grounding; its words are kept
+      and the roadmap's bracketed note form is appended: c1 text = "Agent runs daily and files anomaly recs via log-rec
+      [Re-grounded 2026-11-21 (PLAN-friction-daily-detector): log-rec is retired; recs are filed through the ops data
+      portal's file_rec, which writes through ducklake_writer. The daily detector (scripts/feedback_loop,
+      feedback-loop.yml) proposes drafts and files nothing; filing is the loop filer's (CD.45 pwi-rec-filing-dedupe,
+      wave 3).]". The criterion's meaning is unchanged; the filer plan applies its staged criteria text later.
   - file: tests/feedback_loop/__init__.py
     action: Create
     purpose: Mirror test package marker.
@@ -202,14 +222,18 @@ scope:
       groups, notice-class groups and other-version rows never fire; repeat runs fire; group sums across trees and
       windows equal scripts.telemetry_usage.friction's signatures; tree_count; friction_trees counts trees at V only (zero
       when every row is at another version); ranking; rec_states maps open, declined, superseded, closed and failed and
-      picks the newest; a failed rec read raises; a returned row missing any of the five keys raises; a null or non-object
+      picks the newest; closed or failed reads recurred only when window_from is after its last_updated_timestamp, else
+      closing; a failed rec read raises; a returned row missing any of the six keys raises; a null or non-object
       context_v2_json is skipped and counted, never a match; read_window halves on a 413.
   - file: tests/feedback_loop/test_proposals.py
     action: Create
     purpose: >-
-      Every draft passes validate_source, lint_acceptance_command(require_discrimination=True, require_decidable=True) and
-      scripts.ops_portal.write_validators.gate_write("ops_recommendations", <fields with context_v2_json>, insert=True)
-      offline (the writer's own gate: fileable as written); the acceptance carries --classifier-version; the file lookup
+      Every draft is fileable as written, checked by file_rec's own pre-write sequence on a copy of its fields (no write):
+      scripts.ops_portal.risk_scoring._derive_computed_fields, validate_source, then
+      scripts.ops_portal.write_validators.gate_write("ops_recommendations", fields, insert=True) offline, which reads the
+      regenerated field_semantics accepted values and refuses an unregistered source and a context under 80 characters;
+      context_v2_json is asserted separately as a json.dumps-serialisable object with the named keys (file_rec adds it
+      after the gate); lint_acceptance_command(require_discrimination=True, require_decidable=True) passes; the acceptance carries --classifier-version; the file lookup
       for hook, gate (including a gate name with no file), pre-commit and other signatures; context_v2_json keys; the
       evidence-not-proof sentence; a subject with a quote or space is shell-quoted; proposals.py's text holds exactly one
       "source": "feedback_loop" and friction's rec read uses proposals.SOURCE.
@@ -226,7 +250,9 @@ scope:
       --assert-quiet exit contract (0 only after a completed run at N == V with friction_trees >= min_trees, a measurable
       detector and no finding; 2 with its reason for a version mismatch, zero rows at V, few trees, an unmeasurable
       coverage subject or a read failure, and not_quiet for a finding); a window or rec read failure prints stage,
-      error_type and status only (no planted host) and exits 1; --summary appends; the logging disable level is restored.
+      error_type and status only (no planted host) and exits 1; an unexpected exception prints stage=internal with no
+      traceback under GITHUB_ACTIONS and exits 1; the --json shape (keys, every finding carrying a draft); --summary
+      appends; the logging disable level is restored.
       TestPackageBoundary (AST, the tests/telemetry_verify/test_package_boundary.py shape, direct imports): no module
       under scripts/feedback_loop imports scripts.ops_data_portal, scripts.ops_portal or any submodule, or any module
       whose name contains ducklake_writer, and none names file_rec, update_rec or file_ops (propose-only, checked in code
@@ -324,7 +350,8 @@ verification_plan:
       t=next(i for i in d['tier_items'] if i['id']=='T3.3'); f=t['files_in_scope']; c=t['exit_criteria'];
       assert f==['scripts/feedback_loop/', '.github/workflows/feedback-loop.yml'], f;
       assert [(x['id'], x['status']) for x in c]==[('c1','open'),('c2','open')], c;
-      assert c[0]['text']=='Agent runs daily and files anomaly recs via log-rec'; print('T33_REGROUNDED')"
+      assert c[0]['text'].startswith('Agent runs daily and files anomaly recs via log-rec [Re-grounded 2026-11-21');
+      print('T33_REGROUNDED')"
     expected: prints T33_REGROUNDED and exits 0; red before (the Lambda path and bare-string criteria).
     fix_if: another T3.3 key changed, a criterion's text changed, or the order moved
     hermetic: true
@@ -372,8 +399,8 @@ verification_plan:
     expected: >-
       the newest successful run with all six jobs green deployed a LAMBDA_ARTIFACT_SHA (one gate SHA for every job) that
       has the build commit as an ancestor (prints contains); non-zero until that run exists, so it is re-run after the
-      deploy that follows the merge (the same read through mcp__github__actions_list and get_job_logs where gh is
-      unavailable)
+      deploy that follows the merge (read in a session through mcp__github__actions_list and get_job_logs first, AGENTS.md; the gh command is
+      its literal equivalent)
     fix_if: the run is held or failed; read deploy-paths.yaml's code-deploy recovery, never break-glass by default
     hermetic: false
     graduation: not-applicable
@@ -408,7 +435,7 @@ verification_plan:
       "repos/otl-labs/ontheloop/actions/runs/$run/jobs" --jq '.jobs[] | select(.name=="friction") | .id') && gh api
       "repos/otl-labs/ontheloop/actions/jobs/$job/logs" > /tmp/feedback-loop-run.log && test "$(grep -c 'FRICTION window='
       /tmp/feedback-loop-run.log)" = 1 && ! grep -qE 'https://[a-z0-9]+\.(lambda-url|execute-api)\.' /tmp/feedback-loop-run.log
-    expected: exit 0 (the same read through mcp__github__actions_list and get_job_logs where gh is unavailable)
+    expected: exit 0 (read in a session through mcp__github__actions_list and get_job_logs first, AGENTS.md; the gh command is its literal equivalent)
     fix_if: the run failed (read its FRICTION_STOP line), the line repeats, or an unmasked URL appears
     hermetic: false
     graduation: not-applicable
@@ -430,7 +457,7 @@ verification_plan:
       "run <id> deployed <sha>" then contains, exit 0: the newest deploy-telemetry-content run whose record job succeeded
       (a run that skipped build, deploy and record because the protective set was unchanged never counts), and the commit
       it deployed contains the build's squash commit; pending until the operator approves such a run (the predecessor
-      plan's VP 8 form; the same read through mcp__github__actions_list and get_job_logs where gh is unavailable)
+      plan's VP 8 form; read in a session through mcp__github__actions_list and get_job_logs first, AGENTS.md; the gh command is its literal equivalent)
     fix_if: never forced; no approved run since the merge yet (wait, never dispatch); the copy is inert in that reader
     hermetic: false
     graduation: not-applicable
@@ -453,7 +480,7 @@ test_obligations:
     test_selector: tests/feedback_loop/test_friction.py
     red_green_expectation: red before, green after
   - source: scripts/feedback_loop/proposals.py
-    behavior: every draft is fileable under the portal's source check and acceptance lint
+    behavior: every draft passes file_rec's own pre-write sequence (derived fields, source check, writer gate) and the acceptance lint
     verification_step: 1
     test_selector: tests/feedback_loop/test_proposals.py
     red_green_expectation: red before (no module), green after
@@ -495,12 +522,10 @@ test_obligations:
       Enforced by validate_composite_action_shell_bodies over the live workflows in the fast tier (step 5); a unit test
       restating the counts would duplicate the ratchet it is checked by.
   - source: config/lambda/ducklake/field_semantics.yaml
-    behavior: the writer accepts source feedback_loop
-    verification_step: 5
-    command: bin/venv-python -m scripts.validate --pre
-    waiver_reason: >-
-      The regenerated vocabulary is checked by the fast tier's field-semantics drift and source-registry checks; the writer's acceptance
-      is proven only by the operator's first filing, which fails loudly if refused (Decision 84 I-4), after VP 7's deploy.
+    behavior: the writer's gate accepts source feedback_loop (gate_write refuses it while the regenerated list lacks it)
+    verification_step: 1
+    test_selector: tests/feedback_loop/test_proposals.py
+    red_green_expectation: red before (gate_write refuses an unlisted source), green after the regeneration
   - source: docs/ROADMAP-PLATFORM.yaml
     behavior: T3.3 points at the detector and its criteria carry ids
     verification_step: 4
@@ -509,7 +534,8 @@ test_obligations:
       t=next(i for i in d['tier_items'] if i['id']=='T3.3'); f=t['files_in_scope']; c=t['exit_criteria'];
       assert f==['scripts/feedback_loop/', '.github/workflows/feedback-loop.yml'], f;
       assert [(x['id'], x['status']) for x in c]==[('c1','open'),('c2','open')], c;
-      assert c[0]['text']=='Agent runs daily and files anomaly recs via log-rec'; print('T33_REGROUNDED')"
+      assert c[0]['text'].startswith('Agent runs daily and files anomaly recs via log-rec [Re-grounded 2026-11-21');
+      print('T33_REGROUNDED')"
     waiver_reason: >-
       A one-time moment claim (VP 4, Decision 244 cl.4); validate_platform_roadmap keeps the item's shape valid and a later
       plan may re-ground T3.3 again.
@@ -535,13 +561,15 @@ context:
   - "Why a new package: tests/telemetry_verify/test_package_boundary.py keeps scripts/telemetry_verify an independent oracle that may not import scripts.telemetry_usage; the detector is a consumer, so it lives apart and reuses telemetry_usage's reads and sums."
   - "Rejected drafts: the read-only rec match makes a declined (rejected) or superseded (covered) rec the record of the operator's verdict at read_all, so a rejected draft stops being proposed; the filer's decision (pwi-rec-filing-dedupe, wave 3) replaces this display. Trailer closure: the census buckets the probe PROBEABLE, and Decision 201 cl.4's networkless run exits non-zero, which maps to fails, so a fix PR's Resolves trailer leaves the rec open for the operator."
   - "Sequencing: the guard name tags thread's repeat-run key change (classifier_version 4, verbs module) changes no column this plan reads; rows at a version the detector's rules do not hold are counted, never findings, until its code ships. No backfill of lost capture windows."
+  - "Filing timing and spend: classifier_version 4 (the guard name tags work) is in flight, so a draft filed at v3 carries --classifier-version 3 and its probe reads unmeasurable (version_mismatch) once v4 deploys, by design; the operator files from a run at the deployed version, or re-files after the bump. Spend: one daily run of at most 13 telemetry reader calls and one rec read on existing Lambdas, plus a short Actions job on a public repository; inferred negligible, not measured; no new resource."
   - "Red overlap (red_overlap --plan, 2026-11-21 after merging main 29aa11ee): clear, no reds (rec-5468 was fixed by #2330). Execution step 1 re-runs it."
   - "Kept graduated shards naming tests/checks/ops_governance/test_check_source_registry.py (assertions additive only): actions-capacity-evaluator-and-steps, backlog-health-package-suite, source-registry-guard-producer-scan."
-  - "Overlap (plan_obligations): unbuilt plans scoping the same config files (ci_rca_taxonomy.yaml, composite_action_body_baseline.yaml, field_semantics.yaml, source_registry.yaml, check_source_registry.py and its test, ROADMAP-PLATFORM.yaml), among them PLAN-scheduled-workflow-dispatch, PLAN-merge-annotate-producer, PLAN-merge-annotate-contract-reader, PLAN-billing-shape-local and PLAN-loop-candidate-decisions; each is an additive row, so whichever builds second rebases."
+  - "Overlap (plan_obligations, 2026-11-21): 19 unbuilt plans share scope files, 10 of them config/ci_rca_taxonomy.yaml (7 lines of headroom, hence the relief step); every shared edit is an additive row or entry, so whichever builds second rebases; plan_obligations at build lists them."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:f1ab63c30cf2ce7ed05962075703e599e0a35d734ba6927546864339b84cddcd'}
   - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:e19f4fcfd05db0013f6a9a3001be7fbd1e9c09b6dab3fd240b7b50df5bf9df46'}
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 7, nits: 10}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 9}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
