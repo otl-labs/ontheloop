@@ -27,28 +27,48 @@ scope:
       claude_p_retry.sh call with the step's exact claude arguments as module constants (output format, model, effort,
       max turns, --mcp-config/--strict-mcp-config, the --allowedTools list), the cat of the output file, the filing
       --all check (exit 1 with the same ::error:: line when no pair) and the rec_id line written to GITHUB_OUTPUT.
-      Inputs arrive as flags (run id, bundle sha, S3 uri, pending path, local path, bundle_absent, range note), never
-      by ${{ }} interpolation. Behaviour is byte-for-byte the step's: same argv to the wrapper, same prompt text.
+      Inputs arrive as flags (run id, bundle sha, S3 uri, pending path, local path, bundle_absent, range note) whose
+      values the step passes from its env ("$RCA_RUN_ID" and so on), never by ${{ }} interpolation in the run text.
+      Standard library only (it imports nothing from the repository), because the rca job runs a copy taken from the
+      workflow's own commit (ci-rca.yml row (1)); it calls ${GITHUB_WORKSPACE}/scripts/ci/claude_p_retry.sh and
+      bin/venv-python -m scripts.ci_rca.filing from the workspace, as the step does today. Behaviour is the step's:
+      same argv to the wrapper, same prompt text, proven against goldens recorded from main's own step body (VP 2).
   - file: .github/workflows/ci-rca.yml
     action: Modify
     purpose: >-
-      (1) Run ci-rca agent's body becomes one line calling scripts/ci/ci_rca_agent.py with the step's existing
-      inputs as flags; its id, if:, env and timeout are unchanged. (2) on: gains push to main with paths equal to
-      scripts/ci_rca/smoke.py SURFACE; workflow_dispatch gains smoke (boolean, default false) and surface_digest
-      (string) inputs, and run_id becomes required: false. run-name is "ci-rca smoke <surface_digest>" for a smoke
-      dispatch and "ci-rca smoke push" for a push. (3) The concurrency group gives a smoke run its own key (github.sha
+      (1) Run ci-rca agent's body becomes two lines: git show "$GITHUB_WORKFLOW_SHA:scripts/ci/ci_rca_agent.py" >
+      "$RUNNER_TEMP/ci_rca_agent.py", then python3 "$RUNNER_TEMP/ci_rca_agent.py" with the inputs as flags. The
+      workspace is the failing commit (Checkout at failing commit), which may predate the entrypoint, so the
+      entrypoint always comes from the workflow's own commit (fetch-depth 0 already holds it), the same guard the
+      range step's hashFiles and the capture step use. Its id, if: and timeout are unchanged; its env keeps every
+      entry and gains one per step output it passes (RCA_RUN_ID: ${{ steps.meta.outputs.run_id }}, RCA_BUNDLE_SHA,
+      RCA_BUNDLE_S3_URI, RCA_BUNDLE_PATH, RCA_BUNDLE_LOCAL, RCA_BUNDLE_ABSENT from steps.evidence). (2) on: gains push
+      to main with paths equal to scripts/ci_rca/smoke.py SURFACE; workflow_dispatch gains smoke (boolean, default
+      false) and surface_digest (string) inputs, and run_id becomes required: false. run-name is "ci-rca smoke
+      <surface_digest>" for a smoke dispatch, "ci-rca smoke push" for a push, and otherwise "CI RCA", the workflow
+      name, which is today's default display title for workflow_run and dispatch runs (the build reads one recent
+      real run's display_title through the Actions API first and uses that value if it differs). (3) The concurrency group gives a smoke run its own key (github.sha
       plus "smoke"), so a smoke never queues behind a real diagnosis or shares its group. (4) The rca job's if: gains
       conjuncts so it never runs on push or on a smoke dispatch, and a non-smoke dispatch needs a non-empty run_id.
-      (5) A new smoke job (runs on push to main, or a dispatch with smoke true; the rca job's fork and otl-workflow-dispatcher[bot] exclusions, Decision 267): checkout,
-      aws-region, setup-python, venv install, the Install Claude Code CLI step with text identical to the rca job's,
-      AWS credentials only when github.ref is refs/heads/main, the persona dispatch gate (dispatch only, Decision 205
+      (5) A new smoke job (runs on push to main, or a dispatch with smoke true; the rca job's fork and
+      otl-workflow-dispatcher[bot] exclusions, Decision 267; timeout-minutes 25, as rca): checkout, aws-region,
+      setup-python, venv install, the Install Claude Code CLI step with text identical to the rca job's, the
+      Configure AWS credentials step with text identical to the rca job's (including MASK_AWS_ROLE_ID_ACCOUNT_PART,
+      Decision 101) plus an if: so it runs only when github.ref is refs/heads/main, the persona dispatch gate (dispatch only, Decision 205
       cl.1, validate_persona_trigger_policy's shape), "Stage smoke fixture" (scripts.ci_rca.smoke stage), "Run ci-rca
-      agent (smoke)" calling scripts/ci/ci_rca_agent.py with the staged outputs and step env CI_RCA_SMOKE_SINK and
+      agent (smoke)" running the entrypoint the same two-line way with the staged outputs and step env CI_RCA_SMOKE_SINK and
       CI_RCA_FORCE_RCA=true, "Verify smoke" (scripts.ci_rca.smoke verify), and an upload of /tmp/ci-rca-output.json
       as artifact ci-rca-smoke-output (pinned action SHA), and the same Capture agent telemetry step as the rca job
       (if: always(), continue-on-error; capture.sh records --job smoke, so smoke sessions stay distinguishable from
       real ones, T3.20 c9). The smoke job sets CI_RCA_SMOKE_SINK and CI_RCA_SMOKE_ID (smoke-<run id>) on its agent
       step, has no dedup, mark or PR-comment step, and holds permissions contents: read and id-token: write only.
+      (6) A wake job, mirroring approved-text-approval.yml's (Decision 246): needs smoke, if: always() on a smoke
+      dispatch only, continue-on-error, timeout-minutes 5, permissions contents: read and pull-requests: write, no
+      secrets and no id-token; it runs python -m scripts.ci_rca.smoke wake --branch "$GITHUB_REF_NAME" --run-id
+      "$GITHUB_RUN_ID" --result "${{ needs.smoke.result }}" (values through env), which comments once on each open
+      pull request whose head ref is the branch, so the session subscribed to that PR wakes (VP 7). The smoke job
+      itself never comments. (7) Budget: ci-rca.yml is 414 of 500 effective lines (2026-11-23); measure after the
+      edit, and if it no longer fits, stop and return to planning, never a raise.
   - file: config/composite_action_body_baseline.yaml
     action: Modify
     purpose: >-
@@ -58,19 +78,31 @@ scope:
   - file: scripts/ci_rca/smoke.py
     action: Create
     purpose: >-
-      The smoke's data and verbs. SURFACE: the runtime-surface path list (ci-rca.yml, scripts/ci/claude_p_retry.sh,
-      scripts/ci/ci_rca_agent.py, scripts/ci_rca/**, .claude/agents/scheduled/ci-rca.md, .mcp.json,
-      scripts/ops_data_portal.py, scripts/ops_portal/writer_transport.py, scripts/ops_portal/ci_rca_runtime.py,
-      scripts/ops_portal/ci_rca_schema.py, tests/fixtures/ci_rca/smoke/**), the one list the push paths filter, the
-      gate and T4.26 read. CLI verbs: digest (sha256 over git ls-files -s of SURFACE at HEAD, sorted, so only the
-      surface's blob ids decide it); dispatch-inputs (prints the JSON inputs for a smoke dispatch: smoke true and the
+      The smoke's data and verbs. SURFACE (globs) holds exactly the files the smoke job executes or reads on its path
+      from CLI install to the filing check, so a SURFACE change is one the smoke proves: .github/workflows/ci-rca.yml,
+      scripts/ci/claude_p_retry.sh, scripts/ci/ci_rca_agent.py, scripts/ci/persona_dispatch_gate.py,
+      .claude/agents/scheduled/ci-rca.md, .mcp.json, scripts/ci_rca/smoke.py, scripts/ci_rca/filing.py,
+      scripts/ci_rca/evidence/**, scripts/ci_rca/log_evidence.py, scripts/ops_data_portal.py,
+      scripts/ops_portal/writer_transport.py, scripts/ops_portal/write_validators.py,
+      scripts/ops_portal/ci_rca_runtime.py, scripts/ops_portal/ci_rca_schema.py, tests/fixtures/ci_rca/smoke/**.
+      Left out by that rule: rca-only modules the smoke never runs (fetch_logs, designed_refusal, dedup,
+      convergence_dedup, range_context, red_overlap and the rest of scripts/ci_rca/), the telemetry capture action
+      (continue-on-error, off the filing path), config/ci_rca_taxonomy.yaml rows, and requirements.txt and transitive
+      imports, which the push smoke on main proves after merge. The build adds or drops a path only by this rule.
+      It is the one list the push paths filter, the gate and T4.26 read. CLI verbs: digest(rev) (sha256 over the
+      sorted lines of git ls-tree -r <rev> whose path matches a SURFACE glob; one function, used by stage at HEAD
+      and by the gate at pull_request.head.sha, so the same tree always gives the same digest); dispatch-inputs (prints the JSON inputs for a smoke dispatch: smoke true and the
       digest); stage (on a dispatch, refuses when the surface_digest input differs from the computed digest; copies the
       fixture to /tmp/ci-rca-failed.log, /tmp/ci-rca-jobs.json and /tmp/ci-rca-log-evidence.json; runs
-      scripts.ci_rca.evidence with the rca job's evidence-step flags into /tmp/ci-rca-bundles; writes the agent
+      scripts.ci_rca.evidence with the rca job's evidence-step flags plus --no-upload into /tmp/ci-rca-bundles; writes the agent
       entrypoint's inputs to GITHUB_OUTPUT); verify (exactly one filing --all pair, whose id is the sink's smoke-N id
       and whose category is in config/ci_rca_taxonomy.yaml failure_categories; the sink holds exactly one line, a
       file_ops ops_recommendations record with source ci_rca and context_v2_json that Recommendation validates; prints
-      SMOKE_OK); proof (the gate's lookup, run from a session: prints PROOF_FOUND run=<id> or PROOF_MISSING).
+      SMOKE_OK); proof (the gate's lookup from a session, for the current branch and digest(HEAD) by default, or
+      --event push --sha <sha> for the push smoke whose head_sha is that sha; anonymous on the public repository
+      unless APPROVED_TEXT_GH_TOKEN is set; prints PROOF_FOUND run=<id> or PROOF_MISSING); wake (the wake job's
+      comment: lists open pull requests with head otl-labs:<branch> and posts one comment naming the run id and
+      result; no PR, no comment).
   - file: tests/fixtures/ci_rca/smoke/failed.log
     action: Create
     purpose: >-
@@ -82,6 +114,15 @@ scope:
   - file: tests/fixtures/ci_rca/smoke/log-evidence.json
     action: Create
     purpose: The retrieval envelope fetch_logs would write for failed.log; scripts.ci_rca.log_evidence --validate accepts it.
+  - file: scripts/ci_rca/evidence/__init__.py
+    action: Modify
+    purpose: >-
+      --no-upload flag: the bundle is written to --emit-dir as today but neither uploaded nor written to the pending
+      dir, and BUNDLE_S3_URI and BUNDLE_PATH print empty, so a smoke leaves no fixture bundle in the data-lake bucket.
+      Without the flag nothing changes; the rca job never passes it.
+  - file: tests/ci_rca/evidence/test_main_emit.py
+    action: Modify
+    purpose: A --no-upload node (upload_and_persist never called, S3 uri and pending path empty, emit file written). New node only; the graduated shard ci-rca-scope-reaches-emitted-bundle is kept.
   - file: scripts/ops_portal/writer_transport.py
     action: Modify
     purpose: >-
@@ -110,8 +151,11 @@ scope:
       The pr-validate gate (Decision {{N}} cl.3 in the sidecar). The diff from the merge base touches no SURFACE path:
       skipped() (Decision 170). It does: computes the digest at the event payload's pull_request.head.sha (the merge
       ref's second parent; pr-validate checks out with fetch-depth 0), never at the merge commit, and in PR CI (GITHUB_EVENT_NAME pull_request) lists
-      ci-rca.yml's workflow_dispatch runs through the Actions API with scripts.roadmap.approved_text_github's GET
-      helper and token (APPROVED_TEXT_GH_TOKEN, already set on pr-validate, which holds actions: read) and passes only
+      ci-rca.yml's workflow_dispatch runs filtered by branch (one page, per_page 20, newest first, at most 5
+      candidates checked, under a prov.Deadline like approved_text_github's) through the Actions API with
+      scripts.roadmap.approved_text_github's GET helper and token (APPROVED_TEXT_GH_TOKEN, already set on pr-validate,
+      which holds actions: read; ci.yml's comment on it stays true, since the name is still one no GH_TOKEN reader
+      sees, so ci.yml is not edited) and passes only
       on a run whose path is .github/workflows/ci-rca.yml, head_branch the PR's head ref (from the event payload),
       conclusion success and display_title "ci-rca smoke <digest>", whose actor and triggering_actor are not
       otl-workflow-dispatcher[bot] (Decision 267), and whose job named smoke concluded success (read through the
@@ -130,6 +174,22 @@ scope:
       also fails if that entrypoint stops invoking claude_p_retry.sh, so the rca and smoke jobs each stay paired with
       one capture step and ci-rca.yml stays a valid ci_workflows entry. A strengthening: no call site leaves the check
       (Decision 181 cl.1; scout round 3).
+  - file: scripts/checks/ci_guards/validate_persona_trigger_policy.py
+    action: Modify
+    purpose: >-
+      Policy.upstream_problems computes gated over every LLM step of the file, so the push-triggered smoke step (never
+      failure-gated) would make every workflow_run upstream of ci-rca.yml fail to qualify (critique round 1 measured 7
+      problems). Refinement: an LLM step whose job if: or step if: has the top-level && conjunct
+      github.event_name != 'workflow_run' cannot run on workflow_run, so it does not count toward gated; every other
+      LLM step, the rca job's included, still must be failure-gated or the upstreams must qualify. No other rule
+      changes. Decision 181: precision, not a weakening; an LLM step that can run on workflow_run is judged as before.
+  - file: tests/checks/ci_guards/test_validate_persona_trigger_policy.py
+    action: Modify
+    purpose: >-
+      New nodes: a file with a failure-gated workflow_run LLM step plus a push-only LLM step carrying the exclusion
+      conjunct passes (red before: today's code flags its upstreams); the same push step without the conjunct still
+      fails; a workflow_run LLM step whose conjunct sits inside an || disjunct still counts. Existing nodes unchanged;
+      the graduated shard persona-trigger-policy is kept.
   - file: tests/checks/ci_guards/test_validate_claude_p_retry_wrapper.py
     action: Modify
     purpose: An entrypoint-calling job without a capture step fails; with one it pairs; an entrypoint that no longer calls the wrapper fails. New nodes only; the graduated shard claude-p-retry-wrapper-appends-on-unwrapped-invocation is kept (its node is unchanged).
@@ -142,17 +202,35 @@ scope:
       rec-5493's acceptance file. Parses ci-rca.yml: push paths equal SURFACE; the smoke job's CLI install step text
       equals the rca job's; both agent steps call scripts/ci/ci_rca_agent.py; CI_RCA_SMOKE_SINK appears only in the smoke
       job; the rca job's if: excludes push and smoke dispatch; the smoke job's AWS step runs only on main; the smoke job
-      has no dedup, status or comment step and one capture step; no schedule trigger; run-name carries the digest.
+      has no dedup, status or comment step and one capture step; no schedule trigger; run-name carries the digest and
+      falls back to the workflow name; both agent steps run the entrypoint copied from $GITHUB_WORKFLOW_SHA, never
+      the workspace file; the smoke job's AWS step text equals the rca job's apart from its if:; the smoke agent step
+      carries the github.event_name != 'workflow_run' conjunct; the wake job holds no secret or id-token.
   - file: tests/ci_rca/test_rca_agent_entrypoint.py
     action: Create
     purpose: >-
-      rec-5500's acceptance file. test_rca_agent_step_calls_extracted_entrypoint (the step body is the one-line call)
-      plus entrypoint behaviour under a stub claude on PATH: the wrapper argv equals today's step argv, the prompt text
-      equals the step's for bundle-present, bundle-absent and range-note inputs, no FILED pair exits 1 with the
-      ::error:: line, a pair writes rec_id.
-  - file: tests/ci_rca/test_ci_rca_smoke.py
+      rec-5500's acceptance file. test_rca_agent_step_calls_extracted_entrypoint (the step body is the two-line
+      copy-and-run call) plus entrypoint behaviour under a stub claude on PATH, in process (the module loaded by path,
+      argv monkeypatched): the recorded wrapper argv and stdin equal the committed goldens for bundle-present (two
+      bundle files), bundle-absent and range-note inputs; no FILED pair exits 1 with the ::error:: line; a pair writes
+      rec_id.
+  - file: tests/fixtures/ci_rca/agent_parity/
     action: Create
-    purpose: smoke.py's digest (moves only with a SURFACE blob), stage (digest mismatch refuses; fixture staged; evidence bundle emitted), verify (each failure shape refuses) and proof parsing.
+    purpose: >-
+      Goldens recorded from main's own step body, not from the entrypoint: execution step 1 takes the post-rec-5494
+      Run ci-rca agent run text from git show origin/main:.github/workflows/ci-rca.yml, replaces each ${{ ... }}
+      with the case's fixture value, runs it under bash with a stub claude on PATH that records its argv and stdin
+      (and prints one FILED marker), and commits one argv file and one stdin file per case (bundle-present,
+      bundle-absent, range-note). Fictional run ids and paths only.
+  - file: tests/test_ci_rca_smoke.py
+    action: Create
+    purpose: >-
+      smoke.py's home per map_source_to_test (siblings: tests/test_ci_rca_range_context.py and the rest). digest(rev)
+      moves only with a SURFACE blob and is equal at HEAD and at a named sha of the same tree; stage (digest mismatch
+      refuses; fixture staged; evidence run with --no-upload); verify (each failure shape refuses); proof and wake
+      (mocked GET and POST). Every path runs in process (argv monkeypatched, subprocess and HTTP mocked), because
+      validate_test_coverage needs 100% line coverage and does not trace a subprocess; the same holds for the gate's
+      and filing.py's tests.
   - file: tests/ops_data_portal/test_writer_smoke_sink.py
     action: Create
     purpose: >-
@@ -162,24 +240,36 @@ scope:
   - file: tests/checks/misc/test_validate_ci_rca_smoke_proof.py
     action: Create
     purpose: Mirror test of the gate (skipped, pass, missing, wrong title, failed run, all jobs skipped under a run-level success, dispatcher-App actor or triggering_actor, unreadable in and out of PR CI).
+  - file: docs/DECISIONS.md
+    action: Modify
+    purpose: >-
+      Place the approved-text sidecar's three blocks verbatim (the new Decision entry after the intro paragraph, the
+      dated Update note on Decision 83, the Amended-by note on Decision 205), filling {{N}} with the next free number
+      and {{DATE}} with the build date; docs/decisions-index.json follows as the derived companion.
   - file: tests/test_ci_rca_filing.py
     action: Modify
     purpose: A smoke-N marker parses only with CI_RCA_SMOKE_SINK set and is ignored without it.
   - file: tests/ci_rca/test_agent_tool_allowlist.py
     action: Modify
-    purpose: rec-5494's build creates it reading --allowedTools from the ci-rca.yml step; it now reads ALLOWED_TOOLS from scripts/ci/ci_rca_agent.py, the prompt text from the entrypoint's builder. Assertions unchanged.
+    purpose: >-
+      rec-5494's build creates it reading --allowedTools and the run text from the ci-rca.yml step; it now reads
+      ALLOWED_TOOLS from scripts/ci/ci_rca_agent.py and the prompt from the entrypoint's builder. Assertions (a) and
+      (c) unchanged. (b)'s "$(ls /tmp/ci-rca-bundles/*.json ...) substitution" check has no shell text left to read,
+      so it becomes: no line of the entrypoint source says enumerate (case-insensitive), and the prompt built for a
+      bundle dir holding two .json files names both paths. Recorded in the build plan's weakening_dispositions
+      (Decision 235) as replaced by a behavioural check of the same property.
   - file: tests/ci_rca/test_agent_permissions_untrusted_workspace.py
     action: Modify
     purpose: rec-5494's build creates it; its step-declares-MCP node now reads the entrypoint's constants. Assertions unchanged.
-bundled_recommendations: [rec-5500]
+bundled_recommendations: [rec-5493, rec-5500]
 followon_recs: []
 infrastructure_dependencies: []
 acceptance_criteria:
   - bin/venv-python -m pytest tests/ci_rca/test_ci_rca_smoke_wiring.py -q (rec-5493's acceptance) passes, and fails on main (file absent; with it on main, ci-rca.yml has no push trigger, no smoke job and no entrypoint call)
   - bin/venv-python -m pytest tests/ci_rca/test_rca_agent_entrypoint.py::test_rca_agent_step_calls_extracted_entrypoint -q (rec-5500's acceptance) passes, and fails on main (inline body)
-  - The sink, smoke.py, filing and gate tests pass; the rec-5494 allowlist tests, persona trigger policy, workflow agent safety and body ratchet stay green
+  - The sink, smoke.py, evidence --no-upload, filing and gate tests pass; the persona trigger policy's new nodes pass; the rec-5494 allowlist tests (with (b) replaced as its scope row says), workflow agent safety and body ratchet stay green
   - On the build PR, pr-validate first fails with validate_ci_rca_smoke_proof's remedy (no smoke yet), then a smoke dispatch on the build branch concludes success with SMOKE_OK, and the re-run pr-validate passes (VP 6-8)
-  - After merge, the push smoke on main concludes success, and its AWS step and MCP read verbs ran (VP 9)
+  - After merge, the push smoke on main concludes success, and its job log shows the AWS step succeeded and no MCP read verb was denied (VP 9)
   - rec-5493 and rec-5500 are closed by the merge's Resolves trailer
 verification_plan:
   - step: 1
@@ -207,8 +297,8 @@ verification_plan:
   - step: 3
     phase: pre-deploy
     action: Sink, smoke verbs, smoke-id filing and the pr-validate gate.
-    command: bin/venv-python -m pytest tests/ci_rca/test_ci_rca_smoke.py tests/ops_data_portal/test_writer_smoke_sink.py tests/checks/misc/test_validate_ci_rca_smoke_proof.py tests/test_ci_rca_filing.py -q
-    expected: exit 0; red before (three files absent; the filing smoke-id node fails on main)
+    command: bin/venv-python -m pytest tests/test_ci_rca_smoke.py tests/ops_data_portal/test_writer_smoke_sink.py tests/checks/misc/test_validate_ci_rca_smoke_proof.py tests/test_ci_rca_filing.py tests/ci_rca/evidence/test_main_emit.py -q
+    expected: exit 0; red before (three files absent; the filing smoke-id and --no-upload nodes fail on main)
     fix_if: the sink touches the network or accepts a non-smoke write, or the gate passes without a matching run
     hermetic: true
     expected_literals:
@@ -219,7 +309,7 @@ verification_plan:
     phase: pre-deploy
     action: Existing suites that read ci-rca.yml or its agent step stay green.
     command: bin/venv-python -m pytest tests/checks/ci_guards/test_validate_claude_p_retry_wrapper.py tests/ci_rca/test_agent_tool_allowlist.py tests/ci_rca/test_agent_permissions_untrusted_workspace.py tests/checks/ci_guards/test_validate_persona_trigger_policy.py tests/checks/ci_guards/test_validate_workflow_agent_safety.py tests/checks/ci_guards/test__workflow_shell_bodies.py tests/checks/ci_guards/test_validate_composite_action_shell_bodies.py tests/checks/ci_guards/test_validate_ci_rca_taxonomy_accounting.py -q
-    expected: exit 0; the wrapper check's new nodes red before
+    expected: exit 0; the wrapper check's and the persona trigger policy's new nodes red before
     fix_if: the smoke job breaks the persona gate shape, the capture pairing or an allowlist read; fix the workflow or the read seam, never loosen a check
     hermetic: true
     expected_literals:
@@ -237,9 +327,12 @@ verification_plan:
     graduation_waiver_reason: The full tier and its HEAD attestation are a whole-suite run, not a guard; steps 1-3 graduate the new guards.
   - step: 6
     phase: pre-deploy
-    action: The gate refuses the build PR before any smoke (live red-before).
+    action: >-
+      The gate refuses the build PR before any smoke (live red-before). Run the command on the build branch, then read
+      the PR's first pr-validate run (mcp__github__actions_list for ci.yml at the PR head, then mcp__github__get_job_logs
+      for its failed job).
     command: bin/venv-python -m scripts.ci_rca.smoke proof --repo otl-labs/ontheloop
-    expected: PROOF_MISSING, and the build PR's first pr-validate run fails naming validate_ci_rca_smoke_proof and the dispatch remedy
+    expected: PROOF_MISSING, and that pr-validate job log names validate_ci_rca_smoke_proof and the dispatch remedy
     fix_if: the gate passes with no smoke run; the lookup is wrong
     hermetic: false
     graduation: waive
@@ -249,8 +342,8 @@ verification_plan:
     action: >-
       Dispatch the smoke on the build branch: print the inputs with bin/venv-python -m scripts.ci_rca.smoke
       dispatch-inputs, dispatch ci-rca.yml at the branch ref through mcp__github__actions_run_trigger (Decision
-      {{N}} cl.2 admits a session under the maintainer's account), wait for its completion event, then read the
-      verify step's log.
+      {{N}} cl.2 admits a session under the maintainer's account), end the turn and wake on the wake job's comment on
+      the build PR (subscribe_pr_activity delivers it; never sleep or poll), then read the Verify smoke step's log.
     command: bin/venv-python -m scripts.ci_rca.smoke proof --repo otl-labs/ontheloop
     expected: PROOF_FOUND run=<id>; that run's Verify smoke step printed SMOKE_OK and its upload holds the raw CLI output
     fix_if: a red smoke; RCA from its log (a runtime defect is fixed on the branch, never the smoke weakened); a vendor outage or expired token goes to the operator (UI merge is the valve)
@@ -268,21 +361,23 @@ verification_plan:
     graduation_waiver_reason: Live pr-validate re-run on the build PR; step 3's mirror test graduates the pass path.
   - step: 9
     phase: post-deploy
-    action: The push smoke on main after the merge.
-    command: gh api 'repos/otl-labs/ontheloop/actions/workflows/ci-rca.yml/runs?event=push&branch=main&per_page=1' --jq '.workflow_runs[0] | [.head_sha, .display_title, .conclusion] | @tsv'
-    expected: the merge sha, "ci-rca smoke push" and success; its job log shows the AWS step ran and no MCP read verb was denied
+    action: >-
+      The push smoke on main after the merge: the command with the merge SHA, then that run's smoke job log
+      (mcp__github__get_job_logs) for the Configure AWS credentials step and the agent's MCP read-verb results.
+    command: bin/venv-python -m scripts.ci_rca.smoke proof --repo otl-labs/ontheloop --event push --sha <merge sha>
+    expected: PROOF_FOUND run=<id> titled "ci-rca smoke push"; the job log shows the AWS step succeeded, Verify smoke printed SMOKE_OK and no MCP read verb was denied
     fix_if: red on main; RCA from its log; rec-4678's fallback records it once built
     hermetic: false
   - step: 10
     phase: post-deploy
     action: Closure read-back.
-    command: bin/venv-python -c "import src.common.ducklake_reader_client as rc; rows,_=rc.fetch_recs_by_ids(rc.make_reader(),['rec-5493','rec-5500']); print([(r['id'],r['status']) for r in rows])"
+    command: bin/venv-python -c "import src.common.ducklake_reader_client as rc; rows,_=rc.fetch_recs_by_ids(rc.make_reader(profile='agent_platform'),['rec-5493','rec-5500']); print([(r['id'],r['status']) for r in rows])"
     expected: both closed
     fix_if: a rec still open; the trailer closure job did not run or its acceptance failed
     hermetic: false
 test_obligations:
   - source: scripts/ci/ci_rca_agent.py
-    behavior: the wrapper argv and prompt text equal the old step body's; no FILED pair exits 1 with the same error line
+    behavior: the wrapper argv and stdin equal the goldens recorded from main's step body; no FILED pair exits 1 with the same error line
     verification_step: 2
     test_selector: tests/ci_rca/test_rca_agent_entrypoint.py
     red_green_expectation: red before (file absent), green after
@@ -297,10 +392,25 @@ test_obligations:
     test_selector: tests/ci_rca/test_rca_agent_entrypoint.py::test_rca_agent_step_calls_extracted_entrypoint
     red_green_expectation: red before (inline body), green after
   - source: scripts/ci_rca/smoke.py
-    behavior: digest, stage, verify and proof each refuse their failure shapes
+    behavior: digest(rev) is tree-determined; stage, verify, proof and wake each refuse their failure shapes
     verification_step: 3
-    test_selector: tests/ci_rca/test_ci_rca_smoke.py
+    test_selector: tests/test_ci_rca_smoke.py
     red_green_expectation: red before (file absent), green after
+  - source: scripts/ci_rca/evidence/__init__.py
+    behavior: --no-upload writes the emit file and never uploads or writes pending; without it nothing changes
+    verification_step: 3
+    test_selector: tests/ci_rca/evidence/test_main_emit.py
+    red_green_expectation: red before (the --no-upload node fails on main), green after
+  - source: scripts/checks/ci_guards/validate_persona_trigger_policy.py
+    behavior: a step carrying github.event_name != 'workflow_run' does not count toward upstream gating; every other LLM step still does
+    verification_step: 4
+    test_selector: tests/checks/ci_guards/test_validate_persona_trigger_policy.py
+    red_green_expectation: red before (the exclusion node fails on main), green after
+  - source: docs/DECISIONS.md
+    behavior: the three sidecar blocks are placed verbatim with {{N}} and {{DATE}} filled
+    verification_step: 5
+    command: bin/venv-python -m scripts.validate
+    waiver_reason: Governance text; the full tier's approved-text placement check compares DECISIONS.md with the approved sidecar digest, so a drift fails there.
   - source: scripts/ops_portal/writer_transport.py
     behavior: the sink writes the projected record with no network call and refuses a half-set or malformed pair, updates and other tables
     verification_step: 3
@@ -344,14 +454,14 @@ test_obligations:
   - source: tests/fixtures/ci_rca/smoke/failed.log
     behavior: the fixture stages and yields an evidence bundle
     verification_step: 3
-    test_selector: tests/ci_rca/test_ci_rca_smoke.py
+    test_selector: tests/test_ci_rca_smoke.py
     red_green_expectation: red before (fixture absent), green after
 constraints:
-  - 'Build order (hard): rec-5492''s build (PLAN-claude-p-wrapper-stdout-only, #2362) and rec-5494''s build (PLAN-ci-claude-p-explicit-permissions, #2363) merge first; this build rebases on both. Its entrypoint reproduces the agent step as rec-5494''s build leaves it.'
-  - 'The real CI RCA path is unchanged in behaviour (Decision 181 CONTENT); same wrapper argv, prompt, filing check, dedup, mark and comment steps; CI_RCA_SMOKE_SINK and CI_RCA_FORCE_RCA=true are set only on the smoke job''s agent step.'
+  - 'Build order (hard): rec-5492''s build (#2366, merged fd930248 on 2026-11-23) and rec-5494''s build (PLAN-ci-claude-p-explicit-permissions; its plan PR #2363 merged, its build PR not yet open on 2026-11-23) are both on origin/main before this build starts; check with git log origin/main -- .github/workflows/ci-rca.yml showing rec-5494''s build commit (its --allowedTools line names mcp__ducklake-reads__ verbs). This build rebases on both, and its entrypoint and goldens reproduce the agent step as rec-5494''s build leaves it.'
+  - 'The real CI RCA path is unchanged in behaviour (Decision 181 CONTENT); same wrapper argv, prompt, filing check, dedup, mark and comment steps, proven by the goldens; the entrypoint runs from the workflow''s own commit, never the failing commit''s workspace; CI_RCA_SMOKE_SINK, CI_RCA_SMOKE_ID, CI_RCA_FORCE_RCA=true and --no-upload are used only by the smoke job.'
   - No schedule trigger (Decision 205 cl.1); no new workflow file; no ruleset or required-check change (rec-4624).
   - The sink never uploads, syncs or replays its file (Decision 84 warehouse invariant); smoke ids are never rec-NNN.
-  - The smoke job never posts a commit status or a PR comment; its captured sessions carry job smoke (T3.20 c9).
+  - The smoke job never posts a commit status or a PR comment; only the separate wake job comments, on a smoke dispatch, holding no secret; captured smoke sessions carry job smoke (T3.20 c9; rec-5508 excludes them from real reads).
   - No rescue agents or workaround loops (Decision 55); a red smoke is RCA'd, never weakened to green.
 context:
   - "Operator rulings: option A (branch smoke, pr-validate waits) card 2026-11-23 09:30:15Z; 'perfect, write the plan' 09:30:35Z; rec-4678 is its own plan in this project (2026-11-21 21:48Z)."
@@ -363,7 +473,9 @@ context:
   - "Order: rec-5493 depends on rec-5494 (read back 2026-11-23); rec-5500 depends on rec-5494. rec-4678's plan (thread cmsg_013uUnYHc1Muc8Nd9vFP7qXyELM5GhPUNn8v4YLB9Lgbhd) also edits ci-rca.yml; the coordinator sets that order. Other unbuilt plans scoping ci-rca.yml: merge-annotate-producer, scheduled-workflow-dispatch, telemetry-claude-p-capture-adapter; whichever builds second rebases."
   - "Follow-up filed: rec-5507 (High) scopes CLAUDE_CODE_OAUTH_TOKEN to Environments; read back 2026-11-23."
   - "UNPROVEN until VP 7: file_rec reaches no other network call with the sink set and no AWS credentials (CI_RCA_FORCE_RCA skips the reader backstop; the S3 head check fails open, ci_rca_runtime.py); the branch smoke's MCP read verbs fail without AWS and the agent records evidence unavailable; the persona dispatch gate admits a session dispatch on a non-main ref; actions_run_trigger accepts a non-main ref."
-  - "Gotcha: pr-validate re-run after the smoke is a manual re-run (no wake job, unlike approved-text); the build session re-runs it."
+  - "Gotcha: pr-validate re-run after the smoke is a manual re-run; the wake job's comment wakes the subscribed build session, which re-runs it (VP 8)."
+  - "Gotcha: a fork PR touching SURFACE cannot be smoked on its own branch (a dispatch runs only on this repository's refs); it merges only by the operator's UI merge (Decision {{N}} cl.3)."
+  - "Plan-critique round 1: REVISE, 11 blocking, 10 nits. Fixed: persona trigger policy refinement (scope rows; measured 7 upstream problems otherwise); rec-5493 bundled; DECISIONS.md scope row; smoke test home tests/test_ci_rca_smoke.py with in-process coverage; entrypoint copied from $GITHUB_WORKFLOW_SHA (a red on a commit predating the merge would otherwise lose CI RCA); env wiring named; goldens from main's own step body; evidence --no-upload and cl.1/cl.2 wording made true; build order names #2366 and the unopened rec-5494 build; wake job for VP 7; wording-check row. Nits: VP 6/9/10 reads, bounded lookup, rec-5504 named as the red-push-smoke alarm, digest(rev) via git ls-tree, fork PRs, SURFACE inclusion rule, (b) replacement and weakening disposition, AWS step text identity, timeouts, run-name fallback, budget stop rule, serves [NS.6]. Declined: editing ci.yml's token comment (still true); landing the extraction as a separate PR (one plan, one build)."
   - "Gotcha: Dependabot PRs touching ci-rca.yml (action SHA bumps) now need a smoke dispatch on their branch; no exemption (Decision {{N}} cl.3)."
   - "Decision-scout round 3: FLAGS_FOUND, 228 of 228; roadmap 7, CONFLICT 1, RELATED 6; Serves NS.6 4/5. Dispositions: WARN 181 (extraction would red validate_claude_p_retry_wrapper) -> the check learns the entrypoint as a call site (scope rows), a strengthening; its agent-safety half is moot: scan_workflow_agent_safety examines 0 steps on main today (measured 2026-11-23), so nothing is blinded. WARN 212 cl.3 -> the sink reads no host variable (two explicit env vars). T3.20 c9 CONFLICT -> the smoke job keeps a capture step; sessions carry job smoke. 245 merge-ref digest -> computed at pull_request.head.sha. 267 added to cites. NOTE 279 cl.2 carried to the operator with the wording approval."
   - "Decision-scout round 4: FLAGS_FOUND, 228 of 228; roadmap 7, CONFLICT 0, RELATED 6; Serves NS.6 4/5. Round 3 dispositions all judged RESOLVED. Dispositions: WARN 267 (an App smoke=true dispatch skips every job; if GitHub reports that run as success it could mint the proof) -> the gate requires the run's smoke job to have concluded success and refuses a run whose actor or triggering_actor is the dispatcher App, with mirror-test nodes; NOTE 278 cl.2 -> named below; NOTE 279 cl.2 carried to the operator with the wording approval; SPIRIT 236 (push-smoke sessions reach production telemetry tagged only by job smoke) -> filed rec-5508 (Medium; synthetic marker plus reader exclusion; depends on rec-5493); 212 and 229 added to cites. RELATED 235: the build records weakening_dispositions for the repointed rec-5494 tests and the wrapper test edits in its own PR."
@@ -396,10 +508,12 @@ pre_implementation_checklist:
   - The approved-text sidecar's approval run is recorded (the plan PR's pr-validate shows it)
   - Acceptance criteria understood and verifiable
 execution_steps:
-  - 'scripts/ci/ci_rca_agent.py: move the Run ci-rca agent body (as rec-5494 left it) into the entrypoint; replace the step body with the one-line call; write tests/ci_rca/test_rca_agent_entrypoint.py and repoint the two rec-5494 test files to the module constants.'
-  - 'scripts/ops_portal/writer_transport.py, scripts/ci_rca/filing.py: the sink and the smoke-id parse; their tests.'
-  - 'scripts/ci_rca/smoke.py and tests/fixtures/ci_rca/smoke/: SURFACE, digest, dispatch-inputs, stage, verify, proof; tests/ci_rca/test_ci_rca_smoke.py.'
-  - '.github/workflows/ci-rca.yml: triggers, run-name, concurrency, rca job if:, the smoke job; config/composite_action_body_baseline.yaml re-measured; tests/ci_rca/test_ci_rca_smoke_wiring.py.'
+  - 'Goldens first, before touching ci-rca.yml: record tests/fixtures/ci_rca/agent_parity/ from origin/main''s own Run ci-rca agent body (as rec-5494 left it) under bash with a stub claude, as that scope row says.'
+  - 'scripts/ci/ci_rca_agent.py: move the body into the stdlib-only entrypoint; replace the step body with the two-line copy-from-$GITHUB_WORKFLOW_SHA call and the new env entries; write tests/ci_rca/test_rca_agent_entrypoint.py against the goldens and repoint the two rec-5494 test files (with (b) replaced, recorded in weakening_dispositions).'
+  - 'scripts/ops_portal/writer_transport.py, scripts/ci_rca/filing.py, scripts/ci_rca/evidence/__init__.py: the sink, the smoke-id parse and --no-upload; their tests.'
+  - 'scripts/checks/ci_guards/validate_persona_trigger_policy.py: the workflow_run-exclusion refinement and its nodes, before the smoke job is added.'
+  - 'scripts/ci_rca/smoke.py and tests/fixtures/ci_rca/smoke/: SURFACE, digest(rev), dispatch-inputs, stage, verify, proof, wake; tests/test_ci_rca_smoke.py.'
+  - '.github/workflows/ci-rca.yml: triggers, run-name, concurrency, rca job if:, the smoke and wake jobs; measure its budget; config/composite_action_body_baseline.yaml re-measured; tests/ci_rca/test_ci_rca_smoke_wiring.py.'
   - 'scripts/checks/misc/validate_ci_rca_smoke_proof.py, its _manifest.py Entry, the taxonomy row and the mirror test; .claude/agents/scheduled/ci-rca.md sentence.'
   - 'docs/DECISIONS.md: place the sidecar blocks verbatim, filling {{N}} with the next free number and {{DATE}} with the merge date.'
   - Execute Verification Plan steps 1-5; loop until pass; on unrecoverable V3 failure stop and RCA (Decision 55)
