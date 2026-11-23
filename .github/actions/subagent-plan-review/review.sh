@@ -57,8 +57,10 @@ if [ -z "${CLAUDE_CODE_OAUTH_TOKEN}" ]; then
   echo "outcome=starved" >> "$GITHUB_OUTPUT"
   exit 1
 fi
-if ! command -v claude &> /dev/null; then
-  sudo npm install -g @anthropic-ai/claude-code@2.1.323 --omit=dev --omit=optional && sudo npm cache clean --force
+if ! bash "${WORKSPACE_ROOT}/scripts/ci/install_claude_cli.sh" "${WORKSPACE_ROOT}"; then
+  _starved_marker "claude CLI installer (scripts/ci/install_claude_cli.sh) failed: pin file missing or malformed, or the installed CLI does not name the pin; failing closed before any reviewer invocation."
+  echo "outcome=starved" >> "$GITHUB_OUTPUT"
+  exit 1
 fi
 
 CONTEXT_RE='^[A-Za-z0-9 ().,:_/-]{1,300}$'
