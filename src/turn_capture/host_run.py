@@ -153,8 +153,8 @@ def parse_persona_host_run(data: bytes | None) -> HostRun | LocalRun | None:
     project_ref, agent, policy, block = top
     if not isinstance(block, dict) or block.get("kind") != "local":
         return _gha_run(top)
-    runtime, run_id = block.get("runtime"), block.get("run_id")
-    if set(block) != _LOCAL_HOST_KEYS or runtime not in LOCAL_RUNTIMES or _text(run_id, _LOCAL_RUN_ID) is None:
+    runtime, run_id = block.get("runtime"), _text(block.get("run_id"), _LOCAL_RUN_ID)
+    if set(block) != _LOCAL_HOST_KEYS or runtime not in LOCAL_RUNTIMES or run_id is None:
         return None
     return LocalRun(project_ref=project_ref, agent=agent, content_policy=policy, runtime=runtime, run_id=run_id)
 
