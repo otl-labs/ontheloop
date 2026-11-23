@@ -228,3 +228,15 @@ def test_cli_check_reports_problems(
     monkeypatch.setattr(coverage, "load", lambda *a, **k: real_load(root=root))
     assert coverage.main(["check"]) == 1
     assert "no row" in capsys.readouterr().out
+
+
+def test_check_row_problems(tmp_path: Path) -> None:
+    rows = {
+        "j::a": {"proven_by": "nope", "declared_inputs": ["config/missing.txt"]},
+        "j::stale": {"proven_by": "watchdog_only", "declared_inputs": []},
+    }
+    root = _tree(tmp_path, [{"id": "a", "run": "true"}], rows=rows)
+    problems = _load(root).check()
+    assert "row j::stale: no such step in .github/workflows/ci-rca.yml" in problems
+    assert "row j::a: proven_by 'nope' is not in proven_by_values" in problems
+    assert "row j::a: declared input config/missing.txt does not exist" in problems
