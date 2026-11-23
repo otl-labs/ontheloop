@@ -41,7 +41,7 @@ def test_the_floor_drops_the_azure_metadata_private_and_ipv6_addresses_for_non_r
     dropped = [r.split()[3] for r in rules["v4_floor"] if r.endswith("-j DROP")]
     assert dropped == ["168.63.129.16/32", "169.254.0.0/16", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
     assert rules["v6_floor"][-1] == "-A EGRESS_FLOOR -j DROP" and "--uid-owner 0" in rules["v6_floor"][1]
-    assert egress_floor.dropin_text().rstrip().endswith("-A EGRESS_FAIL_CLOSED -j DROP")
+    assert egress_floor.unit_text().rstrip().endswith("-A EGRESS_FAIL_CLOSED -j DROP")
 
 
 def test_the_probe_and_the_self_check_expect_the_floors_cases_refused() -> None:

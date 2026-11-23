@@ -2,8 +2,9 @@
 
 Runs once as root on the runner's system python. It blocks, for every user but root and every interface but loopback,
 Azure's host address, the metadata address, the private ranges and all IPv6 in the mangle table the filter's agent never
-clears; installs an agent.service exit hook that drops all non-root IPv4 for the rest of the job when the agent exits;
-masks the container services; revokes sudo with a rule the agent cannot restore; then reads every piece back as root.
+clears; installs a fail-closed unit, bound to agent.service, whose stop drops all non-root IPv4 for the rest of the job
+when the agent stops or fails; masks the container services; revokes sudo with a rule the agent cannot restore; then reads
+every piece back as root.
 Stdlib only; the rules are module constants, never read from a file.
 """
 
@@ -20,7 +21,9 @@ FAIL = "EGRESS_FAIL_CLOSED"
 DROP_V4 = ("168.63.129.16/32", "169.254.0.0/16", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
 UNITS = ("docker.socket", "docker.service", "containerd.service")
 SOCKETS = ("/var/run/docker.sock", "/run/containerd/containerd.sock")
-DROPIN = Path("/etc/systemd/system/agent.service.d/egress-floor.conf")
+UNIT = "egress-fail-closed.service"
+UNIT_PATH = Path("/etc/systemd/system/egress-fail-closed.service")
+UNHOOK_PATH = Path("/etc/systemd/system/egress-fail-closed.service.d/unhook.conf")
 SUDOERS = Path("/etc/sudoers.d/zz-egress-floor")
 SUDOERS_LINE = "runner ALL=(ALL) !ALL\n"
 BIN_DIRS = ("/usr/sbin", "/sbin", "/usr/bin", "/bin")
@@ -46,8 +49,15 @@ def hook_argv() -> str:
     return f"{binary('iptables')} -w -t mangle -A {FAIL} -j DROP"
 
 
-def dropin_text() -> str:
-    return f"[Service]\nExecStopPost={hook_argv()}\n"
+def unit_text() -> str:
+    return (
+        "[Unit]\nDescription=Block non-root egress when the filter agent stops\nBindsTo=agent.service\nAfter=agent.service\n\n"
+        f"[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\nExecStop={hook_argv()}\n"
+    )
+
+
+def unhook_text() -> str:
+    return "[Service]\nExecStop=\n"
 
 
 def _run(argv: Sequence[str]) -> tuple[int, str]:
@@ -86,9 +96,9 @@ def apply() -> bool:
     ok = _chain("ip6tables", FLOOR, rules["v6_floor"]) and ok
     ok = _jump("iptables") and ok
     ok = _jump("ip6tables") and ok
-    DROPIN.parent.mkdir(parents=True, exist_ok=True)
-    DROPIN.write_text(dropin_text(), encoding="utf-8")
+    UNIT_PATH.write_text(unit_text(), encoding="utf-8")
     ok = _run(["systemctl", "daemon-reload"])[0] == 0 and ok
+    ok = _run(["systemctl", "start", UNIT])[0] == 0 and ok
     ok = _run(["systemctl", "mask", "--now", *UNITS])[0] == 0 and ok
     for path in SOCKETS:
         if os.path.exists(path):
@@ -112,6 +122,16 @@ def _first_output_rule(tool: str) -> str:
     return rules[0] if rules else ""
 
 
+def _hook_unit_ok() -> bool:
+    shown = _run(["systemctl", "show", UNIT, "-p", "ActiveState", "-p", "BindsTo", "-p", "ExecStop"])[1]
+    lines = shown.splitlines()
+    return "ActiveState=active" in lines and "BindsTo=agent.service" in lines and hook_present(shown)
+
+
+def hook_present(shown: str) -> bool:
+    return f"argv[]={hook_argv()}" in shown
+
+
 def verify() -> list[tuple[str, bool]]:
     want = render_rules()
     checks = [
@@ -120,7 +140,7 @@ def verify() -> list[tuple[str, bool]]:
         ("v6_floor", _rules_of("ip6tables", FLOOR) == want["v6_floor"]),
         ("v4_output_jump", _first_output_rule("iptables") == f"-A OUTPUT -j {FLOOR}"),
         ("v6_output_jump", _first_output_rule("ip6tables") == f"-A OUTPUT -j {FLOOR}"),
-        ("exit_hook", f"argv[]={hook_argv()}" in _run(["systemctl", "show", "agent.service", "-p", "ExecStopPost"])[1]),
+        ("exit_hook", _hook_unit_ok()),
     ]
     for unit in UNITS:
         state = _run(["systemctl", "show", unit, "-p", "LoadState", "--value"])[1].strip()

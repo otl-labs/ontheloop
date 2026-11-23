@@ -44,25 +44,31 @@ def test_a_failing_verify_never_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     assert D.arm(hooked=True) == 1 and D.arm(hooked=False) == 1 and seen == []
 
 
-def test_unhooked_arm_removes_the_dropin_after_verify_and_requires_the_hook_gone(
+def test_unhooked_arm_writes_the_empty_execstop_after_verify_and_requires_the_hook_gone(
     monkeypatch: pytest.MonkeyPatch, tmp_path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _floor(monkeypatch)
-    dropin = tmp_path / "egress-floor.conf"
-    dropin.write_text("x", encoding="utf-8")
-    monkeypatch.setattr(egress_floor, "DROPIN", dropin)
+    unhook = tmp_path / "egress-fail-closed.service.d" / "unhook.conf"
+    monkeypatch.setattr(egress_floor, "UNHOOK_PATH", unhook)
     seen: list[list[str]] = []
-    monkeypatch.setattr(egress_floor, "_run", lambda argv: seen.append(list(argv)) or (0, "ExecStopPost=\n"))
-    assert D.arm(hooked=False) == 0 and not dropin.exists()
-    assert seen[0] == ["systemctl", "daemon-reload"] and seen[-1] == D.schedule_argv()
+    monkeypatch.setattr(egress_floor, "_run", lambda argv: seen.append(list(argv)) or (0, "ExecStop=\n"))
+    assert D.arm(hooked=False) == 0 and unhook.read_text(encoding="utf-8") == "[Service]\nExecStop=\n"
+    assert seen[0] == ["systemctl", "daemon-reload"] and seen[1] == [
+        "systemctl",
+        "show",
+        "egress-fail-closed.service",
+        "-p",
+        "ExecStop",
+    ]
+    assert seen[-1] == D.schedule_argv() and ["systemctl", "stop", "egress-fail-closed.service"] not in seen
     out = capsys.readouterr().out
     assert out.index("EGRESS-FLOOR PASS") < out.index("EGRESS-DRILL UNHOOKED") < out.index("EGRESS-DRILL ARMED")
 
 
 def test_unhooked_arm_refuses_while_the_hook_is_still_loaded(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     _floor(monkeypatch)
-    monkeypatch.setattr(egress_floor, "DROPIN", tmp_path / "gone.conf")
-    shown = f"ExecStopPost={{ argv[]={egress_floor.hook_argv()} }}"
+    monkeypatch.setattr(egress_floor, "UNHOOK_PATH", tmp_path / "d" / "unhook.conf")
+    shown = f"ExecStop={{ argv[]={egress_floor.hook_argv()} }}"
     seen: list[list[str]] = []
     monkeypatch.setattr(egress_floor, "_run", lambda argv: seen.append(list(argv)) or (0, shown))
     assert D.arm(hooked=False) == 1 and D.schedule_argv() not in seen

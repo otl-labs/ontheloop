@@ -31,9 +31,18 @@ def test_ipv6_is_dropped_for_non_root_but_loopback() -> None:
     ]
 
 
-def test_the_dropin_carries_the_exit_hook_with_an_absolute_binary() -> None:
-    text = F.dropin_text()
-    assert text.startswith("[Service]\nExecStopPost=/") and text.rstrip().endswith(HOOK)
+def test_the_fail_closed_unit_is_bound_to_the_agent_and_stops_with_an_absolute_hook() -> None:
+    text = F.unit_text()
+    assert F.UNIT == "egress-fail-closed.service" and str(F.UNIT_PATH).endswith("/egress-fail-closed.service")
+    assert (
+        "BindsTo=agent.service\nAfter=agent.service" in text
+        and "Type=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true" in text
+    )
+    assert "\nExecStop=/" in text and text.rstrip().endswith(HOOK)
+    assert (
+        str(F.UNHOOK_PATH).endswith("/egress-fail-closed.service.d/unhook.conf")
+        and F.unhook_text() == "[Service]\nExecStop=\n"
+    )
 
 
 def _fake(monkeypatch: pytest.MonkeyPatch, replies: dict[tuple[str, ...], tuple[int, str]]) -> list[list[str]]:
@@ -54,12 +63,12 @@ def _good_replies() -> dict[tuple[str, ...], tuple[int, str]]:
     want = F.render_rules()
     v4 = "-N EGRESS_FLOOR\n" + "\n".join(want["v4_floor"]) + "\n"
     out = "-P OUTPUT ACCEPT\n-A OUTPUT -j EGRESS_FLOOR\n-A OUTPUT -o eth0 -j ACCEPT\n"
-    shown = f"ExecStopPost={{ path=x ; argv[]={F.hook_argv()} ; }}\n"
+    shown = f"ActiveState=active\nBindsTo=agent.service\nExecStop={{ path=x ; argv[]={F.hook_argv()} ; }}\n"
     replies: dict[tuple[str, ...], tuple[int, str]] = {
         ("-S", "EGRESS_FLOOR"): (0, v4),
         ("-S", "EGRESS_FAIL_CLOSED"): (0, "-N EGRESS_FAIL_CLOSED\n"),
         ("-S", "OUTPUT"): (0, out),
-        ("ExecStopPost",): (0, shown),
+        ("ExecStop",): (0, shown),
         ("--value",): (0, "masked\n"),
     }
     return replies
@@ -91,7 +100,9 @@ def test_verify_passes_when_every_read_back_matches(monkeypatch: pytest.MonkeyPa
         ({("-S", "EGRESS_FLOOR"): (0, "-N EGRESS_FLOOR\n")}, "v4_floor"),
         ({("-S", "EGRESS_FAIL_CLOSED"): (0, "-A EGRESS_FAIL_CLOSED -j DROP\n")}, "v4_fail_closed"),
         ({("-S", "OUTPUT"): (0, "-A OUTPUT -o eth0 -j ACCEPT\n-A OUTPUT -j EGRESS_FLOOR\n")}, "v4_output_jump"),
-        ({("ExecStopPost",): (0, "ExecStopPost=\n")}, "exit_hook"),
+        ({("ExecStop",): (0, "ActiveState=active\nBindsTo=agent.service\nExecStop=\n")}, "exit_hook"),
+        ({("ExecStop",): (0, f"ActiveState=inactive\nBindsTo=agent.service\nExecStop=argv[]={F.hook_argv()}\n")}, "exit_hook"),
+        ({("ExecStop",): (0, f"ActiveState=active\nBindsTo=\nExecStop=argv[]={F.hook_argv()}\n")}, "exit_hook"),
         ({("--value",): (0, "loaded\n")}, "masked_docker.socket"),
     ],
 )
@@ -117,23 +128,23 @@ def test_main_refuses_unless_root(monkeypatch: pytest.MonkeyPatch, capsys: pytes
 
 
 def _root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(F, "DROPIN", tmp_path / "d" / "egress-floor.conf")
+    monkeypatch.setattr(F, "UNIT_PATH", tmp_path / "egress-fail-closed.service")
     monkeypatch.setattr(F, "SUDOERS", tmp_path / "zz-egress-floor")
     monkeypatch.setattr(F, "SOCKETS", ())
     monkeypatch.setattr(F.os, "geteuid", lambda: 0)
 
 
-def test_apply_writes_the_dropin_masks_the_units_and_installs_the_sudoers_rule_last(
+def test_apply_writes_and_starts_the_unit_masks_the_units_and_installs_the_sudoers_rule_last(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _root(monkeypatch, tmp_path)
     seen = _fake(monkeypatch, {})
     assert F.apply() is True
-    assert F.DROPIN.read_text(encoding="utf-8") == F.dropin_text()
+    assert F.UNIT_PATH.read_text(encoding="utf-8") == F.unit_text()
     assert F.SUDOERS.read_text(encoding="utf-8") == "runner ALL=(ALL) !ALL\n" and F.SUDOERS.stat().st_mode & 0o777 == 0o440
     assert ["systemctl", "mask", "--now", *F.UNITS] in seen
     assert seen[-1][0] == "visudo"
-    assert ["systemctl", "daemon-reload"] in seen
+    assert seen.index(["systemctl", "daemon-reload"]) < seen.index(["systemctl", "start", F.UNIT])
 
 
 def test_apply_inserts_the_jump_at_position_one_for_both_families(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

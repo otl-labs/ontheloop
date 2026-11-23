@@ -27,8 +27,7 @@ def schedule_argv() -> list[str]:
 
 
 def _hook_present() -> bool:
-    shown = egress_floor._run(["systemctl", "show", "agent.service", "-p", "ExecStopPost"])[1]
-    return f"argv[]={egress_floor.hook_argv()}" in shown
+    return egress_floor.hook_present(egress_floor._run(["systemctl", "show", egress_floor.UNIT, "-p", "ExecStop"])[1])
 
 
 def arm(hooked: bool) -> int:
@@ -37,7 +36,8 @@ def arm(hooked: bool) -> int:
     if not egress_floor.report(checks):
         return 1
     if not hooked:
-        egress_floor.DROPIN.unlink(missing_ok=True)
+        egress_floor.UNHOOK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        egress_floor.UNHOOK_PATH.write_text(egress_floor.unhook_text(), encoding="utf-8")
         egress_floor._run(["systemctl", "daemon-reload"])
         if _hook_present():
             print("EGRESS-DRILL FAIL exit hook still loaded")
