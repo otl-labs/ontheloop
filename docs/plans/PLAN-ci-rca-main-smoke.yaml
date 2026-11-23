@@ -120,7 +120,8 @@ scope:
       line {action, table, record} (record = _project_ops_record's projection, the body the writer would get) to the
       sink file and return {"key": CI_RCA_SMOKE_ID}, with no URL resolution, credential or network call. The sink file
       lives under the runner's /tmp and is never read by any writer path (Decision 84 I-4: nothing to replay). Both
-      unset, the function is unchanged.
+      unset, the function is unchanged. No docs/contracts/ports.yaml row: the sink stays inside the ops_verbs adapter
+      and reads no other port's state or host variable, so it adds no cross-port coupling (PC-01 is unchanged).
     new_imports: []
   - file: scripts/ci_rca/filing.py
     action: Modify
@@ -138,7 +139,10 @@ scope:
       be masked: a step continue-on-error that is not literal false (an expression counts as masking), a step if: other
       than none, success() or !cancelled() (with or without ${{ }}), a job continue-on-error, a job if: other than
       exactly needs.select.outputs.run == 'true', or any job the smoke job needs carrying continue-on-error. A
-      main_smoke row with no smoke_workflow in the table is a reported problem. A row of any other
+      main_smoke row with no smoke_workflow in the table is a reported problem. The table also names smoke_verify_step
+      (the Verify step's key; the fallback and evidence rows rest on it, since fallback.py and the generator can exit
+      as the step expects having filed or emitted nothing): with any main_smoke row, check() fails when it is missing,
+      names no step of the smoke job, or that step can be masked under the same rules. A row of any other
       proven_by carrying smoke_step fails. A smoke_workflow naming a missing file is a reported problem, never an
       exception. workflow_inputs(workflow) returns the union of inputs(step) (direct plus closure) over every step of
       the workflow, plus the workflow file itself and the declared_inputs of every main_smoke row whose smoke_step is in
@@ -147,10 +151,11 @@ scope:
   - file: config/agent/ci_rca/coverage.yaml
     action: Modify
     purpose: >-
-      Adds smoke_workflow: .github/workflows/ci-rca-smoke.yml. Flips to main_smoke, each with its smoke_step:
+      Adds smoke_workflow: .github/workflows/ci-rca-smoke.yml and smoke_verify_step (the Verify step's key). Flips to main_smoke, each with its smoke_step:
       rca::install-claude-code-cli, rca::#2 (aws-region), rca::set-up-python-3-12, rca::activate-venv,
       rca::configure-aws-credentials-oidc-branch-role, rca::evidence (note: the fixture exercises no junit, selection
-      manifest or validation-result input; those flags stay proven only by real runs), rca::rca_agent and rca::fallback.
+      manifest or validation-result input, and --no-upload skips the S3 upload leg (_upload_to_s3); those stay proven
+      only by real runs), rca::rca_agent and rca::fallback.
       Every other row stays watchdog_only (the fetches, range, dedup, persona gate, mark, PR comment, checkout at the
       failing commit, capture-agent-telemetry, whose required continue-on-error means the smoke cannot fail on it, and
       the watchdog job): the smoke does not prove them. The keys follow the
@@ -232,7 +237,8 @@ scope:
     purpose: >-
       Fixture nodes for smoke_step (missing, unknown key, a smoke step missing a direct input, a different pin,
       continue-on-error (literal and expression), a skipping if:, job-level continue-on-error or a different job if:, a
-      needed job with continue-on-error, a non main_smoke row carrying it, a missing or absent smoke_workflow) and for
+      needed job with continue-on-error, a non main_smoke row carrying it, a missing or absent smoke_workflow, and a
+      smoke_verify_step that is missing, unknown or masked) and for
       workflow_inputs (includes the workflow file and the mapped declared inputs). New nodes only; test_real_tree_checks_clean (rec-5537's
       acceptance) keeps its id, and the graduated shard ci-rca-coverage-derive is kept.
 bundled_recommendations: [rec-5493]
@@ -271,7 +277,7 @@ verification_plan:
   - step: 3
     phase: pre-deploy
     action: The sink, marker, --no-upload and coverage nodes in their existing suites.
-    command: bin/venv-python -m pytest tests/ops_data_portal/test_writer_transport.py tests/test_ci_rca_filing.py tests/ci_rca/evidence/test_main_emit.py tests/test_ci_rca_coverage.py tests/checks/ci_guards/test_validate_claude_p_retry_wrapper.py tests/checks/ci_guards/test__workflow_shell_bodies.py -q
+    command: bin/venv-python -m pytest tests/ops_data_portal/test_writer_transport.py tests/test_ci_rca_filing.py tests/ci_rca/evidence/test_main_emit.py tests/test_ci_rca_coverage.py tests/checks/misc/test_validate_ci_rca_coverage.py tests/checks/ci_guards/test_validate_claude_p_retry_wrapper.py tests/checks/ci_guards/test__workflow_shell_bodies.py -q
     expected: exit 0
     fix_if: a new node fails; the sink must refuse every non-smoke shape
     hermetic: true
@@ -300,8 +306,8 @@ verification_plan:
   - step: 6
     phase: post-deploy
     action: The merge's own push runs the smoke (the build changes smoke inputs); read its run for the merge SHA.
-    command: mcp__github__actions_list(method=list_workflow_runs, owner=otl-labs, repo=ontheloop, resource_id=ci-rca-smoke.yml, workflow_runs_filter={branch=main, event=push}) then mcp__github__actions_list(method=list_workflow_jobs, owner=otl-labs, repo=ontheloop, resource_id=<that run id>)
-    expected: the run whose head_sha is the merge SHA concluded success, its smoke job concluded success (not skipped), and its Verify step passed; a ci_rca_since read for that day shows no rec citing the fixture run id (the sink held every write)
+    command: mcp__github__actions_list(method=list_workflow_runs, owner=otl-labs, repo=ontheloop, resource_id=ci-rca-smoke.yml, workflow_runs_filter={branch=main, event=push}) then mcp__github__actions_list(method=list_workflow_jobs, owner=otl-labs, repo=ontheloop, resource_id=<that run id>) then mcp__ducklake-reads__ci_rca_since(since=<the merge time>) and mcp__ducklake-reads__recs_by_ids(<those ids>)
+    expected: the run whose head_sha is the merge SHA concluded success, its smoke job concluded success (not skipped), and its Verify step passed; the ci_rca_since ids since the merge, read through recs_by_ids, include no rec citing the fixture run id (the sink held every write)
     fix_if: red or skipped; a red smoke is a red on main, so CI RCA files on it; diagnose from that run's log and forward-fix (Decision 226), never revert the sink or the watched-list line to quiet it
     hermetic: false
   - step: 7
@@ -443,6 +449,17 @@ gate_rounds:
       - {id: PC2-N9, severity: nit, origin: judgement, anchor: "scope[coverage.yaml] capture row", subject: "ci_uncaptured exempts only action call sites, so capture stays a step", disposition: build-note}
       - {id: PC2-N10, severity: nit, origin: judgement, anchor: "verification_plan[6]", subject: "read back that no real rec cites the fixture run", disposition: applied-wording}
       - {id: PC2-N11, severity: nit, origin: mechanical, anchor: "context Cost", subject: "select is not pyyaml-only", disposition: applied-wording}
+  - gate: plan-critique
+    round: 3
+    verdict: REVISE
+    blocking: 1
+    nits: 4
+    findings:
+      - {id: PC3-B1, severity: blocking, origin: judgement, anchor: "scope[coverage.py] masking rule; scope[ci-rca-smoke.yml] Verify", subject: "masking rule never checks Verify, which alone proves evidence and fallback", disposition: fixed}
+      - {id: PC3-N1, severity: nit, origin: mechanical, anchor: "verification_plan[6]", subject: "expected read-back not in the command", disposition: applied-wording}
+      - {id: PC3-N2, severity: nit, origin: judgement, anchor: "scope[coverage.yaml] rca::evidence note", subject: "S3 upload leg unproven by the smoke", disposition: applied-wording}
+      - {id: PC3-N3, severity: nit, origin: judgement, anchor: "scope[writer_transport.py]", subject: "ports.yaml row for the sink", disposition: applied-wording}
+      - {id: PC3-N4, severity: nit, origin: mechanical, anchor: "verification_plan[3]", subject: "coverage check's own test file missing from VP 3", disposition: applied-wording}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
