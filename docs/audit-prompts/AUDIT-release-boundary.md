@@ -129,7 +129,8 @@ is REFUTED becomes the subject of a finding.
   per-decision classification field is needed.
 - C22. Counter-hypothesis: the settings registry, the SA rows, `.importlinter`, `boundary_patterns`, the enforced
   path registry `docs/contracts/file-router.yaml` (checked by `validate_placement`) and the per-decision `kind` field
-  (`docs/contracts/decision-kind.yaml`) together already form a partial classification and enforcement mechanism that
+  (`docs/contracts/decision-kind.yaml`; required on new entries only, so about 34 of 228 entries carry it at compose
+  time, per `grep -cE '^kind:' docs/DECISIONS.md`) together already form a partial classification and enforcement mechanism that
   can be extended rather than replaced.
 - C23. Counter-hypothesis: the persona contract's typed-input design (inputs materialised by a shell, a pinned
   template) already provides the seam adopter guidance needs: guidance would be one more typed input, and the hash pin
@@ -164,10 +165,12 @@ is REFUTED becomes the subject of a finding.
   north stars (Decision 196 clause 2). Do not read north-star.yaml as either one alone.
 - Contract `class:` values: most `docs/contracts/*.yaml` files carry `class: A|B|C|D` (see
   `docs/contracts/contract-population.yaml`). That is a contract taxonomy, unrelated to the Tier A/B/C decision tiers.
-- "Mechanism": `docs/contracts/decision-kind.yaml` gives each Decision a `kind` of direction or mechanism; that sense
+- "Mechanism": `docs/contracts/decision-kind.yaml` has every new Decision declare a `kind` of direction or mechanism
+  (an entry without one reads as direction); that sense
   is "unrelated to ... Decision 197's shipped mechanism" (its own words). In Decision 196 clause 5 and Decision 197,
   a shipped mechanism is a validator, contract, skill, hook or component a release carries. C21 uses the latter.
-- `.claude/agents/scheduled/*.md` are Claude Code subagent definitions for scheduled agents, not persona contracts.
+- `.claude/agents/scheduled/ci-rca.md` (the only file there at compose time) is an agent instruction file that the
+  CI-RCA workflow passes to a headless Claude Code run; it is not a persona contract.
 - The `overseer` skill and command are listed in `instruction-architecture.yaml` `retired_surfaces` (Decision 247)
   but still present in the tree and in the skill census; treat them as retiring, not as shippable method.
 - "Profile": the house-style profile (Decision 211 clause 2) is unrelated to AWS profiles (`agent_platform`,
@@ -322,6 +325,8 @@ Run these first. NEVER abort on a failure -- take the named degraded path.
    - Broad census, core code (adds path joins and other repository paths; report the union):
      `{ git grep -lE '"(docs/contracts|docs/DECISIONS\.md|docs/plans|docs/ROADMAP|config/|\.claude/|AGENTS\.md|CLAUDE\.md|logs/|terraform/|\.github/)' -- 'scripts/*.py' 'src/*.py'; git grep -lE '"(docs|config|logs|audits)" */|/ *"(contracts|plans|DECISIONS\.md|agent)"' -- 'scripts/*.py' 'src/*.py'; } | sort -u | wc -l`.
    - Same narrow census over `'tests/*.py'`.
+   - Cloud SDK census (imports at any indentation, so lazy imports count):
+     `git grep -lE '^\s*(import (boto3|botocore)|from (boto3|botocore))' -- 'scripts/*.py' 'src/*.py' | wc -l`.
    - Root-constant census:
      `git grep -lE '^(REPO_ROOT|ROOT|_ROOT|_REPO_ROOT|PROJECT_ROOT) *=' -- 'scripts/*.py' 'src/*.py' | wc -l`.
    - Skill reference census: for each `.claude/skills/*/SKILL.md`, count `grep -oE 'Decision [0-9]+'` occurrences
@@ -415,8 +420,9 @@ Answer every question in its own `question_answers` entry (Section 14). Verdict 
     the first release; `stays_deferred` -- outside this pull-forward, left with the deferred remainder of T4.24
     (name its trigger in `blocked_behind`; a trigger that is not an id, such as "concurrency above 1", is written as
     a quoted string there).
-  - A criterion or finding needing more than one plan: its own key holds the first slice, and each further slice is
-    a `NEW-<n>` entry whose `blocked_behind` names the previous one.
+  - A criterion or rec needing more than one plan: its own key holds the first slice, and each further slice is a
+    `NEW-<n>` entry whose `blocked_behind` names the previous one. A finding needing more than one plan lists every
+    slice key in its `sequencing.slice_keys`.
   - T4.24 c6 is `at_first_release` (out of scope, Section 4).
   - IF a rec's status or content cannot be read (Section 10 fallback), judge from Section 10's summary and set that
     entry's `confidence: HYPOTHESIS`.
@@ -502,7 +508,7 @@ Answer every question in its own `question_answers` entry (Section 14). Verdict 
   `.github/workflows/` and `.github/actions/` (K26). How does an adopter receive the CI gates: reusable workflows or
   composite actions pinned to a release, or copies scaffolded by `otl init`? Which choice keeps P2 and P4?
   (i) Cloud adapters stay public and ship (Decision 209 clause 4; Decision 212 clause 8 selects one per port), and
-  roughly 43 `scripts/`/`src/` files import `boto3` or `botocore`. Which adapters does a release carry, is
+  roughly 43 `scripts/`/`src/` files import `boto3` or `botocore` (Section 5 SDK census). Which adapters does a release carry, is
   `core_engine` code free of any one cloud's SDK outside its adapters, and how would a check tell?
 
 ## 8. RUBRIC
@@ -762,7 +768,7 @@ audit:
     # the finding `effort` scale (XS under an hour; S one small plan; M one full plan; L several plans)
   pull_forward_sequencing:
     T4.24:c1: {verdict: now|after_prerequisite|after_sit_prod|at_first_release|stays_deferred|already_met|not_applicable,
-               order: <int or null>, blocked_behind: [<criterion, rec, finding or item ids>],
+               order: <int or null>, blocked_behind: [<criterion, rec, finding or item ids, or a quoted trigger>],
                slice: "", rationale: "", confidence: CONFIRMED|HYPOTHESIS}
     # one per T4.24:c1..c17, rec-4191, rec-4673, rec-5134, rec-5274, rec-5405, rec-4391, and NEW-<n> slices;
     # verdict mapping rules for met criteria and closed/declined recs: Q4 text;
