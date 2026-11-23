@@ -47,7 +47,8 @@ adjudication is not a finding. Mapping to the output:
 
 Candidates:
 - C1 Late tail. Composer-measured over the sample frame (re-derive from `gate_rounds` if a verdict
-  depends on it): mean blocking findings per round are about 4.0 in round 1, 1.8 in round 2 and 1.1
+  depends on it, at composing base `79a6cd09` with the Section 11 frame): mean blocking findings
+  per round are about 4.0 in round 1, 1.8 in round 2 and 1.1
   in round 3. Over rounds 4 and later, 41% of rounds return REVISE with 0.65 blocking findings per
   round; per round the REVISE share is 48% at round 4, 42-43% at rounds 5-7, 35% at round 8 and 27%
   at round 9, and rounds 10 and later have under 31 rows each. Side A: the late tail is mostly
@@ -74,6 +75,12 @@ Candidates:
   the build rework. Side B: the build redoes or departs from that detail anyway, or rework traces
   to that detail being wrong.
 
+Pinned reading of the sides: "mostly" means more than half of the items relevant to the candidate.
+Choose `side_a` or `side_b` when more than half of the relevant items support that side (for C5
+side B, at least a quarter suffices, as it claims a "material share"); `mixed` when neither side
+reaches its share; `insufficient_evidence` when fewer than 5 relevant items exist. Name the
+relevant items and the count.
+
 ## 3. READ FIRST -- DISAMBIGUATION TRAPS
 
 - T1 Who wrote the row. `gate_rounds` rows are written by the planner after fixing, not by the
@@ -92,8 +99,9 @@ Candidates:
   not itself preceded by a PROCEED. A round that follows a PROCEED but fails (a)-(c) is not a
   confirming round: it is the opening round of an amendment PR reviewing new text (sample 30 is
   the opening round of amendment PR #1999 for `scout-input-fingerprint`), or a round run after the
-  loop had ended; such rounds are in LATE. Round numbers can continue into an amendment PR or
-  restart at 1; a row with a lower number than the row before it starts a new series.
+  loop had ended; such rounds are in LATE when numbered 3 or later, else in CTRL. Round numbers can
+  continue into an amendment PR or restart at 1; a row with a lower number than the row before it
+  starts a new series.
 - T4 Fix commit vs round. Each sample names the commit on the plan PR's branch whose subject says
   it answers critique round N (for example "address critique round 4", "critique r3 fixes"). Its
   diff is the fix; its parent holds the pre-fix plan text. The same commit also applies that
@@ -107,13 +115,17 @@ Candidates:
   "plan: content reader edit hook and masked read-back (plan 2B) (#2238)"). The PR's commits live
   on the PR ref, which you fetch (Section 5 step 4).
 - T6 Plan PR vs build. "Build" means the implementation commit(s) for a plan. Section 11 lists the
-  build commits the composer found: commits on `main` after the plan PR that change the plan's
-  `implementation_declared` field, plus commits whose subject names the slug. Some builds have no
-  PR number (a sha only); their PR ref cannot be fetched, so read the commit on `main`. "none
-  found" means neither test matched: the plan may be unbuilt, or its build used another route. For
-  each such plan you may run ONE search,
+  build commits the composer found: commits on `main` after the plan PR, other than `plan(...)` or
+  `plan:` commits, that change the plan's `implementation_declared` field or whose subject names
+  the slug. Later `plan(...)` commits (amendments, closure declarations) are listed separately.
+  Some builds have no PR number (a sha only); their PR ref cannot be fetched, so read the commit on
+  `main`, and assume it went through PR CI like other builds (record "PR CI assumed" in the item's
+  `evidence`). "none found" means neither test matched: the plan may be unbuilt, or its build used
+  another route. For each such plan you may run ONE search,
   `git log --first-parent origin/main --oneline --grep "<rec id>"`, with the first rec id in the
-  plan's `bundled_recommendations` (else the first rec id in its `intent` or `context`).
+  plan's `bundled_recommendations` (else the first rec id in its `intent` or `context`; if it names
+  none, skip the search). A hit counts as the build only if it changes that plan's
+  `implementation_declared` field or its message names the plan; otherwise the plan is unbuilt.
 - T7 Three meanings of "block". In this prompt, blocking and nit are the critic's finding tags
   (plan-critique SKILL.md:156). They are not a red `--pre` check and not the decision-scout's BLOCK
   verdict (Decision 262).
@@ -124,7 +136,12 @@ Candidates:
   tier, `scripts.validate --pre`) plus any other workflow that runs on the PR. "Post-merge" is
   everything that runs after a merge: the `main-validate` job, scheduled jobs, live runs and
   post-deploy VP steps. `main-validate` runs the full tier only when the push is not plans-only; a
-  plans-only push (such as a plan PR's squash merge) gets the fast tier (Section 10).
+  plans-only push (such as a plan PR's squash merge) gets the fast tier (Section 10). A VP step's
+  `phase` field is `pre-deploy` or `post-deploy` (`scripts/roadmap/plan_document.py:25`).
+- T10 Two gates write `gate: plan-critique` rows. REPORT-ONLY plans run a Report Critique Gate
+  (planning SKILL.md:418) whose rows also read `gate: plan-critique`, so the frame counts include
+  a few such rows. All 40 sampled plans are IMPLEMENTATION plans; the rules in scope are the
+  IMPLEMENTATION critique gate's (Section 10).
 
 ## 4. SCOPE
 
@@ -164,22 +181,28 @@ re-derive from the repo and record any non-resolving anchor in `meta.stale_ancho
 
 Run these first. NEVER abort on a failure -- take the named degraded path.
 
-0. Hook canary (repo rule, AGENTS.md): if your opening context has no `[hook_canary]` line from
-   this repo's hooks, say "repo hooks not loaded" as your first status, write nothing, and end the
-   turn -- the operator resolves it. This is the one sanctioned stop in this prompt.
-1. `git fetch origin main` then `git rev-parse --short origin/main`. This sha IS the audited tree;
-   use it in the deliverable filenames, the branch name and `meta.audited_commit`. Then
+0. Hook canary (repo rule, AGENTS.md; it applies to a top-level interactive session, which is how
+   this prompt is meant to run): if your opening context has no `[hook_canary]` line from this
+   repo's hooks, say "repo hooks not loaded" as your first status, write nothing, and end the turn
+   -- the operator resolves it. This is the one sanctioned stop in this prompt.
+1. Record your current branch name (`git branch --show-current`; the harness-assigned session
+   branch, needed by Section 16 step 4). `git fetch origin main` then
+   `git rev-parse --short origin/main`. This sha IS the audited tree; use it in the deliverable
+   filenames, the branch name and `meta.audited_commit`. Then
    `git switch -c audit/plan-critique-late-findings-<sha> origin/main` now, so everything you read
    is the audited tree. IF that branch already exists (locally per `git branch --list`, or on the
    remote per `git ls-remote --heads origin <name>`), append `-r2` (then `-r3`, ...) to the branch
-   name only; the deliverable filenames keep `<sha>`. IF the fetch fails: use
-   `git rev-parse --short HEAD`, branch off `HEAD` instead, and record "base is local HEAD" in
-   `meta.contract_notes`.
+   name only; the deliverable filenames keep `<sha>`. IF the switch is refused (for example by a
+   hook), stay on the session branch, read files at the audited sha with `git show <sha>:<path>`
+   where the session branch differs from it, and record "audited on the session branch" in
+   `meta.contract_notes`. IF the fetch fails: use `git rev-parse --short HEAD`, branch off `HEAD`
+   instead, and record "base is local HEAD" in `meta.contract_notes`.
 2. `bin/venv-python -m scripts.session.preflight --roadmap-detail full` -- writes
-   `logs/.preflight-report.json` (gitignored; expected), whose roadmap state you use for the
-   Section 13 roadmap search. Recommendations have no local cache in this repo; rec dedup uses the
-   live reader (step 3). IF this fails: record the error in `meta.contract_notes`, read
-   `docs/ROADMAP-PLATFORM.yaml` directly for Section 13, and continue.
+   `logs/.preflight-report.json` (gitignored; expected), which gives roadmap item statuses (open,
+   in progress, blocked) for Section 13. Criteria text and `candidate_decisions[]` are read from
+   `docs/ROADMAP-PLATFORM.yaml` itself. Recommendations have no local cache in this repo; rec dedup
+   uses the live reader (step 3). IF this fails: record the error in `meta.contract_notes`, take
+   statuses from `docs/ROADMAP-PLATFORM.yaml` too, and continue.
 3. Rec dedup probe -- run it whatever step 2 did:
    `bin/venv-python -m scripts.recs_related .claude/skills/plan-critique/SKILL.md --terms "blocking nit confirming round" --limit 5 --table`.
    IF this fails: do NOT abort -- set `meta.degraded_dedup = true`, set every finding whose
@@ -225,15 +248,21 @@ them.
 Q1 Counterfactual per item. Suppose only the item's change was withheld (every other change the
 plan received is kept) and the plan merged that way. Which outcome follows? Per-item
 `counterfactual`:
-- `needs_operator`: settling the item required a fresh operator act -- new or changed approved
-  wording (the approved-text sidecar), a change to Decision text, a change to the scope, tier or
-  approach the operator approved, or an always-ask surface. An edit inside already-approved text
-  that needs no new approval is not `needs_operator`. This value takes precedence over all below.
+- `needs_operator`: settling the item required a fresh operator act, shown by evidence in the fix
+  itself: the fix changes the approved-text sidecar (`docs/plans/approved/`) or Decision text; or
+  it changes the plan's scope, tier or approach where the plan records that choice as the
+  operator's (an `escalation_choice` on a `gate_rounds` row, or a `context` line naming an operator
+  answer); or it touches an item of `docs/contracts/coordinator.yaml` `always_ask.items` (line
+  161: IAM and security, spend, gated wording, public-surface files, manual or admin steps,
+  non-CI deploys, loosened tests, secret-publishing runs). An edit inside already-approved text
+  that needs no new approval is not `needs_operator`. Without such evidence, trace the stages
+  below instead. This value takes precedence over all below.
 - Otherwise find the control that would fail EARLIEST, in this stage order: (1) plan PR CI;
   (2) the build agent, following `.claude/skills/implement/SKILL.md`, before it opens its PR
   (including its own run of the plan's pre-deploy VP steps); (3) build PR CI (including
   `validate_vp_replay`); (4) post-merge (T9). Label it by what fails:
-  `caught_by_vp` = a pre-deploy VP step fails, at stage 2 or 3;
+  `caught_by_vp` = a pre-deploy VP step fails, at stage 2 or 3 (when a VP step and another part of
+  the build agent's work would both fail at stage 2, the VP step wins);
   `caught_by_ci` = any other CI check or job fails, at stage 1 or 3;
   `caught_by_build` = the build agent's own work fails or stops at stage 2 (its tests, its pytest
   loop, code that cannot work, a deviation-trigger STOP);
@@ -251,10 +280,16 @@ Pinned rules for Q1:
 - Property match: a control counts only if it exercises the property the item concerns AND would
   fail if the item were left unfixed -- apply the counterfactual to the control (would that check,
   test or step go red on the pre-fix text?). A control that merely runs nearby is not a catch.
+- The build commit: where Section 11 lists several, use the one that implements what the item
+  concerns (the first that touches the item's subject; the first listed if unclear). Read its code
+  for the trace.
 - Controls as they stood: stage 1 as at the fix commit's tree; stages 2 and 3 as at the parent of
-  the plan's first build commit (`<build sha>^`); stage 4 as at the build commit; for an unbuilt
-  plan, as at the audited base. The VP and test obligations are as in the plan without the item's
-  change.
+  that build commit (`<build sha>^`); stage 4 as at the build commit; for an unbuilt plan, as at
+  the audited base. The VP and test obligations are as in the plan without the item's change.
+- Later rewrites: when a later change edited, superseded or depends on the text the item's fix
+  touched, apply the counterfactual to the merged text by removing the item's semantic content
+  (what its fix added, or the correction it made) from it. If that content cannot be separated from
+  later changes, the counterfactual is `undeterminable`; say why.
 - Build agent: credit it with a catch only when a step it must run (a planned test, a VP command,
   its pytest loop, a scope check) would fail, or the code it must write cannot work without
   resolving the item. Do not credit it with noticing an omission nothing leads it to.
@@ -262,7 +297,8 @@ Pinned rules for Q1:
   base, set `build_merged: no`, and cap the item's confidence at HYPOTHESIS unless the trace needs
   no build.
 Also record per item:
-- `catch_route`: `none` (no catch, or `no_effect`) | `in_build_fix` (fixed inside the build PR
+- `catch_route`: `none` (no catch: `no_effect`, `needs_operator`, `shipped_defect`,
+  `shipped_guard_gap`, `undeterminable`) | `in_build_fix` (fixed inside the build PR
   with no plan change) | `plan_amendment` (the catch forces a plan amendment PR: a scope or
   contract deviation, implement SKILL.md deviation trigger (b)) | `forward_fix_on_main`.
 - `note_would_suffice`: had the item travelled as a one-line build note instead of a plan fix,
@@ -277,8 +313,10 @@ Q2 Late vs control. Do late items differ from round 1-2 items in consequence if 
 group report items, core-mattered items, extended-mattered items, undeterminable items, and a 95%
 interval for the core-mattered share (exact binomial or Wilson; name it; undeterminable items
 count as not mattered). Verdict: `late_lower_value | similar_value | late_higher_value |
-insufficient_evidence`. Choose `insufficient_evidence` when these sample sizes cannot separate the
-options, and say what size would.
+insufficient_evidence`. Choose `insufficient_evidence` when either group's point estimate lies
+inside the other group's 95% interval and the two estimates differ by more than 10 percentage
+points (a difference the sample cannot confirm); `similar_value` when they differ by 10 points or
+less; otherwise the direction. Say what group size would settle an `insufficient_evidence` call.
 
 Q3 Candidate blocking rules. Rules, listed in no order:
 - R0 (today's rule): blocking = correctness, safety, scope, a Decision conflict or a failed
@@ -299,9 +337,12 @@ item is dropped; this is the worst case, since today the planner fixes nits too,
 SKILL.md:412) and the note world (`note_would_suffice`). For each rule and each group count: items
 blocked, core-mattered blocked, core-mattered demoted, extended-only items demoted (guard gaps and
 plan amendments), undeterminable items demoted, other items demoted, and precision (core-mattered
-blocked / blocked). Per-rule verdict, late group: `unsafe` if it demotes at least one core-mattered
-item whose counterfactual is CONFIRMED; else `insufficient_evidence` if it demotes a core-mattered
-HYPOTHESIS item or an undeterminable item; else `safe`. Also record `safe_extended` (`yes` if it
+blocked / blocked), plus `core_tested` (the core-mattered items in the group, which is what "safe"
+was tested against) and `demoted_upper_95` (the one-sided 95% upper bound on the core-mattered
+share among the items the rule demotes, from core demoted out of all demoted). Per-rule verdict, late group: `no_change` if it demotes no
+item; else `unsafe` if it demotes at least one core-mattered item whose counterfactual is
+CONFIRMED; else `insufficient_evidence` if it demotes a core-mattered HYPOTHESIS item or an
+undeterminable item; else `safe`. Also record `safe_extended` (`yes` if it
 demotes no extended-mattered item, else `no`) and, for an `unsafe` rule, `safe_with_notes` (`yes`
 if every core-mattered item it demotes has `note_would_suffice: yes`). Question-level verdict:
 `safe_rule_found` if any of R1-R3 or RX is `safe` for the late group; else `insufficient_evidence`
@@ -315,7 +356,10 @@ mechanical items, record in `deterministic_checks`: what the check asserts, its 
 check to extend, named by path, or a new module under `scripts/checks/<domain>/`, or the plan lint
 `scripts/roadmap/plan_obligations.py` with `docs/contracts/plan-obligations.yaml`), whether
 something already checks it (`already_exists: yes | partial | no`, naming the check), and the items
-it would have caught. Verdict: `some_recurring | none_recurring`.
+it would have caught. Anti-vacuity: for each check, state that it would be red on the pre-fix text
+and green on the post-fix text of every item it lists, and whether it would stay silent on the
+other sampled plans' merged text (`red_green: yes | partial | no`, with a line of evidence).
+Verdict: `some_recurring | none_recurring`.
 
 Q5 Confirming rounds and rounds after 5. This is the planning skill's own pending revisit question
 (planning SKILL.md:414: "did a confirming round ever find a blocking finding, and were findings
@@ -339,6 +383,9 @@ Q7 Questions the operator did not think to ask. Answer these, then add your own:
   list any that look consequential; trace at most 5 of them in total. Did any nit-tagged change
   carry a core-mattered consequence? Are the nit fixes applied after a confirming round, which
   are "applied, not re-read" (planning SKILL.md:412), ever a source of defects in the sample?
+- Does the escalation rule (planning SKILL.md:414) ever fire? Count the `escalated: true` rows
+  (`scripts/roadmap/plan_gate_rounds.py:55`) among plan-critique rows in the sampled plans, and
+  name the longest series with none.
 - Can the gate's own yield be measured from what the repository stores (planner-written counts and
   optional paraphrases, no critic text), and what is the smallest record that would make the next
   audit of this kind cheaper and firmer?
@@ -364,16 +411,20 @@ where a dimension does not apply; never manufacture a rating or a finding to fil
 - VD5 Convergence (NS4; Q5, C1, C2): later rounds yield materially fewer consequential items than
   earlier rounds, and the stopping rule ends the loop when they no longer do.
 - VD6 Detail value (NS5; Q6, C6): the build-level detail the gate asks plans to carry is detail
-  builds use and that prevents rework.
+  builds use and that prevents rework. The evidence is asymmetric: rework caused by wrong detail
+  can be observed, rework prevented by detail can only be argued (Q6); weigh it accordingly.
 
 ## 9. DEEP-DIVES
 
-DD-A Per-item counterfactual trace (feeds Q1-Q5, Q7, C1-C5). Process samples in this order: CONF
-(1-8), then CTRL (31-40), then LATE (9-30). For each sample:
+DD-A Per-item counterfactual trace (feeds Q1-Q5, Q7, C1-C5). Process samples in this order, so
+that a truncated run keeps every group represented: 1-8, then 9, 10, 31, 11, 12, 32, 13, 14, 33,
+15, 16, 34, 17, 18, 35, 19, 20, 36, 21, 22, 37, 23, 24, 38, 25, 26, 39, 27, 28, 40, 29, 30. For each
+sample:
 1. Row. In `docs/plans/PLAN-<slug>.yaml` at the audited base, find the `gate: plan-critique` row
    with the sample's round number in the right series (T3). Record its blocking and nits counts and
-   any trailing comment. If the row differs from Section 11 (round, verdict or blocking count), use
-   the repository row and record the difference in `meta.contract_notes`.
+   any trailing comment (`row_blocking`, `row_nits`, `row_comment`). If the row differs from
+   Section 11 (round, verdict or blocking count), use the repository row and record the difference
+   in `meta.contract_notes`.
 2. Fix. `git log -1 --format=%B <fix sha>`; `git show --stat <fix sha>`;
    `git show <fix sha> -- docs/plans/` (this includes any approved-text sidecar under
    `docs/plans/approved/`). Pre-fix plan: `git show <fix sha>^:docs/plans/PLAN-<slug>.yaml`.
@@ -384,17 +435,19 @@ DD-A Per-item counterfactual trace (feeds Q1-Q5, Q7, C1-C5). Process samples in 
    (b) Else, the commit subject or body names the round's changes and separates blocking ones from
        nits, or the round's diff (after the exclusions in (c)) holds a single change ->
        `commit_message`.
-   (c) Else, the diff -> `diff_inferred`. A change is one edited plan field (the YAML key path of
-       the edited lines, e.g. `verification_plan[3]` or `scope[2].purpose`). Exclude edits to
-       `gate_rounds`, and any change the commit body or a decision-scout or wording-check
-       `gate_rounds` row added in the same commit attributes to another gate. Tag the remaining
-       changes by plan-critique SKILL.md:156: a change touching only wording, citation form or
-       ordering answers a nit; the rest are blocking candidates. The blocking candidates in diff
-       order are the items.
-   If the source yields fewer items than the row's blocking count, use n = the number found and
-   note it. If it yields none, set `item_source: unavailable`, describe the round's whole change,
-   and continue. Describe the item in at most 30 words of your own. Note any consequential-looking
-   nit change for Q7.
+   (c) Else, the diff -> `diff_inferred`. A change is one edited plan row: the top-level key plus
+       its list index where the key holds a list (e.g. `verification_plan[3]`, `scope[2]`,
+       `rollback`); several edited subkeys of one row are one change. An edit to the approved-text
+       sidecar is one change per top-level key of the sidecar file. Exclude edits to `gate_rounds`,
+       and any change the commit body or a decision-scout or wording-check `gate_rounds` row added
+       in the same commit attributes to another gate. Tag the remaining changes by plan-critique
+       SKILL.md:156: a change touching only wording, citation form or ordering answers a nit; the
+       rest are blocking candidates. The blocking candidates in diff order are the items.
+   n is the number of items the source yields, even when it differs from the row's blocking count
+   (record both; note the difference in `item_note`). If the source yields none, set
+   `item_source: unavailable`, `item_number: 0`, `finding_type: other`, `plan_field: ""`,
+   describe the round's whole change, and continue. Describe the item in at most 30 words of your
+   own. Note any consequential-looking nit change for Q7.
 4. `finding_type` (pinned): `test_case_or_fixture | test_node_or_obligation_row | vp_step |
    line_pin_or_size_arithmetic | scope_row | approach_or_design | decision_conflict |
    invariant_or_safety | definition_or_wording | procedural_bookkeeping | rollback | approved_text
@@ -404,10 +457,13 @@ DD-A Per-item counterfactual trace (feeds Q1-Q5, Q7, C1-C5). Process samples in 
    candidate controls. Record `counterfactual`, `catching_control` (file:line, check name or
    workflow job; empty when none), `control_property_match`, `catch_route`, `note_would_suffice`.
 6. Origin (C3): one
-   `git log -S"<distinctive text the item fixed>" --oneline refs/remotes/pr/<N> -- docs/plans/PLAN-<slug>.yaml`
-   search. `fix_induced: yes` when a commit on the PR before the fix commit (a fix for any gate)
-   introduced the text; `no` when the text was in the PR's first commit or, for an amendment PR,
-   already on `main` before it; `unclear` otherwise.
+   `git log -S"<distinctive pre-fix text>" --oneline refs/remotes/pr/<N> -- docs/plans/PLAN-<slug>.yaml`
+   search, where the pre-fix text is the faulty text the fix removed or changed; for an omission
+   (the fix only added text), use the distinctive text of the row the addition completes.
+   `fix_induced: yes` when a commit on the PR before the fix commit (a fix for any gate)
+   introduced that text; `no` when it was in the PR's first commit or, for an amendment PR,
+   already on `main` before it; `unclear` when there is no distinctive text or the search is
+   inconclusive.
 7. Rules and checks: `rule_blocks` (Q3), `mechanical` and `deterministic_check` (Q4).
 8. Write the row to the YAML deliverable now. The file is your working memory across any context
    compaction; re-read it rather than re-deriving finished rows.
@@ -513,8 +569,11 @@ Dedup pointers (returned by `scripts.recs_related` at compose time, all open the
 ## 11. EMPIRICAL PASS
 
 Sample frame: the `gate: plan-critique` rows, at composing base `79a6cd09`, of the plan files that
-a commit with committer date 2026-11-09 or later had changed: 152 plan files, 1,039 rows (later
-bases have more as new plans land). Pools of REVISE rows: CONF (confirming rounds per T3; 32 rows),
+a commit with committer date on or after 2026-11-09 had changed, as selected by
+`git log --since=2026-11-09`, which git resolved at the composing time of day: 152 plan files,
+1,039 rows. That cutoff fell after 00:03:31 UTC on 2026-11-09, so it leaves out
+`PLAN-coordinator-harness-profile.yaml` (changed at that minute); a strict 00:00 UTC cutoff gives
+153 files and 1,043 rows. Later bases have more rows as new plans land. Pools of REVISE rows: CONF (confirming rounds per T3; 32 rows),
 LATE (round 3 or later and not CONF; 303 rows, of which 39 follow a PROCEED without being
 confirming rounds) and CTRL (round 1 or 2 and not CONF; 264 rows). The composer drew 8, 22 and 10
 rows at random within each pool, at most one row per plan, keeping only rows whose fix commit could
@@ -583,8 +642,8 @@ that first build -- do NOT exceed: sample 4 #2228 (bc29d718), 5 #2189 (9f4dce72)
 commit on `main`.
 
 Tag every finding `evidence_kind: observed` when it rests on traced sample items, `static` when it
-rests on skill text alone; at equal severity, observed outranks static. Do NOT call a model, run a
-critic or re-run a plan's VP.
+rests on skill text alone; at equal severity, observed outranks static. Do NOT call a model API,
+run a critic or re-run a plan's VP (read-only search subagents per Section 5 are allowed).
 
 ## 12. METHOD
 
@@ -602,7 +661,7 @@ critic or re-run a plan's VP.
 ## 13. DEDUP DISCIPLINE
 
 Before filing any finding, search the ownership surfaces: the roadmap (`tier_items[]` criteria text
-and `candidate_decisions[]`, from step 2's report or `docs/ROADMAP-PLATFORM.yaml`),
+and `candidate_decisions[]` in `docs/ROADMAP-PLATFORM.yaml`, with statuses from step 2's report),
 `docs/DECISIONS.md` headers and clauses, and open recs
 (`bin/venv-python -m scripts.recs_related <file paths> --terms "<terms>" --table`, paging with
 `--exclude` -- it takes the comma-joined rec ids the previous page printed as `next_exclude` -- at
@@ -627,8 +686,10 @@ says so, never whether they should exist):
 - Persona-first migration of gates onto GitHub Actions (Decision 229).
 - Verification weakening is human-gated (Decision 235).
 - Whether a critique checklist check verifies the right thing (12c, 12c-1, 12k and the rest; skill
-  text, no Decision).
-- The public-repository content boundary (AGENTS.md).
+  text, no Decision). Whether a failed check should block, and whether the plan detail a check asks
+  for pays off in the build (Q6, VD6), ARE in scope, as Section 4 says: a finding may propose that
+  a class of detail stop blocking or move to the build.
+- The public-repository content boundary (Decision 101; AGENTS.md).
 
 ## 14. OUTPUT
 
@@ -662,7 +723,8 @@ audit:
     - {candidate: C1..C6, verdict: side_a|side_b|mixed|insufficient_evidence, basis: [<item ids>], prose: ""}
   sample_items:
     - {item_id: I01, sample: 1, stratum: CONF|LATE|CTRL, plan: <slug>, round: <int>, plan_pr: <int>,
-       fix_commit: <sha>, blocking_items_found: <int n>, item_number: <int k>,
+       fix_commit: <sha>, row_blocking: <int>, row_nits: <int>, row_comment: "",
+       blocking_items_found: <int n>, item_number: <int k, 0 if unavailable>, item_note: "",
        item_source: gate_rounds_annotation|commit_message|diff_inferred|unavailable,
        item: "<= 30 words", plan_field: "<field path the fix touched>",
        finding_type: <DD-A step 4 enum>,
@@ -678,12 +740,13 @@ audit:
     rules:
       - {rule: R0|R1|R2|R3|RX, group: late|control, blocked: <int>, core_blocked: <int>,
          core_demoted: <int>, extended_only_demoted: <int>, undeterminable_demoted: <int>,
-         other_demoted: <int>, precision: "<core_blocked>/<blocked>",
-         verdict: safe|unsafe|insufficient_evidence|baseline, safe_extended: yes|no|n/a,
+         other_demoted: <int>, precision: "<core_blocked>/<blocked>", core_tested: <int>,
+         demoted_upper_95: "<percent>",
+         verdict: safe|unsafe|insufficient_evidence|no_change|baseline, safe_extended: yes|no|n/a,
          safe_with_notes: yes|no|n/a, rationale: "", confidence: CONFIRMED|HYPOTHESIS}
   deterministic_checks:
     - {finding_type: "", asserts: "", home: "<path>", already_exists: yes|partial|no,
-       existing_check: "", items: [<item ids>], note: ""}
+       existing_check: "", items: [<item ids>], red_green: yes|partial|no, note: ""}
   build_rework:
     - {sample: <int>, plan: <slug>, build_pr: <int>, build_commit: <sha>, commits: <int>,
        by_class: {initial: <int>, ci_fix: <int>, plan_conformance: <int>, plan_detail_wrong: <int>,
@@ -709,7 +772,8 @@ audit:
   summary: {total_findings, novel_count, planned_insufficient_count, planned_unbuilt_count,
             top_improvements: [finding ids], highest_leverage_change: <finding id or null>,
             maturity_S1: <value>, items_total: <int>, items_late: <int>, items_control: <int>,
-            late_core_mattered: <int>, control_core_mattered: <int>, undeterminable: <int>}
+            late_core_mattered: <int>, control_core_mattered: <int>,
+            late_undeterminable: <int>, control_undeterminable: <int>}
 ```
 
 Rules for the contract:
@@ -719,6 +783,10 @@ Rules for the contract:
   verdict rule applied to the control group.
 - `origin: executor` marks a finding you raised yourself; `classification: novel` is a dedup
   result (Section 13). The two are independent.
+- `change_type`: `add` = a new rule, check or record; `rescope` = change what a rule covers;
+  `enforce` = make an existing rule mechanically enforced; `unify` = merge duplicate rules;
+  `persist` = store something now lost; `clarify` = reword without changing behaviour;
+  `retune_gate` = change what blocks or when the loop stops.
 - effort scale: XS = a one-line or config change; S = a small plan; M = one standard plan; L = one
   large plan near the split threshold.
 - COUNTING INVARIANT: `findings[]` is the SOLE enumerated list of defects; `total_findings =
@@ -813,7 +881,7 @@ prompt's framing does not foreclose it.
 - Write boundary (closed list): the ONLY repository files you create or modify are
   `audits/plan-critique-late-findings-<sha>.yaml` and `audits/plan-critique-late-findings-<sha>.md`.
   You do NOT edit skills, plans, contracts, Decisions, the roadmap, code or workflows; do NOT file
-  or update a recommendation; do NOT comment on any PR or issue; do NOT run a critic, call a model,
+  or update a recommendation; do NOT comment on any PR or issue; do NOT run a critic, call a model API,
   dispatch a workflow or re-run a plan's VP.
 - Never write an AWS account id, ARN, ExternalId, credential, secret value or internal hostname in
   either deliverable (public repository).
