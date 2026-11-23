@@ -1,0 +1,361 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: ci-rca-watchdog
+intent: >-
+  Solves rec-5504. A deterministic watchdog (no LLM, no vendor CLI, no AWS, no portal) checks that each red on main of
+  a workflow CI RCA watches, and each CI RCA run, ended with an outcome; when one did not, it opens or comments on one
+  GitHub issue. A no-LLM job at the end of every real CI RCA run (timeouts included) runs the check, so a failed CI RCA
+  run alarms minutes after it ends; a red whose CI RCA run never started, stuck or was skipped is found by the
+  scheduled run or the next real CI RCA run (Decisions 72, 226).
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-ci-rca-watchdog.yaml
+phase: >-
+  ad_hoc_rec (soft-warn exception category: rec-5504, High, an open reliability gap in CI RCA; no tier_item claimed, so
+  the Tier Item Freshness Gate is skipped; closes no criterion). One new workflow, one new scripts/ci_rca module, a
+  run-name and a final watchdog job in ci-rca.yml, one taxonomy row, four baseline rows, one test file. V3: the proof is a
+  live dispatch on main that opens a real issue for real past CI RCA failures.
+closes_criteria: []
+cites: [dec:72, dec:74, dec:84, dec:101, dec:162, dec:197, dec:226, dec:250, dec:267]
+scope:
+  - file: scripts/ci_rca/watchdog.py
+    action: Create
+    purpose: >-
+      Deterministic reconciliation, stdlib plus yaml only (the workflow installs pyyaml alone, notice_digest precedent),
+      under 500 SLOC. All GitHub calls go through one injectable `gh api` helper (scripts/ci/notice_digest.py's _gh
+      shape, but REST only: label, issue, comment and reopen calls use `gh api`, never `gh issue`/`gh label`, which use
+      GraphQL that CC-web sessions refuse); the repository comes from scripts.repo_identity (stdlib-only) so a session
+      run without GITHUB_REPOSITORY resolves it. Tests drive the helper with recorded real API JSON. Every list read (reds, join window, the status sweeps, jobs,
+      issues, issue comments) pages at per_page=100 to the end, at most 10 pages; a full 10th page exits 1 naming
+      the truncated read. (1) Watched set: the names in ci-rca.yml's
+      on.workflow_run.workflows (PyYAML loads the `on` key as True; read both), the single source of truth. Its own
+      short parse, not scripts/ci/persona_dispatch_gate.py's private _workflow_names (raises the gate's Refusal; file
+      out of scope); a test pins both parsers to the same list on the real ci-rca.yml. (2) Reds:
+      GET actions/runs?branch=main&status=failure&created=>=SINCE - 6 h (slack for a red created before the lookback
+      but completed inside it, e.g. a deploy waiting on an Environment approval), kept when name is watched, head_repository.full_name equals the repo, and updated_at
+      is at least GRACE_MINUTES=60 old. SINCE = now - lookback_hours (default 24, argparse int 1..720). (3) Join: for
+      each red, list ci-rca.yml runs created in [red.run_started_at, red.updated_at + 30 min]; a run is linked when its
+      display_title matches ^CI RCA for run (\d+)$ with the red's id; a run is untitled only when its display_title is
+      exactly "CI RCA" (the pre-run-name default). No linked run and an untitled run in the window:
+      the red predates the run-name and is counted `unlinkable`, never alarmed. No linked run and no untitled run:
+      kind no_rca_run. Else the newest linked run (created_at, then run_attempt) decides, judged by its `rca` job's conclusion from
+      the jobs read (5) makes (the run conclusion only when no rca job exists), so a failure of the watchdog job alone
+      is its own kind watchdog_failed, never rca_failed: success -> ok; status not
+      completed -> rca_stuck; conclusion skipped -> rca_skipped; any other conclusion -> rca_failed. A later CI RCA
+      re-dispatch (the issue's own remedy) is created outside the window and never links; marker dedupe makes that
+      harmless. Self run: --self-run-id and --self-result (success, failure, cancelled) name the CI RCA run whose final
+      job is running the check; that run is still in progress, so it is judged as completed with conclusion
+      self-result in both the join and (4). (4) Every ci-rca.yml
+      run created since SINCE with conclusion failure, cancelled, timed_out, startup_failure or action_required (one
+      status-filtered query each) -> rca_failed (watchdog_failed when its rca job succeeded and only the watchdog job
+      failed), whatever its trigger; a cancelled run with zero jobs (a pending run the concurrency group replaced)
+      alarms only when the run its title names concluded failure (one extra GET), so a timeout-minutes kill, a pre-venv or OIDC
+      death and an operator dispatch all alarm. (5) Failed step for each alarmed CI RCA run: GET runs/{id}/jobs, the
+      first step whose conclusion is failure, cancelled or timed_out ("job <name>: <conclusion>" when no step is,
+      "none recorded" when no job is), clamped to 100 chars. (6) Line per alarm: "- <kind>: <workflow> run <url> |
+      CI RCA run <url or none> | failed step: <name>" followed by the hidden marker
+      "<!-- ci-rca-watchdog:<kind>:<key id> -->" (key id = the CI RCA run id, or the red's id for no_rca_run). Only run
+      URLs, workflow names, kinds and step names are written: no log text, no ids beyond run ids (Decision 101).
+      Alarms are collected in a dict keyed by marker, so one run yields one line per marker; when (3) and (4) both
+      reach a CI RCA run, the linked line (workflow and red URL) wins, and a sweep-only line names the red from the
+      run's display_title when it parses ("unknown" otherwise). (7)
+      Dedupe: markers read only from the bodies and comments authored by github-actions[bot] on issues labelled
+      ci-rca-watchdog (any state, updated in the last lookback_hours + 48 h; comments read with since= that window, so
+      a long-lived issue never hits the page cap), so a public commenter cannot suppress an
+      alarm. (8) Post new lines so two writers converge (critique r2 B1: ci-rca.yml's watchdog job and the scheduled run
+      can race, and a burst of CI RCA failures runs several jobs at once): the target is the lowest-numbered
+      bot-authored ci-rca-watchdog issue in ANY state, chosen from its own unwindowed issues?labels=ci-rca-watchdog&state=all
+      read (not the dedupe window's); if closed, reopen it; comment the new lines on it. Only when no
+      such issue has ever existed, create the label if missing (notice_digest's _ensure_issue) and open one issue
+      titled "CI RCA watchdog: reds on main without an outcome" with the lines, then re-list: if a lower-numbered bot
+      issue now exists (a racing create), comment the same lines there and close its own issue as a duplicate
+      (state_reason duplicate, falling back to not_planned on a 422). Residual, accepted: a racing pair may post one line twice. Fixed header, a pager not
+      a queue (Decision 197): for each listed red, first check for an existing ci_rca rec (rec-4678's fallback may
+      already have filed one); if none, have a maintainer re-run CI RCA for the watched run through its
+      workflow_dispatch run_id input (Decision 74; an agent-fired dispatch is refused by the persona gate, Decision 205
+      cl.1) or file it through the portal; then close the issue; the next orphan reopens it. Bodies split under 65536
+      chars. Closes no issue except its own racing duplicate. The header also says a re-run attempt of an
+      already-listed CI RCA run is not listed again (markers key on the run id); a fresh dispatch gets a new id. (9) stdout ends with one line
+      "watchdog: reds=N ok=N unlinkable=N alarms=N new=N". Exit 1 on any gh failure (fail loud, Decision 84 I-4 spirit);
+      --dry-run prints the lines and posts nothing.
+    new_imports: []
+  - file: .github/workflows/ci-rca-watchdog.yml
+    action: Create
+    purpose: >-
+      The schedule path for a CI RCA that never runs at all. name ci-rca-watchdog. on: schedule cron '23 * * * *' and
+      workflow_dispatch with input lookback_hours (string, default '24'); no workflow_run trigger (critique r1: it would
+      add a run per CI RCA run, about 600 a day, blinding dispatch_integrity's 1000-run window, and the deploy and
+      telemetry chains already sit at GitHub's three-level workflow_run cap). Top-level permissions contents: read. Job
+      watch if: `(github.event_name != 'workflow_dispatch' || github.actor != 'otl-workflow-dispatcher[bot]')`, with the
+      parentheses (Decision 267 cl.3; tests/verify_ci_workflow/test_dispatch_bot_guard.py; security-detector-liveness.yml:36). runs-on ubuntu-latest, timeout-minutes 10, permissions exactly contents: read, actions: read,
+      issues: write (no id-token, no secrets, no AWS); job-level concurrency group ci-rca-watchdog, cancel-in-progress
+      false. Steps: checkout of the default ref (persist-credentials false), setup-python 3.12 (the repo's pinned SHA), "Install watchdog
+      dependencies" `python -m pip install pyyaml -c requirements.txt`, "Reconcile CI RCA outcomes" with env GH_TOKEN
+      github.token and LOOKBACK bound from inputs.lookback_hours || '24' (never interpolated into run:), body
+      `python -m scripts.ci_rca.watchdog --lookback-hours "$LOOKBACK"`. Header comment: what it checks, why it shares
+      no failure mode with CI RCA, that ci-rca.yml's final job runs the same check after every real CI RCA run.
+  - file: .github/workflows/ci-rca.yml
+    action: Modify
+    purpose: >-
+      Two additions; the rca job's steps are untouched. (a) After `name: CI RCA`: `run-name: CI RCA for run ${{
+      github.event.workflow_run.id || inputs.run_id }}`, the join key the watchdog reads (persona-verdict.yml
+      precedent), evaluated for every run, skipped ones included. (b) Operator's choice 2026-11-23 12:13Z (decision card, option 1; thread message cmsg_013uUnYHc1Muc8Nd9vFP7qXyPopnueqpC7dVivSGrbNvZk): a
+      final job `watchdog` with needs: rca and if: `(github.event_name != 'workflow_dispatch' || github.actor !=
+      'otl-workflow-dispatcher[bot]') && (always() && needs.rca.result != 'skipped')` (the Decision 267 cl.3 guard
+      prefix the dispatch-bot guard test requires on a job calling a status function, reconcile.yml:621 form; it runs after a
+      failed, cancelled or timed-out rca job and never for the hundreds of skipped runs; a job-level timeout kills
+      only the rca job), runs-on ubuntu-latest, timeout-minutes 10, permissions exactly contents: read, actions: read,
+      issues: write (no id-token, no secret, no AWS, no LLM), the same four steps as ci-rca-watchdog.yml with env
+      GH_TOKEN, SELF_RUN_ID github.run_id and SELF_RESULT needs.rca.result bound in env, body `python -m
+      scripts.ci_rca.watchdog --lookback-hours 24 --self-run-id "$SELF_RUN_ID" --self-result "$SELF_RESULT"`. The
+      workflows filter is unchanged.
+  - file: config/ci_rca_taxonomy.yaml
+    action: Modify
+    purpose: >-
+      One flow-style workflows row: ci-rca-watchdog {tier: not_a_gate, ci_rca: excluded, owner: platform, rationale:
+      "Scheduled watchdog for CI RCA itself (rec-5504); its schedule puts it under loop_liveness_stale, which backstops
+      a persistent red (security-detector-liveness precedent), and ci-rca.yml's own watchdog job runs the same check."}.
+      NEAR_CAP (494 of 500 effective lines at plan time; ten unbuilt plans also add rows): measure on main at build
+      time; if the row does not fit, collapse multi-line rows (Main Canary first, then security-detector-liveness,
+      telemetry-golden-replay, telemetry-verification) into flow style with identical values until it fits; never a raise.
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: >-
+      r3_workflows rows for the two run steps of ci-rca-watchdog.yml and the two run steps of ci-rca.yml's watchdog job
+      at their measured effective line counts (1 each expected); no raise marker.
+  - file: tests/test_ci_rca_watchdog.py
+    action: Create
+    purpose: >-
+      rec-5504's acceptance file (its node test_failed_ci_rca_run_alarms_without_a_join: a CI RCA run concluded
+      failure with no linked red yields one rca_failed line naming its failed step). Fixtures are recorded real GitHub REST shapes (runs list, jobs list, issues list,
+      issue comments). Legs: watched-set parse (the True key); each kind (no_rca_run, rca_stuck, rca_skipped,
+      rca_failed for a linked red, rca_failed for an unlinked CI RCA run with conclusion failure, cancelled and
+      timed_out, a job with a cancelled step as a timeout-minutes kill looks); ok for a linked success; unlinkable for
+      an untitled window; grace (a 59-minute-old red is not judged); fork head_repository and non-watched names
+      ignored; newest linked run wins over an older failed attempt; the self run judged by --self-result (failure gives
+      rca_failed with its failed step, success gives ok, its red is not rca_stuck); a linked failed run seen by both the
+      join and the sweep yields exactly one line; a linked run on page 2 of the join window and a marker in a comment
+      on page 2 are both found; watchdog.py's first-party import closure (scripts.dependency_graph) reaches only
+      stdlib and yaml; dedupe skips a marker from github-actions[bot] and
+      ignores the same marker from another author; a closed issue's marker still dedupes; open issue gets one comment,
+      no bot issue ever creates one; a CI RCA run whose rca job succeeded and whose watchdog job failed is
+      watchdog_failed; a startup_failure run titled otherwise inside a red's window does not make the red unlinkable;
+      comment reads pass since=; a closed bot issue is reopened and commented, not duplicated; a racing create
+      that finds a lower-numbered bot issue comments there and closes its own as duplicate; fixtures are small
+      factory functions trimmed to the fields the watchdog reads (no actor, author or head_commit blocks, Decision
+      101), keeping the file under 500 SLOC; the watched-set parse equals persona_dispatch_gate._workflow_names on the
+      real ci-rca.yml; issue text holds no string outside the allowed fields (assert against a fixture
+      carrying a log-like step output); truncation exits 1; a gh failure exits 1; --dry-run posts nothing; the summary
+      line. Workflow legs: ci-rca-watchdog.yml has the schedule, the dispatch input, no workflow_run trigger, the bot
+      refusal, exactly the three job permissions, no id-token, no `secrets.` reference, no claude invocation;
+      ci-rca.yml's run-name renders the id the watchdog's title regex parses; its watchdog job needs rca, carries the
+      guard-prefixed always()-and-not-skipped if (refusal leg), exactly the three permissions, no `secrets.` reference and the self-run arguments;
+      its filter does not carry ci-rca-watchdog.
+bundled_recommendations:
+  - rec-5504
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - A watched red on main with no CI RCA run, or whose newest linked CI RCA run failed, was skipped or is still pending after the grace period, produces one alarm line naming the workflow, both run links and the failed step.
+  - Every CI RCA run with a non-success conclusion in the window produces one rca_failed line whatever its trigger, including a cancelled or timed-out run and a run whose failing step was cancelled by a timeout; ci-rca.yml's
+    final watchdog job reports its own run from needs.rca.result, so the alarm lands minutes after the rca job ends.
+  - A red whose window holds only CI RCA runs created before the run-name existed is counted unlinkable and never alarmed.
+  - A line already marked in a github-actions[bot] post on any ci-rca-watchdog issue is not posted again; the same marker written by another author does not suppress it.
+  - New lines go to one comment on the lowest-numbered bot-authored watchdog issue (reopened if closed); an issue is created only when none has ever existed, and a racing duplicate closes itself after commenting on the lower one; the watchdog writes only run URLs, workflow names, kinds and step names.
+  - The watchdog job holds only contents read, actions read and issues write, uses no secret, no AWS role and no LLM, in both ci-rca-watchdog.yml (schedule and dispatch, refusing the dispatcher bot; taxonomy row excluded) and ci-rca.yml's final watchdog job (only when the rca job did not skip).
+  - After merge, CI RCA runs carry "CI RCA for run <id>" titles, a real CI RCA run's watchdog job succeeds, and a dispatch on main with a lookback covering 2026-11-21 leaves one open issue carrying rca_failed markers for CI RCA runs 44945298668 and 44956689529; a second identical dispatch posts nothing.
+  - rec-5504's acceptance command exits 0 on main and the rec is closed by the merge's Resolves trailer.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: rec-5504's acceptance file, every watchdog and workflow leg.
+    command: bin/venv-python -m pytest tests/test_ci_rca_watchdog.py -q
+    expected: 'Exit 0. Red before: the file is absent (pytest exits 4).'
+    fix_if: Any failure; fix watchdog.py or the workflow, never loosen a test.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: It is rec-5504's own acceptance, evaluated by the trailer-closure job at merge, and the file runs in every tier that selects scripts/ci_rca or .github/workflows; a shard would duplicate it.
+  - step: 2
+    phase: pre-deploy
+    action: The existing CI RCA and workflow guards pass on the new workflow, the edited filter, the taxonomy row and the baseline.
+    command: bin/venv-python -m pytest tests/checks/ci_guards/test_validate_ci_rca_adjudication.py tests/checks/ci_guards/test_validate_ci_rca_trigger.py tests/checks/ci_guards/test_validate_ci_rca_trigger_accounting.py tests/checks/ci_guards/test_validate_workflow_dependency_install.py tests/checks/ci_guards/test_validate_actions_sha_pinned.py tests/checks/ci_guards/test_validate_persona_trigger_policy.py tests/checks/ci_guards/test_validate_masked_errexit_steps.py tests/verify_ci_workflow/test_dispatch_bot_guard.py -q && bin/venv-python -c "from scripts.checks.ci_guards.validate_composite_action_shell_bodies import validate_composite_action_shell_bodies as v; f=[]; v(f); assert not f, f"
+    expected: 'Exit 0 from pytest, then no R3-workflow violation. Red before: the four new run steps have no r3_workflows rows.'
+    fix_if: A guard fails; fix the workflow, row or baseline, never add a raise marker or an exemption.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: These are standing guard tests in every tier that touches .github/workflows or config.
+  - step: 3
+    phase: pre-deploy
+    action: Read-only dry run against live GitHub from the session, cross-checked against an independent query.
+    command: >-
+      bin/venv-python -m scripts.ci_rca.watchdog --lookback-hours 720 --dry-run > /tmp/wd.txt; tail -1 /tmp/wd.txt; gh api "repos/otl-labs/ontheloop/actions/workflows/ci-rca.yml/runs?status=failure&per_page=100" --jq '.workflow_runs[].id' | sort > /tmp/wd-failed.txt; grep -o 'ci-rca-watchdog:rca_failed:[0-9]*' /tmp/wd.txt | cut -d: -f3 | sort > /tmp/wd-alarmed.txt; comm -23 /tmp/wd-failed.txt /tmp/wd-alarmed.txt; gh api "repos/otl-labs/ontheloop/actions/workflows/ci-rca.yml/runs?status=completed&per_page=100" --jq '[.workflow_runs[] | select(.conclusion=="startup_failure")] | length'
+    expected: The summary line prints; every failure-concluded CI RCA run created in the window appears as an rca_failed marker (the comm output lists only ids older than 30 days, none otherwise), including 44945298668 and 44956689529 while they are inside 720 h; pre-run-name reds count as unlinkable, not alarms; the last command's startup_failure count on that page matches what the status=startup_failure query returned for the same runs (record both).
+    fix_if: A failed CI RCA run is missing, or a pre-run-name red is alarmed; fix the query or the join, not the expectation.
+    hermetic: false
+    graduation: not-applicable
+  - step: 4
+    phase: pre-deploy
+    action: Pre-handoff full tier on the committed, rebased tree (Decision 163), read through its evidence file.
+    command: bin/venv-python -m scripts.validate; bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: Start backgrounded with a 2 h limit from the top-level session; --verify-head reports the full tier passed on HEAD's tree.
+    fix_if: Any failure; fix and re-run both from the start (timeout_disposition blocked).
+    hermetic: false
+    graduation: not-applicable
+  - step: 5
+    phase: post-deploy
+    action: >-
+      The run-name and the watchdog job are live on a real CI RCA run. Ask the operator to fire one ci-rca.yml dispatch
+      on main (Decision 205 cl.1: an agent-fired dispatch does not qualify) with run_id set to a watched red already
+      covered by an open rec (the build names it, for example the newest telemetry-arrival red covered by rec-5491) and
+      force_rca false, so the dedup path ends the rca job green with no LLM turn and no new rec; any non-skipped CI RCA
+      run after the merge serves equally. Then read its jobs.
+    command: gh api "repos/otl-labs/ontheloop/actions/workflows/ci-rca.yml/runs?event=workflow_dispatch&per_page=3" --jq '.workflow_runs[] | [.id, .created_at, .conclusion, .display_title] | @tsv'
+    expected: >-
+      The run is titled "CI RCA for run <the run_id given>", concludes success, and gh api
+      repos/otl-labs/ontheloop/actions/runs/<id>/jobs shows the watchdog job concluded success with its summary line in
+      the log. Name the CI RCA run id.
+    fix_if: Title is still "CI RCA" or the watchdog job did not run or failed; read its log, fix forward.
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: post-deploy
+    action: Live alarm proof. Dispatch ci-rca-watchdog on main with lookback_hours covering 2026-11-21T20:00Z (hours since then plus 2, at most 720), wait for it, then dispatch it again with the same input.
+    command: gh api "repos/otl-labs/ontheloop/issues?labels=ci-rca-watchdog&state=all" --jq '.[] | [.number, .state, .user.login, .title] | @tsv'; gh api "repos/otl-labs/ontheloop/actions/workflows/ci-rca-watchdog.yml/runs?event=workflow_dispatch&per_page=3" --jq '.workflow_runs[] | [.id, .event, .conclusion] | @tsv'
+    expected: Both dispatched runs conclude success (name their ids). Exactly one open github-actions[bot] ci-rca-watchdog issue exists (any racing duplicate closed as duplicate) whose body plus comments carry rca_failed markers for CI RCA runs 44945298668 and 44956689529 with their failed steps and no text beyond the fixed header and lines (a scheduled run may have opened it first); the second dispatch printed new=0 and added no comment. Tell the operator the issue number; he closes it.
+    fix_if: A run fails, the issue is missing or duplicated, or extra text appears; diagnose from the run log, fix forward in a new PR.
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: post-deploy
+    action: rec-5504's acceptance holds on main and the rec is closed.
+    command: bin/venv-python -m pytest tests/test_ci_rca_watchdog.py::test_failed_ci_rca_run_alarms_without_a_join -q && AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader; r,_=fetch_recs_by_ids(make_reader(),['rec-5504']); print(r[0]['status']); assert r[0]['status']=='closed'"
+    expected: Run after ci.yml's trailer-closure job finished on the merge SHA (name its run id). Exit 0, prints closed.
+    fix_if: Open; run bin/venv-python -m scripts.session.merge_step readback and follow git-ops resolves_trailer; never close by hand after an acceptance refusal (Decision 201).
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: post-deploy
+    action: >-
+      Operator step (thread 2026-11-23 11:43Z): alarms after the first are comments on a reopened bot issue, which notify
+      only under an All activity watch or an issue subscription. Ask the operator to set the repository watch to All
+      activity, or subscribe to the VP6 issue, then run the check below under his own GitHub login.
+    command: gh api repos/otl-labs/ontheloop/subscription --jq '.subscribed'
+    expected: Prints true (or the operator confirms he is subscribed to the VP6 issue). Report his answer.
+    fix_if: false or 404; ask him again, naming Watch -> All activity on the repo page.
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: post-deploy
+    action: >-
+      Optional live proof of the failure path without an LLM turn: the operator dispatches ci-rca.yml on main with run_id
+      set to a green run of a watched workflow; the persona gate refuses ("run has not failed"), the rca job fails, and
+      the watchdog job judges its own run with self-result failure. Skip if rec-4678's fallback is built and would file
+      a rec for this refusal.
+    command: gh api "repos/otl-labs/ontheloop/actions/workflows/ci-rca.yml/runs?event=workflow_dispatch&per_page=3" --jq '.workflow_runs[] | [.id, .conclusion, .display_title] | @tsv'
+    expected: The dispatched run concluded failure, its watchdog job concluded success, and the watchdog issue carries a marker ci-rca-watchdog:rca_failed:<that run id> within minutes of the rca job ending. Name the run id.
+    fix_if: No marker; read the watchdog job log, fix forward.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: scripts/ci_rca/watchdog.py
+    behavior: Every kind, ok, unlinkable, grace, fork and non-watched filtering, newest-linked selection, self-run judgement, one line per marker, page-2 reads, stdlib-and-yaml import closure, author-bound dedupe across open and closed issues, comment-or-create posting, allowed-fields-only text, truncation and gh-failure exit 1, dry run and summary line.
+    verification_step: 1
+    test_selector: tests/test_ci_rca_watchdog.py
+    red_green_expectation: red before (file absent), green after.
+  - source: .github/workflows/ci-rca-watchdog.yml
+    behavior: Schedule and dispatch input present, no workflow_run trigger; job permissions exactly contents read, actions read, issues write; no id-token, no secrets, no LLM step.
+    verification_step: 1
+    test_selector: tests/test_ci_rca_watchdog.py
+    red_green_expectation: red before (file absent), green after.
+  - source: .github/workflows/ci-rca.yml
+    behavior: run-name renders "CI RCA for run <id>" that the watchdog's title regex parses; the final watchdog job carries the Decision 267 cl.3 guard prefix and runs after a non-skipped rca job with only contents read, actions read and issues write and the self-run arguments; the workflows filter does not carry ci-rca-watchdog.
+    verification_step: 1
+    test_selector: tests/test_ci_rca_watchdog.py
+    red_green_expectation: red before (no run-name, no watchdog job), green after.
+  - source: config/ci_rca_taxonomy.yaml
+    behavior: The ci-rca-watchdog row is excluded, so adjudication holds with the filter unchanged; the file stays within its line budget.
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test_validate_ci_rca_adjudication.py
+    red_green_expectation: red before (a new workflow with no taxonomy row fails adjudication), green after.
+  - source: config/composite_action_body_baseline.yaml
+    behavior: The four new run steps are registered at their measured counts; no raise marker.
+    verification_step: 2
+    command: bin/venv-python -c "from scripts.checks.ci_guards.validate_composite_action_shell_bodies import validate_composite_action_shell_bodies as v; f=[]; v(f); assert not f, f"
+    red_green_expectation: red before (the new step bodies have no r3_workflows entry), green after.
+constraints:
+  - 'One build PR. "Resolves: rec-5504" goes in a branch commit message and in the squash commit body.'
+  - >-
+    The watchdog never calls an LLM, never assumes an AWS role, never reads or writes the portal and never reads a
+    secret: it must not share CI RCA's failure modes. It writes only to GitHub issues, with fixed templates over run
+    facts (Decision 101: public repo).
+  - >-
+    ci-rca.yml gets only the run-name line and the final watchdog job; the rca job is untouched. If PLAN-ci-rca-agent-failure-fallback (rec-4678, build
+    in progress), PLAN-merge-annotate-producer, PLAN-scheduled-workflow-dispatch, PLAN-telemetry-claude-p-capture-adapter
+    or rec-5493's work built first, rebase and never undo their lines.
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - >-
+    Decision scout r3 (2026-11-23 12:20 UTC): FLAGS_FOUND, 228 of 228, CONFLICT 0, CITE unchanged; CONTRADICT WARN 267
+    cl.3 applied (both new job ifs carry the exact dispatch-bot guard prefix the guard test requires).
+    Decision scout r2 (2026-11-23 11:40 UTC): FLAGS_FOUND. Decisions triaged: 228 of 228. Roadmap items intersected: 5;
+    CONFLICT: 0; RELATED: 5. Serves: mission 3/5. CITE 72, 101, 162, 226, 250, 267; CONTRADICT none. r1 SPIRIT WARN 267
+    (GitHub cron drops about 80% of hourly ticks) pivoted: the watchdog also runs when a non-skipped CI RCA run ends, so
+    a failed, cancelled or timed-out CI RCA run alarms within minutes; never-started, stuck or skipped runs wait for the
+    next delivered tick or real CI RCA completion; a firm tick is rec-5113 (AWS clock register), not this plan. r2
+    SPIRIT NOTE 197 applied (issue header routes each red to a rec). T4.26 c1/c5 must keep the run-name join key.
+  - >-
+    Origin: Fable consult /mnt/project-files/ci-rca-smoke-run/advisor-brief-2/ADVICE.md item 1; operator chose it
+    2026-11-23 11:22Z, own plan 11:24Z, "write the plan" 11:44Z. rec-5504 reshaped through update_rec (read back open);
+    rec-4678 edge dropped (same-file textual overlap only). Critique r1 (B1/B2) showed a workflow_run
+    wake floods dispatch_integrity's run window and misses depth-3 chains; the operator chose the in-workflow job 2026-11-23 12:13Z (card option 1); rec-5504's context was updated to match (update_rec, read back open). Follow-on rec-5515 (preflight lists open watchdog issues).
+  - >-
+    Evidence: CI RCA runs 44945298668 and 44956689529 failed 2026-11-21 unnoticed (10 failed or cancelled since 11-01).
+    CI RCA is excluded from its own filter (loop guard). A green CI RCA run is an outcome: rec filed and marked, dedup
+    hit, designed or rejected-deployment skip (every other path exits 1; rec-4678's fallback keeps the run red).
+  - >-
+    Join key: workflow_run runs carry the default branch's head_sha and the title "CI RCA", so nothing links a CI RCA run
+    to its red; the run-name (persona-verdict.yml precedent) is the root fix. Pre-run-name reds are unlinkable.
+  - >-
+    Watching the watchdog: sensor_liveness derives every scheduled workflow as a cadence peer and loop_liveness_stale
+    backstops a persistent red. Cost: one one-minute job per delivered tick plus one per real CI RCA run (5-10 a day);
+    no row in docs/contracts/actions-capacity.yaml, whose consumer_rule asks load-adding plans to cite one: its units
+    are per_merge, this load is per tick or per red and negligible, so the rule is waived here by name.
+  - >-
+    UNPROVEN: the conclusion GitHub writes for a timeout-minutes kill (failure or cancelled; every non-success alarms),
+    and whether status=startup_failure filters at all (an unknown status value returns 0 with no error); VP3 compares it
+    against a client-side scan of status=completed, and a red whose CI RCA run died at startup still alarms through the join.
+  - >-
+    red_overlap at plan write (main 9d886fd4): blocked by rule 1 slo_breached on rec-5491 and rec-5497, shared paths
+    none. Deferral: repairs neither, shares no file; both handed to Feedback Loop (log #1963 comment 7097070191).
+  - 'selection_budget: breadth_waived (predicted CI test half 60-228s of 228s; one plan). Proof runs leave the 720 h lookback after 2026-12-21.'
+gate_rounds:
+  - {gate: decision-scout, round: 1, scout_input_fingerprint: "v1:c50a2d870a8dd48435ff997518b551de422e8feae233cba1d4ee61a2177b3411", verdict: FLAGS_FOUND}  # WARN 267 cron drops; pivot: also run on CI RCA completion
+  - {gate: decision-scout, round: 2, scout_input_fingerprint: "v1:470c69954f330970aa0655581da7cb54764a7a4cfe7074c64ed9f0ca1e2812a1", verdict: FLAGS_FOUND}  # NOTE 197 pager header applied; stale text reconciled
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 4, nits: 7}  # B1 workflow_run wake floods dispatch_integrity 1000-run window; B2 depth-3 chains; B3 pagination all reads; B4 one line per marker; N1-N7 applied (N5 cites +74 +84 +197)
+  - {gate: decision-scout, round: 3, scout_input_fingerprint: "v1:43c6b983f92db741c078fdac0e7626e4bb9249f19619235ac4bacf9d0455d235", verdict: FLAGS_FOUND}  # CONTRADICT WARN 267 cl.3: both job ifs need the exact guard prefix; applied
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 7}  # B1 two writers race: reopen-and-comment lowest bot issue, create only if none ever, racing duplicate self-closes; N1-N7 applied (N3 kept own parse + equality test)
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 7}  # B1 record operator's card answer + rec-5504 context (done, read back); N1 judge rca job not run; N2 untitled == "CI RCA"; N3 comments since=; N4 operator watch step VP8; N5 failure-path proof VP9; N6 REST-only + repo_identity; N7 relief fallbacks
+  - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 9, escalated: true, escalation_choice: accept-with-deferral}  # operator accept-with-deferral 2026-11-23 12:44Z (no confirming round, usage rule); nits applied as text: N1 startup_failure UNPROVEN + VP3 scan; N2 zero-job cancelled; N3 unwindowed target read; N4 not_planned fallback; N5 6 h slack; N6 header re-run line; N7 four rows; N8 rollback; N9 capacity waiver named
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Only the plan-cited decision sections read
+  - All files in scope located and readable
+execution_steps:
+  - >-
+    Run bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-ci-rca-watchdog.yaml; on blocked by reds
+    other than rec-5491/rec-5497 or by a shared path, stop and report; blocked only by those two, log the deferral and
+    proceed.
+  - Implement scripts/ci_rca/watchdog.py, ci-rca-watchdog.yml, the two ci-rca.yml lines, the taxonomy row (with the relief if needed) and the baseline rows per their scope rows.
+  - Write tests/test_ci_rca_watchdog.py per test_obligations.
+  - Commit, then run VP 1-3; loop until pass; on an unrecoverable failure stop and report (Decision 55).
+  - Code review via a fresh code-review subagent; fix blocking findings; rerun VP 1-2.
+  - >-
+    CLOSURE per the implement skill Commit Flows; VP 4 on the committed clean HEAD; push; PR; squash-merge on green
+    with "Resolves: rec-5504"; merge_step readback; VP 5-9 (VP 8-9 ask the operator).
+  - 'Report: what was implemented, verification results, PR and merge SHA, the VP 6 issue number, VP 7 read-back.'
+rollback: >-
+  Revert the build's squash commit: the watchdog workflow, ci-rca.yml's watchdog job and the run-name go; nothing else depended on
+  them. Watchdog issues already opened stay (they record real orphans).
