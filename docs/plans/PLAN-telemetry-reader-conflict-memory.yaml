@@ -71,7 +71,9 @@ scope:
       ^[A-Za-z0-9_.-]{1,64}$) so a failure traces to its reader log line. The Unreadable docstring ("the class name alone is
       reported"), _walk's noqa comment and the module docstring's "Output is counts and commit shas only" are updated to
       match. A Lambda request_id is a UUID, which scripts/ci_rca/fingerprint.py normalize_message_head scrubs to <uuid>, so the
-      ci-rca fingerprint of the junit message stays stable per error class. The PR body notes that the telemetry-arrival.yml
+      ci-rca fingerprint of the junit message stays stable per error class. The fingerprint now differs by status, error_type
+      and error_class, so a 503 catalog_unavailable and a 500 unmapped out-of-memory become separate recs: an intended, finer
+      dedup grain. The existing node test_unreadable_junit_head_names_the_class_only is kept unchanged as the non-reader case. The PR body notes that the telemetry-arrival.yml
       header ("Counts and commit shas only in the log") now also covers these four reader fields, none confidential (Decision 101). rec-5491's preventive note also names the commits
       path (_judge's commits() failure, :228-229): it reads git and GitHub, never the reader, so it carries no reader status and
       keeps the bare class name.
@@ -157,7 +159,10 @@ verification_plan:
       import time; g=lambda s: (len(r.named('telemetry_root_sessions', day_from=f, day_to=t.isoformat())), 'elapsed_s',
       round(time.monotonic() - s, 1)); [print('roots', *g(time.monotonic())) for _ in range(3)]"
     expected: Three roots lines, each with a row count and its elapsed seconds (the live cost of the extra per-table scan), exit 0.
-    fix_if: A ReaderInvokeError on a roots read means the reader still runs out of memory; read its log group for OutOfMemoryException and stop with an RCA.
+    fix_if: >-
+      A ReaderInvokeError on a roots read means the reader still runs out of memory; read its log group for OutOfMemoryException
+      and stop with an RCA. An elapsed time within 20 s of the reader's 110 s read deadline is reported to the coordinator as a
+      plan-defect, never passed.
     hermetic: false
   - step: 7
     phase: post-deploy
@@ -182,13 +187,13 @@ verification_plan:
     command: >-
       set -o pipefail; live=${LIVE_MS:-$(cat /tmp/reader-conflict-memory-live-ms)} && aws logs filter-log-events --profile agent_platform
       --region "$(cat config/aws-region)" --log-group-name /aws/lambda/agent-platform-ducklake-telemetry-reader --start-time "$live"
-      --filter-pattern '"OutOfMemoryException"' --query 'events[].message' --output text | grep -o -E '"request_id": ?"[^"]+"' | sort
+      --filter-pattern '"OutOfMemoryException"' --query 'events[].message' --output text | { grep -o -E '"request_id": ?"[^"]+"' || test $? -eq 1; } | sort
       | uniq | tee /tmp/reader-conflict-memory-oom.txt | wc -l | sed 's/^/oom_requests=/'
     expected: >-
       oom_requests=<n> and the request ids, exit 0. The unmapped log line carries no verb, and rec-5490's 7-day tool_use_rollup
       reads still run out of memory, so a non-zero count is expected and is not this plan's verdict (VP 6 and VP 7 are). The
       build and the 48 h re-read report the count.
-    fix_if: A failed aws call exits non-zero (pipefail); fix access and rerun. Never paste an account id from an error.
+    fix_if: A failed aws call or a grep error (exit 2) exits non-zero under pipefail; zero matches pass. Fix access and rerun; never paste an account id from an error.
     hermetic: false
   - step: 9
     phase: post-deploy
@@ -257,7 +262,7 @@ context:
   - "Deploy order (Decisions 249 cl.3, 254): code deploys ship only the newest green main commit, so VP 5-11 wait until main is green again; the sibling red rec-5497 (full-tier xdist worker crash on the golden-gates tree test, cause low-confidence; another thread) must clear first or with this merge."
   - "Content reader (Decision 272): it packages this SQL file but it is outside its protective set, so its session_transcript_masked read_version differs from main until its next approved deploy; expected, not drift."
   - "Evidence (2026-11-23): every reader OutOfMemoryException since 2026-11-21 reads 'failed to offload data block ... (286.0 MiB/286.1 MiB used)'; DuckDB 1.5.4 names max_temp_directory_size in that message (reproduced locally), so memory was full and spill then filled; Lambda memory was not exhausted (REPORT max 902-970 of 1024 MB). Settings at src/common/ducklake_event_reads.py:32-34."
-  - "Plan-time probe (scratch, synthetic Parquet corpus, reader limits): current root-sessions SQL fails at 300,000 observations in 0.3 s; duplicate-first conflicts pass in 0.7 s and at 1.5 million rows in 4.6 s with identical rows. Production totals: 831,247 observations and 537,962 transcripts in all."
+  - "Plan-time probe (scratch, synthetic Parquet corpus, reader limits): current root-sessions SQL fails at 300,000 observations in 0.3 s; duplicate-first conflicts pass in 0.7 s and at 1.5 million rows in about 4 s with identical row counts (the probe plants no conflicts; equivalence rests on VP 1's planted conflicts and VP 2's vectors). Locally the error reads 'failed to pin block', in production 'failed to offload'. Production totals: 831,247 observations and 537,962 transcripts in all."
   - "Inferred, not verified: a failure clusters on one warm container (four clusters, each on one log stream), so container state decides which 7-day read tips over; the rewrite removes the heavy operator either way."
   - "rec-5490 (7-day tool_use_rollup OOM) is NOT shown fixed by this change: the same probe corpus still runs out of memory in tool_use_rollup's own body after the rewrite. It stays its own rec, and VP 8 counts its out-of-memory events as evidence only."
   - "read_version: every compose() verb's stamp moves once; the monitor and golden-gate smokes already treat a stamp mismatch as deploy skew until the reader deploy lands."
@@ -274,6 +279,7 @@ gate_rounds:
   - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:164deccb9e592f4621c57abd79e42a22a4dbcc16c70275c6efab47a0996bdef1'}
   - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 5}
   - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 1, nits: 4}
+  - {gate: plan-critique, round: 7, verdict: REVISE, blocking: 1, nits: 4}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
