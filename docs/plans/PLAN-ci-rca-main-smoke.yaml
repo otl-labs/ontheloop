@@ -38,7 +38,7 @@ scope:
       setup-python 3.12 at ci-rca.yml's pin; `python -m pip install pyyaml networkx -c requirements.txt` (the
       watchdog's precedent plus networkx, which coverage.py's import graph needs); `python -m scripts.ci_rca.smoke select --before "$BEFORE" --after "$GITHUB_SHA" >> "$GITHUB_OUTPUT"`
       with BEFORE bound from github.event.before in env, never interpolated into run:. Output run. Job smoke: needs
-      select, if: needs.select.outputs.run == 'true', timeout 30, concurrency group ci-rca-smoke with cancel-in-progress
+      select, if: needs.select.outputs.run == 'true', timeout 35 (step caps 17, 4 and 5 plus install, venv and evidence), concurrency group ci-rca-smoke with cancel-in-progress
       false (a running smoke is never cancelled; GitHub may replace an older queued run with a newer one, which proves a
       later tree that contains the change), permissions id-token: write and contents: read only (no
       statuses, pull-requests or actions scope: the smoke posts nothing). Steps, each the same text as its ci-rca.yml
@@ -56,7 +56,7 @@ scope:
       model, --max-turns 30 and allow list, and ci_rca_steps.sh check; env holds CLAUDE_CODE_OAUTH_TOKEN,
       CI_RCA_BUNDLE_EMIT_DIR, CI_RCA_FORCE_RCA 'true', RANGE_NOTE '', RUN_ID (the fixture's run id), the five bundle
       values from steps.evidence.outputs, CI_RCA_SMOKE_SINK /tmp/ci-rca-smoke-sink.jsonl and CI_RCA_SMOKE_ID
-      smoke-${{ github.run_id }}); Fallback on agent failure (id fallback, timeout-minutes 4, if: ${{ !cancelled() }}; env
+      smoke-${{ github.run_id }}); Fallback on an empty agent output (id fallback, timeout-minutes 4, if: ${{ !cancelled() }}; env
       CI_RCA_SMOKE_SINK /tmp/ci-rca-smoke-fallback.jsonl, the same CI_RCA_SMOKE_ID, CI_RCA_FORCE_RCA 'true',
       CI_RCA_BUNDLE_EMIT_DIR /tmp/ci-rca-bundles and S3_LOG_BUCKET as the rca step: `: > /tmp/ci-rca-smoke-empty.json` then
       `bin/venv-python -m scripts.ci_rca.fallback file --agent-output /tmp/ci-rca-smoke-empty.json --bundles-dir
@@ -77,7 +77,9 @@ scope:
       run=true when any is in coverage.workflow_inputs(.github/workflows/ci-rca-smoke.yml) (see coverage.py: every
       smoke step's direct inputs and closure, the workflow file itself, and the declared_inputs of each main_smoke row
       mapped to its smoke step, so a change to the smoke's own claude flags or to config/ci_rca_taxonomy.yaml runs it). Fails toward run=true, with a ::warning:: line, when BEFORE is all zeros, unknown to the clone, or
-      git fails, so an unreadable push is proven rather than skipped. Prints run=true or run=false. stage SRC...: copies
+      git fails, so an unreadable push is proven rather than skipped. Prints run=true or run=false on stdout (the only
+      stdout line, since it goes to GITHUB_OUTPUT); ::warning:: and ::error:: lines go to stderr. An input that is a
+      directory (dir/) matches any changed path under it. stage SRC...: copies
       the three fixtures to their /tmp names; a missing source exits 1. outputs OUT BUNDLES_DIR: parses the evidence
       generator's BUNDLE_* lines and bundle_absent (no BUNDLE_SHA and no *.json in BUNDLES_DIR) as the rca step does,
       printing key=value lines. verify --smoke-id ID --bundles-dir DIR SINK FALLBACK_SINK AGENT_OUTPUT: DIR holds at least one
@@ -87,7 +89,8 @@ scope:
       least one such line whose parsed context_v2_json carries rca_confidence undetermined (the fallback's agent-failure
       filing); scripts.ci_rca.filing finds a FILED pair naming ID in AGENT_OUTPUT (the agent's marker survives the real
       CLI's output; the step's env sets CI_RCA_SMOKE_SINK so the parser admits it); any miss exits 1 with one ::error::
-      line naming it. Module-level imports are scripts.ci_rca.coverage and scripts.ci_rca.filing only, so select needs
+      line naming it (a sha miss says evidence_bundle_ref is optional in the agent's context, so the agent left it out
+      or named another bundle). Module-level imports are scripts.ci_rca.coverage and scripts.ci_rca.filing only, so select needs
       just pyyaml and networkx (coverage's import graph) as third-party packages.
   - file: tests/fixtures/ci_rca/smoke/failed.log
     action: Create
@@ -111,7 +114,7 @@ scope:
     action: Modify
     purpose: >-
       Dry-run sink at the top of _ducklake_write, host-neutral (Decision 212 cl.3: it reads no compute-host variable).
-      When CI_RCA_SMOKE_SINK or CI_RCA_SMOKE_ID is set: raise RuntimeError unless both are set, CI_RCA_SMOKE_ID matches
+      When CI_RCA_SMOKE_SINK or CI_RCA_SMOKE_ID is set (non-empty): raise RuntimeError unless both are set, CI_RCA_SMOKE_ID matches
       ^smoke-[0-9]+$, action is file_ops and table is ops_recommendations (so a stray variable never silently drops a
       real write and the synthetic id never reaches update_ops or write_ops; Decision 84 I-2); otherwise append one JSON
       line {action, table, record} (record = _project_ops_record's projection, the body the writer would get) to the
@@ -132,7 +135,10 @@ scope:
       carry smoke_step, a step key of that workflow under the same key grammar; check() fails when it is missing, names
       no step, or the smoke step's direct inputs do not include every direct input of the row's CI RCA step, or its
       third-party uses: pin differs (direct-only, so check() still builds no import graph). It also fails a main_smoke row whose smoke step can
-      be masked: continue-on-error true, or an if: other than none, success() or ${{ !cancelled() }}. A row of any other
+      be masked: a step continue-on-error that is not literal false (an expression counts as masking), a step if: other
+      than none, success() or !cancelled() (with or without ${{ }}), a job continue-on-error, a job if: other than
+      exactly needs.select.outputs.run == 'true', or any job the smoke job needs carrying continue-on-error. A
+      main_smoke row with no smoke_workflow in the table is a reported problem. A row of any other
       proven_by carrying smoke_step fails. A smoke_workflow naming a missing file is a reported problem, never an
       exception. workflow_inputs(workflow) returns the union of inputs(step) (direct plus closure) over every step of
       the workflow, plus the workflow file itself and the declared_inputs of every main_smoke row whose smoke_step is in
@@ -178,7 +184,8 @@ scope:
   - file: docs/contracts/account-credential-inventory.yaml
     action: Modify
     purpose: >-
-      ANT-04's location lists .github/workflows/ci-rca-smoke.yml as a CLAUDE_CODE_OAUTH_TOKEN consumer, with one new
+      ANT-04's location lists .github/workflows/ci-rca-smoke.yml (basename ci-rca-smoke, as its other workflow entries are
+      named) as a CLAUDE_CODE_OAUTH_TOKEN consumer, with one new
       amendment_log entry (correction, semantic_break false, location field only), as rec-4639 did for subagent-review-smoke.
   - file: tests/ci_rca/test_ci_rca_smoke_wiring.py
     action: Create
@@ -201,7 +208,8 @@ scope:
       multiple); verify (passes on a good pair of sinks and output; no bundle, a sha mismatch, a missing undetermined
       fallback record and a missing marker each exit 1 with its ::error:: line); select runs for a change to only
       ci-rca-smoke.yml and to only config/ci_rca_taxonomy.yaml; the three committed fixtures run through
-      scripts.ci_rca.evidence main in process with --no-upload yield exactly one bundle of the expected category; a
+      scripts.ci_rca.evidence main in process with --no-upload (evidence's _PENDING_DIR monkeypatched to tmp_path) yield
+      exactly one bundle of the expected category; a
       subprocess imports scripts.ci_rca.smoke under a meta-path finder that refuses any top-level module outside
       sys.stdlib_module_names, scripts, src, yaml and networkx (pins select's third-party set).
       100% line coverage (validate_test_coverage).
@@ -223,7 +231,8 @@ scope:
     action: Modify
     purpose: >-
       Fixture nodes for smoke_step (missing, unknown key, a smoke step missing a direct input, a different pin,
-      continue-on-error, a skipping if:, a non main_smoke row carrying it, a missing smoke_workflow file) and for
+      continue-on-error (literal and expression), a skipping if:, job-level continue-on-error or a different job if:, a
+      needed job with continue-on-error, a non main_smoke row carrying it, a missing or absent smoke_workflow) and for
       workflow_inputs (includes the workflow file and the mapped declared inputs). New nodes only; test_real_tree_checks_clean (rec-5537's
       acceptance) keeps its id, and the graduated shard ci-rca-coverage-derive is kept.
 bundled_recommendations: [rec-5493]
@@ -292,7 +301,7 @@ verification_plan:
     phase: post-deploy
     action: The merge's own push runs the smoke (the build changes smoke inputs); read its run for the merge SHA.
     command: mcp__github__actions_list(method=list_workflow_runs, owner=otl-labs, repo=ontheloop, resource_id=ci-rca-smoke.yml, workflow_runs_filter={branch=main, event=push}) then mcp__github__actions_list(method=list_workflow_jobs, owner=otl-labs, repo=ontheloop, resource_id=<that run id>)
-    expected: the run whose head_sha is the merge SHA concluded success, its smoke job concluded success (not skipped), and its Verify step passed
+    expected: the run whose head_sha is the merge SHA concluded success, its smoke job concluded success (not skipped), and its Verify step passed; a ci_rca_since read for that day shows no rec citing the fixture run id (the sink held every write)
     fix_if: red or skipped; a red smoke is a red on main, so CI RCA files on it; diagnose from that run's log and forward-fix (Decision 226), never revert the sink or the watched-list line to quiet it
     hermetic: false
   - step: 7
@@ -380,7 +389,7 @@ context:
   - "Decision 100 note (scout r2 WARN): the select job deliberately does not use GitHub's native on.push.paths filter. The smoke's input set is derived and moves with imports, so a static paths list would be a second, hand-regenerated list of about 150 paths that every unrelated import change must touch (the frame rec-5537 removed); the native filter also sees only the first 300 changed files and skips silently, where select fails toward run=true."
   - "Residuals: smoke telemetry mixes with real ci_rca sessions until rec-5508 (Decision 236 cl.1; its context updated to this design and read back 2026-11-23); files the smoke opens are not yet checked against the derived inputs (rec-5544); pre-merge proof stays rec-5510; the sink stops before the writer, so writer-side write-boundary rules (Decision 210) are not proven by the smoke."
   - "Selection breadth: breadth_waived (selection_budget on the scope 2026-11-23: CI test half 121.5-458.6s, elapsed 177.8-616.6s; writer_transport.py is widely imported). Declared, one plan, not split."
-  - "Cost: select is a sub-minute pyyaml-only job per push to main; the smoke job runs only on a CI RCA input change, capped at 30 turns and a 30-minute job timeout (Decision 212 cl.2(b)). Frequency (measured 2026-11-23 over the last 100 first-parent merges, 2026-11-20 to 11-23, a CI RCA-heavy window): 15 would have run it (about 5 a day), mostly ci_rca_taxonomy rows and CI RCA work; expect fewer in a normal week. An agent miss on the fixture is a red on main and costs one real CI RCA run."
+  - "Cost: select is a short job (pyyaml and networkx) per push to main; the smoke job runs only on a CI RCA input change, capped at 30 turns and a 35-minute job timeout (Decision 212 cl.2(b)). Frequency (measured 2026-11-23 over the last 100 first-parent merges, 2026-11-20 to 11-23, a CI RCA-heavy window): 15 would have run it (about 5 a day), mostly ci_rca_taxonomy rows and CI RCA work; expect fewer in a normal week. An agent miss on the fixture is a red on main and costs one real CI RCA run."
 gate_rounds:
   - gate: decision-scout
     round: 1
@@ -416,6 +425,24 @@ gate_rounds:
     round: 3
     verdict: FLAGS_FOUND
     scout_input_fingerprint: "v1:9f9c0d7d0fa667005780e9dd8f5e450d88cac605f3628a1f6a90598485452c5c"
+  - gate: plan-critique
+    round: 2
+    verdict: REVISE
+    blocking: 1
+    nits: 11
+    findings:
+      - {id: PC2-B1, severity: blocking, origin: judgement, anchor: "scope[coverage.py] smoke_step masking rule", subject: "job-level continue-on-error, job if: and needed jobs can still mask a smoke step", disposition: fixed}
+      - {id: PC2-N1, severity: nit, origin: mechanical, anchor: "scope[ci-rca-smoke.yml] smoke job timeout", subject: "30-minute job timeout below the step caps plus setup", disposition: applied-wording}
+      - {id: PC2-N2, severity: nit, origin: judgement, anchor: "scope[ci-rca-smoke.yml] Fallback step name", subject: "step name says agent failure but it runs on an empty output", disposition: applied-wording}
+      - {id: PC2-N3, severity: nit, origin: judgement, anchor: "scope[writer_transport.py] sink", subject: "an empty variable should not arm the sink", disposition: applied-wording}
+      - {id: PC2-N4, severity: nit, origin: mechanical, anchor: "scope[smoke.py] select", subject: "warnings on stdout would corrupt GITHUB_OUTPUT", disposition: applied-wording}
+      - {id: PC2-N5, severity: nit, origin: judgement, anchor: "scope[smoke.py] select", subject: "directory inputs need prefix matching", disposition: applied-wording}
+      - {id: PC2-N6, severity: nit, origin: judgement, anchor: "scope[smoke.py] verify", subject: "sha-miss error should say the bundle ref is optional", disposition: applied-wording}
+      - {id: PC2-N7, severity: nit, origin: mechanical, anchor: "scope[test_ci_rca_smoke.py] in-process evidence node", subject: "pending dir must be patched to tmp_path", disposition: applied-wording}
+      - {id: PC2-N8, severity: nit, origin: mechanical, anchor: "scope[account-credential-inventory.yaml]", subject: "ANT-04 names workflows by basename", disposition: applied-wording}
+      - {id: PC2-N9, severity: nit, origin: judgement, anchor: "scope[coverage.yaml] capture row", subject: "ci_uncaptured exempts only action call sites, so capture stays a step", disposition: build-note}
+      - {id: PC2-N10, severity: nit, origin: judgement, anchor: "verification_plan[6]", subject: "read back that no real rec cites the fixture run", disposition: applied-wording}
+      - {id: PC2-N11, severity: nit, origin: mechanical, anchor: "context Cost", subject: "select is not pyyaml-only", disposition: applied-wording}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
