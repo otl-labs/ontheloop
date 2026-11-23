@@ -550,9 +550,27 @@ jobs:
           fi
           echo "rec_id=${REC_ID}" >> "$GITHUB_OUTPUT"
 
+      - name: Fallback filing (rec-4678)
+        id: fallback
+        timeout-minutes: 4
+        # Deterministic, no LLM: files an undetermined source=ci_rca rec for any failed bundle the agent left without a
+        # record (max turns, crash, no FILED marker, an earlier step failed). Exit 1 keeps the run red when it had to file.
+        if: ${{ !cancelled() && hashFiles('scripts/ci_rca/fallback.py') != '' && steps.rejected_deployment.outputs.skip != 'true' && steps.designed_refusal.outputs.skip != 'true' && steps.dedup.outputs.already_filed != 'true' && steps.fp_dedup.outputs.deduped != 'true' && (github.event_name != 'workflow_dispatch' || steps.persona_gate.outcome == 'success') }}
+        env:
+          CI_RCA_BUNDLE_EMIT_DIR: /tmp/ci-rca-bundles
+          CI_RCA_FORCE_RCA: ${{ github.event.inputs.force_rca }}
+          S3_LOG_BUCKET: agent-platform-data-lake
+          RUN_ID: ${{ steps.meta.outputs.run_id }}
+          HEAD_SHA: ${{ steps.meta.outputs.head_sha }}
+          WORKFLOW_NAME: ${{ steps.meta.outputs.workflow_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ steps.meta.outputs.run_id }}
+          STEP_OUTCOMES: evidence=${{ steps.evidence.outcome }} dedup=${{ steps.dedup.outcome }} fp_dedup=${{ steps.fp_dedup.outcome }} persona_gate=${{ steps.persona_gate.outcome }} rca_agent=${{ steps.rca_agent.outcome }}
+        run: |
+          bin/venv-python -m scripts.ci_rca.fallback file --agent-output /tmp/ci-rca-output.json --bundles-dir /tmp/ci-rca-bundles --jobs /tmp/ci-rca-jobs.json --run-id "$RUN_ID" --head-sha "$HEAD_SHA" --workflow-name "$WORKFLOW_NAME" --run-url "$RUN_URL" --force-rca "$CI_RCA_FORCE_RCA" --step-outcomes "$STEP_OUTCOMES" --out /tmp/ci-rca-fallback-filed.txt >> "$GITHUB_OUTPUT"
+
       - name: Mark failure as RCA'd
         id: mark_rca
-        if: steps.rca_agent.outcome == 'success'
+        if: ${{ !cancelled() && (steps.rca_agent.outcome == 'success' || steps.fallback.outputs.marked == 'true') }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -563,7 +581,7 @@ jobs:
           ANCHOR_SHA="${{ steps.meta.outputs.anchor_sha }}"
           WORKFLOW_SLUG="${{ steps.meta.outputs.workflow_slug }}"
           if [ -n "$ANCHOR_SHA" ]; then
-            bin/venv-python -m scripts.ci_rca.filing --all /tmp/ci-rca-output.json | while IFS=',' read -r REC_ID CAT; do
+            { bin/venv-python -m scripts.ci_rca.fallback pairs /tmp/ci-rca-output.json /tmp/ci-rca-fallback-filed.txt || bin/venv-python -m scripts.ci_rca.filing --all /tmp/ci-rca-output.json; } | while IFS=',' read -r REC_ID CAT; do
               [ -z "$REC_ID" ] && continue
               [ -z "$CAT" ] && CAT="unknown"
               CONTEXT="ci-rca/${WORKFLOW_SLUG}/${CAT}"

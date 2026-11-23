@@ -39,7 +39,7 @@ def _parse_ts(raw: Any) -> Optional[datetime]:
 
 
 def _red_files(red: dict, ctx: dict) -> set[str]:
-    files = {red.get("file") or ""}
+    files = set() if ctx.get("agent_failure") else {red.get("file") or ""}
     files |= {str(n).split("::")[0] for n in ctx.get("affected_nodeids") or []}
     return {f for f in files if f}
 
