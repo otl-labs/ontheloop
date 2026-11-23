@@ -16,6 +16,8 @@
 # runs {attempt, session_id, started_at} and a result line after {session_id, exit, transient}. A manifest write failure
 # is ignored. Callers may not pass flags that change the session identity (usage exit 1).
 #
+# Settings: every attempt passes --setting-sources user, so the repo's .claude/settings.json never loads in CI.
+#
 # Distinct from the terraform-registry retry loop (_TRANSIENT_INIT_SIGNATURES): Claude API
 # transient signatures differ from registry 5xx patterns and are defined separately here.
 set -euo pipefail
@@ -45,6 +47,10 @@ for arg in "$@"; do
         --session-id|--session-id=*|--resume|--resume=*|--continue|--continue=*|--fork-session|--fork-session=*|\
         --no-session-persistence|--no-session-persistence=*|-r|-c)
             echo "claude_p_retry.sh: capture needs one fresh persisted session per attempt; refusing ${arg%%=*}" >&2
+            exit 1
+            ;;
+        --setting-sources|--setting-sources=*|--settings|--settings=*)
+            echo "claude_p_retry.sh: CI never loads project settings; refusing ${arg%%=*}" >&2
             exit 1
             ;;
     esac
@@ -88,7 +94,7 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
         STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ 2>/dev/null || true)
         _manifest_append "{\"attempt\":${attempt},\"session_id\":\"${SESSION_ID}\",\"started_at\":\"${STARTED_AT}\"}"
     fi
-    printf '%s' "$STDIN_CONTENT" | claude -p ${SESSION_ID_ARGS[@]+"${SESSION_ID_ARGS[@]}"} "$@" > "$OUTPUT_FILE" 2> "$STDERR_FILE" || LAST_EXIT=$?
+    printf '%s' "$STDIN_CONTENT" | claude -p ${SESSION_ID_ARGS[@]+"${SESSION_ID_ARGS[@]}"} --setting-sources user "$@" > "$OUTPUT_FILE" 2> "$STDERR_FILE" || LAST_EXIT=$?
     cat "$STDERR_FILE" >&2 2>/dev/null || true
     TRANSIENT=false
     if [ "$LAST_EXIT" -ne 0 ]; then
