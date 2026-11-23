@@ -27,8 +27,9 @@ scope:
       repository's issue comments route, with retry=False so the total wait stays 17 s; --slurp returns an array of page
       arrays, and the {owner}/{repo} placeholders resolve from the checkout's git remote as the gh issue calls
       already do) and returns without posting again when a comment body equals the body that was posted (the _fit
-      text, CRLF normalised and stripped). Empty, non-JSON or failing guard output, and a null body, count as not
-      landed: a duplicate costs less than a lost row. The guard also runs after the last transient failure, with no wait,
+      text, CRLF normalised and stripped). Any guard failure counts as not landed and never raises: a failing read, empty
+      or non-JSON output, valid JSON of the wrong shape (an object, a flat list, non-list pages, non-dict items), and a
+      missing, null or non-string body. A duplicate costs less than a lost row. The guard also runs after the last transient failure, with no wait,
       and the run raises only when it finds no row. The module still imports only stdlib, yaml and
       scripts.roadmap.approval_routing: the workflow installs pyyaml alone (the new import time is stdlib).
     new_imports: []
@@ -41,11 +42,12 @@ scope:
       HTTP 499, the guard read shows no row, comment succeeds; asserts the call order, one recorded 2 s wait and the
       row posted once), test_a_retried_comment_that_already_landed_is_not_posted_twice (the guard read returns the
       --slurp shape, an array holding one page array, whose comment body equals the posted body, so no second comment
-      call; the same node covers a failing guard read, empty stdout, non-JSON stdout and a null body, each falling
-      through to a second comment call), test_retry_is_bounded_and_other_failures_are_not_retried (four 499s with an
+      call; the same node covers a failing guard read, empty stdout, non-JSON stdout, a null body and one wrong-shape
+      reply (a flat list), each falling through to a second comment call without raising), test_retry_is_bounded_and_other_failures_are_not_retried (four 499s with an
       empty guard read each raise "gh issue comment failed" after exactly four comment calls, four guard reads and
-      waits of 2, 5, 10; a denied failure raises after one call, no guard read and no wait; a 503 on issue list is
-      retried and then succeeds), test_issue_create_is_not_retried (a 502 on create raises after one create call and
+      waits of 2, 5, 10; four 499s whose fourth guard read shows the row return without raising, after four comment
+      calls and the same waits; a denied failure raises after one call, no guard read and no wait; a 503 on issue list
+      and a 502 on label create are each retried and then succeed), test_issue_create_is_not_retried (a 502 on create raises after one create call and
       no wait; it passes before the change too and pins retry=False). The existing nodes, including the "printed no
       issue URL" assertion, are unchanged.
     new_imports: []
@@ -56,7 +58,7 @@ acceptance_criteria:
   - "A transient gh failure (HTTP 499, 502, 503 or 504) on an issue list, label create or issue comment is retried at most 3 more times with waits of 2, 5 and 10 s, then raises as today; any other gh failure raises on the first attempt."
   - "A comment retried after a transient failure, including after the last one, is not posted again when the issue already holds a comment with the same body."
   - "gh issue create is never retried."
-  - "rec-5543's acceptance node test_post_retries_transient_gh_failure passes and fails before the change; every existing node in tests/ci/test_notice_digest.py still passes with its assertions unchanged."
+  - "rec-5543's acceptance node test_post_retries_transient_gh_failure passes after the change and fails before it; every existing node in tests/ci/test_notice_digest.py still passes with its assertions unchanged."
   - "rec-5543 is closed by the merge's Resolves trailer, through the Decision 186 closure obligation against its closure_artifact shard:notice-digest-gh-retry."
 verification_plan:
   - step: 1
@@ -105,8 +107,8 @@ verification_plan:
     command: >-
       SHA=$(git fetch -q origin main && git log origin/main -1 --format=%H -E --grep='^(build|fix|test)\(notice-digest-gh-retry\)') && test -n "$SHA" &&
       gh run list --repo otl-labs/ontheloop --workflow notice-digest.yml --commit "$SHA" --json databaseId,conclusion
-    expected: one run for the merge commit with conclusion success; record its id
-    fix_if: the run failed; read its job log, and file or fix the cause on a new branch, never a re-run to green
+    expected: one run for the merge commit that has completed (wait for it, for example with gh run watch) with conclusion success; record its id
+    fix_if: the completed run failed (an in-progress run has no conclusion yet and is not a failure); read its job log, and file or fix the cause on a new branch, never a re-run to green
     hermetic: false
   - step: 5
     phase: post-deploy
@@ -152,7 +154,7 @@ constraints:
 context:
   - "Failure: run 45232494715 (push 64eec17c..915f3665): gh issue comment returned HTTP 499 and the PR #2403 row was printed but not posted (rec-5543). The earlier run 44781885027 (PR #2306, issue list empty right after gh issue create) was already fixed by rec-5468 (PR #2330, 29aa11ee: the new issue's number comes from the create URL), so this plan does not touch _ensure_issue."
   - "The cause sits in scripts/ci/notice_digest.py _gh (one attempt, raises on any non-zero exit) and post (one comment call per row, no landed-row check)."
-  - "Precedent for a bounded gh retry: scripts/ci/dependabot_stranded_sweep.sh:78 (_gh_bounded_retry). Statuses retried: 499, 502, 503, 504 matched in gh's stderr (inferred as the transient set; 499 from the rec's log). Only the comment loop waits, so the total wait is 17 s against the workflow's 10 minute timeout."
+  - "Precedent for a bounded gh retry: scripts/ci/dependabot_stranded_sweep.sh:78 (_gh_bounded_retry). Statuses retried: 499, 502, 503, 504 matched in gh's stderr (inferred as the transient set; 499 from the rec's log). Each retried call (and each row's comment loop) waits at most 2, 5 and 10 s, 17 s per call; the guard reads are retry=False and add no wait. Worst case stays far inside the workflow's 10 minute timeout."
   - "Forks decided with notice (consistency-only, no always-ask item): retry reads, label create and the guarded comment but never gh issue create (not idempotent); unreadable guard output posts anyway (a duplicate beats a lost row); the guard also runs after the last failure, since a final 499 on a comment GitHub applied would otherwise still exit 1 and file another ci_rca rec; the guard reads over REST because the 499 came from the GraphQL route (gh api --paginate --slurp needs gh 2.48 or newer: it ran on 2.89 in a session read of issue #2307, 89 comments; the runner image's version is inferred, and an unsupported flag fails the read, which counts as not landed)."
   - "Red overlap: rec-5543 is the open red this plan repairs and bundles (Decision 226 cl.3). It blocks the CI RCA script-extraction build (rec-5500, PLAN-ci-rca-step-extraction) at its red_overlap gate through the shared test file tests/ci/test_notice_digest.py."
   - "rec-5543 closure (Decision 186): escape_class no-edge; closure_artifact shard:notice-digest-gh-retry recorded at plan write without a status change (read back from context_v2_json 2026-11-23: status open), so the build's trailer closure resolves it against the merge sha once the shard is on main."
@@ -178,6 +180,20 @@ gate_rounds:
       - {id: N7, severity: nit, origin: judgement, anchor: "verification_plan[3]", subject: "keep the retry-unproven-live wording in the build report", disposition: fixed}
       - {id: N8, severity: nit, origin: judgement, anchor: "verification_plan[0].expected; execution_steps[0]", subject: "the create-not-retried node passes before the change; say so instead of all nodes failing", disposition: fixed}
   - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:d72088fded8c849e836fb19e29a582a1f61a28918af264c3a5be1e12c3c08e23"}  # pragma: allowlist secret
+  - gate: plan-critique
+    round: 2
+    verdict: PROCEED
+    blocking: 0
+    nits: 8
+    findings:
+      - {id: N1, severity: nit, origin: judgement, anchor: "acceptance_criteria[1]; scope[1].purpose node 3", subject: "no node pins the found-on-the-final-guard-read side; add a four-499 sub-case whose fourth guard read shows the row", disposition: applied-wording}
+      - {id: N2, severity: nit, origin: judgement, anchor: "scope[0].purpose guard inputs", subject: "guard inputs omit valid JSON of the wrong shape; state any parse or shape error counts as not landed and add a wrong-shape sub-case", disposition: applied-wording}
+      - {id: N3, severity: nit, origin: judgement, anchor: "context[2]", subject: "the 17 s total wait is per call, not per run; reword as a per-call bound", disposition: applied-wording}
+      - {id: N4, severity: nit, origin: judgement, anchor: "acceptance_criteria[0]; scope[1].purpose node 3", subject: "label create is named as retried but no node exercises it; add a 502 label-create sub-case", disposition: applied-wording}
+      - {id: N5, severity: nit, origin: judgement, anchor: "scope[0].purpose final guard read", subject: "the last guard read runs with no wait and could miss a just-applied comment; benign, same red as today", disposition: build-note}
+      - {id: N6, severity: nit, origin: judgement, anchor: "verification_plan", subject: "no step runs the REST guard against the runner's real gh; report the runner gh version and remote as unverified", disposition: build-note}
+      - {id: N7, severity: nit, origin: judgement, anchor: "verification_plan[3].expected; fix_if", subject: "the merge run may still be in progress and has no conclusion yet; wait for completion before judging", disposition: applied-wording}
+      - {id: N8, severity: nit, origin: judgement, anchor: "verification_plan[1].hermetic", subject: "a whole-file replay of the in-scope test file stays hermetic false under vp-red-before clause (v); advisory, replay costs about 4 s", disposition: build-note}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -189,5 +205,6 @@ execution_steps:
   - "notice_digest.py: add import time, _sleep, the transient matcher, the retry loop in _gh (retry switch, gh issue create passes retry=False), and _comment with the landed-row guard; post() calls _comment. Post: VP 1 green, then VP 2."
   - "Add the graduated shard config/agent/verification_registry/entries/notice-digest-gh-retry.yaml for VP 1, pinning the four VP 1 nodes."
   - "CLOSURE (implement skill Commit Flows): commit with Resolves: rec-5543; rebase; VP 3; push; PR titled build(notice-digest-gh-retry); code review in a fresh context; merge on PROCEED and green CI with Resolves: rec-5543 in the squash body; then VP 4 and 5."
-  - "Report: what was implemented, verification results, run ids; say the retry is unproven against a real GitHub 499."
+  - "Report: what was implemented, verification results, run ids; say the retry is unproven against a real GitHub 499, and that the runner image's gh version and the checkout's origin remote (for the REST guard's placeholders) are unverified though a failing guard read is fail-safe."
+  - "Build notes from critique round 2 (not plan edits): the last guard read runs with no wait, which at worst raises as today with no row lost; VP 2 is a whole-file replay of the in-scope test file and stays hermetic: true only because it costs about 4 s."
 rollback: Revert the build PR; the digest returns to one gh attempt per call.
