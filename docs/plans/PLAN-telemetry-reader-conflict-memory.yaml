@@ -18,6 +18,7 @@ phase: >-
 closes_criteria: []
 cites:
   - dec:79
+  - dec:272
   - dec:125
   - dec:207
   - dec:226
@@ -89,7 +90,7 @@ acceptance_criteria:
   - The 7-day telemetry_root_sessions read over the 300,000-row local corpus completes under the reader's own memory and spill limits and reports exactly the planted conflicts (red before, green after).
   - The existing Decision 207 dedupe and conflict vectors pass unchanged (same conflicts reported).
   - The arrival unreadable cause carries the reader's HTTP status, error_type and error_class (rec-5491 acceptance).
-  - After the governed deploy, 7-day telemetry_root_sessions reads succeed live and no scheduled telemetry-arrival run after the new SQL went live is unreadable.
+  - After the governed deploy, 7-day telemetry_root_sessions reads succeed live and at least 31 completed telemetry-arrival runs after the new SQL went live are all readable.
 verification_plan:
   - step: 1
     phase: pre-deploy
@@ -129,60 +130,60 @@ verification_plan:
     graduation: not-applicable
   - step: 5
     phase: post-deploy
-    action: The deployed telemetry reader serves the new root-sessions SQL
+    action: The deployed telemetry reader serves the new root-sessions SQL; record the live time
     command: >-
       OTL_OPS_VERBS_TRANSPORT=execute_api bin/venv-python -c "from scripts.telemetry_capture.read_route import make_routed_reader;
       from src.common import ducklake_event_reads as ev; d=make_routed_reader(profile='agent_platform').describe();
       ok=d['telemetry_root_sessions']['read_version']==ev.describe_all()['telemetry_root_sessions']['read_version']; print(ok);
-      raise SystemExit(0 if ok else 1)" && date -u +%s000 > /tmp/reader-conflict-memory-live-ms
+      raise SystemExit(0 if ok else 1)" && date -u +%s000 | tee /tmp/reader-conflict-memory-live-ms | sed 's/^/LIVE_MS=/'
     expected: >-
-      Prints True and exits 0 after the deploy-ducklake-lambdas run for a main commit containing the merge has deployed the
-      telemetry reader; the marker file holds the first time the new SQL was seen live (VP 7 and VP 8 read from it).
+      Prints True, then LIVE_MS=<epoch ms>, exit 0, after the deploy-ducklake-lambdas run for a main commit containing the merge
+      has deployed the telemetry reader. The build report carries the LIVE_MS value as a named closure fact; VP 7 and VP 8 read
+      it from the LIVE_MS environment variable (falling back to the /tmp file) so the coordinator can run them in a fresh session.
     fix_if: >-
       False means the deploy has not run or skipped the reader; read that run's job conclusions and deployed commit. Run this
       from a checkout of the deployed commit (git worktree), since a later merge to the shared SQL file moves main's stamp.
     hermetic: false
   - step: 6
     phase: post-deploy
-    action: Live 7-day reads, three in a row, plus a 7-day tools read as rec-5490 evidence
+    action: Live 7-day root-sessions reads, three in a row
     command: >-
       OTL_OPS_VERBS_TRANSPORT=execute_api bin/venv-python -c "import datetime as d; from scripts.telemetry_capture.read_route import
       make_routed_reader; r=make_routed_reader(profile='agent_platform'); t=d.datetime.now(d.UTC).date(); f=(t-d.timedelta(days=6)).isoformat();
-      [print('roots', len(r.named('telemetry_root_sessions', day_from=f, day_to=t.isoformat()))) for _ in range(3)]" && {
-      OTL_OPS_VERBS_TRANSPORT=execute_api bin/venv-python -c "import datetime as d; from scripts.telemetry_capture.read_route import
-      make_routed_reader; r=make_routed_reader(profile='agent_platform'); t=d.datetime.now(d.UTC).date(); f=(t-d.timedelta(days=6)).isoformat();
-      print('tools', len(r.named('tool_use_rollup', day_from=f, day_to=t.isoformat())))" || echo 'tools read failed'; }
-    expected: >-
-      Three roots lines with a row count each and exit 0. The tools line prints a count or an exception class either way; it
-      is evidence for rec-5490, never this step's verdict.
+      [print('roots', len(r.named('telemetry_root_sessions', day_from=f, day_to=t.isoformat()))) for _ in range(3)]"
+    expected: Three roots lines with a row count each, exit 0.
     fix_if: A ReaderInvokeError on a roots read means the reader still runs out of memory; read its log group for OutOfMemoryException and stop with an RCA.
     hermetic: false
   - step: 7
     phase: post-deploy
-    action: Scheduled telemetry-arrival runs after the new SQL went live are never unreadable (read-only; nothing is dispatched)
+    action: Completed telemetry-arrival runs (any trigger) after the new SQL went live are never unreadable (read-only; nothing is dispatched)
     command: >-
-      since=$(date -u -d "@$(( $(cat /tmp/reader-conflict-memory-live-ms) / 1000 ))" +%Y-%m-%dT%H:%M:%SZ) && for id in $(gh api
-      "repos/otl-labs/ontheloop/actions/workflows/telemetry-arrival.yml/runs?per_page=100&created=>=$since" --jq '.workflow_runs[] |
-      select(.status == "completed") | .id'); do line=$(gh run view $id -R otl-labs/ontheloop --log 2>/dev/null | grep -o -E
-      'ARRIVAL status=[a-z]+|ARRIVAL_UNREADABLE cause=[A-Za-z]+' | tail -1); echo "$id ${line:-no-arrival-line}"; done | tee
-      /tmp/reader-conflict-memory-arrival.txt && grep -c 'ARRIVAL status=' /tmp/reader-conflict-memory-arrival.txt && ! grep -q
-      'unreadable\|ARRIVAL_UNREADABLE' /tmp/reader-conflict-memory-arrival.txt && test "$(grep -c 'ARRIVAL status=' /tmp/reader-conflict-memory-arrival.txt)" -ge 12
+      live=${LIVE_MS:-$(cat /tmp/reader-conflict-memory-live-ms)} && since=$(date -u -d "@$(( live / 1000 ))" +%Y-%m-%dT%H:%M:%SZ) &&
+      for id in $(gh api --paginate "repos/otl-labs/ontheloop/actions/workflows/telemetry-arrival.yml/runs?per_page=100&created=>=$since"
+      --jq '.workflow_runs[] | select(.status == "completed") | .id'); do line=$(gh run view $id -R otl-labs/ontheloop --log 2>/dev/null
+      | grep -o -E 'ARRIVAL status=[a-z]+|ARRIVAL_UNREADABLE cause=[A-Za-z]+' | tail -1); echo "$id ${line:-no-arrival-line}"; done
+      | tee /tmp/reader-conflict-memory-arrival.txt && ! grep -q 'unreadable\|ARRIVAL_UNREADABLE' /tmp/reader-conflict-memory-arrival.txt
+      && n=$(grep -c 'ARRIVAL status=' /tmp/reader-conflict-memory-arrival.txt) && echo "readable_runs=$n" && test "$n" -ge 31
     expected: >-
-      At least 12 completed runs with an ARRIVAL status line, none unreadable, exit 0. Before the fix about 2 of 11 runs in 48 h
-      were unreadable (critique round 3, measured with this loop), so 12 clean runs leave about a 9 percent chance of a false
-      pass. That takes about two to three days of schedule after VP 5, so the build reports this step pending and the
-      coordinator runs it with VP 8's 48 h re-read; green and red (missing keys) both count as readable here.
-    fix_if: An unreadable status now names its HTTP status and error_type; follow that cause.
+      readable_runs=31 or more, none unreadable, exit 0. Base rate re-measured 2026-11-23 11:30Z with this loop: 3 of 41 completed
+      runs in 48 h were unreadable (4 schedule, 37 workflow_run events), so 31 clean runs leave about a 10 percent chance of a
+      false pass (ceil(log 0.1 / log(38/41)) = 31). At about 20 runs a day that is about a day and a half after VP 5, so the build
+      reports this step pending and the coordinator runs it at the 48 h re-read; green and red (missing keys) both count as readable.
+    fix_if: An unreadable status now names its HTTP status, error_type and request_id; follow that cause and stop with an RCA.
     hermetic: false
   - step: 8
     phase: post-deploy
-    action: No reader out-of-memory errors since the deploy
+    action: Evidence only, never the verdict - reader out-of-memory events since the new SQL went live, with request ids
     command: >-
-      set -o pipefail; aws logs filter-log-events --profile agent_platform --region "$(cat config/aws-region)" --log-group-name
-      /aws/lambda/agent-platform-ducklake-telemetry-reader --start-time "$(cat /tmp/reader-conflict-memory-live-ms)" --filter-pattern
-      '"OutOfMemoryException"' --query 'length(events)' --output text | awk '{s+=$1} END {print s+0; exit (s>0)}'
-    expected: One number, 0, at handoff (the awk sums the per-page counts) and exit 0; a failed aws call or any event exits non-zero; the coordinator re-reads it 48 hours after the deploy before the red is reported closed.
-    fix_if: Any event means another verb still runs out of memory; file a rec naming its request id and time, never the account id.
+      set -o pipefail; live=${LIVE_MS:-$(cat /tmp/reader-conflict-memory-live-ms)} && aws logs filter-log-events --profile agent_platform
+      --region "$(cat config/aws-region)" --log-group-name /aws/lambda/agent-platform-ducklake-telemetry-reader --start-time "$live"
+      --filter-pattern '"OutOfMemoryException"' --query 'events[].message' --output text | grep -o -E '"request_id": ?"[^"]+"' | sort
+      | uniq | tee /tmp/reader-conflict-memory-oom.txt | wc -l | sed 's/^/oom_requests=/'
+    expected: >-
+      oom_requests=<n> and the request ids, exit 0. The unmapped log line carries no verb, and rec-5490's 7-day tool_use_rollup
+      reads still run out of memory, so a non-zero count is expected and is not this plan's verdict (VP 6 and VP 7 are). The
+      build and the 48 h re-read report the count; any request id that matches an unreadable arrival line from VP 7 is a fail.
+    fix_if: A failed aws call exits non-zero (pipefail); fix access and rerun. Never paste an account id from an error.
     hermetic: false
   - step: 9
     phase: post-deploy
@@ -239,7 +240,7 @@ test_obligations:
     behavior: The arrival unreadable cause names the reader's HTTP status, error_type and error_class.
     verification_step: 3
     test_selector: tests/telemetry_verify/test_session_presence_reader_status.py::test_unreadable_cause_names_status_and_error_type
-    red_green_expectation: red before (file absent), green after
+    red_green_expectation: red before (file absent; the same assertion also fails on the old code, whose cause is the bare ReaderInvokeError), green after
 constraints:
   - No raise of the reader's memory_size, DuckDB memory_limit or spill cap (those are spend and hide the cause).
   - No test, assertion or dedupe vector is loosened (Decision 235); the conflict result set must not change.
@@ -247,13 +248,13 @@ constraints:
   - The content reader's deploy is never dispatched by this build (ducklake_event_read_sql.py is outside its protective set, so the channel does not ask); VP 9 and VP 10 record and smoke its next operator-approved deploy.
   - No AWS account id in any log excerpt, PR text or rec.
 context:
-  - "Decision-scout verdict NO_FLAGS (228 of 228 triaged); CITE: dec:207, dec:226, dec:249, dec:254, dec:125, dec:79, dec:236. Serves NS.6 (a measured failure fixed with red-before/green-after and live proof), within NS.3 (no spend raise)."
+  - "Decision-scout verdict NO_FLAGS (round 2, 228 of 228 triaged); CITE: dec:207, dec:272, dec:249, dec:125, dec:79, dec:236, dec:226, dec:254. Serves NS.6 (a measured failure fixed with red-before/green-after and live proof), within NS.3 (no spend raise)."
   - "Deploy order (Decisions 249 cl.3, 254): code deploys ship only the newest green main commit, so VP 5-11 wait until main is green again; the sibling red rec-5497 (full-tier xdist worker crash on the golden-gates tree test, cause low-confidence; another thread) must clear first or with this merge."
   - "Content reader (Decision 272): it packages this SQL file but it is outside its protective set, so its session_transcript_masked read_version differs from main until its next approved deploy; expected, not drift."
   - "Evidence (2026-11-23): every reader OutOfMemoryException since 2026-11-21 reads 'failed to offload data block ... (286.0 MiB/286.1 MiB used)'; DuckDB 1.5.4 names max_temp_directory_size in that message (reproduced locally), so memory was full and spill then filled; Lambda memory was not exhausted (REPORT max 902-970 of 1024 MB). Settings at src/common/ducklake_event_reads.py:32-34."
   - "Plan-time probe (scratch, synthetic Parquet corpus, reader limits): current root-sessions SQL fails at 300,000 observations in 0.3 s; duplicate-first conflicts pass in 0.7 s and at 1.5 million rows in 4.6 s with identical rows. Production totals: 831,247 observations and 537,962 transcripts in all."
   - "Inferred, not verified: a failure clusters on one warm container (four clusters, each on one log stream), so container state decides which 7-day read tips over; the rewrite removes the heavy operator either way."
-  - "rec-5490 (7-day tool_use_rollup OOM) is NOT shown fixed by this change: the same probe corpus still runs out of memory in tool_use_rollup's own body after the rewrite. It stays its own rec; VP 6 records the live result as evidence."
+  - "rec-5490 (7-day tool_use_rollup OOM) is NOT shown fixed by this change: the same probe corpus still runs out of memory in tool_use_rollup's own body after the rewrite. It stays its own rec, and VP 8 counts its out-of-memory events as evidence only."
   - "read_version: every compose() verb's stamp moves once; the monitor and golden-gate smokes already treat a stamp mismatch as deploy skew until the reader deploy lands."
   - "Data-model: no table, column or stored field is added."
   - "Shared file: src/common/ducklake_event_read_sql.py (474 of 500 SLOC; this edit adds about 3) is also scoped by unbuilt plans billing-shape-local, merge-annotate-contract-reader, telemetry-claude-p-capture-adapter, telemetry-planning-cost-reads and telemetry-repeated-tool-calls; only conflict_select changes here, so whichever builds second rebases."
@@ -264,6 +265,8 @@ gate_rounds:
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 5, nits: 6}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 10}
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 3, nits: 9}
+  - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 3, nits: 6}
+  - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:164deccb9e592f4621c57abd79e42a22a4dbcc16c70275c6efab47a0996bdef1'}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -273,12 +276,12 @@ pre_implementation_checklist:
 execution_steps:
   - "Run bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-telemetry-reader-conflict-memory.yaml; rec-5491 must read repairs_this_red. If rec-5497 still blocks, carry on (this plan's own deferral is in context); push and open the PR when the local full tier passes, and hold only if the full tier fails on rec-5497's node. Deploys wait for a green main regardless (Decision 249 cl.3)."
   - Write tests/common/test_ducklake_event_read_memory.py and confirm it fails on the current SQL with OutOfMemoryException.
-  - "Before editing the SQL, time rec-5497's node: bin/venv-python -m pytest 'tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_gates.py::test_tree_rows_must_match_the_sent_set_with_one_root' -q --durations=3 (about 20 s locally at plan time)."
-  - "Modify conflict_select in src/common/ducklake_event_read_sql.py to duplicate-first; run VP 1 and 2, then time the same node again. If it is more than 10 percent slower, stop and send a plan-defect report (the rewrite adds one semi-join per table to every compose() verb)."
+  - "Before editing the SQL, time rec-5497's node: bin/venv-python -m pytest 'tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_gates.py::test_tree_rows_must_match_the_sent_set_with_one_root' -q --durations=3 (three runs, keep the median; about 20 s locally at plan time)."
+  - "Modify conflict_select in src/common/ducklake_event_read_sql.py to duplicate-first; run VP 1 and 2, then time the same node again (median of three runs each way). If it is more than 10 percent slower, stop and send a plan-defect report (the rewrite adds one semi-join per table to every compose() verb)."
   - Write tests/telemetry_verify/test_session_presence_reader_status.py, then add reader_cause to scripts/telemetry_verify/session_presence.py; run VP 3.
   - "Graduate VP 1 (telemetry-conflict-report-fits-reader-memory, guard_target src/common/ducklake_event_read_sql.py, guard_symbol conflict_select; precedent telemetry-tool-use-repeat-counts) and VP 3 (arrival-unreadable-names-reader-status) into config/agent/verification_registry/entries/."
   - "CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; commit with the trailer 'Resolves: rec-5491'; git fetch origin main && git rebase origin/main; VP 1-3; VP 4 (full tier backgrounded from the top-level session, then --verify-head; a timeout is BLOCKED, no push); push; open the PR; subscribe; code review; merge on review PROCEED + green CI under standing authorisation with merge_pull_request carrying an explicit commit_message with the Resolves trailer and expectedHeadSha."
   - "Closure evidence, recorded as four SEPARATE facts (implement skill Commit Flows): GitHub readiness state (scripts.session.github_readiness); parent validator evidence (VP 4 plus --verify-head for the pushed HEAD); structured postflight evidence (scripts.session.postflight --evidence); the real outcome -- push, build PR, CI green by event-driven wake, merge SHA."
-  - Post-deploy VP 5, 6, 8 and 11 once the reader deploy lands; VP 7 and the 48 h VP 8 re-read go to the coordinator as pending; VP 9-10 after the operator's next approved content deploy (reported pending until then); on unrecoverable V3 failure stop and RCA (Decision 55).
+  - Post-deploy VP 5, 6, 8 and 11 once the reader deploy lands; VP 7 and the 48 h VP 8 re-read go to the coordinator as pending with the LIVE_MS value; VP 9-10 after the operator's next approved content deploy (reported pending until then); on unrecoverable V3 failure stop and RCA (Decision 55).
   - 'Report: what was implemented, verification results, merge SHA, each closure fact separately, VP 7 and VP 9-10 pending or done.'
 rollback: Revert the squash commit; the deploy channel redeploys the previous reader SQL.
