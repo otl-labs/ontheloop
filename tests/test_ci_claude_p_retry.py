@@ -50,6 +50,20 @@ case "$CLAUDE_STUB_BEHAVIOR" in
         echo "API Error: 500 Internal server error"
         exit 1
         ;;
+    stderr_warning_json)
+        echo "Warning: workspace has not been trusted" >&2
+        echo '{"type":"result","result":"FILED: rec-1"}'
+        exit 0
+        ;;
+    stderr_transient_then_proceed)
+        if [ "$NEW_COUNT" -eq 1 ]; then
+            echo "API Error: 500 Internal server error" >&2
+            exit 1
+        else
+            echo "PROCEED"
+            exit 0
+        fi
+        ;;
     *)
         echo "Unknown behavior: $CLAUDE_STUB_BEHAVIOR" >&2
         exit 1
@@ -300,3 +314,23 @@ def test_wrapper_runs_under_env_i(stub_env, tmp_path):
     ]
     assert subprocess.run(cmd, capture_output=True, text=True).returncode == 0
     assert len(_manifest(out)) == 4
+
+
+def test_stderr_never_enters_output_file(stub_env, tmp_path):
+    env, _ = stub_env
+    env["CLAUDE_STUB_BEHAVIOR"] = "stderr_warning_json"
+    out = tmp_path / "out.json"
+    result = _run_wrapper(env, out)
+    assert result.returncode == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["result"] == "FILED: rec-1"
+    assert "not been trusted" not in out.read_text(encoding="utf-8")
+    assert "not been trusted" in Path(f"{out}.stderr").read_text(encoding="utf-8")
+    assert "not been trusted" in result.stderr
+
+
+def test_transient_signature_on_stderr_still_retries(stub_env, tmp_path):
+    env, counter_file = stub_env
+    env["CLAUDE_STUB_BEHAVIOR"] = "stderr_transient_then_proceed"
+    result = _run_wrapper(env, tmp_path / "out.txt")
+    assert result.returncode == 0
+    assert int(counter_file.read_text().strip()) == 2
