@@ -28,10 +28,11 @@ scope:
     purpose: >-
       TOOL_USE_ROLLUP_SQL only. The op CTE stops selecting json_extract_string(metadata, '$.attribution_mcp_server') from the
       deduped o CTE. A new CTE am reads the raw observations placeholder under the same {scope}: SELECT producer, event_id,
-      parser_version, arg_min(json_extract_string(metadata, '$.attribution_mcp_server'), created_timestamp) AS
+      parser_version, arg_min_null(json_extract_string(metadata, '$.attribution_mcp_server'), created_timestamp) AS
       attribution_mcp_server WHERE observation_type = 'tool_call' AND event_kind = 'open' GROUP BY producer, event_id,
       parser_version. op LEFT JOINs am on (producer, event_id, parser_version), the surviving row's full grain key, so the
-      value is the R5b survivor's own (Decision 207: within one grain key the survivor is the earliest created_timestamp;
+      value is the R5b survivor's own, NULL included (arg_min_null, never arg_min, which skips a NULL value and would
+      return a later row's attribution; Decision 207: within one grain key the survivor is the earliest created_timestamp;
       R5a retirement already fixed parser_version through o). No other CTE, verb or the shared dedupe_ctes/compose text
       changes, so only tool_use_rollup's read_version moves. A one-line comment states why metadata is read beside o, not
       through it (rec-5490).
@@ -50,13 +51,15 @@ scope:
     purpose: >-
       A second module-scoped fixture writes a tool-shaped corpus as Parquet (ROW_GROUP_SIZE 20000, the writer connection
       bounded by ev.TELEMETRY_MEMORY_LIMIT as the existing fixture does): 3,000 root sessions over 7 days, 450,000
-      observations in thirds (tool_call open rows carrying an 800-byte JSON metadata with attribution_mcp_server one of five
-      names, tool_call close rows with outcome, output_bytes and output_sha256, model_call rows), 150,000 tool_input
+      observations in thirds (tool_call open rows, tool_call close rows with outcome, output_bytes and output_sha256, and
+      model_call rows), every observation row carrying an 800-byte JSON metadata with attribution_mcp_server one of five
+      names (the plan-time probe shape; with metadata on the opens only the current SQL passes, measured in critique round 1), 150,000 tool_input
       transcripts with content_sha256, 1,500 agents; and opens the reader-settings connection the same way as reader_con
       (tests.fixtures.duckdb_connect, threads 1, ev.TELEMETRY_MEMORY_LIMIT, ev.TELEMETRY_MAX_TEMP_SIZE). Node
       test_tool_use_week_fits_the_reader_memory runs ev.execute(con, verb="tool_use_rollup", 7-day window) and asserts the
       summed call_count equals the planted open count and the attribution_mcp_server values are exactly the five planted
-      names. Red before (OutOfMemoryException), green after.
+      names. Red before (OutOfMemoryException), green after; measured at plan time on this shape at 450,000 (current SQL
+      out of memory, side scan 4.6 s).
     new_imports: []
   - file: tests/common/test_ducklake_event_read_tool_usage.py
     action: Modify
@@ -65,8 +68,10 @@ scope:
       test_attribution_follows_the_retained_parser_version (one tool_call open stored at parser_version 1 with attribution
       "old" and at parser_version 2 with "new", the session open at 2: the row reads "new") and
       test_conflicted_open_keeps_the_earliest_created_attribution (two rows of one grain key differing only in metadata and
-      created_timestamp: derivation_conflicted is true and the attribution is the earlier created row's, the R5b survivor).
-      Green before and after: they pin the survivor choice the side scan must keep.
+      created_timestamp: derivation_conflicted is true and the attribution is the earlier created row's, the R5b survivor),
+      plus a second case in that node where the earlier created row has no attribution_mcp_server key and the later one has
+      a value: the row reads NULL. Green before and after: they pin the survivor choice the side scan must keep (the NULL case
+      fails under arg_min).
     new_imports: []
   - file: tests/test_telemetry_usage.py
     action: Modify
@@ -77,7 +82,9 @@ scope:
       halves. The fail-closed cases join the existing cases tuple of test_a_failed_chunk_prints_no_total_and_exits_1 (two
       added rows, none changed): the same out-of-memory error on a one-day window exits 1 naming error_type unmapped, and a
       500 unmapped with error_class RuntimeError on a 7-day window exits 1 naming error_type unmapped with no halving (the
-      test's existing assertions; the new rows also assert one call). The file is 474 of 500 SLOC, so the additions stay
+      test's existing assertions; exit 1 already shows no halving, since halves would return rows and exit 0). The halving
+      match names its source in a docstring line: the body shape of ducklake_handler_errors.unmapped, so a later typed
+      out-of-memory row must update this match and its acceptance test. The file is 474 of 500 SLOC, so the additions stay
       within about 20 lines (relief in execution steps).
     new_imports: []
 bundled_recommendations:
@@ -89,14 +96,17 @@ acceptance_criteria:
   - tool_use_rollup output is unchanged, the oracle tests pass unedited and the two survivor nodes pass before and after.
   - The telemetry_usage CLI halves a window on a reader out-of-memory 500 and prints a total; a one-day out-of-memory window and any other 500 fail closed.
   - The content reader's read_version stamps are unchanged by the build.
-  - After the governed deploy, three live 7-day telemetry_usage tools reads each complete in one window (no out-of-memory halving), and a live 7-day tools range exits 0 with a total.
+  - After the governed deploy, three live 7-day tool_use_rollup reads each answer rows or a 413, never an out-of-memory 500, and a live 7-day telemetry_usage tools range exits 0 with a total.
 verification_plan:
   - step: 1
     phase: pre-deploy
     action: Memory regression on the reader's own limits
     command: bin/venv-python -m pytest tests/common/test_ducklake_event_read_memory.py::test_tool_use_week_fits_the_reader_memory -q
     expected: The node passes; before the SQL change it fails with an OutOfMemoryException.
-    fix_if: An out-of-memory error means a wide column still rides the o CTE windows; find it with EXPLAIN ANALYZE on the same corpus. Never raise the reader's limits.
+    fix_if: >-
+      An out-of-memory error after the change means a wide column still rides the o CTE windows; find it with EXPLAIN
+      ANALYZE on the same corpus. Green before the change means the fixture is too light: grow the observation count until
+      the current SQL is red, never weaken the node. Never raise the reader's limits.
     hermetic: false
     graduation: graduate
     graduation_check_id: telemetry-tool-rollup-fits-reader-memory
@@ -108,7 +118,7 @@ verification_plan:
     fix_if: A changed oracle comparison or survivor node means the side scan picks a different row than R5b; fix the SQL, never the oracle or vectors.
     hermetic: false
     graduation: waive
-    graduation_waiver_reason: These are standing full-tier tests that guard the same semantics on every main run, and duckdb is absent from the fast tier, so a graduated row would duplicate them and collect nothing in pr-validate.
+    graduation_waiver_reason: These are standing full-tier tests that already guard the same semantics on every main run, so a graduated row would only duplicate them.
   - step: 3
     phase: pre-deploy
     action: rec-5490 acceptance and the fail-closed cases
@@ -152,16 +162,34 @@ verification_plan:
     hermetic: false
   - step: 7
     phase: post-deploy
-    action: Live 7-day tools reads through the CLI, three in a row, counting windows
-    command: >-
-      for i in 1 2 3; do OTL_OPS_VERBS_TRANSPORT=execute_api bin/venv-python -m scripts.telemetry_usage tools
-      --from "$(date -u -d '6 days ago' +%F)" --to "$(date -u +%F)" 2>&1 >/dev/null | grep -c '^window ' | sed "s/^/read $i windows=/"; done
-    expected: Three lines read N windows=1, exit 0; one window means the 7-day read answered rows first time with no halving.
+    action: Live 7-day tool_use_rollup reads, three in a row, each answering rows or a 413, never a 500
+    command: |-
+      OTL_OPS_VERBS_TRANSPORT=execute_api bin/venv-python - <<'PY'
+      import datetime as d, time
+      from scripts.telemetry_capture.read_route import make_routed_reader
+      from src.common.ducklake_reader_client import ReaderInvokeError, ResponseTooLargeError
+      r = make_routed_reader(profile="agent_platform")
+      t = d.datetime.now(d.UTC).date()
+      f, bad = (t - d.timedelta(days=6)).isoformat(), 0
+      for i in (1, 2, 3):
+          s = time.monotonic()
+          try:
+              out = "rows=%d" % len(r.named("tool_use_rollup", day_from=f, day_to=t.isoformat()))
+          except ResponseTooLargeError:
+              out = "413"
+          except ReaderInvokeError as e:
+              out, bad = "FAIL status=%s error_class=%s" % (e.status, (e.body or {}).get("error_class")), bad + 1
+          print("read", i, out, "elapsed_s", round(time.monotonic() - s, 1))
+      raise SystemExit(1 if bad else 0)
+      PY
+    expected: >-
+      Three lines "read N rows=<n> elapsed_s <s>" or "read N 413 elapsed_s <s>", exit 0. A 413 is the reader's response cap,
+      which a 7-day tools read already hit before #2353; the CLI halves it (VP 8). Before this plan the reads answer FAIL
+      status=500 error_class=OutOfMemoryException.
     fix_if: >-
-      windows above 1 means the 7-day read was refused (413 or an out-of-memory 500); read the reader log group for
-      OutOfMemoryException at that time. An out-of-memory there means production rows are heavier than the probe corpus:
-      report a plan-defect to the coordinator with the request id, never raise the reader's limits. A 413 is the response
-      cap, not this plan's failure; report it as evidence.
+      A FAIL line with error_class OutOfMemoryException means production rows are heavier than the probe corpus: read the
+      reader log group at that time and report a plan-defect to the coordinator with the request id; never raise the
+      reader's limits. Any other FAIL is the client or reader's own recovery (the client already retries a 503).
     hermetic: false
   - step: 8
     phase: post-deploy
@@ -214,6 +242,7 @@ context:
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:ebdacf369a5d9fef284475e9769bd3c165e1a05f99f4cf164bf1fcff6232f79c'}
   - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:a979ace8a5afed552df1bf78f4ef764ccfc20b6c3217cb2a8a2599194cb9c776'}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 3, nits: 5}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -230,5 +259,5 @@ execution_steps:
   - Write the acceptance node and the two added cases in tests/test_telemetry_usage.py, confirm the acceptance node fails, then change _Reads in scripts/telemetry_usage.py; run VP 3.
   - Execute Verification Plan -- run each step; loop until pass; on unrecoverable V3 failure stop and RCA (Decision 55)
   - "Squash-merge body carries Resolves: rec-5490. After the deploy run VP 6-9."
-  - 'Report: what was implemented, verification results, VP 1 duration, VP 7 window counts'
+  - 'Report: what was implemented, verification results, VP 1 duration, VP 7 lines'
 rollback: Revert the squash commit; the reader redeploys the previous SQL through the same channel, and the CLI returns to halving on 413 and 504 only.
