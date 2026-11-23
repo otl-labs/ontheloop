@@ -1,0 +1,512 @@
+schema_version: 7
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: persona-verdict-container-egress
+intent: >-
+  A container on the digest-pinned persona image is denied network egress by default and never holds the provider key:
+  it sits on an internal Docker network with no route out and no DNS, and its only peer is a non-root host proxy with one
+  fixed upstream (the routed tier's provider) that adds the key and opens TLS itself, proven keyless with a red fixture
+  on Actions and on the local twin, so the keyed fixture run (rec-5550) can run the image (T4.32 c7 container leg).
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-persona-verdict-container-egress.yaml
+phase: >-
+  T4.32 (persona foundation), c7 container leg proven keyless. c7 stays open: rec-5550 re-runs the identical red fixture
+  in its keyed job and that re-run proves the container leg.
+cites: [dec:48, dec:128, dec:181, dec:205, dec:212, dec:224, dec:235, dec:246, dec:273, dec:275, dec:279]
+amends: []
+introduces: [persona-container-launcher, persona-key-injecting-proxy]
+scope:
+  - file: docs/plans/approved/persona-verdict-container-egress.yaml
+    action: Create
+    purpose: >-
+      The approved-text sidecar (Decisions 246, 279), written by this planning session and approved by the operator's
+      approval run; the build never edits it. Two blocks: roadmap-t4-32-c7-container (the dated c7 amendment: CONTAINER,
+      ORDER and the residual) and decision-263-update-proxy (a dated Update on Decision 263 cl.4). DECISIONS.md is in the
+      gated set, so the sidecar is required.
+  - file: docs/ROADMAP-PLATFORM.yaml
+    action: Modify
+    purpose: "Place block roadmap-t4-32-c7-container word-exactly; no other edit."
+  - file: docs/DECISIONS.md
+    action: Modify
+    purpose: "Place block decision-263-update-proxy word-exactly; no other edit."
+  - file: docs/contracts/ports.yaml
+    action: Modify
+    purpose: >-
+      Notice class (not in the gated set). PC-12's description becomes one sentence that keeps the tokens
+      tests/checks/contracts/test_ports_verdict_chain_records.py pins ("Decision 263 clause 4", "assumes no AWS
+      identity") and says: the workflow shell, not the persona process, reads the inference keys; on a container host it
+      hands them to the launcher's key-adding proxy, whose address the shell passes to local_container's run_argv as an
+      input, so the persona process never holds a key and every compute host keeps the key out of the persona process.
+      SA-15's flag list adds --pids-limit, --memory and --dns and names the internal network. One terse amendment_log row
+      naming this plan, PC-12 and SA-15, inserted above the 2026-11-23 local-host-root row. Relief (Decision 275 cl.3,
+      never a raise): measured against main after the PLAN-persona-verdict-app-post build (rec-5486), which takes SA-11
+      and SA-13 (or SA-12 and SA-10 as its fallback); this build takes rung 2 (detail moved to its owning plan by
+      citation, keeping subject, location, status and owning_item) on the first of SA-12, SA-10 that the app-post build
+      left untouched. A shortfall is a STOP to the plan owner (the next rung is a subject split under its own rec).
+  - file: scripts/personas/egress_floor_container.py
+    action: Create
+    purpose: >-
+      Verb egress-floor-container: the floor for a covered job that runs the image, run once as root right after the
+      filter and the checkout (sudo python3 -I .../run.py egress-floor-container). Reuses egress_floor.py's chains and
+      fail-closed unit unchanged, then: (1) one extra v4 EGRESS_FLOOR rule, placed after the -j EGRESS_FAIL_CLOSED jump
+      and before the 172.16.0.0/12 DROP, RETURN for -o br-persona with --uid-owner of the system user
+      persona-egress-proxy and -p tcp --sport 18443 (the proxy's replies; nothing else on the bridge); (2) mangle chain
+      EGRESS_BRIDGE_IN jumped at INPUT position 1 for -i br-persona: RETURN only for -d 172.31.250.1 -p tcp --dport
+      18443, else DROP; chain EGRESS_BRIDGE_FWD jumped at FORWARD position 1: DROP -i br-persona and -o br-persona; (3)
+      leaves docker.socket, docker.service and containerd.service unmasked and running, with drop-in
+      /etc/systemd/system/docker.socket.d/zz-egress-floor.conf (SocketMode=0600, SocketUser=root, SocketGroup=root),
+      daemon-reload and restart, never touching /etc/docker/daemon.json (the filter's agent restores its own backup and
+      restarts Docker on exit); (4) docker network create --internal --ipv6=false --subnet 172.31.250.0/24 --gateway
+      172.31.250.1 -o com.docker.network.bridge.name=br-persona persona-egress; (5) docker pull of the pinned digest from
+      config/persona_image.yaml and a RepoDigests read-back; (6) useradd --system persona-egress-proxy; (7) installs
+      egress_launcher.py, egress_proxy.py, egress_container_probe.py and a provider_hosts snapshot of
+      config/persona_verdict_egress.yaml into /usr/local/lib/persona-egress/ (root:root, 0755 dir, 0644 files), writing
+      their sha256 to a root-owned manifest the launcher checks; (8) writes /etc/sudoers.d/zz-egress-floor with
+      runner ALL=(ALL) !ALL first and then exactly two allow lines (runner ALL=(root) NOPASSWD:
+      /usr/bin/python3 -I /usr/local/lib/persona-egress/egress_launcher.py probe, and the same with run), no wildcard,
+      no SETENV, env_reset kept, checked with visudo -cf; verify() reads every piece back as root (rules equal the
+      rendered rules, socket stat root:root 0600, the drop-in, the network's internal flag, subnet, gateway, bridge name
+      and no IPv6, the pulled digest, the install hashes, the sudoers text, docker info LiveRestoreEnabled false) and
+      prints docker version and the iptables backend; EGRESS-FLOOR PASS else FAIL and exit 1. Refuses unless uid 0.
+      Stdlib only; rules, paths, ports, names and the subnet are module constants. Every input is read from the main
+      checkout before any step the runner user controls.
+  - file: scripts/personas/egress_launcher.py
+    action: Create
+    purpose: >-
+      The fixed root launcher, run only as /usr/local/lib/persona-egress/egress_launcher.py through the sudoers rule
+      (argv[1] is probe or run, nothing else). Imports only the stdlib and nothing from the checkout; refuses unless
+      uid 0 and its own and its siblings' sha256 match the manifest. Reads one bounded JSON request on stdin (persona id
+      matching ^[a-z][a-z0-9_]*$, provider prefix that is a key of the snapshot, materialised input; in run mode the key,
+      never on argv or in sudo's environment). Creates its own root-owned in and events directories; takes no path,
+      network, engine, image or entrypoint from the caller. Starts egress_proxy.py as persona-egress-proxy (setuid
+      child, cleared groups) bound to 172.31.250.1:18443 with the provider's host as its one upstream and the key on its
+      stdin; then docker run --rm --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges --user
+      10001:10001 --pids-limit 256 --memory 2g --dns 0.0.0.0 --network persona-egress, the in dir read-only and the
+      events dir, the pinned digest, <PREFIX>_API_BASE=http://172.31.250.1:18443 and a fixed placeholder under the key
+      variable (no -e carries a key, no published port, no --add-host). probe mode runs egress_container_probe.py from
+      the in dir with a fixed entrypoint and starts a decoy listener on 172.31.250.1:18444; run mode runs the image's
+      own entrypoint with the persona contract. Reads results with O_NOFOLLOW, regular file only, size-capped; prints one
+      JSON result to stdout; on SIGTERM or SIGINT kills the container by its fixed name and the proxy, then removes its
+      directories; the existing timeout bounds the run.
+  - file: scripts/personas/egress_proxy.py
+    action: Create
+    purpose: >-
+      Stdlib key-adding reverse proxy with one fixed upstream (host:443 from the snapshot). Accepts plain HTTP from the
+      container; refuses CONNECT and absolute-URI requests (405), oversized headers and bodies, and more than a bounded
+      number of concurrent connections; strips client Authorization, x-api-key and Proxy-* headers, sets Host to the
+      upstream, and adds the provider's auth header (Bearer for deepseek/, x-api-key for anthropic/) only when a key was
+      given on stdin. Resolves the upstream once at start, refuses a loopback, link-local or private answer, and connects
+      to that address with TLS verified against the upstream hostname; streams the response back. Binds only the address
+      it is given; logs method, path and status, never a header value or body.
+  - file: scripts/personas/egress_container_probe.py
+    action: Create
+    purpose: >-
+      Stdlib red fixture run inside the container: unlisted_name (resolve a name), dns_txt_system (TXT through the
+      container's resolver), raw_ip_443 (1.1.1.1:443), imds (169.254.169.254:80), wireserver (168.63.129.16:80),
+      private (10.0.0.1:443), ipv6 (2606:4700:4700::1111:443), decoy_port (gateway:18444) refused; proxy_upstream (an
+      HTTP request through <PREFIX>_API_BASE gets an HTTP status from the provider) and proxy_fixed_upstream (a request
+      with an unlisted Host header still lands on the provider) reached. Prints one CONTAINER-PROBE line per case and
+      CONTAINER-PROBE PASS or FAIL; never imports from the checkout.
+  - file: scripts/personas/egress_container_control.py
+    action: Create
+    purpose: >-
+      Verb egress-container-control for the unfiltered control job: pulls the pinned digest and runs the same probe on
+      Docker's default bridge with no launcher, no proxy and no rules, expecting raw_ip_443, unlisted_name and
+      dns_txt_system reached and reporting the rest, so each refusal in the filtered job is shown to be the control's.
+  - file: scripts/personas/run.py
+    action: Modify
+    purpose: Register verbs egress-floor-container and egress-container-control.
+  - file: src/persona_hosts/local_container/adapter.py
+    action: Modify
+    purpose: >-
+      run_argv and run_image take an optional proxy_base_url input; when given it requires base_url_variable and a
+      network other than bridge, passes base_url_variable=<url> by value and no key variable, and the adapter reads no
+      provider config for it (NS.1, Decision 212 cl.3). Without it the argv is unchanged, so test_exact_argv holds. The
+      docstring names the proxy path.
+  - file: .github/workflows/persona-verdict-egress-probe.yml
+    action: Modify
+    purpose: >-
+      Two keyless jobs. egress-container: the pinned filter (block, its row, switch off), checkout, the floor step sudo
+      python3 -I scripts/personas/run.py egress-floor-container, the self-check, one step that pipes a fixed probe request
+      into sudo /usr/bin/python3 -I /usr/local/lib/persona-egress/egress_launcher.py probe, and the final self-check with
+      if: always(); no secret, id-token, Environment, artifact or job-level container. egress-container-control: no
+      filter, checkout, setup-python, python3 -I scripts/personas/run.py egress-container-control. The header comment
+      names the container leg.
+  - file: config/persona_verdict_egress.yaml
+    action: Modify
+    purpose: >-
+      Row for egress-container: api.deepseek.com:443 (the routed tier's provider) and
+      pkg-containers.githubusercontent.com:443 (GHCR's blob host for the digest pull; ghcr.io is filter-supplied). The
+      header comment names the container variant. If a refused-host log shows a different blob host, STOP to the plan
+      owner.
+  - file: scripts/checks/misc/_persona_verdict_container.py
+    action: Create
+    purpose: >-
+      The container-job class (Decision 128: validate_persona_verdict_egress.py is at 486 lines). A covered job is in the
+      class when its floor step runs egress-floor-container. Rules: the job's only sudo lines are the floor step and
+      steps whose run is exactly one of the two launcher command lines, piped from a fixed command; no docker token
+      anywhere (the existing rule is unchanged); its row lists exactly one provider host and the GHCR blob host; the
+      blob host is refused in a job outside the class; the launcher steps come after the first self-check; the last step
+      is the final self-check. Reads parsed YAML only; imports nothing from scripts/personas/.
+  - file: scripts/checks/misc/_persona_verdict_floor.py
+    action: Modify
+    new_imports: [scripts.checks.misc._persona_verdict_container]
+    purpose: >-
+      FLOOR_VERB set gains egress-floor-container; "a step other than the egress floor runs sudo" admits the two exact
+      launcher lines only in a job _persona_verdict_container classifies as a container job. Every other rule unchanged.
+  - file: scripts/checks/misc/validate_persona_verdict_egress.py
+    action: Modify
+    new_imports: [scripts.checks.misc._persona_verdict_container]
+    purpose: >-
+      Call _persona_verdict_container's rules for each covered job and add the two probe jobs to the probe workflow's job
+      shape table; net growth stays under 500 SLOC (crossing it is a STOP, never a raise).
+  - file: scripts/checks/misc/_manifest.py
+    action: Modify
+    purpose: "Entry validate_persona_verdict_egress's pre_globs gains scripts/checks/misc/_persona_verdict_container.py beside _persona_verdict_floor.py."
+  - file: tests/checks/misc/test__manifest.py
+    action: Modify
+    purpose: Its pinned pre_globs tuple for validate_persona_verdict_egress gains the new module.
+  - file: tests/personas/test_container_egress.py
+    action: Create
+    purpose: >-
+      The rec acceptance test_container_on_internal_network_refuses_unlisted_hosts (hermetic: the launcher's rendered
+      network argv is --internal with IPv6 off; the docker run argv carries no key, no published port and the internal
+      network; the floor's bridge chains admit only 172.31.250.1:18443 and drop every forward; the proxy sends a request
+      with an unlisted Host header to its one upstream through a fake connector), plus
+      test_local_twin_red_fixture (@pytest.mark.integration, skipped unless PERSONA_TWIN=1, uid 0 and a dockerd): runs
+      the launcher's probe mode as root on the CC-web dockerd with the bridge rules applied and asserts every refused
+      case refused and the proxy reached (upstream unreachable from the twin is reported, not failed).
+  - file: tests/personas/test_egress_floor_container.py
+    action: Create
+    purpose: Rendered rules and their order, drop-in text, sudoers text and visudo call, install manifest, verify() read-backs, refusal when not root.
+  - file: tests/personas/test_egress_launcher.py
+    action: Create
+    purpose: >-
+      Hash refusal, mode refusal, stdin parsing and bounds, persona and provider validation, no caller-chosen value
+      reaching argv, key only on the proxy's stdin, O_NOFOLLOW results read, signal cleanup, argv parity with run_argv's
+      hardening flags.
+  - file: tests/personas/test_egress_proxy.py
+    action: Create
+    purpose: Fixed upstream, CONNECT and absolute-URI refused, client auth headers stripped, key header per provider, private answer refused, bounds, no secret in logs.
+  - file: tests/personas/test_egress_container_probe.py
+    action: Create
+    purpose: Case table, expectations and PASS/FAIL lines.
+  - file: tests/personas/test_egress_container_control.py
+    action: Create
+    purpose: The control's argv and expectations.
+  - file: tests/personas/test_run.py
+    action: Modify
+    purpose: The two new verbs.
+  - file: tests/persona_hosts/local_container/test_adapter.py
+    action: Modify
+    purpose: proxy_base_url passes the base URL by value and no key; refused without base_url_variable or on bridge; unchanged argv without it.
+  - file: tests/checks/misc/test__persona_verdict_container.py
+    action: Create
+    purpose: Live probe workflow passes; red fixtures (another sudo line, a docker token, a second provider host, the blob host outside the class, launcher before the self-check, missing final check).
+  - file: tests/checks/misc/test__persona_verdict_floor.py
+    action: Modify
+    purpose: The container floor verb is accepted only in its class; the launcher lines are refused outside it.
+  - file: tests/checks/contracts/test_ports_verdict_chain_records.py
+    action: Modify
+    purpose: Pin PC-12's new tokens (key-adding proxy, keeps the key out of the persona process) beside the kept ones.
+bundled_recommendations: []
+followon_recs: []
+closes_criteria: []
+infrastructure_dependencies:
+  - "data-pipeline (active) bundles docs/ROADMAP-PLATFORM.yaml; this plan changes tier-item text only, so no build, deploy or smoke step is owed."
+acceptance_criteria:
+  - "bin/venv-python -m pytest tests/personas/test_container_egress.py::test_container_on_internal_network_refuses_unlisted_hosts -q passes (rec-5549's acceptance)."
+  - The governed files carry exactly the sidecar's two blocks, words-exact (approved_text verify --base origin/main exits 0).
+  - >-
+    validate_persona_verdict_egress passes on the live tree and each new red fixture fails with its own message. The
+    container-job class is a planned change of a never-weaken rule (Decisions 181, 235): it admits only the two exact
+    launcher sudo lines in a job whose floor is egress-floor-container; the no-docker rule, the self-check's
+    docker_socket and sudo cases and every other covered-job rule are unchanged.
+  - >-
+    The build PR's persona-verdict-egress-probe run, on an eth0-placed Azure attempt, shows for egress-container
+    EGRESS-FLOOR PASS with the docker version and iptables backend printed, both self-checks PASS, and CONTAINER-PROBE
+    PASS with every refused case got=refused and proxy_upstream and proxy_fixed_upstream got=reached; and for
+    egress-container-control raw_ip_443, unlisted_name and dns_txt_system got=reached; before merge.
+  - After merge, the same on main's definition through a fixture PR (c7 ORDER's keyless proof on main).
+  - test_local_twin_red_fixture passes on the CC-web twin with PERSONA_TWIN=1.
+  - docs/contracts/ports.yaml has at most 500 effective lines and fits its byte budget.
+  - The fast tier passes on the build head.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: Unit tests for the floor variant, launcher, proxy, probes, run.py, adapter and the checks.
+    command: >-
+      bin/venv-python -m pytest tests/personas/test_container_egress.py tests/personas/test_egress_floor_container.py
+      tests/personas/test_egress_launcher.py tests/personas/test_egress_proxy.py
+      tests/personas/test_egress_container_probe.py tests/personas/test_egress_container_control.py
+      tests/personas/test_egress_floor.py tests/personas/test_run.py tests/persona_hosts/local_container/test_adapter.py
+      tests/checks/misc/test__persona_verdict_container.py tests/checks/misc/test__persona_verdict_floor.py
+      tests/checks/misc/test_validate_persona_verdict_egress.py tests/checks/misc/test__manifest.py
+      tests/checks/contracts/test_ports_verdict_chain_records.py -q
+    expected: All tests pass; the twin test is skipped here.
+    expected_literals:
+      - passed
+    fix_if: A test fails; fix the code inside scope, never the assertion (Decision 235).
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: persona-verdict-container-egress-units
+  - step: 2
+    phase: pre-deploy
+    action: The registered egress and chain checks pass on the live tree.
+    command: >-
+      bin/venv-python -c "from scripts.checks.misc.validate_persona_verdict_egress import validate_persona_verdict_egress
+      as v; from scripts.checks.ci_guards.validate_persona_verdict_chain import validate_persona_verdict_chain as c;
+      f=[]; v(f); c(f); assert not f, f; print('CONTAINER_EGRESS_CHECKS_OK')"
+    expected: Prints the ok marker.
+    expected_literals:
+      - CONTAINER_EGRESS_CHECKS_OK
+    fix_if: A rule refuses the live workflow or file; fix the workflow or file to the scope row's shape.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      Duplicates validate_persona_verdict_egress and validate_persona_verdict_chain, registered checks the fast and full
+      tiers run on every PR and on main, so a graduated copy adds no guard.
+  - step: 3
+    phase: pre-deploy
+    action: Approved text placed word-exactly and ports.yaml within its line and byte budgets.
+    command: >-
+      bin/venv-python -m scripts.roadmap.approved_text verify --slug persona-verdict-container-egress --base origin/main &&
+      bin/venv-python -c "from scripts.checks.structural._classify import effective_lines;
+      n=effective_lines(open('docs/contracts/ports.yaml').read()); assert n<=500, n; print('PORTS_OK', n)" &&
+      bin/venv-python -c "from scripts.checks.contracts.validate_ports_contract import validate_ports_contract as v; f=[];
+      v(f); assert not f, f; print('PORTS_CONTRACT_OK')" && test $(wc -c < docs/contracts/ports.yaml) -le 50251 && echo
+      PORTS_BYTES_OK
+    expected: Prints the approved-text, ports-size, ports-contract and ports-bytes markers.
+    expected_literals:
+      - APPROVED-TEXT OK
+      - PORTS_OK
+      - PORTS_CONTRACT_OK
+      - PORTS_BYTES_OK
+    fix_if: Drift means re-place the blocks from the sidecar; over 500 lines, over the byte budget or an anchor not unique on main is a STOP to the plan owner.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      A one-shot landing check of placed words; the line budget, the byte budget and the ports contract are registered
+      checks the fast and full tiers already run.
+  - step: 4
+    phase: pre-deploy
+    action: Local twin red fixture on the CC-web dockerd (as root; start dockerd if it is not running).
+    command: >-
+      PERSONA_TWIN=1 bin/venv-python -m pytest
+      tests/personas/test_container_egress.py::test_local_twin_red_fixture -q -rs
+    expected: >-
+      The test passes (not skipped): every refused case refused from inside the container, the proxy reached, and the
+      upstream result reported. If the twin cannot pull the pinned image, STOP to the plan owner with the error.
+    fix_if: A refused case reached or the proxy unreachable; fix inside scope, never the expectation.
+    hermetic: false
+    graduation: not-applicable
+  - step: 5
+    phase: pre-deploy
+    action: Fast tier.
+    command: bin/venv-python -m scripts.validate --pre
+    expected: All fast-tier checks pass.
+    fix_if: A check fails; fix inside scope or STOP to the plan owner; never loosen a check (Decision 235).
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: pre-deploy
+    action: Full tier before handoff.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: >-
+      Full tier passes and --verify-head confirms it for the head. Start it as a harness-tracked background run with a
+      2 h limit from the top-level session with HOME set to an empty directory; the verdict is --verify-head.
+    fix_if: A failure in scope is fixed; one outside scope is a STOP to the plan owner (main reds owned elsewhere are deferred).
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: pre-deploy
+    action: >-
+      Pre-merge live proof: the build PR touches scripts/personas/egress_*.py and the probe workflow, so
+      persona-verdict-egress-probe runs on it with the PR's definition. Read egress-container and
+      egress-container-control, and confirm the existing five jobs stay green.
+    command: >-
+      mcp__github__actions_list(method="list_workflow_runs", owner="otl-labs", repo="ontheloop",
+      resource_id="persona-verdict-egress-probe.yml") for the run on the build PR's head SHA, then
+      mcp__github__actions_list(method="list_workflow_jobs", resource_id=<run id>, workflow_jobs_filter={filter: "all"})
+      and mcp__github__get_job_logs(owner="otl-labs", repo="ontheloop", job_id=<id>, return_content=true) for
+      egress-container and egress-container-control.
+    expected: >-
+      The run concluded success. egress-container: EGRESS-PLACEMENT iface=eth0 with a Cloud: line reading Azure;
+      EGRESS-FLOOR PASS with one line per check and the docker version and iptables backend printed; the first and final
+      EGRESS-SELF-CHECK PASS (docker_socket and sudo got=refused); CONTAINER-PROBE lines with unlisted_name,
+      dns_txt_system, raw_ip_443, imds, wireserver, private, ipv6 and decoy_port got=refused and proxy_upstream and
+      proxy_fixed_upstream got=reached, then CONTAINER-PROBE PASS. egress-container-control: raw_ip_443, unlisted_name
+      and dns_txt_system got=reached, CONTAINER-CONTROL PASS. Off-eth0 attempts follow PLAN-persona-verdict-shell-deny VP
+      6's re-run rule (rerun_workflow_run, at most 10 attempts, each attempt's Cloud: line reported). Report the run id
+      and attempt numbers to the plan owner.
+    fix_if: >-
+      Any refused case reached, a reached case refused, EGRESS-FLOOR FAIL, the bridge without a gateway address (an
+      isolated gateway mode), a blob host other than the listed one in the refused-host log, or a control case refused is
+      a STOP to the plan owner with the log lines; never drop or re-classify a case and never widen a rule in the build.
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: post-deploy
+    action: >-
+      Proof on main (c7 ORDER): after merge, on the build session's branch restarted from main, commit one head that
+      rewrites tests/fixtures/persona_verdict/fixture_pr/proceed.txt with printf '\n%s\n' proceed and nothing else; run
+      the full tier and --verify-head for that head; push and open one draft fixture PR; read its
+      persona-verdict-egress-probe run.
+    command: >-
+      mcp__github__actions_list(method="list_workflow_runs", owner="otl-labs", repo="ontheloop",
+      resource_id="persona-verdict-egress-probe.yml") for the fixture PR's head, then list_workflow_jobs and get_job_logs
+      for every job as step 7; then mcp__github__update_pull_request(state="closed") for the fixture PR.
+    expected: >-
+      Step 7's expected text on main's definition, and the existing five jobs green. The run id is reported to the plan
+      owner and the coordinator as rec-5549's read-back and as the keyless red fixture rec-5550 re-runs; the fixture PR
+      is closed unmerged.
+    fix_if: As step 7; a failure here is a STOP to the plan owner, and rec-5550's build does not start.
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: post-deploy
+    action: rec-5549 closed by the build's squash-merge Resolves trailer once its acceptance holds.
+    command: >-
+      bin/venv-python -c "from src.common import ducklake_reader_client as c; r,_=c.fetch_recs_by_ids(c.make_reader(),
+      ['rec-5549']); print(r[0]['id'], r[0]['status'])"
+    expected: Prints rec-5549 closed.
+    fix_if: Still open after the closure job ran; read ci.yml's closure job log and report to the plan owner.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: docs/plans/approved/persona-verdict-container-egress.yaml
+    behavior: the sidecar parses and its blocks are the ones the operator approved
+    verification_step: 3
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug persona-verdict-container-egress --base origin/main
+    red_green_expectation: red before (blocks not placed), green after
+  - source: docs/ROADMAP-PLATFORM.yaml
+    behavior: exactly the approved c7 container block is placed
+    verification_step: 3
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug persona-verdict-container-egress --base origin/main
+    red_green_expectation: red before (block not placed), green after
+  - source: docs/DECISIONS.md
+    behavior: exactly the approved Decision 263 Update is placed
+    verification_step: 3
+    command: bin/venv-python -m scripts.roadmap.approved_text verify --slug persona-verdict-container-egress --base origin/main
+    red_green_expectation: red before (block not placed), green after
+  - source: docs/contracts/ports.yaml
+    behavior: PC-12 keeps its pinned tokens and gains the proxy tokens within the line and byte budgets
+    verification_step: 1
+    test_selector: tests/checks/contracts/test_ports_verdict_chain_records.py
+    red_green_expectation: red before (new tokens absent), green after
+  - source: scripts/personas/egress_floor_container.py
+    behavior: rendered rules and order, drop-in, sudoers text, install manifest, root-side verify, refusal when not root
+    verification_step: 1
+    test_selector: tests/personas/test_egress_floor_container.py
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/personas/egress_launcher.py
+    behavior: no caller-chosen value reaches argv, hash and mode refusal, key only on the proxy's stdin, safe results read, cleanup
+    verification_step: 1
+    test_selector: tests/personas/test_egress_launcher.py
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/personas/egress_proxy.py
+    behavior: one fixed upstream, refused request forms, header stripping and key header, private answer refused
+    verification_step: 1
+    test_selector: tests/personas/test_egress_proxy.py
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/personas/egress_container_probe.py
+    behavior: case table and PASS/FAIL lines
+    verification_step: 1
+    test_selector: tests/personas/test_egress_container_probe.py
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/personas/egress_container_control.py
+    behavior: control argv and expectations
+    verification_step: 1
+    test_selector: tests/personas/test_egress_container_control.py
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/personas/run.py
+    behavior: the two new verbs dispatch
+    verification_step: 1
+    test_selector: tests/personas/test_run.py
+    red_green_expectation: red before (verbs absent), green after
+  - source: src/persona_hosts/local_container/adapter.py
+    behavior: proxy_base_url passes the base URL by value and no key, refused without base_url_variable or on bridge
+    verification_step: 1
+    test_selector: tests/persona_hosts/local_container/test_adapter.py
+    red_green_expectation: red before (parameter absent), green after
+  - source: .github/workflows/persona-verdict-egress-probe.yml
+    behavior: the two container jobs have the class's shape
+    verification_step: 1
+    test_selector: tests/checks/misc/test__persona_verdict_container.py
+    red_green_expectation: red before (jobs absent), green after
+  - source: config/persona_verdict_egress.yaml
+    behavior: the container job's row is exactly the provider and the blob host
+    verification_step: 1
+    test_selector: tests/checks/misc/test__persona_verdict_container.py
+    red_green_expectation: red before (row absent), green after
+  - source: scripts/checks/misc/_persona_verdict_container.py
+    behavior: the class admits only its exact launcher lines and refuses each red fixture
+    verification_step: 1
+    test_selector: tests/checks/misc/test__persona_verdict_container.py
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/checks/misc/_persona_verdict_floor.py
+    behavior: the container floor verb and launcher lines are accepted only in the class
+    verification_step: 1
+    test_selector: tests/checks/misc/test__persona_verdict_floor.py
+    red_green_expectation: red before (verb refused), green after
+  - source: scripts/checks/misc/_manifest.py
+    behavior: the egress Entry's pre_globs reach the new module
+    verification_step: 1
+    test_selector: tests/checks/misc/test__manifest.py
+    red_green_expectation: red before (module absent from pre_globs), green after
+  - source: scripts/checks/misc/validate_persona_verdict_egress.py
+    behavior: the container rules run for each covered job and the probe job shapes include the two jobs
+    verification_step: 1
+    test_selector: tests/checks/misc/test_validate_persona_verdict_egress.py
+    red_green_expectation: red before (jobs refused as unknown shapes), green after
+constraints:
+  - No rescue agents or workaround loops (Decision 55).
+  - Never loosen a check or drop a probe case to obtain green (Decisions 181, 235); a live surprise is a STOP to the plan owner.
+  - No job in this plan holds a key, id-token, an Environment or a secret; persona-verdict.yml is not edited (rec-5550 owns the run job).
+  - No region id, account id or unpublished host in any file (Decision 101); the launcher and proxy log no header value or body (Decision 224 cl.2).
+  - The launcher imports nothing from the checkout and takes no path, network, engine, image or entrypoint from its caller; the proxy never runs as root.
+  - "Decision 246 cl.4: the build PR merges only after the operator's final-diff word on the security and guard code: egress_floor_container.py, egress_launcher.py, egress_proxy.py, egress_container_probe.py, egress_container_control.py, adapter.py, the probe workflow, config/persona_verdict_egress.yaml, _persona_verdict_container.py, _persona_verdict_floor.py and validate_persona_verdict_egress.py."
+context:
+  - "Decision-scout r1 FLAGS_FOUND, r2 FLAGS_FOUND (WARN 263 cl.4 adopted as the sidecar's Update; NOTE 173 fail-over off, re-run on the fallback role; NOTE 143 residual named in the c7 block); CITE 48, 128, 181, 205, 212, 224, 235, 246, 273, 275, 279; reports in /mnt/project-files/persona-container-egress/PRESENTATION.md."
+  - "Decisions triaged: 228 of 228. Roadmap items intersected: 5; CONFLICT: 0; RELATED: 4."
+  - "Serves: NS.1 3/5 -- The persona_compute_host adapter stays credential-free and target-blind, takes its proxy URL as an input and records the coupling; it also guards the custody NS.9's gates rely on."
+  - "Operator 2026-11-23: rulings (root launcher, non-root host proxy, in-job digest pull, in-repo stdlib proxy, c7 rewording) after a blind Fable consult (/mnt/project-files/persona-container-egress/advisor-brief/ADVICE.md); 22:33 UTC 'a proxy adds the key'; 22:40 UTC 'perfect, write the plan'."
+  - "Split of rec-5545 part B (tag split-of-rec-5545): a further split goes to the operator (Decision 247 cl.5)."
+  - "Order: the build starts after the PLAN-persona-verdict-app-post build (rec-5486) merges; both edit config/persona_verdict_egress.yaml, the egress checks and ports.yaml. rec-5550 waits for this plan's VP 8 run on main."
+  - "Vendor facts (PLAN-persona-verdict-egress-floor context): the filter's and the floor's rules are OUTPUT; bridge traffic is FORWARD; the agent's revert flushes filter OUTPUT and DOCKER-USER, restores its daemon.json backup and restarts Docker, and touches no mangle rule; hence the socket lock is a unit drop-in and the bridge chains are mangle."
+  - "Twin facts [verified 2026-11-23, CC-web Docker 29.9.3]: a container on an --internal network named br-persona (172.31.250.0/24) reached a host listener on 172.31.250.1:18080 with a mangle INPUT allow, a second port 18081 was refused by the mangle DROP, a raw IP was refused, and no name resolved. The runner's Docker version is UNPROVEN until VP 7."
+  - "UNPROVEN until VP 7: GHCR's blob host is pkg-containers.githubusercontent.com; the runner user is in the docker group (the drop-in makes it moot); the proxy's replies need the floor's one RETURN; the hosted image's Docker gives an internal bridge a gateway address; docker info LiveRestoreEnabled is false."
+  - "Twin limit: CC-web egress goes through its own proxy, so the twin proves the launcher and the isolation, not the provider reach; the provider reach is proven on Actions (VP 7, VP 8)."
+  - "Key path for rec-5550 (not built here): the shell pipes the key into the launcher's run mode on stdin; the launcher hands it to the proxy's stdin; the container gets a placeholder (Decision 263 Update). Residuals outside c7 for rec-5550: mask the key at read, treat container output as untrusted, a spend-capped key (ADVICE.md A1)."
+  - "Weakening: the container class is new rules beside unchanged ones; no existing assertion is expected to change. If the weakening detector flags one, that is a STOP to the plan owner for an amendment, never an inline disposition."
+  - "File headroom: validate_persona_verdict_egress.py 486/500 SLOC (new rules go in _persona_verdict_container.py); test_validate_persona_verdict_egress.py near 500 SLOC (new tests go in test__persona_verdict_container.py); ports.yaml at its byte budget (relief in its scope row)."
+  - "Graduated shards kept unchanged: persona-image-twin-adapter (test_adapter.py's existing nodes stay; new nodes join VP 1's shard) and persona-verdict-ports-records (its pinned PC-12 tokens stay; the new tokens join VP 1's shard). _persona_verdict_container.py imports neither _persona_verdict_floor.py nor validate_persona_verdict_egress.py (no cycle)."
+  - "Not rec-5455 (AWS placement): an AWS-placed container job stops as UNSUPPORTED_PLACEMENT like any covered job."
+  - "red_overlap 2026-11-23 23:0x UTC: blocked by rec-5554 (product_regression, age 0.1 h; shared files are transitive test-selection overlap only). Deferral: rec-5554 is a re-diagnosis of rec-5491 (fixed on main by #2388), which the operator handed to Feedback Loop (2026-11-23, coordinator log); this plan touches none of its files (src/common/ducklake_event_read_sql.py)."
+  - "Budget: selection_budget breadth_waived (274 tests, 249-950 s of 950 s) on the draft scope."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:772b51cfff8f547781914f2651e5c740db5c9047fd7151df4c55d5c42b4d949b"}
+  - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:95b745e2b046655f467653f1f60a9b8bc90773426196b95104faba5f18edf141"}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections (48, 128, 181, 205, 212, 224, 235, 246, 263, 273, 275, 279)
+  - The PLAN-persona-verdict-app-post build (rec-5486) is merged; otherwise STOP and tell the plan owner
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "egress_proxy.py, egress_container_probe.py and egress_launcher.py as their scope rows (stdlib only, no checkout imports)."
+  - "egress_floor_container.py as its scope row, reusing egress_floor.py's chains; egress_container_control.py; register both verbs in run.py."
+  - "adapter.py's proxy_base_url input."
+  - "The probe workflow's two jobs and config/persona_verdict_egress.yaml's row; baseline any new inline bodies."
+  - "_persona_verdict_container.py, _persona_verdict_floor.py and validate_persona_verdict_egress.py; then the tests and the registry entry."
+  - "ports.yaml as its scope row, measured against main at build time."
+  - "Place the sidecar's two blocks word-exactly (approved_text verify), never editing the sidecar; flip implementation_declared to true."
+  - Execute the Verification Plan -- run each step; loop until pass; on an unrecoverable live failure stop and report to the plan owner (Decision 55).
+  - "Before merge: the operator's final-diff word (Decision 246 cl.4); squash-merge with Resolves: rec-5549 only after VP 7 passes; then VP 8 and VP 9."
+  - "Report: what was implemented, verification results and run ids."
+rollback: >-
+  Revert the build's squash commit: the probe workflow loses its container jobs, no covered job may run a container, and
+  the c7 text and Decision 263 return to their prior words; no infrastructure changes.
