@@ -1,0 +1,182 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: golden-gates-test-cost
+intent: >-
+  Clear the full-tier red rec-5497 by making the slowest telemetry replay tests cheaper, so a slow CI runner no longer
+  pushes them past the 120 s pytest-timeout (which kills the xdist worker and reads as "worker crashed"). Test-only
+  change; the timeout, the replay script and the fixtures do not move.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-golden-gates-test-cost.yaml
+phase: >-
+  ci_rca (soft-warn exception category: rec-5497, source ci_rca, Critical; no tier_item claimed, so the Tier Item
+  Freshness Gate is skipped). No Lambda-packaged or .tf file changes, so V2.
+cites: [dec:181, dec:201, dec:226, dec:244]
+scope:
+  - file: tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_gates.py
+    action: Modify
+    purpose: >-
+      (1) test_tree_rows_must_match_the_sent_set_with_one_root: take the monkeypatch fixture and narrow the replay to
+      the corpus:tool_result_error passes through the existing _with_passes helper (extra {}), so each of the two
+      mismatch cases (a dropped row, two roots) replays one tree instead of the whole corpus; keep both cases' exit 1
+      and GOLDEN_MISMATCH verb=session_tree_rows assertions; drop the trailing full clean replay, whose assertion
+      (no mismatch on a clean run, including trees that store no row) is already made by
+      test_replay_registers_one_project_per_tree_and_pass, and move its explanatory message onto that test's
+      `not stats.mismatches` assertion. (2) test_deploy_records_follow_the_routed_reader: take monkeypatch and narrow
+      each catalog's replay with _with_passes(monkeypatch, {}); keep every existing assertion (deploy_functions
+      routing, skew 0, no mismatches, trees > 0, both records read). Every other test and every node name stays
+      unchanged (graduated entries telemetry-golden-replay-over-fakes and
+      golden-replay-asserts-catalog-before-registration pin two of them).
+  - file: tests/telemetry_verify/test_monitor_capacity.py
+    action: Modify
+    purpose: >-
+      Build fewer golden worlds and run the monitor fewer times; every node name and every asserted property stays.
+      (1) test_two_workers_report_equals_one_worker: run workers=1 and workers=2 once each with world.cost = 11.0 and
+      budget monitor.Budget(10**6, world.clock), and assert on those two reports both the equality of every
+      non-timing field (the existing skip set) and the slow-call properties (calls_over_10s == reader_calls - 2 for
+      both; call_p95_s == 11 for one worker, >= 11 for two), instead of four separate runs (probed 2026-11-23: the
+      equality holds under these settings). (2) A module-scoped fixture computes the plain golden world's
+      reader_calls once (one _locked_world().run()); _refuse_last_litellm and
+      test_oversize_day_counts_sum_and_backfill_reads_rest read it instead of building and running their own baseline
+      world. (3) The full-read check that the litellm tree is read when the budget is unbounded (litellm_quiet == 1
+      and litellm_read == 1) runs once in the same module fixture instead of once per floor test. Each floor test
+      still builds its own litellm world and makes its own refused run under its own monkeypatched floor.
+bundled_recommendations: [rec-5497]
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - test_tree_rows_must_match_the_sent_set_with_one_root replays one corpus tree per mismatch case and makes no full clean replay; both mismatch cases still exit 1 with GOLDEN_MISMATCH verb=session_tree_rows.
+  - test_deploy_records_follow_the_routed_reader replays one corpus tree per catalog and keeps every existing assertion.
+  - test_monitor_capacity.py builds the plain golden world and runs it unbounded at most once per module for the baseline, and test_two_workers_report_equals_one_worker makes two monitor runs instead of four, with every existing assertion kept.
+  - No pytest timeout value changes anywhere (scripts/checks/_scaffolding.py, pyproject.toml, any timeout marker).
+  - Both files pass in full; on the build container no edited golden node takes over 3 s and no monitor_capacity node over 25 s (main at b5326b3d, probed 2026-11-23 on the planning container, -n0 durations - tree rows 20.3 s, deploy records 14.2 s, two workers 35.8 s, floor met 26.7 s, floor missed 26.7 s, oversize 22.7 s).
+  - rec-5497's acceptance is updated to the command in verification step 1 before the merge, and the merge closes it.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: Run the six edited nodes by node id (rec-5497's new acceptance).
+    command: >-
+      bin/venv-python -m pytest
+      tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_gates.py::test_tree_rows_must_match_the_sent_set_with_one_root
+      tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_gates.py::test_deploy_records_follow_the_routed_reader
+      tests/telemetry_verify/test_monitor_capacity.py::test_two_workers_report_equals_one_worker
+      tests/telemetry_verify/test_monitor_capacity.py::test_floor_met_excuses_litellm_without_coverage_alarm
+      tests/telemetry_verify/test_monitor_capacity.py::test_floor_missed_raises_coverage_incomplete
+      tests/telemetry_verify/test_monitor_capacity.py::test_oversize_day_counts_sum_and_backfill_reads_rest -q
+    expected: exit 0, 6 passed, no skips
+    fix_if: any node fails or skips (fix the edit; never loosen an assertion, Decision 235)
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: >-
+      Both files need duckdb (module-level importorskip in the golden file), which venv-less pr-validate lacks, and
+      every node is already in the full tier; the graduated entries telemetry-golden-replay-over-fakes,
+      golden-replay-asserts-catalog-before-registration and monitor-read-budget keep pinning their nodes.
+  - step: 2
+    phase: pre-deploy
+    action: Run both edited files in full.
+    command: >-
+      bin/venv-python -m pytest tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_gates.py
+      tests/telemetry_verify/test_monitor_capacity.py -q
+    expected: exit 0, no failures, no skips
+    fix_if: any node fails or skips (fix the edit; never loosen an assertion, Decision 235)
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Whole-file re-run of existing standing tests already in the full tier; it adds no new guard.
+  - step: 3
+    phase: pre-deploy
+    action: Measure per-test cost on the build container against the planning baseline.
+    command: >-
+      bin/venv-python -m pytest tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_gates.py
+      tests/telemetry_verify/test_monitor_capacity.py -q -n0 --durations=12
+    expected: >-
+      exit 0; test_tree_rows_must_match_the_sent_set_with_one_root and test_deploy_records_follow_the_routed_reader
+      each under 3 s (setup plus call); every test_monitor_capacity node under 25 s including any module fixture setup
+      charged to it. Record the durations table in the PR body beside the planning baseline.
+    fix_if: >-
+      a golden node still replays the whole corpus (check the _with_passes narrowing), or a monitor node still builds
+      its own baseline world
+    hermetic: false
+    graduation: not-applicable
+  - step: 4
+    phase: pre-deploy
+    action: Confirm no timeout value moved.
+    command: >-
+      git diff --exit-code origin/main -- scripts/checks/_scaffolding.py pyproject.toml && ! git diff origin/main --
+      tests/ | grep -nE '^\+.*(timeout|pytest\.mark\.timeout)'
+    expected: exit 0 (no diff in either config file, no added timeout line in tests/)
+    fix_if: a timeout was raised or a timeout marker added (revert it; the direction is a cheaper test)
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A diff against origin/main is this session's transient state (a moment claim, Decision 244 cl.4), not a standing guard.
+  - step: 5
+    phase: pre-deploy
+    action: >-
+      Fast tier, then the full tier before handoff (handoff_policy): bin/venv-python -m scripts.validate --pre in the
+      foreground (exit 0), then this command as its own backgrounded run with a 2 h limit from the top-level session.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: --pre exited 0 first; this command exits 0 for HEAD
+    fix_if: >-
+      a failure in this plan's files is fixed at root and the full tier rerun; a failure only in another open red
+      (rec-5491 at plan time, owned by the sibling Feedback Loop thread) goes to the operator as the implement skill's
+      go/no-go; it never hands off on a non-green full tier by default
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: post-deploy
+    action: Confirm rec-5497 closed after the squash merge (Resolves trailer).
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import make_reader;
+      r=make_reader(profile='agent_platform').named('recs_by_ids', ids='rec-5497')[0]; print(r['status']); assert r['status']=='closed'"
+    expected: rec-5497 status closed
+    fix_if: still open after ci.yml's closure job ran; close it with update_rec citing the merge SHA and step 1's result
+    hermetic: false
+test_obligations:
+  - source: tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_gates.py
+    behavior: The session_tree_rows mismatch detection and the routed deploy-record reads stay guarded on a one-tree replay.
+    verification_step: 2
+    test_selector: tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_gates.py
+    waiver_reason: >-
+      A test file, not behaviour: the edit narrows two tests' replay set and removes one duplicate clean replay whose
+      assertion test_replay_registers_one_project_per_tree_and_pass already makes; no production code changes, so
+      there is no red-before to show beyond step 3's cost measurement.
+  - source: tests/telemetry_verify/test_monitor_capacity.py
+    behavior: Two-worker equality, slow-call stats, litellm floor and oversize backfill stay guarded with fewer world builds and runs.
+    verification_step: 2
+    test_selector: tests/telemetry_verify/test_monitor_capacity.py
+    waiver_reason: >-
+      A test file, not behaviour: the edit shares one baseline world run per module and folds two runs into two others;
+      every asserted property is kept, so there is no red-before to show beyond step 3's cost measurement.
+constraints:
+  - Test files only. Never edit scripts/ducklake_smoke/lambda_telemetry_golden_gates.py, scripts/telemetry_verify/**, tests/fixtures/**, tests/telemetry_verify/test_monitor.py, conftest files, or any timeout setting.
+  - Keep every test node name (graduated registry entries pin some by node id, Decision 244).
+  - No assertion is loosened (Decision 235); the build records each weakening candidate as weakening_dispositions per implement-scope-boundary.yaml review_dispositions.
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - "Decision-scout verdict FLAGS_FOUND (round 1). CITE: Decisions 181, 201, 226, 244. Decisions triaged: 228 of 228. Roadmap items intersected: 1; CONFLICT: 0; RELATED: 1 (T4.23, prefix match only). Serves: NS.6 3/5. NOTE flag Decision 235 cl.1, handled in the next line."
+  - "Decision 235 cl.1 (human-confirmed plan naming each in-class change): the operator's approval of this plan is that confirmation for exactly these candidates - (a) the tree test's full clean replay is removed (refactor: test_replay_registers_one_project_per_tree_and_pass makes the same no-mismatch assertion over the whole corpus); (b) the tree and deploy-records tests replay one tree instead of all (planned-change, acceptance_criteria 1-2); (c) two-worker equality is checked under cost 11 and an unbounded budget instead of also under the default cost 0 and budget 2000, and the baseline and full litellm runs are shared per module (planned-change, acceptance_criteria 3). None is made to obtain green: the tests pass today and fail only on runner speed. Decision 226: Track A tests-only repair."
+  - "Cause (operator handover 2026-11-23, verified by Agents in GitHub from the full run log of Main Canary 45057590091): pytest-timeout 120 s, thread method, killed worker gw1 exactly 120.0 s after the tree test started; no code regression (same 20 s locally at 10e7bba3). The red runner was about 1.85x slower suite-wide; the test makes three full golden replays."
+  - "Planning probes 2026-11-23 on b5326b3d: one full golden replay about 6.7 s; the tree test narrowed to corpus:tool_result_error gives 1 mismatch per case in 0.2-0.4 s; one golden world build 2.8 s and one monitor run 5.2 s; a second monitor run on the same world gives the same reader_calls (234)."
+  - "rec-5497's filed acceptance names tests/checks/test_full_tier_worker_crash_capture.py, which does not exist (filed while the cause was unobserved). The build updates the acceptance to step 1's command via ops_data_portal --update-rec before merging with Resolves: rec-5497, so the closure job can run it (Decision 201). It is not discriminating on a fast runner; step 3's measured cost is the evidence."
+  - "Out of scope: the log truncation that hid the cause (rec context names head_tail_window); a DuckDB thread or pandas-import speed-up in shared fixtures (the import probe saved about 20 percent of a replay, not enough to own the fix). Single-replay golden tests (about 7 s locally, 48 s on the slow runner) stay as they are."
+  - "test_monitor_capacity.py already imports tests.telemetry_verify.test_monitor inside functions (existing; this plan adds no new cross-test import)."
+  - "Weakening candidates expected: the tree test's removed clean replay (refactor, cite test_replay_registers_one_project_per_tree_and_pass) and the narrowed or folded runs (planned-change, cite acceptance_criteria)."
+  - "No other open PR or unbuilt plan edits either file (Agents in GitHub confirmed no open work on the monitor_capacity tests, operator handover 2026-11-23). Sibling red rec-5491 (reader OOM) is fixed in another Feedback Loop thread with no file overlap."
+  - "red_overlap at plan write (2026-11-23 10:45Z): blocked. repairs_this_red rec-5497 (bundled). Deferral: rec-5491 (telemetry reader out of memory; product_regression, age 38.4 h, rule overlap) shares only these two test files through the import-affected set; this plan edits no file that red's repair edits (the sibling Feedback Loop thread plans the reader read-SQL change) and changes no tested behaviour, and that thread's deploy waits for rec-5497 to clear first. The build re-runs red_overlap and proceeds under the same deferral or waits for the operator."
+  - "No approved-text sidecar: no governed wording changes. The build merges on code review PROCEED + green CI."
+  - "Owning planning thread: 'Fix the slow golden gates test timing out' (Feedback Loop). Plan defects go to the coordinator, which forwards them here."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:32ce01b63405b2ceb278b32c1311e005895927ed27c9538afd26879ace0fe1c2"}  # NOTE dec:235 cl.1 -> candidates named in context for the operator sign-off
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "Run step 3 on unedited main first and keep the durations table as the build container's own baseline."
+  - "Edit the golden gates file per its scope row. Post: step 2 passes for that file; the two edited nodes are under 3 s."
+  - "Edit test_monitor_capacity.py per its scope row. Post: step 2 passes for that file; step 3's monitor bound holds."
+  - Execute Verification Plan -- run each pre-deploy step; loop until pass; on unrecoverable failure stop and RCA (Decision 55)
+  - "CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): update rec-5497's acceptance to step 1's command (ops_data_portal --update-rec, read back with recs_by_ids); set implementation_declared: true; commit; rebase on origin/main; re-run red_overlap; VP 1-5; push; open the PR with both durations tables; subscribe; code review in a fresh context; squash-merge on PROCEED and green CI with `Resolves: rec-5497` in the commit body; report PR number, CI run ids and the read-back merge SHA; VP 6."
+  - "Report: what was implemented, verification results"
