@@ -59,6 +59,8 @@ def _plan(version: int) -> dict[str, Any]:
     }
     if version >= 6:
         plan["cites"] = []
+    if version >= 7:
+        plan["gate_rounds"][1]["findings"] = []
     return plan
 
 

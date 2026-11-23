@@ -294,7 +294,7 @@ Derive the plan slug from the task, not the branch. Author only `docs/plans/PLAN
 ## PLAN-{slug}.yaml Template (Workflow Step 8)
 The plan is a YAML document validated against the `PlanDocument` Pydantic schema (`scripts/roadmap/plan_document.py`, enforced by `validate.py` in both tiers). Unknown keys FAIL validation (`extra="forbid"`). Use exactly this structure -- comments document field semantics:
 ```yaml
-schema_version: 6 # NEW plans: the newest version on main; versions 1-5 stay valid
+schema_version: 7 # NEW plans: the newest version on main; versions 1-6 stay valid
 handoff_policy:
   full_validation_required_before_commit: true # exact literal; commit/PR waits for completed full exit 0
   timeout_disposition: blocked # exact literal; resume later and rerun full from the start
@@ -339,7 +339,7 @@ context: # <= 40 rendered lines; link evidence (ids/paths), never restate it
   - Relevant decisions, phase dependencies, known gotchas
   - "Decision-scout verdict + CITE list (verbatim decision ids)" # REQUIRED ITEM (WF-04a)
 gate_rounds: # REQUIRED on new plans; one row per gate round (+gate_run_id if dispatched)
-  - {gate: decision-scout, round: 1, verdict: NO_FLAGS} # critique rows add blocking, nits, category_consistency (12p per drafted entry); escalated + escalation_choice when asked
+  - {gate: decision-scout, round: 1, verdict: NO_FLAGS} # critique rows add blocking, nits, findings list, category_consistency (12p); escalated + escalation_choice when asked
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
