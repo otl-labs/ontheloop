@@ -23,26 +23,34 @@ scope:
   - file: scripts/ci_rca/coverage.py
     action: Create
     purpose: >-
-      The deriver and its CLI. load(workflow, table) parses .github/workflows/ci-rca.yml with yaml.safe_load. A step's
-      key is job id plus the step's id, else its name, else its uses: value without the @ref; a duplicate key in one
-      job fails. direct_inputs(step) collects, from the comment-blanked run: body (the same blanking rule as
-      validate_workflow_dependency_install's _blank_shell_comments, imported, not copied) and from with:/env: values:
-      every -m scripts.X / -m src.X module, every relative repository path token matching
-      ^(scripts|src|config|bin|tests|\.claude|\.github)/ or a top-level dotfile named in the table's
-      known_top_level list (.mcp.json), every hashFiles('...') argument, and, for uses: ./<dir>, that directory's
-      action.yml plus the direct inputs of its own run: steps (recursively), where ${{ github.action_path }}/X resolves to
-      <dir>/X and that script is scanned (Decision 162 R1 thin adapters: aws-region's resolve.sh, telemetry-ci-capture's
-      capture.sh). Absolute paths, other ${{ }} expressions and
-      /tmp paths are ignored. A token that matches the path or module shape but resolves to no file fails closed (an
-      unresolved reference is an error, never a skip). Third-party uses: values are recorded as external pins, not
-      files. closure(step) adds, for each direct Python module or .py path, its forward import closure from
-      scripts.dependency_graph (import_subgraph + forward_closure, module granularity), mapped back to files; a shell
-      script's own body is scanned for direct inputs the same way. inputs(step) = direct inputs + closure + the row's
-      declared_inputs. CLI: derive [--step KEY] (JSON: per step, direct, closure, declared, proven_by), paths
-      --proven-by VALUE (the sorted union of inputs(step) over steps with that proven_by, one path per line; rec-5493
-      reads it for main_smoke), check (the gate's problems, exit 1 on any). Standard library plus yaml and the
-      repository's own modules; no network.
-    new_imports: [scripts.dependency_graph, scripts.checks.ci_guards.validate_workflow_dependency_install]
+      The deriver and its CLI. load(workflow, table) parses .github/workflows/ci-rca.yml with yaml.safe_load.
+      STEP KEY: job id + '::' + _workflow_shell_bodies._step_identity(step, index) (the step's id, else its name
+      slug, else #index; the repository's existing grammar, imported, not copied); a duplicate key in one job fails.
+      SCANNED FIELDS: the comment-blanked run: body (validate_workflow_dependency_install's _blank_shell_comments,
+      imported), with:, env: and if: values, and every scanned script's own body. MODULES: every -m X token is
+      resolved by validate_workflow_dependency_install's _MODULE_AFTER_RE and _module_to_path (imported; no second
+      module parser; it matches -m scripts.X, which is every repository -m in the real tree, and a test pins that no
+      scanned field holds a -m src.X token the regex would miss); -m of a package yields both pkg/__init__.py and pkg/__main__.py. PATHS, normalized before
+      matching: an action-relative prefix ($(dirname "$0"), $(dirname "${BASH_SOURCE[0]}"), $GITHUB_ACTION_PATH,
+      ${GITHUB_ACTION_PATH}, ${{ github.action_path }}) resolves to the action or script directory and the result is
+      normalized, so ../../../config/aws-region becomes config/aws-region; any other leading $NAME/ or ${NAME}/ prefix
+      (GITHUB_WORKSPACE, ROOT, REPO_ROOT, ${{ github.workspace }}) is dropped. A path token then matches
+      (?<![\w./$}-])(scripts|src|config|bin|tests|\.claude|\.github)/[\w./-]+ or is exactly a top-level file named
+      in the table's known_top_level list; .venv/ paths, /tmp paths, absolute paths and remaining ${{ }} expressions are
+      ignored. hashFiles('...') arguments are paths. For uses: ./<dir>, that directory's action.yml joins the inputs and
+      its run: steps are scanned the same way (recursively); a scanned shell script is scanned the same way.
+      known_top_level files that are JSON (.mcp.json) are scanned too: their string values are joined and read as a
+      command line, so .mcp.json's bin/venv-python -m scripts.agent_sdk.mcp_server is a direct input of the step
+      that names .mcp.json. Third-party uses: values are recorded as external pins, not files. FAIL CLOSED: a token
+      that matches a path or module shape but resolves to no file is an error, never a skip. CLOSURE: closure(step)
+      seeds scripts.dependency_graph's forward_closure over import_subgraph (module granularity, mapped back to files)
+      from every direct AND declared Python module or .py path, including __main__ for a package. inputs(step) =
+      direct inputs + closure + the row's declared_inputs. check() is direct-only (keys, rows, values, declared
+      inputs exist, direct references resolve) and builds no import graph. CLI: derive [--step KEY] (JSON: per step,
+      direct, closure, declared, proven_by), paths --proven-by VALUE (the sorted union of inputs(step) over steps with
+      that proven_by, one path per line; rec-5493 reads it for main_smoke), check (exit 1 on any problem). Standard
+      library plus yaml and the repository's own modules; no network.
+    new_imports: [scripts.dependency_graph, scripts.checks.ci_guards.validate_workflow_dependency_install, scripts.checks.ci_guards._workflow_shell_bodies]
   - file: config/agent/ci_rca/coverage.yaml
     action: Create
     purpose: >-
@@ -50,7 +58,7 @@ scope:
       proven_by_values with one line each: main_smoke (the post-merge smoke on main runs this step, rec-5493),
       pr_smoke (a pre-merge smoke runs it, rec-5510), seam_contract (the seam contract test covers it, rec-5509),
       watchdog_only (only a real run exercises it; the watchdog, rec-5504, reports when it fails); known_top_level
-      [.mcp.json]; steps: one row per step key with proven_by, declared_inputs (repository paths a step reads that no
+      [.mcp.json, requirements.txt]; steps: one row per step key with proven_by, declared_inputs (repository paths a step reads that no
       derivation sees, for example config/ci_rca_taxonomy.yaml for Generate evidence bundle) and an optional note.
       Today every row is watchdog_only, which is the true state on main: no smoke or seam test exists yet. Each later
       plan flips its own rows in the same change that makes them true.
@@ -63,9 +71,11 @@ scope:
   - file: scripts/checks/misc/_manifest.py
     action: Modify
     purpose: >-
-      One Entry for validate_ci_rca_coverage with pre=True and pre_globs [.github/workflows/ci-rca.yml,
-      config/agent/ci_rca/coverage.yaml, .github/actions/**, scripts/ci_rca/**, scripts/ci/**]; full_segment so the
-      post-merge full tier repeats it (cheap and hermetic). name, module and attr are bare string literals (Decision 169).
+      One Entry for validate_ci_rca_coverage with pre=True and pre_globs=None (ungated: it runs on every PR, so a rename
+      of any referenced file, for example .mcp.json, the agent prompt or a declared input, fails the PR rather than
+      main, and validate_pre_glob_closure has no closure to cover); full_segment="full_after_lint" so the post-merge
+      full tier repeats it. name, module and attr are bare string literals (Decision 169). Cheap because check() is
+      direct-only (one YAML parse and a few dozen file-existence checks).
   - file: config/ci_rca_taxonomy.yaml
     action: Modify
     purpose: >-
@@ -80,17 +90,21 @@ scope:
       workflow fixtures under tmp_path and the real tree: step keys (id, name, uses fallback; a duplicate fails);
       direct inputs for each token shape (-m module, script path, hashFiles, with:/env:, a local action recursing into
       its run steps, ${{ github.action_path }}/X resolving to the action's own script, a top-level dotfile); comment text and /tmp and ${{ }} tokens ignored; an unresolved path or
-      module fails closed; closure pulls a module's imports from a tiny package; declared inputs join; paths
+      module fails closed; a ${GITHUB_WORKSPACE}/x token, a .venv/bin/pip token (ignored, never bin/pip), an action-relative ../../../config/x
+      token and a $(dirname "$0")/.. token each resolve as specified; if: hashFiles arguments; -m of a package seeds
+      the closure from __main__ (a fixture package whose __main__ imports a module __init__ does not); a JSON
+      known_top_level file's command and args; closure from a declared .py input; closure pulls a module's imports
+      from a tiny package; requirements.txt as a known_top_level input; check() never builds the graph; declared inputs join; paths
       --proven-by unions only matching rows; CLI derive, paths and check (argv monkeypatched, 100% line coverage);
       the real tree checks clean.
   - file: tests/checks/misc/test_validate_ci_rca_coverage.py
     action: Create
-    purpose: Mirror test of the gate (missing row, stale row, bad proven_by, missing declared input, unresolved reference, clean real tree, examined count).
+    purpose: Mirror test of the gate (missing row, stale row, bad proven_by, missing declared input, unresolved reference, clean real tree, examined count) and of its manifest Entry (pre=True, pre_globs None, full_segment full_after_lint).
 bundled_recommendations: [rec-5537]
 followon_recs: []
 infrastructure_dependencies: []
 acceptance_criteria:
-  - bin/venv-python -m pytest tests/test_ci_rca_coverage.py -q (rec-5537's acceptance) passes, and fails on main (file absent; with it on main, scripts/ci_rca/coverage.py and the table do not exist)
+  - bin/venv-python -m pytest tests/test_ci_rca_coverage.py::test_real_tree_checks_clean -q (rec-5537's stored acceptance, read back 2026-11-23) passes, and fails on main (file absent; with it on main, scripts/ci_rca/coverage.py and the table do not exist)
   - bin/venv-python -m scripts.ci_rca.coverage check exits 0 on the real tree, and derive lists every ci-rca.yml step with its direct inputs and closure
   - validate_ci_rca_coverage fails a PR that adds a ci-rca.yml step without a row, removes one leaving a stale row, or references a path that does not exist
   - rec-5537 is closed by the merge's Resolves trailer
@@ -120,8 +134,8 @@ verification_plan:
   - step: 3
     phase: pre-deploy
     action: The real tree, through the CLI.
-    command: bin/venv-python -m scripts.ci_rca.coverage check && bin/venv-python -m scripts.ci_rca.coverage derive --step 'rca/rca_agent'
-    expected: check exits 0; derive --step 'rca/rca_agent' (the step's id is rca_agent) names scripts/ci/claude_p_retry.sh, .claude/agents/scheduled/ci-rca.md, .mcp.json and scripts/ci_rca/filing.py among the step's inputs
+    command: bin/venv-python -m scripts.ci_rca.coverage check && bin/venv-python -m scripts.ci_rca.coverage derive --step 'rca::rca_agent'
+    expected: check exits 0; derive --step 'rca::rca_agent' (the step's id is rca_agent) names scripts/ci/claude_p_retry.sh, .claude/agents/scheduled/ci-rca.md, .mcp.json, scripts/agent_sdk/mcp_server.py and scripts/ci_rca/filing.py among the step's inputs
     fix_if: a real reference does not resolve (fix the deriver's token rule or add a declared input; never drop the fail-closed rule)
     hermetic: true
     expected_literals:
@@ -130,10 +144,10 @@ verification_plan:
     graduation_waiver_reason: A real-tree read of the same code steps 1-2 graduate; the gate repeats it on every PR touching the surface.
   - step: 4
     phase: pre-deploy
-    action: Existing suites the new entry and row touch.
-    command: bin/venv-python -m pytest tests/checks/misc/test__manifest.py tests/checks/ci_guards/test_validate_ci_rca_taxonomy_accounting.py -q
-    expected: exit 0
-    fix_if: the manifest grammar or the taxonomy accounting rejects the new check; fix the entry or row
+    action: Existing suites the new entry and row touch, then rec-5537's stored acceptance node.
+    command: bin/venv-python -m pytest tests/checks/misc/test__manifest.py tests/checks/ci_guards/test_validate_ci_rca_taxonomy_accounting.py -q && bin/venv-python -m pytest tests/test_ci_rca_coverage.py::test_real_tree_checks_clean -q
+    expected: exit 0; the second command is rec-5537's stored acceptance verbatim, so the node id the closure job runs exists and passes
+    fix_if: the manifest grammar or the taxonomy accounting rejects the new check (fix the entry or row), or the acceptance node is missing (name the test test_real_tree_checks_clean)
     hermetic: true
     expected_literals:
       - ' passed'
@@ -172,7 +186,7 @@ test_obligations:
     test_selector: tests/checks/misc/test_validate_ci_rca_coverage.py
     red_green_expectation: red before (file absent), green after
   - source: scripts/checks/misc/_manifest.py
-    behavior: the gate is registered pre with its globs and in the full tier
+    behavior: the gate is registered pre=True, pre_globs None, full_segment full_after_lint; the gate's mirror test asserts those three Entry fields
     verification_step: 2
     test_selector: tests/checks/misc/test_validate_ci_rca_coverage.py
     red_green_expectation: red before (no entry), green after
@@ -192,12 +206,15 @@ context:
   - "Residual until rec-5493: declared_inputs are hand-declared and unverified; rec-5493's smoke checks the files it actually opened against inputs(step) and fails on any it did not expect."
   - "Reuse: scripts.dependency_graph (import graph, module granularity) and validate_workflow_dependency_install's comment blanking; no second parser of either."
   - "Decision scout r1 FLAGS_FOUND. Decisions triaged: 228 of 228. Roadmap items intersected: 3; CONFLICT: 0; RELATED: 3. Serves: NS.6 3/5. Dispositions: cite 166 (taxonomy NEAR_CAP uses the config class's valve, not flow-style folding) and 169 (literal Entry fields); 162 R1 action_path delegates now scanned; VP step 3 uses the id key rca/rca_agent; 86 kept as awareness (no second hand-kept list). Related, no action: 73/208 fast-tier cost (one small closure per matching PR), 135/187 globs installed complete now, 131 mirror paths confirmed."
-  - "Other unbuilt plans scoping config/ci_rca_taxonomy.yaml (merge-annotate-producer, trusted-plan-cutover): whichever builds second rebases."
+  - "Eleven other unbuilt plans scope config/ci_rca_taxonomy.yaml (plan_obligations, 2026-11-23: bootstrap-ci-gated-apply, bootstrap-trusted-pr-plan, ci-branch-state-fence, ci-policy-plan-time-lambda-arns, derived-list-scan, environment-gates-fail-closed, friction-daily-detector, merge-annotate-producer, neon-key-out-of-pr-plans, trusted-plan-cutover, trusted-plan-identity): whichever builds later rebases and uses the relief valve above."
+  - "rec-5537's acceptance was updated in planning (update_rec, read back 2026-11-23) to the decidable node form bin/venv-python -m pytest tests/test_ci_rca_coverage.py::test_real_tree_checks_clean -q (lint_acceptance_command require_decidable and require_discrimination both pass), so the Resolves trailer can close it (Decision 201). The build must name that test exactly."
+  - "Plan critique r1 REVISE (5 blocking, 6 nits), all folded: decidable acceptance node; path normalization (workspace and action-relative prefixes, .venv ignored, lookbehind); -m package seeds __main__; ungated Entry with a direct-only check(); closure seeded from declared inputs and .mcp.json scanned; requirements.txt known_top_level; if: scanned; reused _step_identity grammar; full_after_lint named; plan list corrected."
 gate_rounds:
   - gate: decision-scout
     round: 1
     verdict: FLAGS_FOUND
     scout_input_fingerprint: "v1:bea7aed8b4f4a934e6cc7fb59e63c23857f71e79b4af11371d35d0a2e75c83be"
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 5, nits: 6}  # B1 decidable acceptance node (rec updated, read back); B2 path normalization; B3 -m pkg seeds __main__; B4 ungated Entry, direct-only check(); B5 closure from declared inputs + .mcp.json scanned; N1-N6 folded
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
