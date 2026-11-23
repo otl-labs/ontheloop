@@ -38,6 +38,9 @@ _HOST_KEYS = {
     "sha",
     "checkout_sha",
 }
+LOCAL_RUNTIMES = ("local_container", "sandbox_runtime", "sandbox_runtime_windows")
+_LOCAL_HOST_KEYS = {"kind", "runtime", "run_id"}
+_LOCAL_RUN_ID = re.compile(r"[A-Za-z0-9_.-]{1,128}")
 _DIGITS = re.compile(r"[0-9]{1,20}")
 _ATTEMPT = re.compile(r"[0-9]{1,6}")
 _JOB = re.compile(r"[A-Za-z0-9_.-]{1,100}")
@@ -62,6 +65,15 @@ class HostRun:
     ref: str
     sha: str
     checkout_sha: str | None
+
+
+@dataclass(frozen=True)
+class LocalRun:
+    project_ref: str
+    agent: str
+    content_policy: str
+    runtime: str
+    run_id: str
 
 
 def _text(value: Any, pattern: re.Pattern[str]) -> str | None:
@@ -103,23 +115,53 @@ def valid_host_facts(host: object) -> bool:
     return _host_fields(host) is not None
 
 
-def parse_host_run(data: bytes | None) -> HostRun | None:
-    """Strict schema_version 1 shape and the ci-pass value grammar; anything else is None (the caller counts it)."""
+def _sidecar_body(data: bytes | None) -> tuple[str, str, str, object] | None:
+    """The schema_version 1 top level shared by both readers: (project_ref, agent, content_policy, host block)."""
     try:
         body = json.loads(data) if data is not None else None
     except ValueError:
         return None
     if not isinstance(body, dict) or set(body) != _KEYS or body["schema_version"] != SCHEMA_VERSION:
         return None
-    host = _host_fields(body["host"])
     project_ref, agent = _text(body["project_ref"], PIN_REF), _text(body["agent"], AGENT_KEY)
     policy = body["content_policy"]
-    if host is None or project_ref is None or agent is None or policy not in CONTENT_POLICIES:
+    if project_ref is None or agent is None or policy not in CONTENT_POLICIES:
         return None
-    return HostRun(project_ref=project_ref, agent=agent, content_policy=policy, **host)
+    return project_ref, agent, policy, body["host"]
 
 
-def render_host_run_ref(host: HostRun) -> str:
+def _gha_run(top: tuple[str, str, str, object]) -> HostRun | None:
+    project_ref, agent, policy, block = top
+    host = _host_fields(block)
+    return None if host is None else HostRun(project_ref=project_ref, agent=agent, content_policy=policy, **host)
+
+
+def parse_host_run(data: bytes | None) -> HostRun | None:
+    """Strict schema_version 1 shape and the ci-pass value grammar; anything else is None (the caller counts it).
+
+    The claude_code reader: gha only.
+    """
+    top = _sidecar_body(data)
+    return None if top is None else _gha_run(top)
+
+
+def parse_persona_host_run(data: bytes | None) -> HostRun | LocalRun | None:
+    """The litellm reader: a gha sidecar as parse_host_run reads it, or a local host's {kind, runtime, run_id}."""
+    top = _sidecar_body(data)
+    if top is None:
+        return None
+    project_ref, agent, policy, block = top
+    if not isinstance(block, dict) or block.get("kind") != "local":
+        return _gha_run(top)
+    runtime, run_id = block.get("runtime"), block.get("run_id")
+    if set(block) != _LOCAL_HOST_KEYS or runtime not in LOCAL_RUNTIMES or _text(run_id, _LOCAL_RUN_ID) is None:
+        return None
+    return LocalRun(project_ref=project_ref, agent=agent, content_policy=policy, runtime=runtime, run_id=run_id)
+
+
+def render_host_run_ref(host: HostRun | LocalRun) -> str:
+    if isinstance(host, LocalRun):
+        return f"local:{host.runtime}/{host.run_id}"
     return f"gha:{host.run_id}/{host.run_attempt}/{host.job}/{host.retry_ordinal}"
 
 
