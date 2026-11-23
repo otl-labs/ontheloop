@@ -437,6 +437,26 @@ RED = [
     ),
     _red("smoke-without-environment", "persona-verdict Environment", lambda d: _jobs(d)["smoke"].pop("environment")),
     _red(
+        "floor-with-env",
+        "has ['env']",
+        lambda d: _named(_jobs(d)["smoke"], "Lay the egress floor").update({"env": {"A": "b"}}),
+    ),
+    _red(
+        "floor-with-workdir",
+        "has ['working-directory']",
+        lambda d: _named(_jobs(d)["refusal"], "Lay the egress floor").update({"working-directory": "x"}),
+    ),
+    _red(
+        "second-sudo-python-step",
+        "run.py steps are not exactly",
+        lambda d: _jobs(d)["smoke"]["steps"].append({"id": "x", "run": "sudo " + v.RUN_PREFIX + "egress-floor"}),
+    ),
+    _red(
+        "final-check-without-always",
+        "final self-check must carry",
+        lambda d: _named(_jobs(d)["smoke"], "Check the egress filter again").pop("if"),
+    ),
+    _red(
         "other-secret-in-smoke",
         "other than secrets.GITHUB_TOKEN",
         lambda d: _named(_jobs(d)["smoke"], "Smoke the primary role")["env"].update({"K": "${{ secrets.OTHER }}"}),

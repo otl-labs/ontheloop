@@ -19,7 +19,7 @@ from typing import Any
 import yaml
 
 from scripts.checks import _common, registry
-from scripts.checks.ci_guards._persona_verdict_keyed import KEYED_JOBS, SELF_CHECK, keyed_problems
+from scripts.checks.ci_guards._persona_verdict_keyed import FLOOR, KEYED_JOBS, SELF_CHECK, keyed_problems
 from scripts.checks.ci_guards._shared import is_sha_pinned
 
 TRIGGER = ".github/workflows/persona-verdict-trigger.yml"
@@ -189,8 +189,9 @@ def _python_steps(job: dict[str, Any]) -> list[dict[str, Any]]:
 def _python_step_problems(name: str, step: dict[str, Any]) -> list[str]:
     out: list[str] = []
     run = str(step.get("run", "")).strip()
-    if name in KEYED_JOBS and run == SELF_CHECK:
-        return out
+    if name in KEYED_JOBS and run in (SELF_CHECK, FLOOR):
+        env_keys = {"env", "working-directory"} & set(step)
+        return [f"{VERDICT}: job {name} step {run!r} has {sorted(env_keys)}"] if env_keys else out
     verb = run[len(RUN_PREFIX) :] if run.startswith(RUN_PREFIX) else ""
     env = _map(step.get("env"))
     if verb not in VERBS:
@@ -233,6 +234,7 @@ def _job_problems(name: str, job: dict[str, Any]) -> list[str]:
     py = _python_steps(job)
     for step in py:
         out.extend(_python_step_problems(name, step))
+    py = [s for s in py if str(s.get("run", "")).strip() != FLOOR]
     if py:
         first_python = steps.index(py[0])
         if not any(str(s.get("run", "")).strip() == MKDIR for s in steps[:first_python]):

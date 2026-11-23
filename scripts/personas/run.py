@@ -26,6 +26,11 @@ VERBS = {
     "egress-probe": "egress_probe",
     "egress-self-check": "egress_self_check",
     "egress-control": "egress_control",
+    "egress-floor": "egress_floor",
+    "egress-revert-drill": "egress_revert_drill",
+    "egress-revert-drill-control": "egress_revert_drill_control",
+    "egress-fail-closed": "egress_fail_closed",
+    "egress-fail-closed-verdict": "egress_fail_closed_verdict",
     "inference-smoke": "inference_smoke",
     "key-refusal": "key_refusal",
 }

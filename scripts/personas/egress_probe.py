@@ -20,6 +20,7 @@ AGENT_PATH = "/home/agent/agent"
 SINKHOLE = "54.185.253.63"
 TIMEOUT = 5.0
 AZURE_DNS = "168.63.129.16"
+DOCKER_SOCKET = "/var/run/docker.sock"
 VENDOR_PATH = "/sys/class/dmi/id/sys_vendor"
 ROUTE_PATH = "/proc/net/route"
 EXPECTED_IFACE = "eth0"
@@ -38,6 +39,9 @@ CASES: tuple[Case, ...] = (
     ("dns_udp_azure", "dns_udp", AZURE_DNS, 53),
     ("dns_tcp_azure", "dns_tcp", AZURE_DNS, 53),
     ("dot", "tcp", "1.1.1.1", 853),
+    ("wireserver_http", "tcp", AZURE_DNS, 80),
+    ("imds", "tcp", "169.254.169.254", 80),
+    ("docker_socket", "unix", DOCKER_SOCKET, 0),
     ("ipv6", "tcp", "2606:4700:4700::1111", 443),
     ("sudo", "sudo", "sudo", 0),
     ("agent_binary", "agent_binary", AGENT_PATH, 0),
@@ -60,6 +64,16 @@ def dns_answers(reply: bytes) -> int | None:
 def _connect(host: str, port: int) -> bool:
     try:
         socket.create_connection((host, port), timeout=TIMEOUT).close()
+    except OSError:
+        return False
+    return True
+
+
+def _unix(path: str) -> bool:
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(TIMEOUT)
+            sock.connect(path)
     except OSError:
         return False
     return True
@@ -173,6 +187,7 @@ def attempt(case: Case) -> bool:
         "name": lambda: _name(target, port),
         "dns_txt_system": lambda: _txt_system(target),
         "tcp": lambda: _connect(target, port),
+        "unix": lambda: _unix(target),
         "dns_udp": lambda: _udp_dns(target, 1, False),
         "dns_tcp": lambda: _tcp_dns(target),
         "sudo": _sudo,
@@ -203,7 +218,6 @@ def emit_placement() -> None:
 def main(argv: Sequence[str]) -> int:
     expect = {case[0]: "refused" for case in CASES}
     expect["listed"] = "reached"
-    expect["dns_tcp_azure"] = "reported"
     emit_placement()
     results = run_cases(CASES, expect)
     emit("EGRESS-PROBE", results)

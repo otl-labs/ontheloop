@@ -25,6 +25,7 @@ import yaml
 
 from scripts.checks import _common, registry
 from scripts.checks.ci_guards.validate_project_region import job_outputs_aws_region_via_action
+from scripts.checks.misc._persona_verdict_floor import PROBE_PREFIX, floor_problems, is_floor_line
 
 LIST_FILE = "config/persona_verdict_egress.yaml"
 WORKFLOW_GLOB = ".github/workflows/persona-verdict*.yml"
@@ -47,7 +48,6 @@ SECRET_REF = re.compile(r"(?<![\w.])secrets\b(?!\.GITHUB_TOKEN\b)", re.I)
 CHECKOUT = re.compile(r"^actions/checkout@[0-9a-f]{40}$")
 MKDIR = 'mkdir -p "$RUNNER_TEMP/work"'
 RUN_PREFIX = 'python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" '
-PROBE_PREFIX = "python3 -I scripts/personas/run.py "
 FILTER_WITH = {"egress-policy", "allowed-endpoints", "disable-telemetry", "disable-sudo-and-containers"}
 PROBE_TRIGGER = {
     "pull_request": {
@@ -60,12 +60,40 @@ PROBE_TRIGGER = {
         ]
     }
 }
+SELF = PROBE_PREFIX + "egress-self-check"
+
+
+def _drill(verb: str) -> list[tuple[str, str]]:
+    return [
+        ("drill-floor", "sudo " + PROBE_PREFIX + verb),
+        ("drill-self-check", SELF),
+        ("drill-fail-closed", PROBE_PREFIX + "egress-fail-closed"),
+        ("drill-final-check", SELF),
+    ]
+
+
 PROBE_STEPS = {
-    "egress-probe": [("probe-egress", PROBE_PREFIX + "egress-probe")],
+    "egress-probe": [
+        ("probe-floor", "sudo " + PROBE_PREFIX + "egress-floor"),
+        ("probe-egress", PROBE_PREFIX + "egress-probe"),
+        ("probe-final-check", SELF),
+    ],
     "egress-control": [
         ("control-install", "pip install pyyaml -c requirements.txt"),
         ("control-egress", PROBE_PREFIX + "egress-control"),
     ],
+    "egress-fail-closed": _drill("egress-revert-drill"),
+    "egress-fail-closed-control": _drill("egress-revert-drill-control"),
+    "egress-fail-closed-verdict": [("fail-closed-verdict", PROBE_PREFIX + "egress-fail-closed-verdict")],
+}
+DRILL_JOBS = ("egress-fail-closed", "egress-fail-closed-control")
+VERDICT_JOB = "egress-fail-closed-verdict"
+TIMEOUTS = {
+    "egress-probe": 5,
+    "egress-control": 5,
+    "egress-fail-closed": 10,
+    "egress-fail-closed-control": 10,
+    VERDICT_JOB: 30,
 }
 
 
@@ -274,8 +302,8 @@ def _step0_problems(
         out.append(f"{where}: egress-policy must be block")
     if not _flag(with_["disable-telemetry"], "true"):
         out.append(f"{where}: disable-telemetry must be true")
-    if not _flag(with_["disable-sudo-and-containers"], "true"):
-        out.append(f"{where}: disable-sudo-and-containers must be true")
+    if not _flag(with_["disable-sudo-and-containers"], "false"):
+        out.append(f"{where}: disable-sudo-and-containers must be false")
     if any("${{" in str(v) for k, v in with_.items() if k != "allowed-endpoints"):
         out.append(f"{where}: a filter with: value other than allowed-endpoints holds an expression")
     listed, problems = _tokenised_endpoints(where, str(with_["allowed-endpoints"]), workflow, job)
@@ -323,7 +351,7 @@ def _order_problems(where: str, steps: list[Any], probe: bool) -> list[str]:
         if str(step.get("uses", "")).startswith("actions/checkout@"):
             out.extend(_checkout_problems(where, step, probe))
             seen_main = seen_main or (step.get("with") or {}).get("path") == "main"
-        elif str(step.get("run", "")).strip() != MKDIR:
+        elif str(step.get("run", "")).strip() != MKDIR and not is_floor_line(str(step.get("run", ""))):
             if not _self_check_ok(step, probe, seen_main):
                 out.append(
                     f"{where}: the first step after the filter that is not a checkout or the work-directory mkdir "
@@ -353,11 +381,39 @@ def _job_problems(rel: str, name: str, workflow: dict[str, Any], data: dict[str,
     out.extend(_step0_problems(where, steps[0], data["filter"], row, text, workflow, job))
     out.extend(_row_host_problems(where, root, data, row, steps))
     out.extend(_order_problems(where, steps, probe))
+    out.extend(floor_problems(rel, name, job))
     uses_artifact = any(
         isinstance(s, dict) and str(s.get("uses", "")).startswith(("actions/upload-artifact@", "actions/download-artifact@"))
         for s in steps
     )
     out.extend(_endpoint_problems(where, row, data["wildcard_residuals"], uses_artifact))
+    return out
+
+
+def _probe_job_problems(name: str, want: list[tuple[str, str]], job: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    keys = {"runs-on", "timeout-minutes", "permissions", "steps"}
+    keys |= {"continue-on-error"} if name in DRILL_JOBS else {"needs", "if"} if name == VERDICT_JOB else set()
+    if set(job) - keys:
+        out.append(f"{PROBE}: job {name} has keys beyond {sorted(keys)}")
+    perms = {"actions": "read", "contents": "read"} if name == VERDICT_JOB else {"contents": "read"}
+    if job.get("timeout-minutes") != TIMEOUTS[name] or job.get("permissions") != perms:
+        out.append(f"{PROBE}: job {name} must have timeout-minutes {TIMEOUTS[name]} and permissions {perms}")
+    if (job.get("continue-on-error") is True) != (name in DRILL_JOBS):
+        out.append(f"{PROBE}: continue-on-error must be true on the two drill jobs and absent elsewhere")
+    if name == VERDICT_JOB and (job.get("needs") != list(DRILL_JOBS) or str(job.get("if")).strip() != "always()"):
+        out.append(f"{PROBE}: job {name} must need both drill jobs and run if: always()")
+    steps = [s for s in job.get("steps") or [] if isinstance(s, dict)]
+    if [(s.get("id"), str(s.get("run", "")).strip()) for s in steps if s.get("run")] != want:
+        out.append(f"{PROBE}: job {name} run lines drift from the scope row")
+    if name in DRILL_JOBS and [s.get("name") for s in steps if str(s.get("id", "")).startswith("drill-")] != [
+        i for i, _ in want
+    ]:
+        out.append(f"{PROBE}: job {name} drill step names must equal their ids")
+    if name == VERDICT_JOB and [s.get("env") for s in steps if s.get("run")] != [{"GH_TOKEN": "${{ github.token }}"}]:
+        out.append(f"{PROBE}: job {name} env must be exactly GH_TOKEN: github.token")
+    if name == "egress-control" and any("harden-runner" in str(s.get("uses", "")) for s in steps):
+        out.append(f"{PROBE}: egress-control must run without the filter")
     return out
 
 
@@ -375,16 +431,7 @@ def _probe_problems(workflow: dict[str, Any]) -> list[str]:
     if set(jobs) != set(PROBE_STEPS):
         out.append(f"{PROBE}: jobs must be exactly {sorted(PROBE_STEPS)}")
     for name, want in PROBE_STEPS.items():
-        job = jobs.get(name) or {}
-        if set(job) - {"runs-on", "timeout-minutes", "permissions", "steps"}:
-            out.append(f"{PROBE}: job {name} has keys beyond runs-on, timeout-minutes, permissions and steps")
-        if job.get("timeout-minutes") != 5 or job.get("permissions") != {"contents": "read"}:
-            out.append(f"{PROBE}: job {name} must have timeout-minutes 5 and permissions {{contents: read}}")
-        runs = [(s.get("id"), str(s.get("run", "")).strip()) for s in job.get("steps") or [] if s.get("run")]
-        if runs != want:
-            out.append(f"{PROBE}: job {name} run lines drift from the scope row")
-        if name == "egress-control" and any("harden-runner" in str(s.get("uses", "")) for s in job.get("steps") or []):
-            out.append(f"{PROBE}: egress-control must run without the filter")
+        out.extend(_probe_job_problems(name, want, jobs.get(name) or {}))
     return out
 
 

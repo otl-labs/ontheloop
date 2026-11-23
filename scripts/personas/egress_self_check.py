@@ -2,7 +2,8 @@
 
 The filter step can pass while blocking nothing, so this refuses to continue unless the running agent is the read
 agent binary (checked first, so a job under another binary fails before any other step) and an unlisted name, a
-default route leaves by eth0, a resolver outside the filter, a raw-IP connect, IPv6 and sudo are all refused. Stdlib only.
+default route leaves by eth0, a resolver outside the filter, a raw-IP connect, IPv6, Azure's DNS over TCP, the wireserver,
+the metadata address, the Docker socket and sudo are all refused. Stdlib only.
 """
 
 from __future__ import annotations
@@ -11,7 +12,19 @@ from collections.abc import Sequence
 
 from scripts.personas import egress_probe
 
-SELF_CHECK_IDS = ("agent_binary", "default_iface", "unlisted_name", "dns_txt_system", "raw_ip_443", "ipv6", "sudo")
+SELF_CHECK_IDS = (
+    "agent_binary",
+    "default_iface",
+    "unlisted_name",
+    "dns_txt_system",
+    "raw_ip_443",
+    "ipv6",
+    "dns_tcp_azure",
+    "wireserver_http",
+    "imds",
+    "docker_socket",
+    "sudo",
+)
 
 
 def main(argv: Sequence[str]) -> int:
