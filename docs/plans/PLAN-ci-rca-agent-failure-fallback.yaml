@@ -24,16 +24,19 @@ scope:
       Deterministic fallback filer, no LLM; under 500 SLOC or a facade package (Decision 128). CLI `file` takes the
       agent output path, bundles dir, jobs JSON path, run id, head sha, workflow name, run URL, force_rca, a step-outcomes
       string and the out path. Per bundle (sorted *.json, the order scripts.ci_rca.dedup._load_fingerprints uses):
-      (a) when a failure_category has at least as many FILED pairs (scripts.ci_rca.filing.extract_filed_recs) as
-      bundles, its bundles are covered with no lookup; when it has fewer, no pair covers a bundle by count or order
+      (a) when a failure_category has at least as many DISTINCT FILED rec ids (scripts.ci_rca.filing.extract_filed_recs; a
+      repeated marker counts once) as bundles, its bundles are covered with no lookup; when it has fewer, no pair covers a bundle by count or order
       (the agent's marker order is unrelated to sha order) and every bundle of that category goes to (b); an
-      uncategorised pair covers none; (b) classified by scripts.ci_rca.dedup.decide with the default chain-aware finder (newest_open_in_chain),
+      uncategorised pair covers none; (b) classified by scripts.ci_rca.dedup.decide, always called with force_rca=False (decide(force_rca=True) returns no
+      verdicts; the fallback applies the force_rca pair-id rule itself), with the default chain-aware finder (newest_open_in_chain),
       the real closed-head resolver (dedup._default_closed_head_resolver) and a NO-OP bumper: a matched open rec covers
       it (written to the out file for marking) - under force_rca only when its id is one of the run's FILED pairs, since
-      a pre-existing open rec does not show this run diagnosed it - a closed-head 'drop' covers it (stale rerun; not marked); the fallback
+      a pre-existing open rec does not show this run diagnosed it - a closed-head 'drop' covers it (stale rerun; not marked), under force_rca too, deliberately: a closed head means a
+      human already acted on that fingerprint, though the portal backstop is skipped under force_rca; the fallback
       never bumps (fp_dedup already bumped pre-existing matches this run, Decision 142 cl.3; only a lookup/backstop race
       bumps once, through the portal backstop); (c) otherwise it is uncovered and filed. A reader error in (b) (resolve_chain
-      does not fail open) prints ::error::, writes what it has, prints marked accordingly and exits 1, filing nothing. Happy path: every bundle has a FILED pair, so no reader call, no write, marked=false, exit 0.
+      does not fail open) prints ::error::, writes what it has, prints marked accordingly and exits 1, filing nothing. Happy path: every bundle has a FILED pair, so no reader call, no write, marked=false, exit 0. An unparseable bundle
+      JSON (fingerprint '' in _load_fingerprints, no sha256) prints ::error:: and is filed as bundle-absent.
       Filing an uncovered bundle: file_rec_with_outcome with source ci_rca, tags [ci-rca-fallback], risk medium, effort
       M, file = the failing workflow's repo-relative path (scripts.ci_rca.taxonomy.enumerate_workflow_name_paths, the single
       name-to-path map, which returns absolute paths; else .github/workflows/ci-rca.yml), and a CiRcaContext from fixed templates over bundle and run facts: schema_version
@@ -49,7 +52,9 @@ scope:
       so no file:line terminus; mandatory human review supplies it); gap_explanation (>= 120 chars: gate not determined
       because no diagnosis exists; names the bundle and run; its file:line citation is where the record was made, the
       line of `id: fallback` in .github/workflows/ci-rca.yml found at run time, else scripts/ci_rca/fallback.py:1); corrective_action (diagnose from the run and bundle, then
-      record the cause or fix forward); bundle-derived text (error-signature excerpt, check name) is clamped to the
+      record the cause or fix forward; when the acceptance is the gh run list placeholder, replace it through update_rec
+      with the fix's own discriminating test before writing the Resolves trailer, since at merge the newest main run is
+      the in-progress or old red one - Decision 201, never close by hand); bundle-derived text (error-signature excerpt, check name) is clamped to the
       schema maxima (proximate_cause 600, why_chain entry 400, gap_explanation 600, title 80) and kept out of why_chain
       and gap_explanation, which carry only fixed text, ids and the file:line; no template uses cross-check 4's author-discipline words (author, did not run,
       skipped, forgot, missed, ignored); preventive_action (find why the agent filed nothing - subtype and step outcomes
@@ -75,13 +80,16 @@ scope:
       !cancelled() && hashFiles('scripts/ci_rca/fallback.py') != '' && rejected_deployment skip, designed_refusal skip,
       dedup already_filed and fp_dedup deduped are each not 'true' && (event is not workflow_dispatch || persona_gate
       outcome is success). env: CI_RCA_BUNDLE_EMIT_DIR /tmp/ci-rca-bundles (so the portal cross-check finds each bundle,
-      stamps fingerprint and runs the write-time backstop and closed-head chain), CI_RCA_FORCE_RCA from the input, GH_TOKEN,
+      stamps fingerprint and runs the write-time backstop and closed-head chain), CI_RCA_FORCE_RCA from the input, S3_LOG_BUCKET
+      agent-platform-data-lake (as the evidence step sets it, so _resolve_bucket() never falls through to config; no GH_TOKEN, the step makes no gh call),
       and the run facts bound from event values (never interpolated into run:). Body: one delegate line,
       `bin/venv-python -m scripts.ci_rca.fallback file ... >> "$GITHUB_OUTPUT"` (no pipe, so its exit status stands).
       "Mark failure as RCA'd": if becomes !cancelled() && (rca_agent outcome success || fallback marked == 'true'); its
       parse line becomes `{ bin/venv-python -m scripts.ci_rca.fallback pairs ... || bin/venv-python -m
       scripts.ci_rca.filing --all /tmp/ci-rca-output.json; } | while ...` on one line (a checkout predating fallback.py
-      keeps today's behaviour; body line count unchanged). Nothing else changes; the agent step keeps its exit 1.
+      keeps today's behaviour; body line count unchanged). Decision 162 cl.3 touch-it-fix-it for this in-place mark_rca
+      edit is deferred to rec-5500 (extended 2026-11-23 through update_rec, read back open, to extract mark_rca as well as
+      rca_agent). Nothing else changes; the agent step keeps its exit 1.
   - file: config/composite_action_body_baseline.yaml
     action: Modify
     purpose: r3_workflows gains ".github/workflows/ci-rca.yml::rca::fallback" at its measured effective line count (no marker); mark_rca stays at 14.
@@ -107,7 +115,9 @@ scope:
   - file: scripts/ci_rca/red_overlap.py
     action: Modify
     purpose: >-
-      _red_files: when the red's context_v2_json carries agent_failure (set only by the fallback), the red's own file
+      _red_files: when the red's context_v2_json carries agent_failure (set only by the fallback by instruction; an
+      agent-set value only widens blocking, so it fails closed, and it is deliberately not added to _PORTAL_OWNED_KEYS,
+      which would strip the fallback's own value), the red's own file
       field does not count (the fallback's file names the workflow, not a diagnosis); every other source still does
       (its affected_nodeids' files today, a named culprit's diff once Decision 254 cl.6 is built), so a fallback red
       with no other source is rule 3 undeterminable and blocks (Decision 226 cl.3). Every agent-filed red, including
@@ -124,7 +134,8 @@ scope:
     action: Modify
     purpose: >-
       halt.rules rule 3 text adds "(the file field of a red whose context carries agent_failure does not count)",
-      plus one terse amendment_log row naming this plan and rec-4678.
+      plus one terse amendment_log row naming this plan and rec-4678, change_class accepted_values_narrow (fewer reds clear
+      rule 3), semantic_break true (rule 3 changes meaning for one red class).
   - file: tests/test_ci_rca_fallback.py
     action: Create
     purpose: >-
@@ -141,7 +152,7 @@ followon_recs: []
 infrastructure_dependencies: []
 acceptance_criteria:
   - An agent run that ends error_max_turns with no FILED marker, one bundle and no open rec for its fingerprint files exactly one source=ci_rca rec with agent_failure error_max_turns, rca_confidence undetermined, earliest_viable_gate undetermined, that bundle's evidence_bundle_ref, the ci-rca-fallback tag, no warn_mode_reject stamp, and the run id, head sha, failed check, bundle sha and terminal subtype in its context.
-  - The parser-miss case (run 44945298668's shape - the agent filed, the marker was not parsed) files nothing and the fallback bumps nothing; the bundle is covered by the open rec found by fingerprint, the out file names it and the mark step posts its status context.
+  - The parser-miss case (run 44945298668's shape - the agent filed, the marker was not parsed) files nothing and the fallback bumps nothing; the bundle is covered by the open rec found by fingerprint, the out file names it and the mark step's if-condition and parse line (checked structurally in tests/test_ci_rca_fallback.py) select it for the status context.
   - Partial dedup (one bundle matched an open rec in fp_dedup, the agent filed the other) files nothing, the fallback bumps nothing, and exits 0; a closed-head stale-rerun bundle is covered and not marked.
   - The happy path (every bundle has a FILED pair) makes no reader call and no write, prints marked=false, exits 0.
   - A run whose earlier step failed (no agent output, no bundle) files one bundle-absent undetermined rec and exits 1.
@@ -279,14 +290,15 @@ gate_rounds:
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 3, nits: 10}  # B1 red_overlap keyed on new agent_failure field (6 agent-filed undetermined recs would block); B2 citation, unknown gate, vacuous/not_a_gate fixtures; B3 count-bounded markers; N1-N9 applied, N10 skipped (mark body unchanged)
   - {gate: decision-scout, round: 4, scout_input_fingerprint: "v1:78efd07cde44230c9b8a320fd6acf5a59dc054798adc8bc994545a9eddd1c341", verdict: FLAGS_FOUND}
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 11}  # B1 short categories look every bundle up (marker order is not sha order), force_rca covers by pair id; N1-N11 applied
+  - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 9}  # N1 distinct ids; N2 force_rca=False + drop asymmetry; N3 placeholder acceptance; N4 bad bundle; N5 S3_LOG_BUCKET, no GH_TOKEN; N6 rec-5500 extended; N7-N9 applied
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
-  - rec-5492 read closed (its build merged)
+  - rec-5492 read closed (its build merged at fd930248); if still open after ci.yml's trailer-closure job ran on fd930248, follow git-ops resolves_trailer's fallback (bin/venv-python -m scripts.session.merge_step readback), do not stall
   - Only the plan-cited decision sections read
   - All files in scope located and readable
 execution_steps:
-  - Run bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-ci-rca-agent-failure-fallback.yaml; on blocked stop and report. Read rec-5492 closed.
+  - Run bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-ci-rca-agent-failure-fallback.yaml; on blocked stop and report. Read rec-5492 closed (else the checklist's resolves_trailer route).
   - Implement scripts/ci_rca/fallback.py, the CiRcaContext field, the ci-rca.yml step and mark-step edits, the baseline row, the red_overlap rule and both contract edits per their scope rows.
   - Write tests/test_ci_rca_fallback.py and the red_overlap legs per test_obligations.
   - Commit, then run VP 1-2; loop until pass; on an unrecoverable failure stop and report (Decision 55).
