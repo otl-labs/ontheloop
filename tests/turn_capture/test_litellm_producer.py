@@ -19,6 +19,7 @@ from tests.fixtures.turn_capture_ducklake import load_specs
 from tests.fixtures.turn_capture_litellm_cases import (
     FB,
     HOST_RUN,
+    HOST_RUN_LOCAL,
     LITELLM_BUILDERS,
     T0,
     call,
@@ -314,3 +315,12 @@ def test_run_persona_never_imports_the_producer():
         path = ROOT / rel
         for source in [path] if path.is_file() else sorted(path.glob("*.py")):
             assert "litellm_producer" not in source.read_text(encoding="utf-8"), source
+
+
+def test_local_root_session_and_run_rows() -> None:
+    events = json.loads(load_litellm_case("local_container_run.json")[0]["events.json"])
+    mapped = _map(events, HOST_RUN_LOCAL.encode())
+    tables = dict(mapped.batches)
+    assert {r["execution_attempt"] for r in tables["telemetry_sessions"]} == {1}
+    assert {(r["trigger"], r.get("workflow_run_id")) for r in tables["telemetry_agents"]} == {("manual", None)}
+    assert {r["parser_version"] for rows in tables.values() for r in rows} == {2}
