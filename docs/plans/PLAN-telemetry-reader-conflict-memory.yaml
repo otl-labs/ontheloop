@@ -36,7 +36,8 @@ scope:
       row-value compare. A key with one row can never hold two distinct row values, so the result set is identical (Decision
       207: reported, never resolved; the NULL-safe row-value compare is unchanged). The IN filter drops a key with a NULL
       component, which the old GROUP BY would group; equivalence rests on the writer gate refusing NULL grain columns
-      (src/telemetry/append.py:52 _STRUCTURAL_NOT_NULL, checked at src/telemetry/gate.py:102-105; field_semantics marks producer, event_id and parser_version nullable False), and the
+      (the provisioned DDL declares them NOT NULL, src/common/ducklake_telemetry_provision.py:75-77; the writer also checks
+      src/telemetry/append.py:52 _STRUCTURAL_NOT_NULL at src/telemetry/gate.py:102-105; field_semantics marks producer, event_id and parser_version nullable False), and the
       docstring states that premise and why the rewrite exists. Every verb built by
       compose(), including the content reader's SESSION_TRANSCRIPT_SQL, shares the text, so their read_version stamps move once.
     new_imports: []
@@ -44,16 +45,17 @@ scope:
     action: Create
     purpose: >-
       Module-level duckdb importorskip (full tier, like test_ducklake_event_read_dedupe.py). A fixture writes the four journals
-      as Parquet files under tmp_path with COPY (SELECT ... FROM range(n)) TO '<file>.parquet' (columns from tests.fixtures.telemetry_read_db.table_columns;
+      as Parquet files under tmp_path with COPY (SELECT ... FROM range(n)) TO '<file>.parquet' (ROW_GROUP_SIZE 20000) (columns from tests.fixtures.telemetry_read_db.table_columns;
       300,000 observations with an 800-byte metadata value, 150,000 transcripts, 3,000 root sessions over 7 days, 1,500 agents),
-      plants three conflicts (two observation grain keys and one transcript grain key whose second row differs in one compared
-      column), and opens a fresh DuckDB with the reader's own settings (threads=1, temp_directory under tmp_path, memory_limit
+      plants three conflicts (two observation grain keys whose second row differs in metadata, and one transcript grain key whose second row
+      differs in content_sha256, a transcript compared column; transcripts have no metadata column), and opens a fresh DuckDB with the reader's own settings (threads=1, temp_directory under tmp_path, memory_limit
       ev.TELEMETRY_MEMORY_LIMIT, max_temp_directory_size ev.TELEMETRY_MAX_TEMP_SIZE) and views named as the reader's tables
       under rt.TELEMETRY_CATALOG_ALIAS plus a one-row real-purpose projects table, so render_sql's output runs unchanged with no
       ducklake extension. Node test_root_sessions_week_fits_the_reader_memory runs ev.execute(con, verb="telemetry_root_sessions",
       params 7-day window) and asserts 3,000 rows, and that exactly the planted sessions carry derivation_conflicted with the
       planted grain keys. The fixture-writing connection also sets memory_limit ev.TELEMETRY_MEMORY_LIMIT so the
-      test's footprint stays bounded in the full tier (measured peak RSS about 220 MB green, 330 MB red per process; rec-5497's
+      test's footprint stays bounded in the full tier (the bounded row group keeps the 300,000-row write inside that limit: critique round 6 measured observations written in
+      about 1 s, current SQL red in 0.4 s, duplicate-first green in 0.6 s; rec-5497's
       inferred cause names a DuckDB abort in a fixture, so the build reports this node's full-tier duration and worker beside
       the golden-gates node). Red before (OutOfMemoryException, measured at plan time on a 300,000-row corpus in about 0.3 s), green
       after (about 1 s).
@@ -152,8 +154,9 @@ verification_plan:
     command: >-
       OTL_OPS_VERBS_TRANSPORT=execute_api bin/venv-python -c "import datetime as d; from scripts.telemetry_capture.read_route import
       make_routed_reader; r=make_routed_reader(profile='agent_platform'); t=d.datetime.now(d.UTC).date(); f=(t-d.timedelta(days=6)).isoformat();
-      [print('roots', len(r.named('telemetry_root_sessions', day_from=f, day_to=t.isoformat()))) for _ in range(3)]"
-    expected: Three roots lines with a row count each, exit 0.
+      import time; g=lambda s: (len(r.named('telemetry_root_sessions', day_from=f, day_to=t.isoformat())), 'elapsed_s',
+      round(time.monotonic() - s, 1)); [print('roots', *g(time.monotonic())) for _ in range(3)]"
+    expected: Three roots lines, each with a row count and its elapsed seconds (the live cost of the extra per-table scan), exit 0.
     fix_if: A ReaderInvokeError on a roots read means the reader still runs out of memory; read its log group for OutOfMemoryException and stop with an RCA.
     hermetic: false
   - step: 7
@@ -270,6 +273,7 @@ gate_rounds:
   - {gate: plan-critique, round: 4, verdict: REVISE, blocking: 3, nits: 6}
   - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:164deccb9e592f4621c57abd79e42a22a4dbcc16c70275c6efab47a0996bdef1'}
   - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 5}
+  - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 1, nits: 4}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
