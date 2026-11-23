@@ -37,21 +37,26 @@ scope:
       budget monitor.Budget(10**6, world.clock), and assert on those two reports both the equality of every
       non-timing field (the existing skip set) and the slow-call properties (calls_over_10s == reader_calls - 2 for
       both; call_p95_s == 11 for one worker, >= 11 for two), instead of four separate runs (probed 2026-11-23: the
-      equality holds under these settings). (2) A module-scoped fixture computes the plain golden world's
-      reader_calls once (one _locked_world().run()); _refuse_last_litellm and
+      equality holds under these settings). (2) A module-scoped fixture first calls
+      pytest.importorskip("duckdb", reason="env: duckdb is not installed in the fast tier") (the file has no
+      module-level duckdb import and is collected in the fast tier, so without it the fixture would turn skips into
+      setup errors), then computes the plain golden world's reader_calls once (one _locked_world().run(); that world
+      has no litellm tree, so it needs no LITELLM_FLOOR patch); _refuse_last_litellm and
       test_oversize_day_counts_sum_and_backfill_reads_rest read it instead of building and running their own baseline
       world. (3) The full-read check that the litellm tree is read when the budget is unbounded (litellm_quiet == 1
-      and litellm_read == 1) runs once in the same module fixture instead of once per floor test. Each floor test
-      still builds its own litellm world and makes its own refused run under its own monkeypatched floor.
+      and litellm_read == 1) stays in a test body, made once in test_floor_met_excuses_litellm_without_coverage_alarm
+      on the same litellm world that test then reruns under the refused budget (a second run on one world gives the
+      same reader_calls, probed 2026-11-23); test_floor_missed_raises_coverage_incomplete builds its own litellm world
+      and makes only its refused run. Both floors stay monkeypatched per test.
 bundled_recommendations: [rec-5497]
 followon_recs: []
 infrastructure_dependencies: []
 acceptance_criteria:
   - test_tree_rows_must_match_the_sent_set_with_one_root replays one corpus tree per mismatch case and makes no full clean replay; both mismatch cases still exit 1 with GOLDEN_MISMATCH verb=session_tree_rows.
   - test_deploy_records_follow_the_routed_reader replays one corpus tree per catalog and keeps every existing assertion.
-  - test_monitor_capacity.py builds the plain golden world and runs it unbounded at most once per module for the baseline, and test_two_workers_report_equals_one_worker makes two monitor runs instead of four, with every existing assertion kept.
+  - test_monitor_capacity.py builds the plain golden world and runs it unbounded at most once per module for the baseline (after a duckdb importorskip, so the fast tier still skips rather than errors), and test_two_workers_report_equals_one_worker makes two monitor runs instead of four, with every existing assertion kept.
   - No pytest timeout value changes anywhere (scripts/checks/_scaffolding.py, pyproject.toml, any timeout marker).
-  - Both files pass in full; on the build container no edited golden node takes over 3 s and no monitor_capacity node over 25 s (main at b5326b3d, probed 2026-11-23 on the planning container, -n0 durations - tree rows 20.3 s, deploy records 14.2 s, two workers 35.8 s, floor met 26.7 s, floor missed 26.7 s, oversize 22.7 s).
+  - Both files pass in full. On the build container (-n0, measured against its own main baseline from the first execution step) the two edited golden nodes each take under 3 s; no monitor_capacity node takes over 30 s including module fixture setup charged to it (pytest-randomly decides which node that is); and the monitor file's total wall time is at most two thirds of its main baseline. Planning baseline on b5326b3d (planning container, 2026-11-23) - tree rows 20.3 s, deploy records 14.2 s, two workers 35.8 s, floor met 26.7 s, floor missed 26.7 s, oversize 22.7 s; the critic's container measured the monitor file at 115.5 s total.
   - rec-5497's acceptance is updated to the command in verification step 1 before the merge, and the merge closes it.
 verification_plan:
   - step: 1
@@ -70,8 +75,9 @@ verification_plan:
     hermetic: false
     graduation: waive
     graduation_waiver_reason: >-
-      Both files need duckdb (module-level importorskip in the golden file), which venv-less pr-validate lacks, and
-      every node is already in the full tier; the graduated entries telemetry-golden-replay-over-fakes,
+      Every node needs duckdb (a module-level importorskip in the golden file, per-test importorskips plus the new
+      fixture's in test_monitor_capacity.py), which venv-less pr-validate lacks, and every node is already in the full
+      tier; the graduated entries telemetry-golden-replay-over-fakes,
       golden-replay-asserts-catalog-before-registration and monitor-read-budget keep pinning their nodes.
   - step: 2
     phase: pre-deploy
@@ -92,13 +98,15 @@ verification_plan:
       tests/telemetry_verify/test_monitor_capacity.py -q -n0 --durations=12
     expected: >-
       exit 0; test_tree_rows_must_match_the_sent_set_with_one_root and test_deploy_records_follow_the_routed_reader
-      each under 3 s (setup plus call); every test_monitor_capacity node under 25 s including any module fixture setup
-      charged to it. Record the durations table in the PR body beside the planning baseline.
+      each under 3 s (setup plus call); every test_monitor_capacity node under 30 s including any module fixture setup
+      charged to it; the monitor file's total at most two thirds of the main baseline taken in the first execution
+      step. Record both durations tables in the PR body.
     fix_if: >-
       a golden node still replays the whole corpus (check the _with_passes narrowing), or a monitor node still builds
       its own baseline world
     hermetic: false
-    graduation: not-applicable
+    graduation: waive
+    graduation_waiver_reason: A runner-dependent wall-clock bound would be a flaky standing guard; the property it checks (fewer replays and world builds) is a one-time cost measurement for this change.
   - step: 4
     phase: pre-deploy
     action: Confirm no timeout value moved.
@@ -155,7 +163,7 @@ constraints:
   - No rescue agents or workaround loops (Decision 55).
 context:
   - "Decision-scout verdict FLAGS_FOUND (round 1). CITE: Decisions 181, 201, 226, 244. Decisions triaged: 228 of 228. Roadmap items intersected: 1; CONFLICT: 0; RELATED: 1 (T4.23, prefix match only). Serves: NS.6 3/5. NOTE flag Decision 235 cl.1, handled in the next line."
-  - "Decision 235 cl.1 (human-confirmed plan naming each in-class change): the operator's approval of this plan is that confirmation for exactly these candidates - (a) the tree test's full clean replay is removed (refactor: test_replay_registers_one_project_per_tree_and_pass makes the same no-mismatch assertion over the whole corpus); (b) the tree and deploy-records tests replay one tree instead of all (planned-change, acceptance_criteria 1-2); (c) two-worker equality is checked under cost 11 and an unbounded budget instead of also under the default cost 0 and budget 2000, and the baseline and full litellm runs are shared per module (planned-change, acceptance_criteria 3). None is made to obtain green: the tests pass today and fail only on runner speed. Decision 226: Track A tests-only repair."
+  - "Decision 235 cl.1 (human-confirmed plan naming each in-class change): the operator's approval of this plan is that confirmation for exactly these candidates - (a) the tree test's full clean replay is removed (refactor: test_replay_registers_one_project_per_tree_and_pass makes the same no-mismatch assertion over the whole corpus); (b) the tree and deploy-records tests replay one tree instead of all (planned-change, acceptance_criteria 1-2); (c) two-worker equality is checked under cost 11 and an unbounded budget instead of also under the default cost 0 and budget 2000, the baseline run is shared per module and the full litellm read is checked once, in the floor-met test (planned-change, acceptance_criteria 3). None is made to obtain green: the tests pass today and fail only on runner speed. Decision 226: Track A tests-only repair."
   - "Cause (operator handover 2026-11-23, verified by Agents in GitHub from the full run log of Main Canary 45057590091): pytest-timeout 120 s, thread method, killed worker gw1 exactly 120.0 s after the tree test started; no code regression (same 20 s locally at 10e7bba3). The red runner was about 1.85x slower suite-wide; the test makes three full golden replays."
   - "Planning probes 2026-11-23 on b5326b3d: one full golden replay about 6.7 s; the tree test narrowed to corpus:tool_result_error gives 1 mismatch per case in 0.2-0.4 s; one golden world build 2.8 s and one monitor run 5.2 s; a second monitor run on the same world gives the same reader_calls (234)."
   - "rec-5497's filed acceptance names tests/checks/test_full_tier_worker_crash_capture.py, which does not exist (filed while the cause was unobserved). The build updates the acceptance to step 1's command via ops_data_portal --update-rec before merging with Resolves: rec-5497, so the closure job can run it (Decision 201). It is not discriminating on a fast runner; step 3's measured cost is the evidence."
@@ -168,6 +176,7 @@ context:
   - "Owning planning thread: 'Fix the slow golden gates test timing out' (Feedback Loop). Plan defects go to the coordinator, which forwards them here."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:32ce01b63405b2ceb278b32c1311e005895927ed27c9538afd26879ace0fe1c2"}  # NOTE dec:235 cl.1 -> candidates named in context for the operator sign-off
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 2}  # F1 fixture importorskip duckdb + step 1 waiver fixed; F2 AC5 and step 3 bound reworded (30 s per node incl. fixture, file total <= 2/3 of main baseline); N1 step 3 waive; N2 full-read check stays in floor_met body on the same world, fixture needs no floor patch
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
