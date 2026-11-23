@@ -40,6 +40,8 @@ bin/venv-python scripts/roadmap/find_plan.py
 If either command prints `NOT_FOUND`, list `docs/plans/PLAN-*.yaml` and ask the human which plan to implement.
 
 Read the entire plan file. Extract Intent, Plan Type, Verification Tier, Execution Steps, Verification Plan, and Constraints.
+
+Build notes: each `findings` entry with `disposition: build-note` on any `gate: plan-critique` row of `gate_rounds` is a build instruction (its `subject`, at its `anchor`). Apply it inside the plan's scope, approved text and VP commands; one that cannot be applied there is skipped and named in the handoff, and becomes a plan defect for the planner (amendment) only when the build cannot finish without it.
 **If no plan file exists, STOP.**
 Also read `docs/PROJECT_CONTEXT.md`. Read only the decisions cited in the plan context (locate each via `rg "^## Decision N:" docs/DECISIONS.md`); do not load the full file.
 
