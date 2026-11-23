@@ -172,6 +172,7 @@ def _single_call() -> dict[str, str]:
 def _local_container_run() -> dict[str, str]:
     message = {"role": "assistant", "content": fakes.VALID, "reasoning_content": "weighing the notes"}
     events, _ = _run([result(rec(), (call(),), message)])
+    events["header"]["rendered_prompt_sha256"] = "0" * 63 + "1"  # low entropy: detect-secrets needs no .secrets.baseline entry
     return _bodies(events, HOST_RUN_LOCAL)
 
 
