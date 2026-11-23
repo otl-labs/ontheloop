@@ -231,6 +231,26 @@ RED = [
 
 RED += [
     (
+        "floor-missing",
+        "run.py steps are not exactly",
+        lambda d: d["jobs"]["smoke"]["steps"].remove(_named(d["jobs"]["smoke"], "Lay the egress floor")),
+    ),
+    (
+        "final-check-missing",
+        "run.py steps are not exactly",
+        lambda d: d["jobs"]["refusal"]["steps"].remove(_named(d["jobs"]["refusal"], "Check the egress filter again")),
+    ),
+    (
+        "final-check-without-always",
+        "final self-check must carry",
+        lambda d: _named(d["jobs"]["smoke"], "Check the egress filter again").pop("if"),
+    ),
+    (
+        "floor-with-env",
+        "floor or first self-check step has keys",
+        lambda d: _named(d["jobs"]["smoke"], "Lay the egress floor").update({"env": {"X": "1"}}),
+    ),
+    (
         "account-id-not-the-secret",
         "AWS_ACCOUNT_ID is not exactly",
         lambda d: _named(d["jobs"]["smoke"], "Smoke the primary role")["env"].update({"AWS_ACCOUNT_ID": "x"}),

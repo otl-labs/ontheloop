@@ -1,9 +1,10 @@
 """Verb egress-control: the unfiltered control job (PLAN-persona-verdict-shell-deny).
 
-Every refusal the filtered probe shows must be the filter's, so each probe case except ipv6, dns_tcp_azure, default_iface and
-agent_binary is expected reached here (ipv6 and dns_tcp_azure are reported, not asserted; agent_binary is skipped: no
-agent runs here). It then fetches the vendor's host list, normalises it as config/persona_verdict_egress.yaml's
-filter_supplied is, and fails if the vendor's list holds a host the file's snapshot lacks.
+Every refusal the filtered probe shows must be the filter's or the floor's, so each probe case except ipv6, dns_tcp_azure,
+wireserver_http, default_iface and agent_binary is expected reached here (imds and docker_socket included; ipv6, dns_tcp_azure
+and wireserver_http are reported, not asserted, because Azure's guest agent may drop non-root traffic to them itself;
+agent_binary is skipped: no agent runs here). It then fetches the vendor's host list, normalises it as
+config/persona_verdict_egress.yaml's filter_supplied is, and fails if the vendor's list holds a host the file's snapshot lacks.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "config" / "persona_verdict_egress.yaml"
 VENDOR_LIST = "https://agent.api.stepsecurity.io/v1/github/meta"
 STORE_NAME = re.compile(r"^productionresultssa\d+(\.blob\.core\.windows\.net)$")
-REPORTED = ("ipv6", "dns_tcp_azure", "default_iface")
+REPORTED = ("ipv6", "dns_tcp_azure", "wireserver_http", "default_iface")
 SKIPPED = ("agent_binary",)
 
 

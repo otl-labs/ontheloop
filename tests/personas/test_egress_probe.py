@@ -107,6 +107,35 @@ def test_tcp_cases_are_reached_or_refused(monkeypatch: pytest.MonkeyPatch) -> No
     assert P.attempt(_case("raw_ip_443")) is False and P.attempt(_case("ipv6")) is False
 
 
+def test_the_azure_and_metadata_cases_are_tcp_to_port_80_and_the_socket_case_is_a_unix_connect() -> None:
+    assert _case("wireserver_http")[1:] == ("tcp", "168.63.129.16", 80)
+    assert _case("imds")[1:] == ("tcp", "169.254.169.254", 80)
+    assert _case("docker_socket")[1:] == ("unix", "/var/run/docker.sock", 0)
+
+
+def test_the_docker_socket_is_reached_only_when_the_connect_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Sock:
+        fail = False
+
+        def __init__(self, *a: object) -> None: ...
+
+        def __enter__(self) -> "Sock":
+            return self
+
+        def __exit__(self, *a: object) -> None: ...
+
+        def settimeout(self, t: float) -> None: ...
+
+        def connect(self, path: str) -> None:
+            if Sock.fail:
+                raise OSError("refused")
+
+    monkeypatch.setattr(P.socket, "socket", Sock)
+    assert P.attempt(_case("docker_socket")) is True
+    Sock.fail = True
+    assert P.attempt(_case("docker_socket")) is False
+
+
 def test_listed_is_a_tls_handshake_with_sni(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[str] = []
 
@@ -249,14 +278,28 @@ def _patch_attempts(monkeypatch: pytest.MonkeyPatch, reached: set[str]) -> None:
 def test_probe_main_passes_when_only_listed_is_reached(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    _patch_attempts(monkeypatch, {"listed", "dns_tcp_azure"})
+    _patch_attempts(monkeypatch, {"listed"})
     assert P.main([]) == 0
     out = capsys.readouterr().out
     assert "EGRESS-PROBE case=listed expect=reached got=reached" in out
-    assert "EGRESS-PROBE case=dns_tcp_azure expect=reported got=reached" in out and out.rstrip().endswith("EGRESS-PROBE PASS")
+    assert "EGRESS-PROBE case=dns_tcp_azure expect=refused got=refused" in out and out.rstrip().endswith("EGRESS-PROBE PASS")
 
 
-@pytest.mark.parametrize("leak", ["dns_udp_azure", "unlisted_name", "dns_txt_system", "ipv6", "agent_binary", "sudo"])
+@pytest.mark.parametrize(
+    "leak",
+    [
+        "dns_udp_azure",
+        "dns_tcp_azure",
+        "wireserver_http",
+        "imds",
+        "docker_socket",
+        "unlisted_name",
+        "dns_txt_system",
+        "ipv6",
+        "agent_binary",
+        "sudo",
+    ],
+)
 def test_probe_main_fails_when_a_refused_case_is_reached(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], leak: str
 ) -> None:
@@ -350,6 +393,23 @@ def test_control_passes_with_every_asserted_case_reached_and_a_matching_list(
     out = capsys.readouterr().out
     assert "case=agent_binary" not in out and "EGRESS-CONTROL case=ipv6 expect=reported got=refused" in out
     assert "EGRESS-CONTROL VENDOR-LIST ok" in out and out.rstrip().endswith("EGRESS-CONTROL PASS")
+
+
+@pytest.mark.parametrize("case_id", ["imds", "docker_socket"])
+def test_control_expects_the_floors_refusals_reached(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path, case_id: str
+) -> None:
+    _control(monkeypatch, _all_but("agent_binary", case_id), ["ghcr.io"], tmp_path)
+    assert egress_control.main([]) == 1
+    assert f"EGRESS-CONTROL FAIL {case_id}" in capsys.readouterr().out
+
+
+def test_control_only_reports_the_wireserver(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    _control(monkeypatch, _all_but("agent_binary", "wireserver_http"), ["ghcr.io"], tmp_path)
+    assert egress_control.main([]) == 0
+    assert "EGRESS-CONTROL case=wireserver_http expect=reported got=refused" in capsys.readouterr().out
 
 
 def test_control_fails_when_a_case_is_refused_without_the_filter(
