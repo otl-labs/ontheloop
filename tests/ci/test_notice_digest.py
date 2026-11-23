@@ -208,6 +208,84 @@ def test_gh_failures_are_loud(monkeypatch: pytest.MonkeyPatch, repo: Path, capsy
     assert "ERROR: gh issue list failed: boom" in capsys.readouterr().err
 
 
+@pytest.fixture(autouse=True)
+def sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    waited: list[float] = []
+    monkeypatch.setattr(nd, "_sleep", waited.append, raising=False)
+    return waited
+
+
+def _fail(stderr: str) -> SimpleNamespace:
+    return SimpleNamespace(returncode=1, stdout="", stderr=stderr)
+
+
+_LIST = json.dumps([{"number": 4}])
+_499 = "HTTP 499 (https://api.github.com/graphql)"
+
+
+def _kinds(calls: list[list[str]]) -> list[tuple[str, str]]:
+    return [tuple(c[1:3]) for c in calls[1:]]  # type: ignore[misc]
+
+
+def test_post_retries_transient_gh_failure(monkeypatch: pytest.MonkeyPatch, sleeps: list[float]) -> None:
+    calls = _gh_recorder(monkeypatch, [_ok(_LIST), _fail(_499), _ok("[[]]"), _ok()])
+    nd.post(["row one"])
+    assert _kinds(calls) == [("issue", "list"), ("issue", "comment"), ("api", "--paginate"), ("issue", "comment")]
+    assert sleeps == [2]
+    assert set(calls[0]) == {"row one"} and _kinds(calls).count(("issue", "comment")) == 2
+
+
+def test_a_retried_comment_that_already_landed_is_not_posted_twice(monkeypatch: pytest.MonkeyPatch) -> None:
+    landed = json.dumps([[{"body": "other"}, {"body": "row one\r\n"}]])
+    calls = _gh_recorder(monkeypatch, [_ok(_LIST), _fail(_499), _ok(landed)])
+    nd.post(["row one"])
+    assert _kinds(calls).count(("issue", "comment")) == 1
+    for guard in (
+        _fail("boom"),
+        _ok(""),
+        _ok("not json"),
+        _ok(json.dumps([[{"body": None}, {"nobody": 1}, "x"]])),
+        _ok(json.dumps([{"body": "row one"}])),
+        _ok(json.dumps({"body": "row one"})),
+    ):
+        calls = _gh_recorder(monkeypatch, [_ok(_LIST), _fail(_499), guard, _ok()])
+        nd.post(["row one"])
+        assert _kinds(calls).count(("issue", "comment")) == 2
+
+
+def test_retry_is_bounded_and_other_failures_are_not_retried(monkeypatch: pytest.MonkeyPatch, sleeps: list[float]) -> None:
+    four = [_fail(_499), _ok("[[]]")] * 4
+    calls = _gh_recorder(monkeypatch, [_ok(_LIST), *four])
+    with pytest.raises(RuntimeError, match="gh issue comment failed"):
+        nd.post(["r"])
+    assert _kinds(calls).count(("issue", "comment")) == 4 and _kinds(calls).count(("api", "--paginate")) == 4
+    assert sleeps == [2, 5, 10]
+    sleeps.clear()
+    landed = json.dumps([[{"body": "r"}]])
+    calls = _gh_recorder(monkeypatch, [_ok(_LIST), *([_fail(_499), _ok("[[]]")] * 3), _fail(_499), _ok(landed)])
+    nd.post(["r"])
+    assert _kinds(calls).count(("issue", "comment")) == 4 and sleeps == [2, 5, 10]
+    sleeps.clear()
+    calls = _gh_recorder(monkeypatch, [_ok(_LIST), _fail("denied")])
+    with pytest.raises(RuntimeError, match="gh issue comment failed: denied"):
+        nd.post(["r"])
+    assert _kinds(calls) == [("issue", "list"), ("issue", "comment")] and sleeps == []
+    calls = _gh_recorder(monkeypatch, [_fail("HTTP 503 oops"), _ok(_LIST), _ok()])
+    nd.post(["r"])
+    assert _kinds(calls)[:2] == [("issue", "list"), ("issue", "list")] and sleeps == [2]
+    sleeps.clear()
+    calls = _gh_recorder(monkeypatch, [_ok("[]"), _fail("HTTP 502 bad"), _ok(), _ok("https://x/issues/3\n"), _ok()])
+    nd.post(["r"])
+    assert _kinds(calls)[:3] == [("issue", "list"), ("label", "create"), ("label", "create")] and sleeps == [2]
+
+
+def test_issue_create_is_not_retried(monkeypatch: pytest.MonkeyPatch, sleeps: list[float]) -> None:
+    calls = _gh_recorder(monkeypatch, [_ok("[]"), _ok(), _fail("HTTP 502 bad gateway")])
+    with pytest.raises(RuntimeError, match="gh issue create failed"):
+        nd.post(["r"])
+    assert _kinds(calls) == [("issue", "list"), ("label", "create"), ("issue", "create")] and sleeps == []
+
+
 def test_dry_run_calls_no_gh_and_a_long_body_is_cut(monkeypatch: pytest.MonkeyPatch, repo: Path) -> None:
     calls = _gh_recorder(monkeypatch, [])
     before = _with_map(repo)

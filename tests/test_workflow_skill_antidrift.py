@@ -165,8 +165,7 @@ def test_critique_gate_convergence_is_finding_shaped() -> None:
     assert "after 3 REVISE rounds" not in planning
     assert "Every round is a full fresh read and no count caps them" in rule
     assert "REVISE means at least one blocking finding" in rule
-    assert "PROCEED listing nits -> apply them and dispatch ONE fresh confirming round, no card" in rule
-    assert "it ends the loop unless it returns a blocking finding" in rule
+    assert "The first PROCEED ends the loop, no confirming round" in rule
     assert "(oscillation interrupts, not the count)" in rule
     assert "recurring at a tag+anchor you recorded fixed" in rule
     assert "a disputed blocking finding" in rule
@@ -198,7 +197,7 @@ def test_oscillation_revisit_condition_is_countable() -> None:
     """Every revisit condition counts something the gate_rounds record holds (rec-3514)."""
     rule = _step9_convergence()
     assert "40 cap-hitting plans" not in rule
-    assert "Revisit when 20 plans carry `gate_rounds`" in rule
+    assert "Revisit when 20 plans carry findings lists" in rule
     assert "Revisit after 10 contested escalations" in rule
 
 
@@ -233,7 +232,7 @@ def test_plan_command_and_overseer_contract_defer_to_the_skill_rule() -> None:
     """No surface restates a round cap the skill no longer has."""
     plan_cmd = " ".join(_PLAN_CMD.read_text(encoding="utf-8").split())
     assert "round 4 runs one autonomous confirming round" not in plan_cmd
-    assert "a PROCEED that lists nits gets them applied and ONE fresh confirming round, with no card" in plan_cmd
+    assert "the first PROCEED ends the loop with no confirming round, its wording nits applied" in plan_cmd
     assert "An open escalation stops the loop until the human answers" in plan_cmd
     assert "the gates line" not in plan_cmd
     assert "gate history lives in `gate_rounds`" in plan_cmd
@@ -241,8 +240,8 @@ def test_plan_command_and_overseer_contract_defer_to_the_skill_rule() -> None:
     assert "3-round" not in dispatch
     assert "per the planning skill's Decision Scout convergence rule" in dispatch
     assert "or GATE_REQUEST round=N+1 after a BLOCK pivot" in dispatch
-    assert "On a PROCEED that ends the planning skill's Step 9 loop (no nits, or the confirming round's)" in dispatch
-    assert "On REVISE, or any other PROCEED listing nits: the subagent fixes and re-requests" in dispatch
+    assert "On a PROCEED that ends the planning skill's Step 9 loop (the first PROCEED, its nits disposed)" in dispatch
+    assert "On REVISE: the subagent fixes and re-requests" in dispatch
 
 
 def test_dispatch_contract_relays_an_escalation_instead_of_a_round() -> None:
