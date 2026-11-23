@@ -1,0 +1,158 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: notice-digest-gh-retry
+intent: >-
+  Clear the Critical ci_rca red rec-5543 by making the notice digest's gh calls survive one transient GitHub fault: a
+  bounded retry on transient statuses, a guard so a retried comment that GitHub already applied is not posted twice,
+  and an issue number taken from the created issue's URL so a lagging issue list right after creation no longer drops
+  the row. No row is ever skipped to get green.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-notice-digest-gh-retry.yaml
+phase: >-
+  ci_rca (soft-warn exception category): repair of the main red rec-5543 the operator handed CI Reform on 2026-11-23.
+  No tier_item is claimed and no exit criterion is closed.
+closes_criteria: []
+cites: [dec:55, dec:186, dec:226, dec:235, dec:246, dec:279]
+scope:
+  - file: scripts/ci/notice_digest.py
+    action: Modify
+    purpose: >-
+      _gh gains a bounded retry (4 attempts, sleeps of 2, 5 and 10 s through a module-level _sleep wrapper around
+      time.sleep) that fires only when stderr matches HTTP 499, 502, 503 or 504; any other failure, and a transient one
+      on the last attempt, raises exactly as today. A retry=False switch keeps gh issue create out of it (not
+      idempotent). Row posting moves to a _comment helper: it calls gh issue comment with retry off, and on a transient
+      failure waits, then reads the issue's comments over REST (gh api --paginate --slurp on the repository's issue
+      comments route, so every page is read and the read does not share the GraphQL route the 499 came from) and
+      returns without posting again when a comment already holds the row (bodies compared after normalising CRLF and
+      stripping); a failing guard read falls through to the retry, since a duplicate costs less than a lost row. _ensure_issue reads the new
+      issue's number from the URL gh issue create prints and takes the lowest of it and the relisted number, so an
+      empty relist no longer fails; the existing "not found after creating" error stays for an unparsable URL plus an
+      empty list. The module still imports only stdlib, yaml and scripts.roadmap.approval_routing (import time is
+      stdlib).
+    new_imports: []
+  - file: tests/ci/test_notice_digest.py
+    action: Modify
+    purpose: >-
+      An autouse fixture replaces nd._sleep with a recorder, so no test sleeps and the waits are asserted. Five new
+      nodes: test_post_retries_transient_gh_failure (rec-5543's acceptance node: issue list, then comment fails with
+      HTTP 499, the guard read shows no row, comment succeeds; asserts the call order, one recorded 2 s wait and the row posted
+      once), test_a_retried_comment_that_already_landed_is_not_posted_twice (the guard read returns a comment whose
+      body equals the row, so no second comment call), test_retry_is_bounded_and_other_failures_are_not_retried (four 499s raise
+      "gh issue comment failed" after exactly four comment calls and waits of 2, 5, 10; a denied failure raises after
+      one call and no wait), test_a_lagging_list_after_create_uses_the_created_number (empty list, label, create
+      printing an issues URL, empty list, comment goes to that number), test_issue_create_is_not_retried (a 502 on
+      create raises after one create call). The existing nodes, including the "not found after creating" assertion,
+      are unchanged.
+    new_imports: []
+bundled_recommendations: [rec-5543]
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - "A transient gh failure (HTTP 499, 502, 503 or 504) on an issue list, label create or issue comment is retried at most 3 more times with waits of 2, 5 and 10 s, then raises as today; any other gh failure raises on the first attempt."
+  - "A comment retried after a transient failure is not posted again when the issue already holds a comment with the same body."
+  - "gh issue create is never retried, and an empty issue list right after it no longer fails the run: the number comes from the URL gh printed."
+  - "rec-5543's acceptance node test_post_retries_transient_gh_failure passes, red before; every existing node in tests/ci/test_notice_digest.py still passes with its assertions unchanged."
+  - "rec-5543 is closed by the merge's Resolves trailer, through the Decision 186 closure obligation against its closure_artifact shard:notice-digest-gh-retry."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The five new nodes pass, including rec-5543's acceptance node.
+    command: >-
+      bin/venv-python -m pytest
+      tests/ci/test_notice_digest.py::test_post_retries_transient_gh_failure
+      tests/ci/test_notice_digest.py::test_a_retried_comment_that_already_landed_is_not_posted_twice
+      tests/ci/test_notice_digest.py::test_retry_is_bounded_and_other_failures_are_not_retried
+      tests/ci/test_notice_digest.py::test_a_lagging_list_after_create_uses_the_created_number
+      tests/ci/test_notice_digest.py::test_issue_create_is_not_retried -q
+    expected: exit 0 with 5 passed; red before (each node fails on the missing retry, guard or URL parse)
+    fix_if: a node fails; the retry, guard or created-number path is wrong
+    hermetic: true
+    expected_literals: ["5 passed"]
+    graduation: graduate
+    graduation_check_id: notice-digest-gh-retry
+  - step: 2
+    phase: pre-deploy
+    action: Every node in the digest's test file passes, the old ones with their assertions unchanged.
+    command: bin/venv-python -m pytest tests/ci/test_notice_digest.py -q
+    expected: exit 0, no failure
+    fix_if: an existing node fails; the gh call order the old nodes pin changed
+    hermetic: true
+    expected_literals: [" passed"]
+    graduation: waive
+    graduation_waiver_reason: The file already runs in the full tier; step 1 carries the new regression.
+  - step: 3
+    phase: pre-deploy
+    action: Full tier, then HEAD attestation, after the build commit and rebase and before the push (handoff_policy); start it backgrounded from the top-level session with a 2 h limit.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: the full tier exits 0 and the validation result attests the current HEAD's tree
+    fix_if: any failure; fix and rerun the full tier from the start
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion).
+  - step: 4
+    phase: post-deploy
+    action: >-
+      The notice-digest run for the merge push (the workflow runs on every push to main) completes green with the new
+      script. It proves the workflow still starts and exits 0 with the new code; a real GitHub 499 cannot be induced
+      from a cloud environment, so the retry itself is proven by step 1 against a faked gh and is unproven live.
+    command: >-
+      SHA=$(git fetch -q origin main && git log origin/main -1 --format=%H -E --grep='^(build|fix|test)\(notice-digest-gh-retry\)') && test -n "$SHA" &&
+      gh run list --repo otl-labs/ontheloop --workflow notice-digest.yml --commit "$SHA" --json databaseId,conclusion
+    expected: one run for the merge commit with conclusion success; record its id
+    fix_if: the run failed; read its job log, and file or fix the cause on a new branch, never a re-run to green
+    hermetic: false
+  - step: 5
+    phase: post-deploy
+    action: >-
+      rec-5543 is closed by the merge's Resolves trailer through the Decision 186 closure obligation: it is
+      escape-classified (no-edge), and its closure_artifact shard:notice-digest-gh-retry is recorded at plan write, so
+      the trailer closure resolves it once the shard (step 1's graduation) is on main.
+    command: >-
+      AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids,
+      make_reader; rows, _ = fetch_recs_by_ids(make_reader(), ['rec-5543']); print([(r['id'], r['status']) for r in rows])"
+    expected: rec-5543 closed after the closure job runs on the merge commit
+    fix_if: >-
+      still open; read the closure job log for a ClosureArtifactRequired or acceptance refusal marker and fix its cause
+      (the shard file missing from the merge, or no Resolves line in the squash body), never a direct status write
+    hermetic: false
+test_obligations:
+  - source: scripts/ci/notice_digest.py
+    behavior: a transient gh failure is retried within bounds, a landed row is not re-posted, a lagging list after create still finds the issue, and create is never retried
+    verification_step: 1
+    test_selector: tests/ci/test_notice_digest.py::test_post_retries_transient_gh_failure
+    red_green_expectation: red before (the first gh failure raises), green after
+constraints:
+  - "No test, assertion or workflow condition is loosened (Decision 235): the existing nodes stay as they are, including the 'not found after creating' assertion, and a failed run still raises and exits 1 once the bounded retry is spent."
+  - "The workflow file, the digest row format and the issue title and label are not edited; no new environment variable, secret or config key (the retry constants are module-level, so Decision 224's project-configuration row does not apply)."
+  - "The module keeps importing only stdlib, yaml and scripts.roadmap.approval_routing: the workflow installs pyyaml alone."
+  - "Both scope files sit on the executor boundary (config/agent/executor/capabilities.yaml boundary_patterns row notice_digest, the Decision 235 cl.5 floor): the edit is human-directed /plan -> /implement, never executor-authored, and rec-5543 stays automatable: false (read 2026-11-23). The autouse _sleep fixture only removes real waiting; no assertion of the floor check is loosened (Decision 235 cl.1 and cl.5)."
+  - "No rescue agents or workaround loops (Decision 55): the bounded retry is Decision 55's deterministic recovery for a well-understood failure class."
+context:
+  - "Failures: run 45232494715 (push 64eec17c..915f3665): gh issue comment returned HTTP 499 and the PR #2403 row was printed but not posted (rec-5543). Run 44781885027 (2026-11-20 17:17Z, PR #2306): gh issue list came back empty right after gh issue create made issue #2307 (created the same second), so the run failed and the #2306 row was never posted (the list lag is inferred from timing, not reproduced)."
+  - "Both are scripts/ci/notice_digest.py _gh and _ensure_issue; the existing node at tests/ci/test_notice_digest.py (test_a_missing_issue_creates_the_label_then_the_issue) mocks the relist as immediately consistent, which is why neither was caught."
+  - "Precedent for a bounded gh retry: scripts/ci/dependabot_stranded_sweep.sh:78 (_gh_bounded_retry). Statuses retried: 499, 502, 503, 504 matched in gh's stderr (inferred as the transient set; 499 from the rec's log). Total wait is 17 s against the workflow's 10 minute timeout."
+  - "Forks decided with notice (consistency-only, no always-ask item): retry reads, label create and the guarded comment but never gh issue create (not idempotent); a failing guard read posts anyway (a duplicate beats a lost row); the guard reads over REST because the 499 came from the GraphQL route (gh api --paginate --slurp needs gh 2.48 or newer: it ran on 2.89 in a session read of issue #2307, 89 comments; the runner image's version is inferred, and an unsupported flag fails the read, which falls through to the retry); rows already lost stay a separate operator-called backfill by re-running runs 44781885027 and 45232494715 after checking the issue for the row, not part of this plan."
+  - "Red overlap: rec-5543 is the open red this plan repairs and bundles (Decision 226 cl.3). It blocks the CI RCA script-extraction build (rec-5500, PLAN-ci-rca-step-extraction) at its red_overlap gate through the shared test file tests/ci/test_notice_digest.py."
+  - "rec-5543 closure (Decision 186): escape_class no-edge; closure_artifact shard:notice-digest-gh-retry recorded at plan write without a status change, so the build's trailer closure resolves it against the merge sha once the shard is on main."
+  - "Decision-scout verdict FLAGS_FOUND (round 1). CITE: 55, 186, 226, 235, 279. CONTRADICT: 117 NOTE (constraint added). SPIRIT: 279 NOTE (the full-read window of approval-routing.yaml ended 2026-11-23 and rows for PR #2306 and PR #2403 fell inside it; deferral note below). RELATED: 246, 100, 244, 132, 176, 72, 162, 163. Decisions triaged: 228 of 228. Roadmap items intersected: 1; CONFLICT: 0; RELATED: 1 (T4.23, bare tests/ prefix only). Serves: NS.8 3/5. Decision 246 stays in cites (the digest's origin and the scout fingerprint covers it) but is awareness only: this plan has no always-ask wording, and the digest's governing clause is Decision 279 cl.6."
+  - "Decision 279 deferral note: the two lost rows (PR #2306 from run 44781885027, PR #2403 from run 45232494715) are confirmed absent from issue #2307 (REST read 2026-11-23, 89 comments). Their backfill is a re-run of each failed run, the operator's call, offered in this plan's thread and done after this plan's build merges so the re-run uses the fixed script; it is not a plan deliverable and needs no follow-on rec."
+  - "Graduated shards kept unchanged: notice-digest-composer (it runs the whole test file, so the five new nodes also run there; the new shard pins only them, so a rename of any has a named owner)."
+  - "Approval: Benjamin's handoff of 2026-11-23T18:40:59Z (cmsg_01DE2cGfmCsT1URMgE9SxkYhQ33iih8XodR7h3KrLH7wmM) asks for one small plan and one PR for rec-5543, with the coordinator's note to fold in the list-lag fix; taken as write-the-plan. No always-ask wording, no new Decision, so no approved-text sidecar."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:dc7a1a99e42d922b1406a96a3947cc9e318fb890625074d3d0b01e8cb98b4dad"}  # pragma: allowlist secret
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "test_notice_digest.py: add the autouse _sleep fixture and the five new nodes first. Pre-change VP 1: all five fail."
+  - "notice_digest.py: add _sleep, the transient matcher, the retry loop in _gh (retry switch), _comment with the landed-row guard, and the created-number read in _ensure_issue; post() calls _comment. Post: VP 1 green, then VP 2."
+  - "Add the graduated shard config/agent/verification_registry/entries/notice-digest-gh-retry.yaml for VP 1, pinning the five VP 1 nodes."
+  - "CLOSURE (implement skill Commit Flows): commit with Resolves: rec-5543; rebase; VP 3; push; PR titled build(notice-digest-gh-retry); code review in a fresh context; merge on PROCEED and green CI with Resolves: rec-5543 in the squash body; then VP 4 and 5."
+  - "Report: what was implemented, verification results, run ids"
+rollback: Revert the build PR; the digest returns to one gh attempt per call.
