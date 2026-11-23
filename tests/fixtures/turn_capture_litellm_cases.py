@@ -45,6 +45,16 @@ HOST_RUN = json.dumps(
     },
     sort_keys=True,
 )
+HOST_RUN_LOCAL = json.dumps(
+    {
+        "agent": "plan-critique",
+        "content_policy": "full",
+        "host": {"kind": "local", "run_id": "00000000000000000000000000000001", "runtime": "local_container"},
+        "project_ref": "example/project",
+        "schema_version": 1,
+    },
+    sort_keys=True,
+)
 READ = {"blob": "notes", "mode": "lines"}
 
 
@@ -148,15 +158,22 @@ def _run(script: list[Any], *, cut: bool = False) -> tuple[dict[str, Any], Path]
     return json.loads((folder / "events.json").read_text(encoding="utf-8")), folder
 
 
-def _bodies(events: dict[str, Any]) -> dict[str, str]:
+def _bodies(events: dict[str, Any], host_run: str = HOST_RUN) -> dict[str, str]:
     events["header"]["contract_path"] = "tests/fixtures/persona_backends/fixture_persona.yaml"
-    return {"events.json": json.dumps(events, sort_keys=True, indent=2) + "\n", "host-run.json": HOST_RUN}
+    return {"events.json": json.dumps(events, sort_keys=True, indent=2) + "\n", "host-run.json": host_run}
 
 
 def _single_call() -> dict[str, str]:
     message = {"role": "assistant", "content": fakes.VALID, "reasoning_content": "weighing the notes"}
     events, _ = _run([result(rec(), (call(),), message)])
     return _bodies(events)
+
+
+def _local_container_run() -> dict[str, str]:
+    message = {"role": "assistant", "content": fakes.VALID, "reasoning_content": "weighing the notes"}
+    events, _ = _run([result(rec(), (call(),), message)])
+    events["header"]["rendered_prompt_sha256"] = "0" * 63 + "1"  # low entropy: detect-secrets needs no .secrets.baseline entry
+    return _bodies(events, HOST_RUN_LOCAL)
 
 
 def _two_turn() -> tuple[Any, Any]:
@@ -223,4 +240,5 @@ LITELLM_BUILDERS = {
     "repair_loss_markers.json": _repair_loss_markers,
     "aborted_transport.json": _aborted_transport,
     "partial_no_end.json": _partial_no_end,
+    "local_container_run.json": _local_container_run,
 }
