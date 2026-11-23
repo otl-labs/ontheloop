@@ -1,4 +1,5 @@
 name: CI RCA
+run-name: CI RCA for run ${{ github.event.workflow_run.id || inputs.run_id }}
 # Triggered on every CI failure. Invokes the ci-rca agent headlessly to diagnose
 # the root cause and file a recommendation via ops_data_portal.
 # Decision 72: RCA-as-Plan-Source for CI Merge Gate Failures.
@@ -73,6 +74,18 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # TODO(bedrock): When this runner migrates to GitHub-hosted (target: 90-day window),
+      # replace this step and the `claude -p` invocation below with a Python entrypoint
+      # that calls bedrock-runtime via the runner's IAM role (boto3). This eliminates the
+      # Claude Code CLI dependency, the CLAUDE_CODE_OAUTH_TOKEN rotation requirement, and the
+      # npm permission complexity (EACCES on global npm install without sudo) entirely.
+      # Runs before the failing-commit checkout so the pin and installer come from the trusted main
+      # tree (rec-5509); the CLI is a global install, so the later checkout leaves it in place.
+      - name: Install Claude Code CLI
+        run: |
+          bash scripts/ci/install_claude_cli.sh "$GITHUB_WORKSPACE"
+          claude --version
+
       - uses: ./.github/actions/aws-region
 
       - name: Checkout at failing commit
@@ -104,18 +117,6 @@ jobs:
           python -m venv .venv
           .venv/bin/pip install --quiet --upgrade pip
           .venv/bin/pip install -r requirements.txt
-
-      # TODO(bedrock): When this runner migrates to GitHub-hosted (target: 90-day window),
-      # replace this step and the `claude -p` invocation below with a Python entrypoint
-      # that calls bedrock-runtime via the runner's IAM role (boto3). This eliminates the
-      # Claude Code CLI dependency, the CLAUDE_CODE_OAUTH_TOKEN rotation requirement, and the
-      # npm permission complexity (EACCES on global npm install without sudo) entirely.
-      - name: Install Claude Code CLI
-        run: |
-          if ! command -v claude &> /dev/null; then
-            sudo npm install -g @anthropic-ai/claude-code@2.1.323 --omit=dev --omit=optional && sudo npm cache clean --force
-          fi
-          claude --version
 
       - name: Configure AWS credentials (OIDC -- branch role)
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
@@ -508,10 +509,10 @@ jobs:
           BUNDLE_ABSENT="${{ steps.evidence.outputs.bundle_absent }}"
           EVIDENCE_CONTEXT=""
           if ls /tmp/ci-rca-bundles/*.json 2>/dev/null >/dev/null 2>&1; then
-            # Reference the emit-dir so multi-failure runs expose all N bundles to the agent.
-            # For a single-failure run BUNDLE_SHA is the only SHA; for N>1 the agent enumerates
-            # /tmp/ci-rca-bundles/*.json to find each bundle's sha256 and failure_category.
-            EVIDENCE_CONTEXT=" Evidence bundle(s) are at /tmp/ci-rca-bundles/ -- enumerate *.json for multi-failure runs (one JSON per failed check). Primary bundle SHA: ${BUNDLE_SHA}. Primary S3 URI: ${BUNDLE_S3_URI}. Pending path: ${BUNDLE_PATH}. Local bundle path: ${BUNDLE_LOCAL}."
+            # Reference the emit-dir and list its files so multi-failure runs expose all N bundles to the agent.
+            # For a single-failure run BUNDLE_SHA is the only SHA; for N>1 the listed
+            # /tmp/ci-rca-bundles/*.json files carry each bundle's sha256 and failure_category.
+            EVIDENCE_CONTEXT=" Evidence bundle(s) are at /tmp/ci-rca-bundles/ -- bundle files (one JSON per failed check): $(ls /tmp/ci-rca-bundles/*.json | tr '\n' ' '). Primary bundle SHA: ${BUNDLE_SHA}. Primary S3 URI: ${BUNDLE_S3_URI}. Pending path: ${BUNDLE_PATH}. Local bundle path: ${BUNDLE_LOCAL}."
           fi
           # c12(ii): when no evidence bundle was generated at all, force the agent onto the
           # mandatory human-review route instead of letting it file a confidently-wrong rec with
@@ -526,8 +527,8 @@ jobs:
           PROMPT="Apply the .claude/agents/scheduled/ci-rca.md instructions to failed CI run ${RUN_ID}. The failed log is at /tmp/ci-rca-failed.log.${EVIDENCE_CONTEXT}${RANGE_NOTE}"
           printf '%s' "$PROMPT" | ${GITHUB_WORKSPACE}/scripts/ci/claude_p_retry.sh /tmp/ci-rca-output.json -- \
             --output-format json --model "opus[1m]" --effort high \
-            --max-turns 30 \
-            --allowedTools "Read,Bash(grep:*),Bash(cat:*),Bash(git log:*),Bash(bin/venv-python -m scripts.ops_data_portal:*)" || true
+            --max-turns 30 --mcp-config "${GITHUB_WORKSPACE}/.mcp.json" --strict-mcp-config \
+            --allowedTools "Read,Glob,Grep,Bash(grep:*),Bash(cat:*),Bash(git log:*),Bash(bin/venv-python -m scripts.ops_data_portal:*),mcp__ducklake-reads__ci_rca_since,mcp__ducklake-reads__ci_rca_open,mcp__ducklake-reads__recs_by_ids" || true
           cat /tmp/ci-rca-output.json
           # Deterministic filing check: the marker/dedup must reflect a real filing, not the
           # || true-masked exit above. CIRCA-07: gate on --all (ALL FILED: markers) rather than
@@ -550,9 +551,27 @@ jobs:
           fi
           echo "rec_id=${REC_ID}" >> "$GITHUB_OUTPUT"
 
+      - name: Fallback filing (rec-4678)
+        id: fallback
+        timeout-minutes: 4
+        # Deterministic, no LLM: files an undetermined source=ci_rca rec for any failed bundle the agent left without a
+        # record (max turns, crash, no FILED marker, an earlier step failed). Exit 1 keeps the run red when it had to file.
+        if: ${{ !cancelled() && hashFiles('scripts/ci_rca/fallback.py') != '' && steps.rejected_deployment.outputs.skip != 'true' && steps.designed_refusal.outputs.skip != 'true' && steps.dedup.outputs.already_filed != 'true' && steps.fp_dedup.outputs.deduped != 'true' && (github.event_name != 'workflow_dispatch' || steps.persona_gate.outcome == 'success') }}
+        env:
+          CI_RCA_BUNDLE_EMIT_DIR: /tmp/ci-rca-bundles
+          CI_RCA_FORCE_RCA: ${{ github.event.inputs.force_rca }}
+          S3_LOG_BUCKET: agent-platform-data-lake
+          RUN_ID: ${{ steps.meta.outputs.run_id }}
+          HEAD_SHA: ${{ steps.meta.outputs.head_sha }}
+          WORKFLOW_NAME: ${{ steps.meta.outputs.workflow_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ steps.meta.outputs.run_id }}
+          STEP_OUTCOMES: evidence=${{ steps.evidence.outcome }} dedup=${{ steps.dedup.outcome }} fp_dedup=${{ steps.fp_dedup.outcome }} persona_gate=${{ steps.persona_gate.outcome }} rca_agent=${{ steps.rca_agent.outcome }}
+        run: |
+          bin/venv-python -m scripts.ci_rca.fallback file --agent-output /tmp/ci-rca-output.json --bundles-dir /tmp/ci-rca-bundles --jobs /tmp/ci-rca-jobs.json --run-id "$RUN_ID" --head-sha "$HEAD_SHA" --workflow-name "$WORKFLOW_NAME" --run-url "$RUN_URL" --force-rca "$CI_RCA_FORCE_RCA" --step-outcomes "$STEP_OUTCOMES" --out /tmp/ci-rca-fallback-filed.txt >> "$GITHUB_OUTPUT"
+
       - name: Mark failure as RCA'd
         id: mark_rca
-        if: steps.rca_agent.outcome == 'success'
+        if: ${{ !cancelled() && (steps.rca_agent.outcome == 'success' || steps.fallback.outputs.marked == 'true') }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -563,7 +582,7 @@ jobs:
           ANCHOR_SHA="${{ steps.meta.outputs.anchor_sha }}"
           WORKFLOW_SLUG="${{ steps.meta.outputs.workflow_slug }}"
           if [ -n "$ANCHOR_SHA" ]; then
-            bin/venv-python -m scripts.ci_rca.filing --all /tmp/ci-rca-output.json | while IFS=',' read -r REC_ID CAT; do
+            { bin/venv-python -m scripts.ci_rca.fallback pairs /tmp/ci-rca-output.json /tmp/ci-rca-fallback-filed.txt || bin/venv-python -m scripts.ci_rca.filing --all /tmp/ci-rca-output.json; } | while IFS=',' read -r REC_ID CAT; do
               [ -z "$REC_ID" ] && continue
               [ -z "$CAT" ] && CAT="unknown"
               CONTEXT="ci-rca/${WORKFLOW_SLUG}/${CAT}"
@@ -599,3 +618,33 @@ jobs:
         uses: ./.github/actions/telemetry-ci-capture
         with:
           manifests: /tmp/ci-rca-output.json.sessions.jsonl
+
+  watchdog:
+    # rec-5504: no-LLM reconciliation after every real CI RCA run (timeouts included); never for skipped runs.
+    needs: rca
+    if: ${{ (github.event_name != 'workflow_dispatch' || github.actor != 'otl-workflow-dispatcher[bot]') && (always() && needs.rca.result != 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - name: Install watchdog dependencies
+        run: python -m pip install pyyaml -c requirements.txt
+
+      - name: Reconcile CI RCA outcomes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SELF_RUN_ID: ${{ github.run_id }}
+          SELF_RESULT: ${{ needs.rca.result }}
+        run: python -m scripts.ci_rca.watchdog --lookback-hours 24 --self-run-id "$SELF_RUN_ID" --self-result "$SELF_RESULT"

@@ -187,7 +187,7 @@ def test_main_logs_routes_and_writes_the_routes_file(
         "routes": ["verdict_probe.proceed"],
         "plan_paths": [],
     }
-    assert (tmp_path / "out").read_text() == "routes=1\n"
+    assert (tmp_path / "out").read_text() == "routes=1\nfixture=true\n"
 
 
 def test_an_override_resolution_yields_no_routes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -199,3 +199,45 @@ def test_an_override_resolution_yields_no_routes(tmp_path: Path, monkeypatch: py
     route.resolve_pr.RESOLUTION.write_text(json.dumps(res))
     assert route.main([]) == 0
     assert json.loads(route.ROUTES.read_text())["routes"] == []
+
+
+def _main_fixture_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resolution: dict, files: list) -> str:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "prepared").mkdir(exist_ok=True)
+    (tmp_path / "prepared" / "resolution.json").write_text(json.dumps(resolution))
+    monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+    out = tmp_path / "out"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    monkeypatch.setattr(route, "changed_files", lambda *a: (files, False, "m"))
+    assert route.main([]) == 0
+    return out.read_text()
+
+
+@pytest.mark.parametrize(
+    ("names", "expected"),
+    [
+        ([f"{route.PROBE_DIR}proceed.txt"], "true"),
+        ([f"{route.PROBE_DIR}proceed.txt", "README.md"], "false"),
+        (["README.md"], "false"),
+        ([f"{route.PROBE_DIR}notes.md"], "false"),
+    ],
+)
+def test_fixture_output_is_true_only_for_a_probe_only_diff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, names: list[str], expected: str
+) -> None:
+    resolution = {"resolved": True, "head_sha": "h", "base_ref": "main", "draft": False}
+    out = _main_fixture_output(tmp_path, monkeypatch, resolution, [_f(n) for n in names])
+    assert f"fixture={expected}\n" in out
+
+
+def test_fixture_is_false_when_unresolved_or_an_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "out"))
+    monkeypatch.setattr(route, "changed_files", lambda *a: (_ for _ in ()).throw(AssertionError("compare")))
+    route.resolve_pr.RESOLUTION.parent.mkdir(parents=True)
+    for res in ({"resolved": False}, {"resolved": True, "override": {"run_id": 1}}):
+        route.resolve_pr.RESOLUTION.write_text(json.dumps(res))
+        (tmp_path / "out").write_text("")
+        assert route.main([]) == 0
+        assert "fixture=false\n" in (tmp_path / "out").read_text()

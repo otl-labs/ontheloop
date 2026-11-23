@@ -35,6 +35,7 @@ SCANNED_PATHS: tuple[str, ...] = (
     "scripts/preflight/reversal_reviews.py",
     "scripts/checks/decisions/append_only_census_recs.py",
     "scripts/feedback_loop/proposals.py",
+    "scripts/checks/hygiene/derived_list_recs.py",
 )
 
 

@@ -7,10 +7,16 @@
 # Backoff: CLAUDE_P_RETRY_BACKOFF_BASE (default 4) * 2^attempt seconds.
 # Parity with _TRANSIENT_CLAUDE_SIGNATURES in scripts/validate.py (Decision 73, Decision 92).
 #
+# Output contract: "<output_file>" holds claude's stdout only (the JSON envelope callers parse). Each attempt's stderr goes
+# to "<output_file>.stderr" and is replayed to this wrapper's own stderr, so CLI diagnostics reach the job log without
+# ever corrupting the envelope. Transient detection reads stdout and stderr together.
+#
 # Capture manifest: each attempt runs under its own fresh --session-id and appends two compact JSON lines to
 # "<output_file>.sessions.jsonl" (never truncated; two invocations in one job share the file): a start line before claude
 # runs {attempt, session_id, started_at} and a result line after {session_id, exit, transient}. A manifest write failure
 # is ignored. Callers may not pass flags that change the session identity (usage exit 1).
+#
+# Settings: every attempt passes --setting-sources user, so the repo's .claude/settings.json never loads in CI.
 #
 # Distinct from the terraform-registry retry loop (_TRANSIENT_INIT_SIGNATURES): Claude API
 # transient signatures differ from registry 5xx patterns and are defined separately here.
@@ -43,10 +49,15 @@ for arg in "$@"; do
             echo "claude_p_retry.sh: capture needs one fresh persisted session per attempt; refusing ${arg%%=*}" >&2
             exit 1
             ;;
+        --setting-sources|--setting-sources=*|--settings|--settings=*)
+            echo "claude_p_retry.sh: CI never loads project settings; refusing ${arg%%=*}" >&2
+            exit 1
+            ;;
     esac
 done
 
 MANIFEST="${OUTPUT_FILE}.sessions.jsonl"
+STDERR_FILE="${OUTPUT_FILE}.stderr"
 
 _new_session_id() {
     if [ -r /proc/sys/kernel/random/uuid ]; then
@@ -83,10 +94,11 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
         STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ 2>/dev/null || true)
         _manifest_append "{\"attempt\":${attempt},\"session_id\":\"${SESSION_ID}\",\"started_at\":\"${STARTED_AT}\"}"
     fi
-    printf '%s' "$STDIN_CONTENT" | claude -p ${SESSION_ID_ARGS[@]+"${SESSION_ID_ARGS[@]}"} "$@" > "$OUTPUT_FILE" 2>&1 || LAST_EXIT=$?
+    printf '%s' "$STDIN_CONTENT" | claude -p ${SESSION_ID_ARGS[@]+"${SESSION_ID_ARGS[@]}"} --setting-sources user "$@" > "$OUTPUT_FILE" 2> "$STDERR_FILE" || LAST_EXIT=$?
+    cat "$STDERR_FILE" >&2 2>/dev/null || true
     TRANSIENT=false
     if [ "$LAST_EXIT" -ne 0 ]; then
-        OUTPUT_CONTENT=$(cat "$OUTPUT_FILE")
+        OUTPUT_CONTENT="$(cat "$OUTPUT_FILE" "$STDERR_FILE" 2>/dev/null || true)"
         if _is_transient "$OUTPUT_CONTENT"; then
             TRANSIENT=true
         fi

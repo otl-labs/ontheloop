@@ -13,6 +13,7 @@ import pytest
 
 from src.persona_hosts.local_container import adapter
 from src.persona_hosts.local_container.adapter import run_argv, run_image
+from src.turn_capture.host_run import parse_persona_host_run
 
 REF = "ghcr.io/example/persona@sha256:" + "c" * 64
 KEY = "DEEPSEEK_API_KEY"
@@ -117,3 +118,51 @@ def test_daemon_error_from_docker_raises(monkeypatch: pytest.MonkeyPatch) -> Non
     )
     with pytest.raises(RuntimeError, match="docker unreachable"):
         run_image(REF, "plan_critic", {}, key_variable=None)
+
+
+def _fake_docker(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        adapter.subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(argv, 0, stdout="{}", stderr="")
+    )
+
+
+def test_run_image_mints_a_fresh_local_sidecar_per_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_docker(monkeypatch)
+    first = run_image(REF, "plan_critic", {}, key_variable=KEY, project_ref="example/project", agent="plan-critique")
+    second = run_image(REF, "plan_critic", {}, key_variable=KEY, project_ref="example/project", agent="plan-critique")
+    assert first.host_run is not None and second.host_run is not None and first.host_run != second.host_run
+    body = json.loads(first.host_run)
+    assert first.host_run == json.dumps(body, sort_keys=True).encode()
+    assert body["host"]["kind"] == "local" and body["host"]["runtime"] == "local_container"
+    assert parse_persona_host_run(first.host_run) is not None
+
+
+def test_run_image_passes_an_outer_sidecar_through_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_docker(monkeypatch)
+    outer = b'{"opaque": "outer host bytes"}'
+    assert run_image(REF, "plan_critic", {}, key_variable=KEY, host_run=outer).host_run == outer
+
+
+def test_run_image_without_sidecar_arguments_defers(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_docker(monkeypatch)
+    assert run_image(REF, "plan_critic", {}, key_variable=KEY).host_run is None
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"host_run": b"{}", "project_ref": "example/project"},
+        {"host_run": b"{}", "agent": "plan-critique"},
+        {"project_ref": "example/project"},
+        {"agent": "plan-critique"},
+        {"project_ref": "example/project", "agent": "Plan Critique"},
+        {"project_ref": "not a ref", "agent": "plan-critique"},
+    ],
+)
+def test_run_image_refuses_mixed_or_bad_sidecar_arguments(monkeypatch: pytest.MonkeyPatch, kwargs: dict[str, Any]) -> None:
+    def no_docker(argv: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("docker must not run")
+
+    monkeypatch.setattr(adapter.subprocess, "run", no_docker)
+    with pytest.raises(ValueError):
+        run_image(REF, "plan_critic", {}, key_variable=KEY, **kwargs)

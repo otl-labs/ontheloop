@@ -73,6 +73,32 @@ class TestEvaluate:
         v = _ev([_red(file="")], work=[("M", "scripts/b.py")])
         assert (v["verdict"], _rules(v)) == ("blocked", ["undeterminable"])
 
+    def test_fallback_red_with_only_a_file_is_undeterminable(self) -> None:
+        v = _ev([_red(ctx={"agent_failure": "error_max_turns"})], work=[("M", "scripts/b.py")])
+        assert (v["verdict"], _rules(v)) == ("blocked", ["undeterminable"])
+
+    def test_fallback_red_with_node_ids_evaluates_their_files_only(self) -> None:
+        ctx = {"agent_failure": "no_output", "affected_nodeids": ["tests/test_x.py::t"]}
+        sel = _selector(
+            {
+                "scripts/b.py": _manifest(selected=["tests/test_shared.py"]),
+                "tests/test_x.py": _manifest(selected=["tests/test_shared.py"]),
+            }
+        )
+        v = _ev([_red(file="scripts/other.py", ctx=ctx)], work=[("M", "scripts/b.py")], selector=sel)
+        assert _rules(v) == ["overlap"]
+        v2 = _ev([_red(file="scripts/b.py", ctx=ctx)], work=[("M", "scripts/b.py")], selector=_selector({}))
+        assert _rules(v2) == ["disjoint"]
+
+    def test_agent_filed_undetermined_red_with_file_is_unchanged(self) -> None:
+        v = _ev([_red(ctx={"rca_confidence": "undetermined"})], work=[("M", "scripts/b.py")])
+        assert _rules(v) == ["disjoint"]
+
+    def test_rule_3_text_names_the_agent_failure_case(self) -> None:
+        text = Path("docs/contracts/red-main-recovery.yaml").read_text(encoding="utf-8")
+        rule3 = next(line for line in text.splitlines() if line.strip().startswith('- "3 undeterminable'))
+        assert "agent_failure" in rule3
+
     @pytest.mark.parametrize("flag", ["fallback", "full_suite_forced"])
     @pytest.mark.parametrize("side", ["work", "red"])
     def test_selector_fallback_or_full_suite_blocks(self, flag: str, side: str) -> None:

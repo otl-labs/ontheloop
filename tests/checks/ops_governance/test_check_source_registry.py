@@ -36,6 +36,7 @@ class TestScannedPaths:
             "scripts/convergence_health/dispatch_integrity.py",
             "scripts/preflight/reversal_reviews.py",
             "scripts/feedback_loop/proposals.py",
+            "scripts/checks/hygiene/derived_list_recs.py",
         }
         assert required <= set(SCANNED_PATHS)
 

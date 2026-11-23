@@ -4,8 +4,10 @@ name: persona-verdict
 # main's code. The PR is resolved only from fields GitHub sets; the author allowlist fails closed; routing reads the diff.
 # The override workflow's completion is a second upstream (PLAN-persona-verdict-override): the run job never runs on that
 # event, so no persona runs on an override, and prepare resolves and proves the approval from GitHub's own records.
-# No job reads a secret other than its GITHUB_TOKEN, holds id-token: write or names an Environment (the persona-verdict
-# role is first assumed in PLAN-persona-verdict-egress). Only the post job holds checks: write.
+# Only the keyed jobs (PLAN-persona-verdict-first-key-read: keyprep, smoke, refusal; fixture PRs only) read a secret other
+# than GITHUB_TOKEN, hold id-token: write or name an Environment. smoke, in the persona-verdict Environment, first assumes
+# the persona-verdict role and runs each tier role's cold start; refusal shows the role refuses a job outside the
+# Environment. Only the post job holds checks: write.
 on:
   workflow_run:
     workflows: [persona-verdict-trigger, persona-verdict-override]
@@ -29,6 +31,7 @@ jobs:
       actions: read
     outputs:
       allowlisted: ${{ steps.resolve.outputs.allowlisted }}
+      fixture: ${{ steps.route.outputs.fixture }}
     steps:
       - name: Check out main
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -134,6 +137,158 @@ jobs:
           path: ${{ runner.temp }}/work/results
           retention-days: 1
           if-no-files-found: ignore
+
+  keyprep:
+    needs: prepare
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && github.event.workflow_run.event == 'pull_request' && needs.prepare.outputs.allowlisted == 'true' && needs.prepare.outputs.fixture == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      aws_region: ${{ steps.region.outputs.aws_region }}
+    steps:
+      - name: Check out the workflow's commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve the project region
+        id: region
+        uses: ./.github/actions/aws-region
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - name: Build the hash-locked wheelhouse
+        id: keyprep-wheels
+        run: |
+          pip download --require-hashes --no-deps --only-binary :all: -r docker/persona/requirements-persona.txt -d "$RUNNER_TEMP/work/wheels"
+
+      - name: Upload the wheelhouse
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: persona-verdict-wheels
+          path: ${{ runner.temp }}/work/wheels
+          retention-days: 1
+          if-no-files-found: error
+
+  smoke:
+    needs: [prepare, keyprep]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && github.event.workflow_run.event == 'pull_request' && needs.prepare.outputs.allowlisted == 'true' && needs.prepare.outputs.fixture == 'true' && needs.keyprep.result == 'success' }}
+    environment: persona-verdict
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: block
+          allowed-endpoints: >-
+            sts.${{ needs.keyprep.outputs.aws_region }}.amazonaws.com:443
+            ssm.${{ needs.keyprep.outputs.aws_region }}.amazonaws.com:443
+            api.deepseek.com:443
+            api.anthropic.com:443
+          disable-telemetry: true
+          disable-sudo-and-containers: true
+
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: main
+          persist-credentials: false
+
+      - name: Create the work directory
+        id: smoke-mkdir
+        run: mkdir -p "$RUNNER_TEMP/work"
+
+      - name: Check the egress filter
+        id: smoke-self-check
+        run: python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" egress-self-check
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - name: Download the wheelhouse
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: persona-verdict-wheels
+          path: ${{ runner.temp }}/work/wheels
+
+      - name: Install the wheelhouse offline
+        id: smoke-install
+        run: |
+          pip install --no-index --find-links "$RUNNER_TEMP/work/wheels" --require-hashes --no-deps --only-binary :all: -r "$GITHUB_WORKSPACE/main/docker/persona/requirements-persona.txt"
+
+      - name: Smoke the primary role
+        id: smoke-primary
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          PERSONA_AWS_REGION: ${{ needs.keyprep.outputs.aws_region }}
+          PERSONA_SMOKE_ROLE: primary
+          PERSONA_SNAPSHOT: ${{ runner.temp }}/snapshot
+        working-directory: ${{ runner.temp }}/work
+        run: python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" inference-smoke
+
+      - name: Smoke the warm_fetched_escape_hatch role
+        id: smoke-warm-fetched-escape-hatch
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          PERSONA_AWS_REGION: ${{ needs.keyprep.outputs.aws_region }}
+          PERSONA_SMOKE_ROLE: warm_fetched_escape_hatch
+          PERSONA_SNAPSHOT: ${{ runner.temp }}/snapshot
+        working-directory: ${{ runner.temp }}/work
+        run: python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" inference-smoke
+
+  refusal:
+    needs: [prepare, keyprep]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && github.event.workflow_run.event == 'pull_request' && needs.prepare.outputs.allowlisted == 'true' && needs.prepare.outputs.fixture == 'true' && needs.keyprep.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: block
+          allowed-endpoints: |
+            sts.${{ needs.keyprep.outputs.aws_region }}.amazonaws.com:443
+          disable-telemetry: true
+          disable-sudo-and-containers: true
+
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: main
+          persist-credentials: false
+
+      - name: Create the work directory
+        id: refusal-mkdir
+        run: mkdir -p "$RUNNER_TEMP/work"
+
+      - name: Check the egress filter
+        id: refusal-self-check
+        run: python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" egress-self-check
+
+      - name: Show the role refuses a job outside the Environment
+        id: refusal-attempt
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          PERSONA_AWS_REGION: ${{ needs.keyprep.outputs.aws_region }}
+          PERSONA_SNAPSHOT: ${{ runner.temp }}/snapshot
+        working-directory: ${{ runner.temp }}/work
+        run: python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" key-refusal
 
   post:
     needs: [prepare, run]

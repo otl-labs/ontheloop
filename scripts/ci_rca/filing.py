@@ -25,7 +25,8 @@ def extract_filed_rec_id(output_path: str | Path) -> str | None:
 
     Tries to parse the file as a JSON envelope (claude -p --output-format json)
     and extracts text from the 'result' field. Falls back to raw text on parse
-    failure so stderr-polluted output is still searchable.
+    failure; a file that is not one JSON envelope yields no marker from inside an
+    escaped JSON string.
 
     Scans all FILED: markers in document order and returns the LAST one. A
     trailing `FILED: none` (or no marker at all) yields None; an earlier
@@ -85,6 +86,22 @@ def _extract_text(raw: str) -> str:
     return raw
 
 
+def _warn_if_corrupt_envelope(path: str) -> None:
+    try:
+        raw = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    if not any(line.startswith("{") for line in raw.splitlines()):
+        return
+    try:
+        json.loads(raw)
+    except ValueError as exc:
+        print(
+            f"ci_rca.filing: {path} is not a single claude -p JSON envelope ({exc}); scanning raw text",
+            file=sys.stderr,
+        )
+
+
 def main() -> None:
     argv = sys.argv[1:]
     all_mode = "--all" in argv
@@ -92,6 +109,8 @@ def main() -> None:
     if len(positional) != 1:
         print("Usage: ci_rca_filing.py [--all] <output_path>", file=sys.stderr)
         sys.exit(1)
+
+    _warn_if_corrupt_envelope(positional[0])
 
     if all_mode:
         # CIRCA-07: one "rec_id,category" line per filed rec (workflow's per-category mark_rca

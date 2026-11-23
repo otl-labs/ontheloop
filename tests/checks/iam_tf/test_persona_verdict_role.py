@@ -8,6 +8,7 @@ Environment's cases (terraform/github) and PR 3 the role's own cases (terraform/
 from __future__ import annotations
 
 import fnmatch
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -136,6 +137,10 @@ def workflow_problems(workflows: dict[str, dict[str, Any]]) -> list[str]:
                 problems.append(f"{fname}:{jname} names the {_ENV} environment")
             if fname != _ENV_WORKFLOW and _assumes_role(job):
                 problems.append(f"{fname}:{jname} assumes the persona-verdict role")
+            blob = json.dumps(job, default=str)
+            for needle in (_ROLE_NAME, "inference-smoke", "key-refusal"):
+                if fname != _ENV_WORKFLOW and needle in blob:
+                    problems.append(f"{fname}:{jname} names {needle}")
     if _ENV_WORKFLOW in workflows:
         refused = sorted(_triggers(workflows[_ENV_WORKFLOW]) & set(_REFUSED_TRIGGERS))
         if refused:
@@ -156,7 +161,7 @@ def test_no_secret_or_variable_names_persona_verdict_or_a_key() -> None:
 
 
 def test_workflow_fence() -> None:
-    """Holds vacuously for the persona-verdict.yml cases until the verdict-jobs plan creates that file."""
+    """persona-verdict.yml (PLAN-persona-verdict-first-key-read) is the only workflow that names the role or its verbs."""
     assert workflow_problems(_real_workflows()) == []
 
 
@@ -202,6 +207,10 @@ def test_red_workflow_fence() -> None:
         ]
     }
     assert workflow_problems({"other.yml": {"on": "push", "jobs": {"j": assume}}})
+    for needle in (_ROLE_NAME, "inference-smoke", "key-refusal"):
+        named = {"runs-on": "ubuntu-latest", "steps": [{"run": f"echo {needle}"}]}
+        assert any(needle in p for p in workflow_problems({"other.yml": {"on": "push", "jobs": {"j": named}}}))
+        assert workflow_problems({_ENV_WORKFLOW: {"on": {"workflow_run": {}}, "jobs": {"j": named}}}) == []
     for trigger in ("pull_request", "workflow_call"):
         assert workflow_problems({_ENV_WORKFLOW: {"on": {trigger: {}, "workflow_run": {}}, "jobs": {"j": job}}})
     assert workflow_problems({_ENV_WORKFLOW: {"on": {"workflow_run": {}}, "jobs": {"j": job}}}) == []
