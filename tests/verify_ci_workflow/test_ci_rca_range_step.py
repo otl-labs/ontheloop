@@ -50,7 +50,8 @@ def test_evidence_step_reads_range_prev() -> None:
 def test_agent_prompt_ends_with_range_note() -> None:
     s = step("rca_agent")
     assert s["env"]["RANGE_NOTE"] == "${{ steps.range.outputs.prompt_note }}"
-    prompt = next(line for line in s["run"].splitlines() if line.strip().startswith("PROMPT="))
+    script = (WORKFLOW.parents[2] / "scripts" / "ci" / "ci_rca_steps.sh").read_text(encoding="utf-8")
+    prompt = next(line for line in script.splitlines() if line.strip().startswith("PROMPT="))
     assert prompt.rstrip().endswith('${RANGE_NOTE}"')
 
 
