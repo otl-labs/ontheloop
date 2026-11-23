@@ -74,16 +74,14 @@ def _skill_step_ids(persona: str) -> dict[str, str]:
     return ids
 
 
-_OMITTED = "omitted: retired (Decision 247)"
 STEP_MAP = {
     "decision_scout": dict.fromkeys(["0", "1", "2", "3", "4", "5", "6", "7", "8", "8b", "9", "10"], "template"),
     "plan_critic": {
         **dict.fromkeys(
-            ["1", "2", "3", "4", "5", "5b", "6", "7", "8", "9", "10", "11", "12", "12b", "12c", "12c-1"]
+            ["1", "2", "3", "4", "5", "5b", "5c", "6", "7", "8", "9", "10", "11", "12b", "12c", "12c-1"]
             + ["12e", "12f", "12g", "12h", "12i", "12j", "12k", "12l", "12m", "12n", "12o", "12p", "13", "14"],
             "template",
         ),
-        "12d": _OMITTED,
     },
     "code_reviewer": {
         **dict.fromkeys(["0", "0b", "1", "2", "3", "4", "5", "6", "v3 evidence"], "template"),
@@ -156,10 +154,8 @@ def test_step_id_map_matches_skill_and_template() -> None:
         assert set(ids) == set(STEP_MAP[persona]), (persona, set(ids) ^ set(STEP_MAP[persona]))
         template = _load(contract)["prompt_template"]
         for step_id, disposition in STEP_MAP[persona].items():
-            if disposition == "template":
-                assert ids[step_id] in template, (persona, step_id)
-            else:
-                assert disposition.startswith("omitted: ")
+            assert disposition == "template"
+            assert ids[step_id] in template, (persona, step_id)
 
 
 def test_scout_roadmap_id_pattern_matches_every_roadmap_item() -> None:
