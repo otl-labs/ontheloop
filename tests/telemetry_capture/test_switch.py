@@ -41,7 +41,10 @@ def test_the_committed_switch_is_on_and_still_guarded() -> None:
     data = yaml.safe_load((REPO / switch.SWITCH_FILE).read_text(encoding="utf-8"))
     assert data["enabled"] is True
     assert data["ci_repository"] == "otl-labs/ontheloop"
-    assert [e["workflow"] for e in data["ci_workflows"]] == [".github/workflows/ci-rca.yml"]
+    assert [e["workflow"] for e in data["ci_workflows"]] == [
+        ".github/workflows/ci-rca.yml",
+        ".github/workflows/ci-rca-smoke.yml",
+    ]
     assert switch.capture_mode(REMOTE, REPO) == switch.ON
     assert switch.capture_mode({}, REPO) == switch.OFF
     assert switch.capture_mode({**REMOTE, "GITHUB_ACTIONS": "true"}, REPO) == switch.OFF

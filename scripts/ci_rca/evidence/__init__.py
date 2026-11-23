@@ -446,6 +446,11 @@ def main(argv: list[str] | None = None) -> None:
         default=None,
         help="Write each bundle to <dir>/<sha>.json regardless of S3 upload outcome; prints BUNDLE_LOCAL=<path>",
     )
+    parser.add_argument(
+        "--no-upload",
+        action="store_true",
+        help="Never upload: take the unresolved-bucket path (pending file, upload_failed). Used by the CI RCA smoke.",
+    )
     args = parser.parse_args(argv)
 
     if not args.log_file.exists():
@@ -456,7 +461,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.retrieval_envelope is not None:
         retrieval = load_retrieval_input(args.retrieval_envelope, args.log_file, args.workflow_run_id)
 
-    bucket = _resolve_bucket()
+    bucket = "" if args.no_upload else _resolve_bucket()
     bundles = generate_bundles(
         log_file=args.log_file,
         workflow_name=args.workflow_name,

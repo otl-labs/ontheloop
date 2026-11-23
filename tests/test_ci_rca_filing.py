@@ -282,3 +282,26 @@ class TestMainInProcess:
 
     def test_non_string_result_falls_back_to_raw(self, tmp_path: Path) -> None:
         assert extract_filed_recs(_write(tmp_path, json.dumps({"result": ""}))) == []
+
+
+class TestSmokeMarker:
+    """rec-5493: a smoke-N marker parses only while CI_RCA_SMOKE_SINK is set."""
+
+    def test_smoke_marker_parses_with_the_sink_set(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CI_RCA_SMOKE_SINK", "/tmp/sink.jsonl")
+        f = _write(tmp_path, "FILED: smoke-42 code_regression\n")
+        assert extract_filed_rec_id(f) == "smoke-42"
+        assert extract_filed_recs(f) == [("smoke-42", "code_regression")]
+
+    def test_smoke_marker_is_ignored_without_the_sink(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("CI_RCA_SMOKE_SINK", raising=False)
+        f = _write(tmp_path, "FILED: smoke-42 code_regression\n")
+        assert extract_filed_rec_id(f) is None
+        assert extract_filed_recs(f) == []
+
+    def test_real_marker_before_an_ignored_smoke_marker_still_wins(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("CI_RCA_SMOKE_SINK", raising=False)
+        f = _write(tmp_path, "FILED: rec-7\nFILED: smoke-42\n")
+        assert extract_filed_rec_id(f) == "rec-7"
