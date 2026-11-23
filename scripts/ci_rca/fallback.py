@@ -351,7 +351,11 @@ def _file_uncovered(  # noqa: PLR0913
     citation: Optional[str],
 ) -> None:
     if filer is None:
-        from scripts.ops_data_portal import file_rec_with_outcome as filer  # noqa: PLC0415
+        from scripts.ops_data_portal import file_rec_with_outcome  # noqa: PLC0415
+
+        file_fn: Callable[..., Any] = file_rec_with_outcome
+    else:
+        file_fn = filer
 
     subtype = terminal_subtype(agent_output)
     wf_file = _workflow_file(run["workflow_name"])
@@ -371,7 +375,7 @@ def _file_uncovered(  # noqa: PLR0913
         )
         category = str((bundle or {}).get("failure_category") or "unknown")
         try:
-            outcome = filer(fields, context_v2_json=ctx)
+            outcome = file_fn(fields, context_v2_json=ctx)
         except Exception as exc:  # noqa: BLE001
             print(f"::error::CI RCA fallback: filing failed for {name} ({type(exc).__name__}: {exc})", file=sys.stderr)
             continue
