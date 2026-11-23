@@ -56,11 +56,20 @@ def conflict_select(table: str) -> str:
 
     The compare is one row value over every compared column, never a per-column DISTINCT (which would ignore NULLs and hide a
     NULL-versus-value conflict).
+
+    Duplicate-first: rows are compared only for grain keys holding more than one row in scope, since a one-row key cannot
+    hold two distinct row values. This keeps the whole-window row compare inside the reader's memory limit (rec-5491).
+    Equivalence rests on the writer gate refusing NULL grain columns (the IN filter drops a NULL-component key that
+    GROUP BY would keep).
     """
+    ph = _PLACEHOLDER[table]
     return (
         f"SELECT '{table}' AS table_name, producer, event_id, parser_version, min(session_id) AS session_id "
-        f"FROM {{{_PLACEHOLDER[table]}}} WHERE {{scope}} GROUP BY producer, event_id, parser_version "
-        f"HAVING count(DISTINCT row({{cmp_{_PLACEHOLDER[table]}}})) > 1"
+        f"FROM {{{ph}}} WHERE {{scope}} AND (producer, event_id, parser_version) IN "
+        f"(SELECT producer, event_id, parser_version FROM {{{ph}}} WHERE {{scope}} "
+        f"GROUP BY producer, event_id, parser_version HAVING count(*) > 1) "
+        f"GROUP BY producer, event_id, parser_version "
+        f"HAVING count(DISTINCT row({{cmp_{ph}}})) > 1"
     )
 
 
