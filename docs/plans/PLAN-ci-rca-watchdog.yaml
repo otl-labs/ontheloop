@@ -25,7 +25,9 @@ scope:
     purpose: >-
       Deterministic reconciliation, stdlib plus yaml only (the workflow installs pyyaml alone, notice_digest precedent),
       under 500 SLOC. All GitHub calls go through one injectable `gh api` helper (scripts/ci/notice_digest.py's _gh
-      shape) so tests drive it with recorded real API JSON. Every list read (reds, join window, the status sweeps, jobs,
+      shape, but REST only: label, issue, comment and reopen calls use `gh api`, never `gh issue`/`gh label`, which use
+      GraphQL that CC-web sessions refuse); the repository comes from scripts.repo_identity (stdlib-only) so a session
+      run without GITHUB_REPOSITORY resolves it. Tests drive the helper with recorded real API JSON. Every list read (reds, join window, the status sweeps, jobs,
       issues, issue comments) pages at per_page=100 to the end, at most 10 pages; a full 10th page exits 1 naming
       the truncated read. (1) Watched set: the names in ci-rca.yml's
       on.workflow_run.workflows (PyYAML loads the `on` key as True; read both), the single source of truth. Its own
@@ -34,16 +36,20 @@ scope:
       GET actions/runs?branch=main&status=failure&created=>=SINCE, kept when name is watched, head_repository.full_name equals the repo, and updated_at
       is at least GRACE_MINUTES=60 old. SINCE = now - lookback_hours (default 24, argparse int 1..720). (3) Join: for
       each red, list ci-rca.yml runs created in [red.run_started_at, red.updated_at + 30 min]; a run is linked when its
-      display_title matches ^CI RCA for run (\d+)$ with the red's id. No linked run and an untitled run in the window:
+      display_title matches ^CI RCA for run (\d+)$ with the red's id; a run is untitled only when its display_title is
+      exactly "CI RCA" (the pre-run-name default). No linked run and an untitled run in the window:
       the red predates the run-name and is counted `unlinkable`, never alarmed. No linked run and no untitled run:
-      kind no_rca_run. Else the newest linked run (created_at, then run_attempt) decides: success -> ok; status not
+      kind no_rca_run. Else the newest linked run (created_at, then run_attempt) decides, judged by its `rca` job's conclusion from
+      the jobs read (5) makes (the run conclusion only when no rca job exists), so a failure of the watchdog job alone
+      is its own kind watchdog_failed, never rca_failed: success -> ok; status not
       completed -> rca_stuck; conclusion skipped -> rca_skipped; any other conclusion -> rca_failed. A later CI RCA
       re-dispatch (the issue's own remedy) is created outside the window and never links; marker dedupe makes that
       harmless. Self run: --self-run-id and --self-result (success, failure, cancelled) name the CI RCA run whose final
       job is running the check; that run is still in progress, so it is judged as completed with conclusion
       self-result in both the join and (4). (4) Every ci-rca.yml
       run created since SINCE with conclusion failure, cancelled, timed_out, startup_failure or action_required (one
-      status-filtered query each) -> rca_failed, whatever its trigger, so a timeout-minutes kill, a pre-venv or OIDC
+      status-filtered query each) -> rca_failed (watchdog_failed when its rca job succeeded and only the watchdog job
+      failed), whatever its trigger, so a timeout-minutes kill, a pre-venv or OIDC
       death and an operator dispatch all alarm. (5) Failed step for each alarmed CI RCA run: GET runs/{id}/jobs, the
       first step whose conclusion is failure, cancelled or timed_out ("job <name>: <conclusion>" when no step is,
       "none recorded" when no job is), clamped to 100 chars. (6) Line per alarm: "- <kind>: <workflow> run <url> |
@@ -54,7 +60,8 @@ scope:
       reach a CI RCA run, the linked line (workflow and red URL) wins, and a sweep-only line names the red from the
       run's display_title when it parses ("unknown" otherwise). (7)
       Dedupe: markers read only from the bodies and comments authored by github-actions[bot] on issues labelled
-      ci-rca-watchdog (any state, updated in the last lookback_hours + 48 h), so a public commenter cannot suppress an
+      ci-rca-watchdog (any state, updated in the last lookback_hours + 48 h; comments read with since= that window, so
+      a long-lived issue never hits the page cap), so a public commenter cannot suppress an
       alarm. (8) Post new lines so two writers converge (critique r2 B1: ci-rca.yml's watchdog job and the scheduled run
       can race, and a burst of CI RCA failures runs several jobs at once): the target is the lowest-numbered
       bot-authored ci-rca-watchdog issue in ANY state; if closed, reopen it; comment the new lines on it. Only when no
@@ -90,7 +97,7 @@ scope:
     purpose: >-
       Two additions; the rca job's steps are untouched. (a) After `name: CI RCA`: `run-name: CI RCA for run ${{
       github.event.workflow_run.id || inputs.run_id }}`, the join key the watchdog reads (persona-verdict.yml
-      precedent), evaluated for every run, skipped ones included. (b) Recommended on the operator's 2026-11-23 card (option 1; the operator's choice pending at r3): a
+      precedent), evaluated for every run, skipped ones included. (b) Operator's choice 2026-11-23 12:13Z (decision card, option 1; thread message cmsg_013uUnYHc1Muc8Nd9vFP7qXyPopnueqpC7dVivSGrbNvZk): a
       final job `watchdog` with needs: rca and if: `(github.event_name != 'workflow_dispatch' || github.actor !=
       'otl-workflow-dispatcher[bot]') && (always() && needs.rca.result != 'skipped')` (the Decision 267 cl.3 guard
       prefix the dispatch-bot guard test requires on a job calling a status function, reconcile.yml:621 form; it runs after a
@@ -106,8 +113,9 @@ scope:
       One flow-style workflows row: ci-rca-watchdog {tier: not_a_gate, ci_rca: excluded, owner: platform, rationale:
       "Scheduled watchdog for CI RCA itself (rec-5504); its schedule puts it under loop_liveness_stale, which backstops
       a persistent red (security-detector-liveness precedent), and ci-rca.yml's own watchdog job runs the same check."}.
-      NEAR_CAP (494 of 500 effective lines at plan time): measure on main at build time; if the row does not fit,
-      collapse the multi-line Main Canary row into flow style with identical values (no semantic change) as the relief.
+      NEAR_CAP (494 of 500 effective lines at plan time; ten unbuilt plans also add rows): measure on main at build
+      time; if the row does not fit, collapse multi-line rows (Main Canary first, then security-detector-liveness,
+      telemetry-golden-replay, telemetry-verification) into flow style with identical values until it fits; never a raise.
   - file: config/composite_action_body_baseline.yaml
     action: Modify
     purpose: >-
@@ -128,7 +136,9 @@ scope:
       on page 2 are both found; watchdog.py's first-party import closure (scripts.dependency_graph) reaches only
       stdlib and yaml; dedupe skips a marker from github-actions[bot] and
       ignores the same marker from another author; a closed issue's marker still dedupes; open issue gets one comment,
-      no bot issue ever creates one; a closed bot issue is reopened and commented, not duplicated; a racing create
+      no bot issue ever creates one; a CI RCA run whose rca job succeeded and whose watchdog job failed is
+      watchdog_failed; a startup_failure run titled otherwise inside a red's window does not make the red unlinkable;
+      comment reads pass since=; a closed bot issue is reopened and commented, not duplicated; a racing create
       that finds a lower-numbered bot issue comments there and closes its own as duplicate; fixtures are small
       factory functions trimmed to the fields the watchdog reads (no actor, author or head_commit blocks, Decision
       101), keeping the file under 500 SLOC; the watched-set parse equals persona_dispatch_gate._workflow_names on the
@@ -221,6 +231,29 @@ verification_plan:
     fix_if: Open; run bin/venv-python -m scripts.session.merge_step readback and follow git-ops resolves_trailer; never close by hand after an acceptance refusal (Decision 201).
     hermetic: false
     graduation: not-applicable
+  - step: 8
+    phase: post-deploy
+    action: >-
+      Operator step (thread 2026-11-23 11:43Z): alarms after the first are comments on a reopened bot issue, which notify
+      only under an All activity watch or an issue subscription. Ask the operator to set the repository watch to All
+      activity, or subscribe to the VP6 issue, then run the check below under his own GitHub login.
+    command: gh api repos/otl-labs/ontheloop/subscription --jq '.subscribed'
+    expected: Prints true (or the operator confirms he is subscribed to the VP6 issue). Report his answer.
+    fix_if: false or 404; ask him again, naming Watch -> All activity on the repo page.
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: post-deploy
+    action: >-
+      Optional live proof of the failure path without an LLM turn: the operator dispatches ci-rca.yml on main with run_id
+      set to a green run of a watched workflow; the persona gate refuses ("run has not failed"), the rca job fails, and
+      the watchdog job judges its own run with self-result failure. Skip if rec-4678's fallback is built and would file
+      a rec for this refusal.
+    command: gh api "repos/otl-labs/ontheloop/actions/workflows/ci-rca.yml/runs?event=workflow_dispatch&per_page=3" --jq '.workflow_runs[] | [.id, .conclusion, .display_title] | @tsv'
+    expected: The dispatched run concluded failure, its watchdog job concluded success, and the watchdog issue carries a marker ci-rca-watchdog:rca_failed:<that run id> within minutes of the rca job ending. Name the run id.
+    fix_if: No marker; read the watchdog job log, fix forward.
+    hermetic: false
+    graduation: not-applicable
 test_obligations:
   - source: scripts/ci_rca/watchdog.py
     behavior: Every kind, ok, unlinkable, grace, fork and non-watched filtering, newest-linked selection, self-run judgement, one line per marker, page-2 reads, stdlib-and-yaml import closure, author-bound dedupe across open and closed issues, comment-or-create posting, allowed-fields-only text, truncation and gh-failure exit 1, dry run and summary line.
@@ -272,7 +305,7 @@ context:
     Origin: Fable consult /mnt/project-files/ci-rca-smoke-run/advisor-brief-2/ADVICE.md item 1; operator chose it
     2026-11-23 11:22Z, own plan 11:24Z, "write the plan" 11:44Z. rec-5504 reshaped through update_rec (read back open);
     rec-4678 edge dropped (same-file textual overlap only). Critique r1 (B1/B2) showed a workflow_run
-    wake floods dispatch_integrity's run window and misses depth-3 chains; the in-workflow job is option 1 on the operator's card (pending). Follow-on rec-5515 (preflight lists open watchdog issues).
+    wake floods dispatch_integrity's run window and misses depth-3 chains; the operator chose the in-workflow job 2026-11-23 12:13Z (card option 1); rec-5504's context was updated to match (update_rec, read back open). Follow-on rec-5515 (preflight lists open watchdog issues).
   - >-
     Evidence: CI RCA runs 44945298668 and 44956689529 failed 2026-11-21 unnoticed (10 failed or cancelled since 11-01).
     CI RCA is excluded from its own filter (loop guard). A green CI RCA run is an outcome: rec filed and marked, dedup
@@ -295,6 +328,7 @@ gate_rounds:
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 4, nits: 7}  # B1 workflow_run wake floods dispatch_integrity 1000-run window; B2 depth-3 chains; B3 pagination all reads; B4 one line per marker; N1-N7 applied (N5 cites +74 +84 +197)
   - {gate: decision-scout, round: 3, scout_input_fingerprint: "v1:43c6b983f92db741c078fdac0e7626e4bb9249f19619235ac4bacf9d0455d235", verdict: FLAGS_FOUND}  # CONTRADICT WARN 267 cl.3: both job ifs need the exact guard prefix; applied
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 7}  # B1 two writers race: reopen-and-comment lowest bot issue, create only if none ever, racing duplicate self-closes; N1-N7 applied (N3 kept own parse + equality test)
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 1, nits: 7}  # B1 record operator's card answer + rec-5504 context (done, read back); N1 judge rca job not run; N2 untitled == "CI RCA"; N3 comments since=; N4 operator watch step VP8; N5 failure-path proof VP9; N6 REST-only + repo_identity; N7 relief fallbacks
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -311,7 +345,7 @@ execution_steps:
   - Code review via a fresh code-review subagent; fix blocking findings; rerun VP 1-2.
   - >-
     CLOSURE per the implement skill Commit Flows; VP 4 on the committed clean HEAD; push; PR; squash-merge on green
-    with "Resolves: rec-5504"; merge_step readback; VP 5-7.
+    with "Resolves: rec-5504"; merge_step readback; VP 5-9 (VP 8-9 ask the operator).
   - 'Report: what was implemented, verification results, PR and merge SHA, the VP 6 issue number, VP 7 read-back.'
 rollback: >-
   Revert the build's squash commit: the watchdog workflow and the run-name go; nothing else depended on
