@@ -25,30 +25,37 @@ commit them). You draft; the human disposes.
 
 This prompt hands you FACTS (Section 10) and CANDIDATE hypotheses (below). It hands you no verdicts. ASSUME NO
 CANDIDATE IS A REAL DEFECT UNTIL YOU TRACE IT. A run that merely confirms the candidates below has failed. Candidates
-are leads of uneven quality, deliberately unranked; some are expected to be dismissed, and defects not listed here are
-expected to be found.
+are leads of uneven quality, deliberately unranked; some are expected to be dismissed, and you should look for defects
+not listed here -- but report only what you trace (precision wins over count; Section 17).
 
-Adjudicate every candidate to exactly one outcome, and record it where the mapping says:
+What a defect is, for this audit: (a) a property of the BUILT tree today that you can cite at file:line (or observe
+by a command) and that works against the North Star (Section 6); or (b) an insufficiency in a RECORDED design (a
+Decision clause, a roadmap criterion, a contract rule) such that building it as written would leave a gap. The mere
+absence of something designed but deliberately unbuilt is NOT a defect: an unbuilt T4.24 criterion is a
+`pull_forward_sequencing` row (Q4), never by itself a finding.
+
+Adjudicate every candidate, and record it where the mapping says:
 
 | Adjudication | Where it goes |
 |---|---|
-| CONFIRMED defect, no owning roadmap item / Decision / open rec | `findings[]`, `roadmap_crossref.classification: novel` |
-| Planned, and the owning item's remedy is insufficient | `findings[]`, `classification: planned-insufficient` |
-| Planned, owning item's remedy is sufficient but unbuilt (deferred or not) | `findings[]`, `classification: planned-unbuilt` |
+| Defect (a) or (b), no owning roadmap item / Decision / open rec | `findings[]`, `roadmap_crossref.classification: novel` |
+| Defect whose owning item's remedy, as recorded, is insufficient | `findings[]`, `classification: planned-insufficient` |
+| Defect (a), observable in the built tree today, whose owning item's remedy is sufficient but unbuilt | `findings[]`, `classification: planned-unbuilt` |
+| No present defect: the owning design is sufficient and simply unbuilt | `rejected_candidates[]`: `why_dismissed` "deferred; owned by <item>"; its timing goes in `pull_forward_sequencing` |
 | Planned and fully covered: the owning remedy is BUILT and works | `rejected_candidates[]`, naming the owning item |
 | Not a defect | `rejected_candidates[]`, naming the compensating control or the reason |
 
-A `deferred_post_mvp` status is never by itself a defect (Section 13): absence of a deliberately deferred build is not
-a finding. A finding on deferred work exists only where the design is insufficient (`planned-insufficient`), or where
-the design is sufficient but the pull-forward needs it built (`planned-unbuilt`). When to build it is answered in the
-`pull_forward_sequencing` block (Q4).
+A `deferred_post_mvp` status is never by itself a defect (Section 13).
 
 A candidate may be partly confirmed and partly dismissed: then it appears in one or more findings for the confirmed
-part AND in one `rejected_candidates` row for the dismissed part. Every candidate appears at least once.
+part AND in one `rejected_candidates` row for the dismissed part. Every candidate appears at least once. A defect you
+find yourself that turns out to be fully covered goes in `rejected_candidates` with `candidate: "NEW: <short title>"`.
 
-Candidates (C1-C23) are numbered with an upper-case C; they are unrelated to T4.24's lower-case criteria c1-c17. Each
-is phrased as an observation plus the hypothesis to test. C21-C23 are counter-hypotheses that existing mechanisms
-already suffice; adjudicate them with the same rigour:
+Candidates (C1-C25) are numbered with an upper-case C; they are unrelated to T4.24's lower-case criteria c1-c17. Each
+is phrased as an observation plus the hypothesis to test. C21-C25 are counter-hypotheses that existing mechanisms
+already suffice; adjudicate them with the same rigour, with the polarity reversed: a counter-hypothesis that HOLDS
+goes to `rejected_candidates` (`why_dismissed` states what suffices; `control_property_match` is required); one that
+is REFUTED becomes the subject of a finding.
 
 - C1. The only recorded release classification in the repository is `binds` (repository / release / both) and
   `adopters` (bound / may_override / set_scale) on the nine `docs/contracts/north-star.yaml` principles. Hypothesis:
@@ -121,6 +128,11 @@ already suffice; adjudicate them with the same rigour:
 - C23. Counter-hypothesis: the persona contract's typed-input design (inputs materialised by a shell, a pinned
   template) already provides the seam adopter guidance needs: guidance would be one more typed input, and the hash pin
   covers only the template, not input values.
+- C24. Counter-hypothesis: the roughly 88 module-level root constants (C4) can be redirected cheaply through one shim
+  module, so their number is not a material migration cost.
+- C25. Counter-hypothesis: many of the roughly 332 test files that quote repository paths (C18) test checks that are
+  correctly `repository_only` or `optional_profile`, so their coupling to this repository is right rather than a
+  defect.
 
 ## 3. READ FIRST -- DISAMBIGUATION TRAPS
 
@@ -145,8 +157,17 @@ already suffice; adjudicate them with the same rigour:
   (`config/agent/executor/prompts/`) belongs to it. The Decision 185 loop's personas (`docs/contracts/personas/`,
   run via `run_persona`) are its successors and are a different surface. Do NOT read "executor" in a file name as
   "legacy": `config/agent/executor/capabilities.yaml` and its `boundary_patterns` are live, read by current checks
-  (verify by grepping `scripts/checks/` for `capabilities.yaml`), and C13 concerns that live list.
-- Identifier collisions inside this prompt: candidates C1-C23 (upper-case C) are not T4.24 criteria c1-c17
+  (verify by grepping `scripts/checks/` for `capabilities.yaml`), and C13 concerns that live list. Likewise "the
+  executor runs an installed kernel" in Decision 185 clause 3 (Q6's anchor) means the Decision 185 loop, so Decision
+  247's retirement does not make that rule moot.
+- "Kernel", "engine" and "core": "core" (glossary) is everything a release carries for free. "Kernel" (Decision 185
+  clause 3, T4.24 c3, T4.22 c5) is the loop's executing code that the released-version rule says must be installed,
+  not loaded from the edited tree -- a part of the core. "Engine" in prose and the bucket name `core_engine` mean
+  any code a release ships and runs; `core_engine` is a classification bucket, not a component name.
+- "Tier A/B/C": in this audit, always Decision 196's decision tiers (A north stars, B decisions a release ships, C an
+  adopter's own decisions). Decision 66 (`docs/DECISIONS.md` ~13829) uses "Tier A/B/C/D" for unrelated enforcement
+  tiers of the rec write gateway; ignore that sense here.
+- Identifier collisions inside this prompt: candidates C1-C25 (upper-case C) are not T4.24 criteria c1-c17
   (lower-case c, always written `T4.24 c<n>` or `T4.24:c<n>`); north-star principles P1-P7 (Section 6) are not method
   phases M1-M9 (Section 12); audit surfaces S1-S5 are not the prose-budget classes S1/S2/S4/S8 of
   `config/prose_budgets.yaml` (written here as "prose class S<n>"); surface classes K01-K29 are this prompt's own.
@@ -166,14 +187,15 @@ already suffice; adjudicate them with the same rigour:
 
 Trust nothing quoted in this prompt. Obtain every file, line, count and size by reading the repository; re-derive
 from the repo and record any anchor that does not resolve in `meta.stale_anchors` (string: "<anchor as quoted> ->
-<what you found>"), then continue.
+<what you found>"), then continue. A "~N" line anchor resolves if the named content is within 10 lines of N; a count
+quoted with "about" or "roughly" holds if within 10 percent.
 
 Surfaces (state as of compose time; verify):
 
 | Id | Surface | State |
 |---|---|---|
 | S1 | Core code: `scripts/`, `src/`, `bin/` | built |
-| S2 | Contracts and configuration: `docs/contracts/`, `config/`, `docs/contracts/project-configuration.yaml` (settings registry), `docs/contracts/ports.yaml`; the tracked `ontheloop/` root, `ontheloop/platform.yaml`, the `.ontheloop/` runtime root | registry built; tracked `ontheloop/` and `ontheloop/platform.yaml` designed-unbuilt (T4.24 c12, c14, c15); `.ontheloop/` partly in use: `.gitignore` ignores only `/.ontheloop/maps/`, which `docs/contracts/visual-grammar.yaml` uses as a default folder "until T4.24 c12 creates and ignores that whole root" |
+| S2 | Contracts and configuration: `docs/contracts/`, `config/`, `docs/contracts/project-configuration.yaml` (settings registry), `docs/contracts/ports.yaml`; the tracked `ontheloop/` root, `ontheloop/platform.yaml`, the `.ontheloop/` runtime root | registry built; tracked `ontheloop/` and `ontheloop/platform.yaml` designed-unbuilt (T4.24 c12, c14, c15); `.ontheloop/` untracked and partly in use: `.gitignore` ignores only `/.ontheloop/maps/` (the default folder `docs/contracts/visual-grammar.yaml` names), an ignore that lasts "until T4.24 c12 creates and ignores that whole root" |
 | S3 | Decision corpus and tiers: `docs/DECISIONS.md`, `docs/DECISIONS_ARCHIVE.md`, `docs/contracts/north-star.yaml`, `docs/contracts/decision-entry.yaml`; the Tier B release snapshot, Tier B/C id prefixes, the house-style profile | corpus built; Tier B snapshot, prefixes and profile designed-unbuilt (Decision 196 clause 8; T4.24 c7, c9) |
 | S4 | Agent instruction surfaces: `AGENTS.md`, `CLAUDE.md`, `**/CLAUDE.md`, `.claude/skills/`, `.claude/commands/`, `.claude/hooks/`, `.claude/settings.json`, the `ontheloop` Claude Code plugin manifests, `docs/contracts/personas/`, `docs/contracts/executor-personas.yaml`, `docs/contracts/instruction-architecture.yaml` | built for this repository; no design for adopter customisation found at compose time (C15 to adjudicate) |
 | S5 | Packaging and bootstrap: root packaging and tool config (`pyproject.toml`, `requirements*`), `packages/`, the released-version rule (Decision 185 clause 3), its dependency on SIT/PROD (T2.57, T2.58), the three-repository topology (Decision 209 clause 3) | placeholders only; designed-unbuilt (T4.24 c1, c3, c5) |
@@ -193,8 +215,9 @@ Release classification buckets (the vocabulary of Q1; pinned):
 - `split` -- the surface class mixes buckets; the block entry's `mechanism` names each part and its bucket.
 
 Surface classes for the `release_classification` block (K01-K29). Classify every one; `split` is expected for several.
-Every tracked path belongs to exactly one class: a path matched by K01-K28 belongs there, and K29 takes everything
-else.
+Every tracked path belongs to exactly one class. Where classes overlap, the most specific (longest matching) path
+wins, with one exception: every `CLAUDE.md` file belongs to K23 wherever it sits. A path matched by no K01-K28 entry
+belongs to K29.
 
 K01 `scripts/checks/` | K02 `scripts/validate.py` and `scripts/checks/registry.py` dispatch | K03 `scripts/ops_portal/`,
 `scripts/ops_data_portal.py`, `scripts/ops/` | K04 `scripts/roadmap/` | K05 `scripts/personas/`,
@@ -213,7 +236,8 @@ K08 `scripts/ci/`, `scripts/ci_rca/` | K09 `scripts/telemetry_capture/`, `script
 `docker/`, `migrations/` | K28 `tests/`, `bin/`, root packaging and tool config (`pyproject.toml`, `requirements*`,
 `.importlinter`, `.pre-commit-config.yaml`), `packages/` | K29 every other tracked path (one entry; name notable
 members, for example `src/` packages not listed in K13-K15, other `docs/` files, root files such as `README.md`, the
-licence files and `EVALUATION-PROMPTS.yaml`, and the partly used `.ontheloop/` root).
+licence files and `EVALUATION-PROMPTS.yaml`). K29's entry also classifies the untracked, partly used `.ontheloop/`
+runtime root, the one untracked path in this block.
 
 Classify at surface-class granularity. Do not classify file by file except inside the bounded samples of Section 11.
 The operator did not settle whether `tests/` and `terraform/` belong in the classification; they are included as
@@ -236,15 +260,20 @@ Run these first. NEVER abort on a failure -- take the named degraded path.
 0. Hook canary (repository rule, AGENTS.md): if your opening context has no `[hook_canary]` line from this
    repository's hooks, say "repo hooks not loaded" as your first status, write nothing, and end the turn. This is the
    one sanctioned stop in this prompt.
-1. `git fetch origin main` then `git rev-parse --short origin/main`. This sha IS the audited tree; use it in the
-   deliverable filenames, the branch name and `meta.audited_commit`. Then
-   `git switch -c audit/release-boundary-<sha> origin/main` now, so everything you read is the audited tree. IF that
-   branch already exists (locally per `git branch --list`, or on the remote per `git ls-remote --heads origin <name>`),
-   append `-r2` (then `-r3`, ...) to the branch name only; the deliverable filenames keep `<sha>`. IF deliverables
-   named `audits/release-boundary-<sha>.yaml` or `.md` already exist in the tree, name yours
-   `audits/release-boundary-<sha>-r2.yaml` / `.md` (then `-r3`, ...), use those names everywhere this prompt says
-   `release-boundary-<sha>`, and record the suffix in `meta.contract_notes`. IF fetch fails: use
-   `git rev-parse --short HEAD`, branch off `HEAD` instead, and record "base is local HEAD" in `meta.contract_notes`.
+1. Base, names, branch -- in this order:
+   a. `git fetch origin main` then `git rev-parse --short origin/main`. This sha IS the audited tree and
+      `meta.audited_commit`. IF fetch fails: use `git rev-parse --short HEAD` as the sha and `HEAD` as the base in
+      step d, and record "base is local HEAD" in `meta.contract_notes`.
+   b. Deliverable names: `audits/release-boundary-<sha>.yaml` and `.md`. IF either already exists at the base
+      (`git ls-tree origin/main audits/`), use `release-boundary-<sha>-r2` (then `-r3`, ...) for both files and record
+      the suffix in `meta.contract_notes`. Every later mention of the deliverables means these names.
+   c. Branch name: `audit/release-boundary-<sha>`. IF it already exists (locally per `git branch --list`, or on the
+      remote per `git ls-remote --heads origin <name>`), append `-r2` (then `-r3`, ...). The branch suffix and the
+      deliverable suffix are independent.
+   d. `git switch -c <branch name> origin/main` now, so everything you read is the audited tree. This prompt is the
+      operator's explicit instruction to create this branch; see Section 16 step 1. IF the switch is refused: run
+      `git switch --detach origin/main`, read from there, record "branch creation refused" in `meta.contract_notes`,
+      and at Section 16 take the step-1 refusal path.
 2. `bin/venv-python -m scripts.session.preflight --roadmap-detail full` -- writes `logs/.preflight-report.json`
    (gitignored; expected). Use it in phase M1 as context only: its roadmap section gives current item statuses to
    compare with Section 10, and its CI-RCA section tells you whether `main` is red (record a red `main` in
@@ -326,8 +355,11 @@ Answer every question in its own `question_answers` entry (Section 14). Verdict 
   `release_classification` block. Then answer: is there an existing mechanism sufficient to record and enforce such a
   classification machine-readably (consider north-star.yaml `binds`/`adopters`, Decision 196 clause 5's trimming
   rule, `ports.yaml` structural assumptions, the settings registry, `.importlinter`, `config/agent/executor/
-  capabilities.yaml`)? Where none is sufficient, propose one mechanism (shape, home, enforcing check). Verdict:
-  `sufficient | partial | insufficient` (about the mechanism).
+  capabilities.yaml`)? Where none is sufficient, propose one mechanism (shape, home, enforcing check); P3's
+  collocated-and-checked shape is one option, not a required answer. Also name any class you classified
+  `core_engine`, `release_schema_defaults` or `optional_profile` that carries operator deployment content (for example
+  an account-specific setting, an admin-only path list, or this repository's own hook settings), since a release
+  would then carry it. Verdict: `sufficient | partial | insufficient` (about the mechanism).
 - Q2 Init-specification source. T4.24 c9 derives the `otl init` specification from `ports.yaml`
   `structural_assumptions`; Decision 224 adds the settings registry. Is that pair a sufficient and complete source?
   Consider how rows are recorded, what the validator checks, the path census, the root-constant census, the byte
@@ -341,11 +373,23 @@ Answer every question in its own `question_answers` entry (Section 14). Verdict 
   T4.24 stays deferred. Is a pull-forward viable now, and in what order? Fill the `pull_forward_sequencing` block for
   every T4.24 criterion c1-c17 and for rec-4191, rec-4673, rec-5134, rec-5274, rec-5405 and rec-4391, and add any new
   slice you propose (id `NEW-<n>`). Each slice must be sized for one plan (one verifiable, revertible outcome; Decision
-  247). Mapping rules: a criterion whose status is `met`, or a rec that is `closed` with its acceptance satisfied, is
-  `already_met`; a rec that is `declined` or `superseded` is `not_applicable`; a rec still `open` whose acceptance
-  command already passes on the audited tree is `already_met` with that stated in `rationale` (check each rec's
-  acceptance this way); T4.24 c6 is `at_first_release` (out of scope, Section 4). Verdict:
-  `viable | viable_with_preconditions | not_viable`.
+  247). Mapping rules:
+  - A T4.24 criterion whose roadmap status is `met` is `already_met`.
+  - A rec is judged on the INTENT its context states, not on its acceptance command: `already_met` only when that
+    intent is achieved on the audited tree. An acceptance that already passes is evidence, not proof -- apply the
+    counterfactual "would this acceptance have failed before the rec's work was done?"; if not, it passes vacuously,
+    so say so in `rationale` and judge the intent. (rec-4191's acceptance grep already returns 12 at compose time; its
+    stated intent is to seed SA rows from `scripts/executor/` and `src/`, which Q2 assesses.) Running a rec's
+    acceptance command is optional; a command that names a test file that does not exist yet is not run.
+  - A `closed` rec whose intent is achieved is `already_met`; a `closed` rec whose intent is not achieved gets a
+    `NEW-<n>` slice for the residue and its own key is `not_applicable`; a `declined` or `superseded` rec is
+    `not_applicable`; a `failed` rec is judged as if `open`.
+  - Work that stays deferred beyond this pull-forward is `stays_deferred` (name its trigger in `blocked_behind`).
+  - T4.24 c6 is `at_first_release` (out of scope, Section 4).
+  - IF a rec's status or content cannot be read (Section 10 fallback), judge from Section 10's summary and set that
+    entry's `confidence: HYPOTHESIS`.
+  `pull_forward_sequencing` is the AUTHORITATIVE sequencing record: each finding names the slice key that fixes it in
+  `sequencing.slice_key`, and the two must not disagree. Verdict: `viable | viable_with_preconditions | not_viable`.
 - Q5 Repository topology (operator instinct: keep Decision 209 clause 3 -- this public repository holds the core; a
   public adopter products monorepo depends on On The Loop as an external dependency; a private monorepo holds the paid
   service). Does that topology hold given your Q1-Q3 answers, and what must the separation deliver before the
@@ -373,10 +417,16 @@ Answer every question in its own `question_answers` entry (Section 14). Verdict 
   drops amendment history; Rationale is optional); how should a superseding Tier C record acknowledge the rationale
   and the risk it accepts (compare Tier A's required `failure_signal`); how should rationale reach an agent at the
   moment a rule blocks it (enforcer messages pointing to the reason) without front-loading context; and which house
-  style rules are enforced in code paths an adopter cannot switch off. Verdict: `sufficient | partial | insufficient`.
-- Q9 Industry practice. Rate the designed and built state against the external checklist below, property by
-  property, in `external_checklist` (rating `met | partial | missed`; `partial` requires an argued, property-matched
-  compensating control in evidence). Verdict: `at_practice | partially_at_practice | below_practice`. Each row is
+  style rules are enforced in code paths an adopter cannot switch off -- answer this last part from the Section 11
+  check sample plus SA-03 only (no wider sweep; name further suspects in Q10). Verdict:
+  `sufficient | partial | insufficient`.
+- Q9 Industry practice. Rate the BUILT state against the external checklist below, property by property, in
+  `external_checklist`: `met` = built and working; `partial` = partly built, or the built state reaches the property
+  through an argued, property-matched compensating control (name it in evidence); `missed` = not built. A property
+  that exists only as a recorded design is `missed`; name the design and its owning item in evidence, and judge the
+  design's sufficiency in the relevant question, not in the rating. The same rule applies to rubric cells (Section 8):
+  rate what is built; a design-only target rates `absent`. Verdict: `at_practice | partially_at_practice |
+  below_practice`. Each row is
   relevant to the surfaces fixed here (used by Section 15's maturity rule; do not change them): E1 S1, S2; E2 S2;
   E3 S2, S5; E4 S5; E5 S3, S4; E6 S4; E7 S3; E8 S3; E9 S1, S4; E10 S1; E11 S5; E12 S4.
   External checklist (E1-E12; you may cite external sources within the Section 5 lookup cap):
@@ -416,6 +466,9 @@ Answer every question in its own `question_answers` entry (Section 14). Verdict 
   (`ops_data_portal --backfill-decisions-md`, AGENTS.md), with read caches `logs/.decisions-index.jsonl` and
   `docs/decisions-index.json`. How does a release locate and rebuild these for an adopter, and does Tier B appear in
   an adopter's `ops_decisions`?
+  (h) GitHub Actions is the verdict plane in every mode (Decision 184 clause 3), and this repository's gates live in
+  `.github/workflows/` and `.github/actions/` (K26). How does an adopter receive the CI gates: reusable workflows or
+  composite actions pinned to a release, or copies scaffolded by `otl init`? Which choice keeps P2 and P4?
 
 ## 8. RUBRIC
 
@@ -449,8 +502,9 @@ where a dimension does not structurally apply; never manufacture a rating or a f
   rendered prompt is built (`docs/contracts/executor-personas.yaml` `rendered_prompt` rules, `scripts/persona_contracts/
   render.py`), which declared inputs name this repository's files in their contract descriptions, and where an
   adopter-guidance input would attach. The input producers are NOT built yet: `scripts/personas/materialise.py`
-  holds an empty `PROVIDERS` registry that a later plan fills, so assess the declared design, not a producer; do not
-  search further for one. State what the hash pin covers and what it does not.
+  holds an empty `PROVIDERS` registry that a later plan fills, so assess the declared design, not a producer. Verify
+  that claim once with `git grep -l review_guidance -- scripts src .github` (expect no producer) and search no
+  further. State what the hash pin covers and what it does not.
 - DD-D Bootstrap path (feeds Q4, Q6). Using Decision 185 clause 3, Decision 252, T2.57, T2.58 and T4.22 c5 ("Loads the
   installed kernel, never the target repo tree"), describe the concrete sequence by which this repository would stop
   running its own working tree, and the earliest point each step is possible.
@@ -534,7 +588,8 @@ rec it returns is open and a rec it does not return has unknown status -- treat 
 `confidence: HYPOTHESIS`.
 - rec-4191 (open, Medium): seed `structural_assumptions` from hard-coded repository-path and AWS-identity assumptions
   in `scripts/executor/` and `src/`; acceptance is
-  `test "$(grep -c '^  - id: SA-' docs/contracts/ports.yaml)" -ge 8` plus the ports contract test. At compose time
+  `test "$(grep -c '^  - id: SA-' docs/contracts/ports.yaml)" -ge 8` plus
+  `bin/venv-python -m pytest tests/checks/contracts/test_validate_ports_contract.py::test_real_contract_passes -q`. At compose time
   that grep returns 12 (block-form rows only; 4 further rows are flow-form).
 - rec-5274 (open, Low): give `docs/contracts/ports.yaml` a real size relief valve instead of flow-style compaction
   near its cap.
@@ -552,17 +607,20 @@ rec it returns is open and a rec it does not return has unknown status -- treat 
 Tag every finding `evidence_kind: static` (read from code or docs) or `observed` (from a sampled artifact or a command
 you ran). At equal severity, observed findings outrank static ones. Hard bounds -- do NOT exceed any:
 
-- Census files: at most 15 files from the core-code path census, stratified across at least 6 packages, at least 5
+- Census files: at most 15 files from the core-code broad census, stratified across at least 6 packages (a package
+  is the first two path components, `scripts/<dir>` or `src/<dir>`; all root-level `scripts/*.py` modules count as
+  one package), at least 5
   from `scripts/checks/`. Per file, apply the counterfactual: "If this repository's `docs/`, `config/` and decision
   files moved under `ontheloop/` and the location were supplied through configuration, would this file still work
-  without an edit?" Record each file's bucket (Section 4).
+  without an edit?" Record each file's bucket (Section 4) in `empirical_samples` (Section 14).
 - Decisions: at most 10, chosen to include at least 4 house-style decisions (from 43, 86, 102, 127, 128, 240) and at
   least 3 whose clauses would ship in Tier B under the trimming rule. Per decision: does it carry Problem or
   Rationale; would its reason survive a Tier B snapshot that drops amendment history; does any enforcer message point
   to it.
 - Check failure messages: at most 8 checks; record whether the failure text names the rule's reason or the Decision
   carrying it.
-- Skills: all 9 `.claude/skills/*/SKILL.md` via the Section 5 census; read in full at most 2.
+- Skills: every `.claude/skills/*/SKILL.md` (9 at compose time; "every" governs if the count differs) via the
+  Section 5 census; read in full at most 2.
 - Persona contracts: all 5 under `docs/contracts/personas/`, reading inputs and `prompt_template` only.
 
 ## 12. METHOD
@@ -571,7 +629,8 @@ you ran). At equal severity, observed findings outrank static ones. Hard bounds 
 - M2 Trace: DD-A to DD-D.
 - M3 Classify: fill `release_classification` (Q1).
 - M4 Empirical: Section 11 samples.
-- M5 Adjudicate: every candidate C1-C23 to findings and/or `rejected_candidates`, plus any new findings.
+- M5 Adjudicate: every candidate C1-C25 to findings and/or `rejected_candidates`, plus any new findings. Their
+  `roadmap_crossref` classifications are provisional until M7.
 - M6 Rate: rubric cells; external checklist (Q9).
 - M7 Dedup: Section 13 before any finding is final.
 - M8 Sequence: fill `pull_forward_sequencing` (Q4) from surviving findings and dependencies.
@@ -599,7 +658,8 @@ exist):
   finding.
 - `deferred_post_mvp` statuses (Decision 93). Pull-forward is the `pull_forward_sequencing` block's job.
 - Licence and Additional Use Grant (Decisions 171, 194).
-- Public-content boundary (Decision 101).
+- Whether this repository is public, and what Decision 101 lets it publish. (Whether operator deployment content
+  would ride into a release IS in scope: Q1 and Section 15's critical class.)
 - GitHub as approval authority; no identity system in the core (Decision 233 clause 4).
 - Glossary names (Decision 240).
 - Persona contracts' and the loop kernel's place in `boundary_patterns` (Decision 185 clause 3).
@@ -655,12 +715,13 @@ audit:
     # class reaches its target (move into a release package, read through configuration, ship as profile, stay put).
     # what_changes = what must move or change for the class to reach its target; cost = effort to get there
   pull_forward_sequencing:
-    T4.24:c1: {verdict: now|after_prerequisite|after_sit_prod|at_first_release|already_met|not_applicable,
+    T4.24:c1: {verdict: now|after_prerequisite|after_sit_prod|at_first_release|stays_deferred|already_met|not_applicable,
                order: <int or null>, blocked_behind: [<criterion, rec, finding or item ids>],
                slice: "", rationale: "", confidence: CONFIRMED|HYPOTHESIS}
     # one per T4.24:c1..c17, rec-4191, rec-4673, rec-5134, rec-5274, rec-5405, rec-4391, and NEW-<n> slices;
     # verdict mapping rules for met criteria and closed/declined recs: Q4 text;
     # order is a 1-based global execution order across verdicts now and after_prerequisite (null otherwise);
+    # slices that can run in parallel may share an order value;
     # slice = the one-plan outcome, phrased so /plan can take it
   findings:
     - id: RB-01
@@ -675,6 +736,9 @@ audit:
       gap: ""
       compensating_controls_considered: ""
       change_type: add|rescope|enforce|unify|persist|clarify|retune_gate
+      # add = new mechanism; rescope = change an item's scope; enforce = add a check for an existing rule;
+      # unify = merge duplicate sources; persist = record something only held in prose or code; clarify = wording;
+      # retune_gate = change a threshold or trigger
       proposed_change: ""
       acceptance: ""             # a check a planner could turn into a verification step
       severity: critical|high|medium|low
@@ -682,20 +746,26 @@ audit:
       confidence: CONFIRMED|HYPOTHESIS
       roadmap_crossref: {classification: novel|planned-insufficient|planned-unbuilt, item_ids: [],
                          dedup_search_terms: [], dedup_hit_count: 0, note: ""}
-      effort: XS|S|M|L
+      effort: XS|S|M|L           # XS under an hour; S one small plan; M one full plan; L needs splitting into plans
       depends_on: [<finding ids>]
-      sequencing: {safe_to_queue_now: true|false, blocked_behind: [<finding or roadmap ids>], note: ""}
+      sequencing: {slice_key: <pull_forward_sequencing key>, safe_to_queue_now: true|false,
+                   blocked_behind: [<finding or roadmap ids>], note: ""}
+      # safe_to_queue_now = the operator could file it as a rec and plan it today without waiting on anything
   rejected_candidates:
-    - {candidate: C<n>, why_dismissed: "", compensating_control: "", control_property_match: "",
+    - {candidate: C<n> | "NEW: <short title>", why_dismissed: "", compensating_control: "", control_property_match: "",
        decision_or_item_id: ""}
+  empirical_samples:             # system of record for the Section 11 samples; never counted as findings
+    - {kind: census_file|decision|check_message|skill|persona_contract, subject: "<path or id>",
+       result: "<the per-sample answer Section 11 asks for>", bucket: <Section 4 bucket or null>, note: ""}
   summary:
     total_findings: 0
     novel_count: 0
     planned_insufficient_count: 0
     planned_unbuilt_count: 0
-    top_improvements: [<finding ids>]   # 3 to 5 ids, highest leverage first
+    top_improvements: [<finding ids>]   # min(3, total_findings) to 5 ids, highest leverage first
     highest_leverage_change: <finding id>
-    degraded: ""                        # "none", or the meta flags set to true plus the stale_anchors count
+    degraded: ""                        # "none" unless any of: a meta flag is true, stale_anchors is non-empty,
+                                        # or contract_notes records a base, branch or setup fallback; then list them
     maturity_S1: <value>
     maturity_S2: <value>
     maturity_S3: <value>
@@ -706,16 +776,19 @@ audit:
 Invariants (state them to yourself and hold them):
 - COUNTING INVARIANT: `findings[]` is the SOLE enumerated list of defects. `total_findings = len(findings) =
   novel_count + planned_insufficient_count + planned_unbuilt_count`. Fully covered candidates live in
-  `rejected_candidates`, NOT findings. `rubric_ratings`, `question_answers`, `release_classification` and
-  `pull_forward_sequencing` are systems of record referenced FROM findings, never re-counted. `top_improvements` and
+  `rejected_candidates`, NOT findings. `rubric_ratings`, `question_answers`, `release_classification`,
+  `pull_forward_sequencing` and `empirical_samples` are systems of record referenced FROM findings, never re-counted. `top_improvements` and
   `highest_leverage_change` MUST be finding ids. Order `top_improvements` by leverage; where two candidates for a
   place have equal severity and leverage, the `observed` one ranks first.
-- Every candidate C1-C23 appears at least once: in one or more findings (cite it in the finding's `title` or `gap` as
+- Every candidate C1-C25 appears at least once: in one or more findings (cite it in the finding's `title` or `gap` as
   "(C<n>)"), in one `rejected_candidates` row, or in both when partly confirmed and partly dismissed (Section 2).
 - `control_property_match` is REQUIRED whenever a compensating control is the reason for dismissal: name the property
   the control exercises, where it operates (mechanism or file:line), and why the control would FAIL if the defect were
   real.
 - CONFIRMED requires the behaviour traced to file:line or an observed sampled artifact; anything less is HYPOTHESIS.
+  For a `release_classification` entry, CONFIRMED means you read at least one file of the class (or its sampled
+  files) and the bucket follows from what you read; otherwise HYPOTHESIS.
+- Keep every free-text `evidence` field to about 40 words; a rubric cell with no finding behind it carries one line.
 - Every `release_classification` key K01-K29 and every listed `pull_forward_sequencing` key is present.
 
 Write `audits/release-boundary-<sha>.md`, prose, at most 1500 words, the layer the operator reads first:
@@ -759,8 +832,10 @@ property-matched compensating control; this prompt's framing does not foreclose 
 
 ## 16. COMMIT / PR MECHANICS
 
-1. The base was derived ONCE in Section 5 step 1 and you are on `audit/release-boundary-<sha>` created from it. The
-   `audit/` branch is SANCTIONED, not a conflict for Section 17 to resolve: `docs/contracts/git-ops.yaml` registers
+1. The base was derived ONCE in Section 5 step 1 and you are on the `audit/release-boundary-<sha>` branch (with any
+   `-rN` suffix) created from it. This prompt is the operator's explicit instruction to create that branch; AGENTS.md's
+   harness-branch rule governs routine sessions, not this one. The `audit/` branch is SANCTIONED, not a conflict for
+   Section 17 to resolve: `docs/contracts/git-ops.yaml` registers
    `extra_destination_prefixes: ["audit/"]` (its `handoff_evidence_gate` block), the governing rule for audit
    deliverables, which need a clean two-file diff off the audited base. The branch base MUST equal
    `meta.audited_commit`; the branch name carries any `-rN` suffix Section 5 step 1 added. IF creating or pushing the
