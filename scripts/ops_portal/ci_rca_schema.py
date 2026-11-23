@@ -162,6 +162,8 @@ class CiRcaContext(BaseModel):
     repair_track: Optional[str] = Field(default=None, pattern=r"^(test_defect|product_regression)$")
     repair_track_confirmed: Optional[str] = Field(default=None, pattern=r"^(test_defect|product_regression)$")
     workflow_tier: Optional[str] = None
+    # Written only by scripts/ci_rca/fallback.py: the agent terminal subtype when the fallback filed the rec.
+    agent_failure: Optional[str] = Field(default=None, pattern=r"^[a-z0-9_]{1,40}$")
 
     @field_validator("why_chain")
     @classmethod
