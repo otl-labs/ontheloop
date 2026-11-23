@@ -6,16 +6,16 @@ slug: claude-cli-seam-contract
 intent: >-
   Prove the seam between the pinned claude CLI, scripts/ci/claude_p_retry.sh and CI RCA's FILED parser
   (scripts/ci_rca/filing.py) with one contract probe that runs two ways: on every PR against golden envelopes captured
-  from the real pinned CLI, and live on push to main whenever the pin, wrapper, parser, probe or ci-rca.yml changes.
-  The CLI pin moves into one file that every install site and test reads (rec-5509), so a CLI bump like #2311 can no
-  longer break CI RCA with every unit test green.
+  from the real pinned CLI, and live on push to main whenever the pin, installer, wrapper, parser, probe or its
+  workflow changes. The CLI pin moves into one file that one validated installer reads for every install site
+  (rec-5509), so a CLI bump like #2311 can no longer break CI RCA with every unit test green.
 plan_type: IMPLEMENTATION
 verification_tier: V2
 plan_path: docs/plans/PLAN-claude-cli-seam-contract.yaml
 phase: >-
   ad_hoc_rec (soft-warn exception category: rec-5509, High, split from rec-5493 after the operator chose "watchdog
   first, rework smoke" 2026-11-23 11:22Z; no tier_item claimed, so the Tier Item Freshness Gate is skipped; closes no
-  criterion). CI scripts, a workflow job, a config file and tests change; no Lambda or Terraform, so V2 with one
+  criterion). CI scripts, one new workflow, config rows and tests change; no Lambda or Terraform, so V2 with one
   post-merge live read.
 cites: [dec:74, dec:162, dec:205, dec:224]
 scope:
@@ -23,43 +23,60 @@ scope:
     action: Create
     purpose: >-
       The single home of the claude CLI version for CI: one line, the bare version (2.1.323 today), trailing newline,
-      nothing else. Every install site and test reads it; a bump is a one-line edit plus a golden recapture.
+      nothing else. Only scripts/ci/install_claude_cli.sh and tests read it; a bump is a one-line edit plus a golden
+      recapture.
+  - file: scripts/ci/install_claude_cli.sh
+    action: Create
+    purpose: >-
+      The one installer every site calls: `install_claude_cli.sh <repo_root>`. Reads <repo_root>/config/claude-cli-version
+      and validates it against ^[0-9]+\.[0-9]+\.[0-9]+$ before anything else; a missing, unreadable or malformed file
+      prints one stderr line naming the cause and exits 2 with no npm call (fails closed, never an unpinned install).
+      If `command -v claude` succeeds it prints the installed version and exits 0 (today's guard semantics). Otherwise
+      it runs `sudo npm install -g "@anthropic-ai/claude-code@${version}" --omit=dev --omit=optional && sudo npm cache
+      clean --force` (Decision 74's flags), then requires `claude --version` to contain the pin, else exits 1. Bash,
+      `set -euo pipefail`, no other side effects.
   - file: .github/workflows/ci-rca.yml
     action: Modify
     purpose: >-
-      (a) The rca job's Install Claude Code CLI step installs "@anthropic-ai/claude-code@$(cat config/claude-cli-version)"
-      instead of the literal version, keeping the `if ! command -v claude` guard and sudo/--omit flags. (b) A new
-      on.push trigger: branches [main], paths = exactly the seam job's inputs (config/claude-cli-version,
-      .github/workflows/ci-rca.yml, scripts/ci/claude_p_retry.sh, scripts/ci/claude_p_seam_contract.py,
-      scripts/ci_rca/filing.py); the test in scope derives that set and fails on any difference. (c) A new job `seam`
-      with `if: github.event_name == 'push'`, runs-on ubuntu-latest, timeout-minutes 10, permissions contents: read
-      only, no AWS role and no aws-region action: SHA-pinned checkout, setup-python 3.12, the same venv install the rca
-      job uses (satisfies validate_workflow_dependency_install), the pinned CLI install, then one step `Seam contract
-      probe` with CLAUDE_CODE_OAUTH_TOKEN in its env only, running `bin/venv-python -m scripts.ci.claude_p_seam_contract`.
-      Every new run: body stays at most 3 effective lines (each gets a baseline row, scope row below). (d) The concurrency group gains
-      `github.sha` as its push fallback so seam runs never share a group with rca runs. The rca job's `if:` already
-      evaluates false on push (no workflow_run conclusion, not a dispatch); a test pins that.
+      Only the rca job's Install Claude Code CLI step changes: it moves to just after the first (default-branch)
+      checkout, before "Checkout at failing commit", so the pin and installer are read from the trusted main tree, and
+      its body becomes `bash scripts/ci/install_claude_cli.sh "$GITHUB_WORKSPACE"` then `claude --version` (no more
+      effective lines than today). The CLI is a global install, so the later checkout does not remove it. No trigger,
+      job, concurrency or other step changes.
+  - file: .github/workflows/ci-rca-seam.yml
+    action: Create
+    purpose: >-
+      The live seam lane, its own workflow so the persona trigger policy holds (critique round 1 measured 8 guard
+      problems for a job inside ci-rca.yml and none for a separate push-only file). `on: push` only: branches [main],
+      paths = exactly the derived set test_seam_paths_filter_is_derived computes. permissions contents: read; no AWS
+      role, no aws-region action; concurrency group ci-rca-seam, cancel-in-progress false. One job `seam`,
+      ubuntu-latest, timeout-minutes 10: SHA-pinned checkout (persist-credentials false), setup-python 3.12, the venv
+      install the rca job uses (validate_workflow_dependency_install), `bash scripts/ci/install_claude_cli.sh
+      "$GITHUB_WORKSPACE"`, then the step `Seam contract probe` with CLAUDE_CODE_OAUTH_TOKEN in its env only, running
+      `bin/venv-python -m scripts.ci.claude_p_seam_contract`. Every run: body at most 3 effective lines. Not a
+      required check. The one-turn probe session is deliberately not captured by telemetry-ci-capture: it is a
+      contract check, not an agent run, and the wrapper is driven from Python, so validate_claude_p_retry_wrapper's
+      call-site rule does not see it.
+  - file: config/ci_rca_taxonomy.yaml
+    action: Modify
+    purpose: >-
+      One flow-style workflows-map row: ci-rca-seam: {tier: not_a_gate, ci_rca: excluded, owner: platform, rationale:
+      "Push-to-main live probe of the claude CLI seam (rec-5509); a red run is the alarm, never a gate on main."}
+      (subagent-review-smoke's row is the model). Relief, measured after rebasing: if the row would take the file past
+      500 effective lines, compact one existing block-style workflows row to flow style with identical words, in this
+      file only (the operator's 'compact, don't add' ruling for capped files), never a raise.
   - file: config/composite_action_body_baseline.yaml
     action: Modify
     purpose: >-
-      validate_composite_action_shell_bodies R3 needs one r3 row per new inline run: body: the seam job's steps
-      (keys ".github/workflows/ci-rca.yml::seam::<step-id>", values their measured effective line counts, at most 3
-      each). If the rca job's install body's line count changes, its row is updated to the measured value (a decrease
-      is unrestricted; an increase is avoided by keeping the body's line count). No raise marker is needed.
+      validate_composite_action_shell_bodies R3 rows (r3_workflows section, keys "<workflow>::<job>::<step-id>") for
+      each new inline run: body in ci-rca-seam.yml at its measured effective line count, no headroom; the rca
+      install step's row re-measured (it may only decrease). No raise marker.
   - file: .github/actions/subagent-plan-review/review.sh
     action: Modify
     purpose: >-
-      Installs "@anthropic-ai/claude-code@${CLI_VERSION}" where CLI_VERSION is read from
-      "${WORKSPACE_ROOT}/config/claude-cli-version" and must match ^[0-9]+\.[0-9]+\.[0-9]+$; an unreadable or
-      malformed file fails closed through the existing _starved_marker path before any reviewer invocation. Nothing
-      else changes.
-  - file: tests/test_subagent_review_wiring.py
-    action: Modify
-    purpose: >-
-      Decision 162 R2 (scout NOTE): a new node test_missing_or_malformed_cli_pin_starves runs review.sh under the
-      literal GITHUB_COMPOSITE_BASH argv with no claude binary on PATH and stub sudo and npm on PATH that record any
-      call, once with config/claude-cli-version missing and once holding "latest"; both write outcome=starved, exit 1
-      and make no npm call. Existing nodes unchanged.
+      The guarded literal install becomes `if ! bash "${WORKSPACE_ROOT}/scripts/ci/install_claude_cli.sh"
+      "${WORKSPACE_ROOT}"; then` _starved_marker naming the installer failure, outcome=starved, exit 1. It runs
+      unconditionally (the installer holds the `command -v claude` guard). Nothing else changes.
   - file: scripts/ci/claude_p_seam_contract.py
     action: Create
     purpose: >-
@@ -70,26 +87,43 @@ scope:
       its is_error is false and its result is a string; <out>.stderr exists; and
       scripts.ci_rca.filing.extract_filed_recs(out) == [("rec-0", "seam_contract")]. Prints one PASS line and returns 0,
       else returns 1. A failing marker check with a valid envelope says "envelope ok, marker missing (model reply)" so
-      a model wording slip is told apart from a broken seam; no retry is added beyond the wrapper's (Decision 55).
-      `--capture <dir>` (used only by a person or agent recapturing goldens after a pin bump) runs the same probe and,
-      on PASS, writes <dir>/success.stdout.json (session_id and uuid values replaced by fixed zero UUIDs, nothing else
-      changed) and <dir>/success.stderr.txt. `--out` defaults to a temp path.
+      a model wording slip is told apart from a broken seam; no retry beyond the wrapper's (Decision 55).
+      `--capture <dir>` (used only to recapture goldens after a pin bump) runs the same probe and, on PASS, writes
+      <dir>/success.stdout.json (session_id and uuid values replaced by fixed zero UUIDs, nothing else changed),
+      <dir>/success.stderr.txt and <dir>/version.txt (the `claude --version` output). `--out` defaults to a temp path.
   - file: tests/ci/test_claude_p_seam_contract.py
     action: Create
     purpose: >-
       rec-5509's acceptance. Nodes: test_golden_envelope_passes_real_wrapper_and_parser (a stub `claude` on PATH replays
       tests/fixtures/claude_cli_envelopes/<pin>/success.stdout.json on stdout and success.stderr.txt on stderr, exit 0;
       main() returns 0); test_stderr_in_envelope_fails_the_probe (stub writes the golden stderr then the envelope to
-      stdout, the #2311 shape; main() returns 1 and names the envelope); test_marker_missing_is_named (envelope with
-      the marker line removed; returns 1 with "marker missing"); test_golden_matches_pin (the fixture directory named by
-      config/claude-cli-version exists with both files, and no other version directory exists);
-      test_seam_paths_filter_is_derived (ci-rca.yml on.push.paths equals the set derived at test time: the pin file,
-      ci-rca.yml, WRAPPER, the probe module and the repo files of its scripts.* import closure walked with ast; never a
-      list restated in the test); test_seam_job_shape (seam job: if push only, contents read only, no
-      configure-aws-credentials step, OAuth token only in the probe step env, installs from the pin file; rca job's if:
-      unchanged and contains the workflow_run failure conjunct); test_capture_normalises_ids (capture mode against the
-      stub writes both files with zero UUIDs and an otherwise identical key set). Covers claude_p_seam_contract.py at
-      100% lines in-process (main() called directly with monkeypatched PATH).
+      stdout, the #2311 shape; main() returns 1 and names the envelope); test_marker_missing_is_named;
+      test_golden_matches_pin (the directory named by config/claude-cli-version exists with all three files, its
+      version.txt contains the pin, and no other version directory exists); test_seam_paths_filter_is_derived
+      (ci-rca-seam.yml on.push.paths equals the set derived at test time: the pin file, ci-rca-seam.yml, the wrapper,
+      the installer, and the repo file of every module in the probe's forward import closure from
+      scripts.dependency_graph's import_subgraph/forward_closure plus the probe itself, package __init__.py files
+      included exactly when that closure names them; never a list restated in the test); test_seam_workflow_shape
+      (on is exactly {push} on main; permissions contents read only; no configure-aws-credentials step; the OAuth
+      token only in the probe step env; the installer is called before the probe); test_capture_normalises_ids
+      (capture mode against the stub writes the three files with zero UUIDs and an otherwise identical key set).
+      Covers claude_p_seam_contract.py at 100% lines in-process (main() called directly with a monkeypatched PATH).
+  - file: tests/ci/test_install_claude_cli.py
+    action: Create
+    purpose: >-
+      Decision 162 R2: every node runs the installer under the literal composite argv
+      (bash --noprofile --norc -e -o pipefail <script> <root>) with PATH limited to a stub directory plus /usr/bin and
+      /bin, whose stub sudo and npm record their argv: missing pin file -> exit 2, no npm call; "latest" -> exit 2, no
+      npm call; valid pin, no claude -> npm called with exactly "@anthropic-ai/claude-code@<pin>" and the --omit flags;
+      claude already present -> exit 0, no npm call; post-install `claude --version` not containing the pin -> exit 1.
+  - file: tests/ci/test_review_sh_cli_pin.py
+    action: Create
+    purpose: >-
+      Decision 162 R2 for review.sh's starve branch, in its own file because tests/test_subagent_review_wiring.py is at
+      470 of 500 SLOC: runs review.sh under the literal composite argv with a minimal env (WORKSPACE_ROOT pointing at a
+      tmp root holding the real installer and a missing or malformed pin, CLAUDE_CODE_OAUTH_TOKEN set, GITHUB_OUTPUT a
+      tmp file, stub sudo and npm on a limited PATH) and asserts outcome=starved, exit 1 and no npm call. Its own
+      minimal harness (no import from another test module).
   - file: tests/fixtures/claude_cli_envelopes/2.1.323/success.stdout.json
     action: Create
     purpose: >-
@@ -100,23 +134,29 @@ scope:
   - file: tests/fixtures/claude_cli_envelopes/2.1.323/success.stderr.txt
     action: Create
     purpose: Golden stderr from the same capture (the untrusted-workspace warning if the CLI prints it, else empty).
+  - file: tests/fixtures/claude_cli_envelopes/2.1.323/version.txt
+    action: Create
+    purpose: The captured CLI's `claude --version` output, so a golden copied forward under a new version name fails.
   - file: tests/test_claude_cli_model_pin.py
     action: Modify
     purpose: >-
-      PIN is read from config/claude-cli-version instead of the literal. test_every_install_pins_the_current_version
-      becomes: every install site under .github/ references config/claude-cli-version (ci-rca.yml via $(cat ...),
-      review.sh via CLI_VERSION) and no file under .github/ or tests/ (outside the fixture directory names) holds a
-      literal x.y.z claude-code version. Other nodes unchanged except _reaches_install also matching the pin-file form,
-      so the seam job counts as an install site on ubuntu-latest.
+      PIN is read from config/claude-cli-version. The assertions move with the install line, never weakened
+      (Decision 235): the only "@anthropic-ai/claude-code@" install line in the repo is the installer's, and it is
+      sudo-prefixed with the --omit flags and behind the `command -v claude` guard; no file under .github/, scripts/ or
+      tests/ (outside the fixture directory names and version.txt) holds a literal x.y.z claude-code version; every job
+      that reaches the installer (ci-rca.yml rca, ci-rca-seam.yml seam, and the subagent-plan-review users) runs on
+      ubuntu-latest; ci-rca.yml's install step comes before "Checkout at failing commit". The model/effort node is
+      unchanged.
 bundled_recommendations: [rec-5509]
 followon_recs: []
 infrastructure_dependencies: []
 acceptance_criteria:
-  - config/claude-cli-version is the only place a claude CLI version is written for CI; ci-rca.yml, review.sh and tests read it.
+  - config/claude-cli-version is the only place a claude CLI version is written for CI, and scripts/ci/install_claude_cli.sh is the only install line; ci-rca.yml, ci-rca-seam.yml and review.sh call it.
+  - A missing or malformed pin fails closed in the installer and in review.sh, with no npm call.
   - On a PR, the probe passes against golden envelopes from the pinned CLI through the real wrapper and FILED parser, and fails on the #2311 shape.
-  - A pin bump without a matching golden directory fails the PR.
-  - On push to main touching the pin, wrapper, parser, probe or ci-rca.yml, ci-rca.yml's seam job runs the real pinned CLI and the probe passes; the job holds no AWS role.
-  - The seam job's paths filter equals a set the test derives; adding an import to the probe without the filter fails.
+  - A pin bump without a matching golden directory (version.txt included) fails the PR.
+  - On push to main touching the seam's inputs, ci-rca-seam.yml runs the real pinned CLI and the probe passes; it holds no AWS role and passes validate_persona_trigger_policy.
+  - The seam workflow's paths filter equals a set the test derives; adding an import to the probe without the filter fails.
   - rec-5509 closes on the build's merge.
 verification_plan:
   - step: 1
@@ -141,41 +181,59 @@ verification_plan:
     graduation_check_id: claude-cli-seam-detects-2311-shape
   - step: 3
     phase: pre-deploy
-    action: "Golden directory matches the pin; the seam paths filter is derived (red before: file absent)."
-    command: bin/venv-python -m pytest "tests/ci/test_claude_p_seam_contract.py::test_golden_matches_pin" "tests/ci/test_claude_p_seam_contract.py::test_seam_paths_filter_is_derived" -q
-    expected: exit 0, 2 passed
-    fix_if: a mismatch between the filter and the derived set, or a missing or extra version directory
+    action: "The golden directory matches the pin (red before: file absent)."
+    command: bin/venv-python -m pytest "tests/ci/test_claude_p_seam_contract.py::test_golden_matches_pin" -q
+    expected: exit 0, 1 passed
+    fix_if: a missing or extra version directory, or version.txt not naming the pin
     hermetic: true
-    expected_literals: ["2 passed"]
+    expected_literals: ["1 passed"]
     graduation: graduate
-    graduation_check_id: claude-cli-seam-pin-and-filter
+    graduation_check_id: claude-cli-seam-golden-pin
   - step: 4
     phase: pre-deploy
-    action: "No literal CLI version outside the pin file (red before: the assertion fails on the three literals; the starve node is absent)."
-    command: >-
-      bin/venv-python -m pytest "tests/test_claude_cli_model_pin.py::test_every_install_pins_the_current_version"
-      "tests/test_subagent_review_wiring.py::test_missing_or_malformed_cli_pin_starves" -q
-    expected: exit 0, 2 passed
-    fix_if: a literal version remains in ci-rca.yml, review.sh or a test, or a bad pin file reaches npm
+    action: "The seam workflow's paths filter is derived (red before: file absent)."
+    command: bin/venv-python -m pytest "tests/ci/test_claude_p_seam_contract.py::test_seam_paths_filter_is_derived" -q
+    expected: exit 0, 1 passed
+    fix_if: the filter and the derived set differ
     hermetic: true
-    expected_literals: ["2 passed"]
-    graduation: waive
-    graduation_waiver_reason: The node already lives in a fast-tier selected file that changes in this plan; VP 3 graduates the pin-to-golden binding.
+    expected_literals: ["1 passed"]
+    graduation: graduate
+    graduation_check_id: claude-cli-seam-paths-derived
   - step: 5
     phase: pre-deploy
-    action: Whole-file re-runs of every test that drives the wrapper, parser, pin or ci-rca.yml guards.
+    action: "A bad pin fails closed in the installer and in review.sh, under the literal composite argv (red before: files absent)."
+    command: bin/venv-python -m pytest tests/ci/test_install_claude_cli.py tests/ci/test_review_sh_cli_pin.py -q
+    expected: exit 0, no failures
+    fix_if: npm is called for a missing or malformed pin, or review.sh does not write outcome=starved
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: claude-cli-installer-fails-closed
+  - step: 6
+    phase: pre-deploy
+    action: "No literal CLI version outside the pin file; one install line (red before: the assertion fails on the three literals)."
+    command: bin/venv-python -m pytest "tests/test_claude_cli_model_pin.py::test_every_install_pins_the_current_version" -q
+    expected: exit 0, 1 passed
+    fix_if: a literal version remains, or an install line outside the installer
+    hermetic: true
+    expected_literals: ["1 passed"]
+    graduation: waive
+    graduation_waiver_reason: The node lives in a file the fast tier selects whenever these surfaces change; VP 3 and VP 5 graduate the pin binding and the fail-closed installer.
+  - step: 7
+    phase: pre-deploy
+    action: Whole-file runs of every test that drives the wrapper, parser, pin, installer or the workflow guards the new workflow meets.
     command: >-
-      bin/venv-python -m pytest tests/ci/test_claude_p_seam_contract.py tests/test_claude_cli_model_pin.py
-      tests/test_ci_claude_p_retry.py tests/ci_rca/test_filing_stderr_preamble.py tests/test_ci_rca_filing.py
-      tests/test_subagent_review_wiring.py tests/checks/ci_guards/test_validate_claude_p_retry_wrapper.py
-      tests/checks/ci_guards/test_validate_workflow_agent_safety.py
-      tests/checks/ci_guards/test_validate_composite_action_shell_bodies.py -q
+      bin/venv-python -m pytest tests/ci/test_claude_p_seam_contract.py tests/ci/test_install_claude_cli.py
+      tests/ci/test_review_sh_cli_pin.py tests/test_claude_cli_model_pin.py tests/test_ci_claude_p_retry.py
+      tests/ci_rca/test_filing_stderr_preamble.py tests/test_ci_rca_filing.py tests/test_subagent_review_wiring.py
+      tests/checks/ci_guards/test_validate_claude_p_retry_wrapper.py tests/checks/ci_guards/test_validate_workflow_agent_safety.py
+      tests/checks/ci_guards/test_validate_composite_action_shell_bodies.py tests/checks/ci_guards/test_validate_persona_trigger_policy.py
+      tests/checks/ci_guards/test_validate_ci_rca_adjudication.py -q
     expected: exit 0, no failures
     fix_if: an existing case fails (fix the code, never loosen an assertion, Decision 235)
     hermetic: false
     graduation: waive
-    graduation_waiver_reason: Whole-file regression run; VP 1-3 graduate the new guards.
-  - step: 6
+    graduation_waiver_reason: Whole-file regression run; VP 1-5 graduate the new guards.
+  - step: 8
     phase: pre-deploy
     action: >-
       Fast tier, then the full tier before handoff (handoff_policy): bin/venv-python -m scripts.validate --pre in the
@@ -185,21 +243,22 @@ verification_plan:
     fix_if: a failure in this plan's files is fixed at root and the full tier rerun
     hermetic: false
     graduation: not-applicable
-  - step: 7
+  - step: 9
     phase: post-deploy
     action: >-
-      Live proof: the squash merge touches the seam paths, so its push runs ci-rca.yml's seam job on main. The build
-      reads that run: the seam job concludes success with the probe's PASS line, and the rca job is skipped.
+      Live proof: the squash merge touches the seam's inputs, so its push runs ci-rca-seam.yml on main. The build reads
+      that run: the seam job concludes success and its log holds the probe's PASS line. A red run here is this plan's
+      failure, reported to the planner.
     command: >-
       echo 'READ VIA MCP: mcp__github__actions_list(method="list_workflow_runs", owner="otl-labs", repo="ontheloop",
-      resource_id="ci-rca.yml", workflow_runs_filter={"event":"push","branch":"main"}) for the merge SHA, then
+      resource_id="ci-rca-seam.yml", workflow_runs_filter={"event":"push","branch":"main"}) for the merge SHA, then
       list_workflow_jobs and get_job_logs for the seam job'
-    expected: seam job conclusion success and its log holds the probe PASS line; rca job skipped
+    expected: seam job conclusion success and its log holds the probe PASS line
     fix_if: >-
       the probe FAILs (its line names the contract; a seam defect is a new rec naming the run id, routed to this
-      planner) or the job fails before the probe (install or token: file a rec naming the run id)
+      planner) or the job fails before the probe (installer or token: file a rec naming the run id)
     hermetic: false
-  - step: 8
+  - step: 10
     phase: post-deploy
     action: Confirm rec-5509 closed after the squash merge (Resolves trailer).
     command: >-
@@ -210,58 +269,71 @@ verification_plan:
     hermetic: false
 test_obligations:
   - source: config/claude-cli-version
-    behavior: The pin names a version whose golden envelopes exist, and nothing else holds a literal version.
+    behavior: The pin names a version whose golden envelopes exist.
     verification_step: 3
     test_selector: tests/ci/test_claude_p_seam_contract.py::test_golden_matches_pin
     red_green_expectation: red before (no pin file, no goldens), green after.
-  - source: config/composite_action_body_baseline.yaml
-    behavior: Each new seam-job run body has its measured r3 row.
+  - source: scripts/ci/install_claude_cli.sh
+    behavior: A missing or malformed pin exits 2 with no npm call; a valid pin installs exactly that version.
     verification_step: 5
-    test_selector: tests/checks/ci_guards/test_validate_composite_action_shell_bodies.py
-    waiver_reason: Data rows only; validate_composite_action_shell_bodies enforces them in --pre (VP 6) and its own tests cover the rule.
+    test_selector: tests/ci/test_install_claude_cli.py
+    red_green_expectation: red before (installer and tests absent), green after.
   - source: scripts/ci/claude_p_seam_contract.py
     behavior: The probe passes a real pinned-CLI envelope through the wrapper and parser and fails the #2311 shape.
     verification_step: 2
     test_selector: tests/ci/test_claude_p_seam_contract.py::test_stderr_in_envelope_fails_the_probe
     red_green_expectation: red before (module and node absent), green after.
-  - source: .github/workflows/ci-rca.yml
-    behavior: The seam job's push paths equal the derived input set of the probe.
-    verification_step: 3
+  - source: .github/workflows/ci-rca-seam.yml
+    behavior: The seam workflow's push paths equal the derived input set of the probe.
+    verification_step: 4
     test_selector: tests/ci/test_claude_p_seam_contract.py::test_seam_paths_filter_is_derived
-    red_green_expectation: red before (no push trigger), green after.
+    red_green_expectation: red before (no workflow), green after.
+  - source: .github/workflows/ci-rca.yml
+    behavior: The rca job installs through the installer, before the failing-commit checkout, with no literal version.
+    verification_step: 6
+    test_selector: tests/test_claude_cli_model_pin.py::test_every_install_pins_the_current_version
+    red_green_expectation: red before (ci-rca.yml holds the literal 2.1.323), green after.
   - source: .github/actions/subagent-plan-review/review.sh
     behavior: A missing or malformed pin file fails closed (outcome=starved) before any install, under the literal composite argv.
-    verification_step: 4
-    test_selector: tests/test_subagent_review_wiring.py::test_missing_or_malformed_cli_pin_starves
+    verification_step: 5
+    test_selector: tests/ci/test_review_sh_cli_pin.py
     red_green_expectation: red before (review.sh installs its literal and never reads the file), green after.
-  - source: .github/actions/subagent-plan-review/review.sh
-    behavior: The reviewer installs the version in config/claude-cli-version, never a literal.
-    verification_step: 4
-    test_selector: tests/test_claude_cli_model_pin.py::test_every_install_pins_the_current_version
-    red_green_expectation: red before (review.sh holds the literal 2.1.323), green after.
+  - source: config/ci_rca_taxonomy.yaml
+    behavior: The new workflow is adjudicated.
+    verification_step: 7
+    test_selector: tests/checks/ci_guards/test_validate_ci_rca_adjudication.py
+    waiver_reason: One data row; validate_ci_rca_adjudication enforces it in --pre (VP 8) and its own tests cover the rule.
+  - source: config/composite_action_body_baseline.yaml
+    behavior: Each new seam-workflow run body has its measured row.
+    verification_step: 7
+    test_selector: tests/checks/ci_guards/test_validate_composite_action_shell_bodies.py
+    waiver_reason: Data rows only; validate_composite_action_shell_bodies enforces them in --pre (VP 8) and its own tests cover the rule.
 constraints:
-  - The live CLI call runs only on push to main, never on a PR (Decision 205 cl.2 rejects secrets in a pull_request job); the token stays in ci-rca's lane (cl.4).
-  - The seam job holds no AWS role and files nothing; a red seam run is caught by the CI RCA watchdog (rec-5504), not by CI RCA itself (loop guard).
+  - The live CLI call runs only on push to main, never on a PR (Decision 205 cl.2 rejects secrets in a pull_request job); it stays in ci-rca's claude -p lane (cl.4) as a contract check, not persona compute.
+  - The seam workflow holds no AWS role, files nothing and gates nothing; a red run on main is the alarm (the subagent-review-smoke and ghas-probe shape). CI RCA does not watch it (excluded, loop guard).
   - Golden files are captured, never hand-written; only session_id and uuid are normalised.
-  - Every existing assertion stays (Decision 235). No rescue agents or workaround loops (Decision 55).
+  - Every existing assertion stays or moves with the code it guards (Decision 235). No rescue agents or workaround loops (Decision 55).
 context:
-  - "Decision-scout verdict FLAGS_FOUND (round 1). CITE: Decision 74 (the pinned sudo/--omit install this carries forward), Decision 205 (cl.1 push qualifies, cl.2 no PR-time OAuth call, cl.4 the claude -p lane stays with ci-rca and subagent-plan-review), Decision 224 (cl.1: a version pin this repository owns is not user configuration, so no project-configuration.yaml row). Flags: Decision 162 NOTE (review.sh's new fail-closed branch needs a literal-argv test) -> fixed, tests/test_subagent_review_wiring.py row; Decision 205 SPIRIT NOTE (deepens the grandfathered claude -p lane) -> fixed, retirement note below. Decisions triaged: 228 of 228. Roadmap items intersected: 5; CONFLICT: 0; RELATED: 5. Serves: NS.6 3/5. Round 2: NO_FLAGS; CITE adds Decision 162 (R2 literal-argv test for review.sh's starve branch, R3 baseline rows). Decisions triaged: 228 of 228. Roadmap items intersected: 5; CONFLICT: 0; RELATED: 5."
-  - "Retires with the lane (Decision 205 cl.4, T4.26 c1/c3): when T4.26 swaps ci-rca's claude -p for the LiteLLM lane, the seam job, scripts/ci/claude_p_seam_contract.py, its tests and the goldens retire with it; the probe is one of the claude -p-specific guards T4.26 c3 removes, never orphans."
+  - "Decision-scout verdict FLAGS_FOUND (round 1). CITE: Decision 74 (the pinned sudo/--omit install this carries forward), Decision 205 (cl.1 push qualifies, cl.2 no PR-time OAuth call, cl.4 the claude -p lane stays with ci-rca and subagent-plan-review), Decision 224 (cl.1: a version pin this repository owns is not user configuration, so no project-configuration.yaml row). Flags: Decision 162 NOTE (a new fail-closed branch needs a literal-argv test) -> fixed; Decision 205 SPIRIT NOTE (deepens the grandfathered claude -p lane) -> fixed, retirement note below. Round 2: NO_FLAGS; CITE adds Decision 162 (R2 literal-argv tests, R3 baseline rows). Decisions triaged: 228 of 228. Roadmap items intersected: 5; CONFLICT: 0; RELATED: 5. Serves: NS.6 3/5."
+  - "Retires with the lane (Decision 205 cl.4, T4.26 c1/c3): when T4.26 swaps ci-rca's claude -p for the LiteLLM lane, ci-rca-seam.yml, the installer, the probe, their tests and the goldens retire with it; they are claude -p-specific guards T4.26 c3 removes, never orphans."
   - "Origin: rec-5509, split from rec-5493 (operator 2026-11-23 11:22Z, watchdog first); advice /mnt/project-files/ci-rca-smoke-run/advisor-brief-2/ADVICE.md section 1 item 2 and section 5 item 2. Operator asked for this plan 2026-11-23 11:42Z."
   - "Three literal pins today: .github/workflows/ci-rca.yml:116, .github/actions/subagent-plan-review/review.sh:61, tests/test_claude_cli_model_pin.py:11."
-  - "Lane fork settled with notice: live call on push to main inside ci-rca.yml, because Decision 205 cl.2 and its Options ('Secrets in a pull_request job -- rejected') bar a PR-time OAuth call, and cl.4 keeps the claude -p lane to ci-rca and subagent-plan-review (a new workflow would add a third holder). A pre-merge live call needs its own Decision (rec-5507). A pin bump PR is proven pre-merge by its own session's recapture (test_golden_matches_pin forces it) and live by the merge push."
-  - "Probes 2026-11-23 (this session): npm view @anthropic-ai/claude-code@2.1.323 resolves from CC-web; a nested `claude -p --model haiku --output-format json` returns one envelope (local CLI 2.1.330). UNPROVEN: the 2.1.323 envelope key set (the capture records it) and haiku's verbatim compliance (VP 7 reads it live)."
+  - "Lane fork: the live call runs on push to main because Decision 205 cl.2 and its Options ('Secrets in a pull_request job -- rejected') bar a PR-time OAuth call; a pre-merge live call needs its own Decision (rec-5507). Placement: critique round 1 (B1) measured validate_persona_trigger_policy failing 8 ways with the job inside ci-rca.yml (its workflow_run and dispatch triggers make an ungated LLM step disqualify every upstream) and passing with a separate push-only workflow, so the job moved to ci-rca-seam.yml; subagent-review-smoke.yml is the precedent, and the token is already referenced by several workflows, so no new holder. The operator was asked on a card; this revision follows the recommended option while he answers."
+  - "Installer (critique round 1 B2): ci-rca.yml read the pin from the failing-commit checkout, where `$(cat ...)` can silently yield an unpinned install; one validated installer now serves all three sites and the rca install moves before the failing-commit checkout."
+  - "Probes 2026-11-23 (this session): npm view @anthropic-ai/claude-code@2.1.323 resolves from CC-web; a nested `claude -p --model haiku --output-format json` returns one envelope (local CLI 2.1.330). UNPROVEN: the 2.1.323 envelope key set (the capture records it) and haiku's verbatim compliance (VP 9 reads it live)."
   - "Out of scope: scripts/ci/review_verdict.py (the plan reviewer's parser) is not exercised by this probe; rec-5498 owns its stale prose. rec-5507 owns any pre-merge live call."
-  - "Graduated shards kept: claude-cli-pin-and-model-alias pins the whole of tests/test_claude_cli_model_pin.py and subagent-review-starved-marker-and-archival names tests/test_subagent_review_wiring.py; this plan modifies both files and keeps every existing node green; their entry files are untouched."
-  - "Unbuilt plans also scoping ci-rca.yml (PLAN-ci-rca-agent-failure-fallback, building now; PLAN-merge-annotate-producer, PLAN-scheduled-workflow-dispatch, PLAN-telemetry-claude-p-capture-adapter) and review.sh (PLAN-plan-review-digest-actionable-first): whichever builds second rebases. ci-rca.yml is at 414 of 500 effective lines; the seam job adds about 40. If the build finds it NEAR_CAP after rebasing, it moves the seam job's install and probe bodies into scripts (never a raise)."
+  - "Graduated shard kept: claude-cli-pin-and-model-alias pins the whole of tests/test_claude_cli_model_pin.py, which this plan modifies and keeps green; its entry file is untouched."
+  - "Unbuilt plans also scoping ci-rca.yml (PLAN-ci-rca-agent-failure-fallback, building now; PLAN-merge-annotate-producer, PLAN-scheduled-workflow-dispatch, PLAN-telemetry-claude-p-capture-adapter) and review.sh (PLAN-plan-review-digest-actionable-first): whichever builds second rebases. This plan's ci-rca.yml change is one step moved and shortened."
+  - "config/ci_rca_taxonomy.yaml is NEAR_CAP (494 of 500 effective lines); rec-5504's watchdog and rec-5516's detector plans also add one row each. Relief is the compaction in the scope row, never a raise; rec-5275 owns the lasting relief valve."
   - "rec-5509 acceptance updated 2026-11-23 to a ::node_id selector so it is decidable (Decision 201); read back."
-  - "red_overlap verdict (2026-11-23 ~12:15Z, scratch draft): blocked. rec-5491 and rec-5497 slo_breached (shared: none); rec-5517 overlap on fast-tier selection neighbours only (tests/checks/ci_guards/*, tests/test_ci_rca_*.py and others; none is in this plan's scope). Deferral rationale: the operator handed rec-5491 and rec-5497 to Feedback Loop on 2026-11-23 and this project proceeds with red deferrals; rec-5517 is a repeat filing of rec-5491's telemetry-arrival red (same run 44945189064 and fingerprint 39a57784) from the forced CI RCA proof run, in Feedback Loop's area. This plan edits none of their files and neither repairs nor worsens them. The build dispatch faces the same check (Decision 226 cl.3); the operator's deferral is recorded there."
+  - "red_overlap verdict (2026-11-23 ~12:15Z, scratch draft): blocked. rec-5491 and rec-5497 slo_breached (shared: none); rec-5517 overlap on fast-tier selection neighbours only (tests/checks/ci_guards/*, tests/test_ci_rca_*.py and others; none is in this plan's scope). Deferral rationale: the operator handed rec-5491 and rec-5497 to Feedback Loop on 2026-11-23 and this project proceeds with red deferrals; rec-5517 is a repeat filing of rec-5491's telemetry-arrival red (same run 44945189064 and fingerprint 39a57784) from the forced CI RCA proof run, in Feedback Loop's area. This plan edits none of their files and neither repairs nor worsens them. The build dispatch faces the same check (Decision 226 cl.3)."
   - "Operator said write the plan 2026-11-23 12:11Z in the owning thread; the plan PR merges on green and the build merges on green (rulings 2026-11-12, 2026-11-16). No red_overlap override given; that stays a dispatch-time question."
-  - "No approved-text sidecar: nothing in scope is gated wording (approval-routing.yaml). The plan file and the two config/ files are notice-class; scripts, tests and the workflow are neither."
+  - "No approved-text sidecar: nothing in scope is gated wording (approval-routing.yaml). The plan file and the config/ files are notice-class; scripts, tests and workflows are neither."
   - "Owning planning thread: 'Detect hand-maintained lists and seam test' (Agents in GitHub). Plan defects go to the coordinator, which forwards them here."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:2f57ef762f4bb069b27c9f9f8046fe3e55c3b7d1b55ed6409d95fe1f5d186e7c'}
   - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:3f21c2b81cbab897e3e94a46cc7d1b8a171e09a9ff5496eedec55f43e05e8dfb'}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 2, nits: 8}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -269,8 +341,9 @@ pre_implementation_checklist:
   - All files in scope located and readable
   - Acceptance criteria understood and verifiable
 execution_steps:
-  - config/claude-cli-version, then ci-rca.yml and review.sh reading it (scope rows 1-3)
-  - scripts/ci/claude_p_seam_contract.py (scope row 4)
-  - Capture the goldens with the pinned CLI per scope row 6, then the tests (rows 5, 8)
+  - config/claude-cli-version and scripts/ci/install_claude_cli.sh with tests/ci/test_install_claude_cli.py (scope rows 1-2, 10)
+  - ci-rca.yml and review.sh calling the installer, with tests/ci/test_review_sh_cli_pin.py and tests/test_claude_cli_model_pin.py (rows 3, 7, 11, 15)
+  - scripts/ci/claude_p_seam_contract.py, then capture the goldens with the pinned CLI per row 12, then tests/ci/test_claude_p_seam_contract.py (rows 8-9, 12-14)
+  - ci-rca-seam.yml with its taxonomy and baseline rows (rows 4-6)
   - Execute Verification Plan -- run each step; loop until pass; on unrecoverable failure stop and RCA (Decision 55)
   - 'Report: what was implemented, verification results, the build PR number and its squash-merge SHA'
