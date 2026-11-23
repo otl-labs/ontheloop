@@ -1,4 +1,5 @@
 name: CI RCA
+run-name: CI RCA for run ${{ github.event.workflow_run.id || inputs.run_id }}
 # Triggered on every CI failure. Invokes the ci-rca agent headlessly to diagnose
 # the root cause and file a recommendation via ops_data_portal.
 # Decision 72: RCA-as-Plan-Source for CI Merge Gate Failures.
@@ -617,3 +618,33 @@ jobs:
         uses: ./.github/actions/telemetry-ci-capture
         with:
           manifests: /tmp/ci-rca-output.json.sessions.jsonl
+
+  watchdog:
+    # rec-5504: no-LLM reconciliation after every real CI RCA run (timeouts included); never for skipped runs.
+    needs: rca
+    if: ${{ (github.event_name != 'workflow_dispatch' || github.actor != 'otl-workflow-dispatcher[bot]') && (always() && needs.rca.result != 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - name: Install watchdog dependencies
+        run: python -m pip install pyyaml -c requirements.txt
+
+      - name: Reconcile CI RCA outcomes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SELF_RUN_ID: ${{ github.run_id }}
+          SELF_RESULT: ${{ needs.rca.result }}
+        run: python -m scripts.ci_rca.watchdog --lookback-hours 24 --self-run-id "$SELF_RUN_ID" --self-result "$SELF_RESULT"
