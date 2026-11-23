@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from src.turn_capture.host_run import HostRun, parse_host_run, render_host_run_ref
+from src.turn_capture.host_run import HostRun, LocalRun, parse_persona_host_run, render_host_run_ref
 from src.turn_capture.observations import OBSERVATION_COLUMNS
 from src.turn_capture.refs import (
     litellm_call_ref,
@@ -31,9 +31,9 @@ from src.turn_capture.refs import (
 from src.turn_capture.sessions import SESSION_COLUMNS, agent_row_base
 from src.turn_capture.transcripts import Ctx, canonical_json
 
-PARSER_VERSION = 1
+PARSER_VERSION = 2
 PRODUCER = "litellm"
-PRODUCER_VERSION = "litellm-1"
+PRODUCER_VERSION = "litellm-2"
 SCHEMA = 2
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _FALLBACK = "warm_fetched_escape_hatch"
@@ -91,7 +91,7 @@ def reasoning_visibility(message: Any, reasoning_tokens: Any) -> str:
 
 
 class _Builder:
-    def __init__(self, events: dict[str, Any], host: HostRun) -> None:
+    def __init__(self, events: dict[str, Any], host: HostRun | LocalRun) -> None:
         self.head = events["header"]
         self.turns = [t for t in events.get("turns") or [] if isinstance(t, dict)]
         self.end = events.get("end") if isinstance(events.get("end"), dict) else None
@@ -102,7 +102,15 @@ class _Builder:
         self.run = litellm_run_ref(self.session)
         self.diag: Counter[str] = Counter()
         self._position = 0
-        self.ctx = Ctx(PRODUCER, PRODUCER_VERSION, PARSER_VERSION, self.pin, self._billing_shape(), 0, host)
+        self.ctx = Ctx(
+            PRODUCER,
+            PRODUCER_VERSION,
+            PARSER_VERSION,
+            self.pin,
+            self._billing_shape(),
+            0,
+            host if isinstance(host, HostRun) else None,
+        )
 
     def _billing_shape(self) -> str:
         for turn in self.turns:
@@ -242,7 +250,7 @@ class _Builder:
             "producer_version": PRODUCER_VERSION,
             "parser_version": PARSER_VERSION,
             "workflow": self.host.agent,
-            "execution_attempt": int(self.host.run_attempt),
+            "execution_attempt": 1 if isinstance(self.host, LocalRun) else int(self.host.run_attempt),
         }
         rows = [
             _row(
@@ -276,8 +284,8 @@ class _Builder:
             "session_ref": self.session,
             "agent_type": self.host.agent,
             "version": str(self.head.get("contract_version")),
-            "trigger": self.host.event_name,
-            "workflow_run_id": self.host.run_id,
+            "trigger": "manual" if isinstance(self.host, LocalRun) else self.host.event_name,
+            "workflow_run_id": None if isinstance(self.host, LocalRun) else self.host.run_id,
             "host_run_ref": render_host_run_ref(self.host),
             "definition_sha256": self.head.get("rendered_prompt_sha256"),
         }
@@ -314,7 +322,7 @@ def map_run(events: Any, host_run: bytes | None) -> Mapped | Deferred | Refused:
         return Refused(f"events schema {head.get('schema')!r} is not {SCHEMA}")
     if not _is_int(head.get("started_at_ms")):
         return Deferred("header has no integer started_at_ms")
-    host = parse_host_run(host_run)
+    host = parse_persona_host_run(host_run)
     if host is None:
         return Deferred("host-run sidecar is missing or invalid")
     build = _Builder(events, host)

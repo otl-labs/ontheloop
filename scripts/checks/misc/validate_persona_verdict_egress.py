@@ -8,6 +8,9 @@ can reach a credential. Reads YAML and text only; imports nothing from scripts/p
 ${{ needs.<job>.outputs.aws_region }} expression, and provider hosts derived from the committed tier models. The module is
 imported by ci_guards/_persona_verdict_keyed.py (misc is upstream of ci_guards; validate_project_region imports only
 _common and registry, so there is no cycle).
+Allowed-endpoints parsing assumes the pinned harden-runner agent (v0.18.1, ports.yaml SA-16): after the action's trim the
+value is split on single spaces (empty tokens skipped) and each token is host:port with the port read by strconv.Atoi, so
+a newline, tab or CR between entries makes the agent read the whole value as one malformed entry; the check refuses it.
 """
 
 from __future__ import annotations
@@ -34,6 +37,8 @@ REGION_TOKEN = "{aws_region}"
 REGION_EXPR = re.compile(r"\s*needs\.([\w-]+)\.outputs\.aws_region\s*")
 REGION_LABEL = re.compile(r"(?:^|\.)[a-z]{2}(?:-[a-z]+)+-[0-9]+(?:\.|:|$)")
 WHOLE_LABEL = re.compile(r"(?:^|\.)\{aws_region\}(?:\.|:|$)")
+AGENT_TRIM = " \t\n\r\v\f"
+AGENT_PORT = re.compile(r"[0-9]{1,5}")
 DOCKER_TOKEN = re.compile(r"""(^|[\s;&|(`"'/\\])(sudo\s+)?docker([\s"']|$)""")
 INFERENCE_SMOKE_RUN = re.compile(r"\binference-smoke\b")
 GLOBAL_STS = "sts.amazonaws.com:443"
@@ -182,7 +187,24 @@ def _tokenised_endpoints(where: str, raw: str, workflow: dict[str, Any], job: di
             out.append(f"{where}: needs.{needed}.outputs.aws_region is not an aws-region action output of a needed job")
         return REGION_TOKEN
 
-    return set(EXPRESSION.sub(admit, raw).split()), out
+    value = EXPRESSION.sub(admit, raw)
+    if not value.isascii():
+        out.append(
+            f"{where}: the filter's allowed-endpoints holds a non-ASCII character, which the agent's parser reads differently"
+        )
+        return set(), out
+    value = value.strip(AGENT_TRIM)
+    if any(c.isspace() and c != " " for c in value):
+        out.append(
+            f"{where}: the filter's allowed-endpoints holds whitespace other than a plain space between entries; the agent "
+            "splits on single spaces only, so write the list as a folded block (allowed-endpoints: >-)"
+        )
+    tokens = [t for t in value.split(" ") if t]
+    for token in tokens:
+        host, colon, port = token.partition(":")
+        if not (colon and host and ":" not in port and AGENT_PORT.fullmatch(port) and 1 <= int(port) <= 65535):
+            out.append(f"{where}: the filter's allowed-endpoints entry {token!r} is not host:port with a port from 1 to 65535")
+    return set(tokens), out
 
 
 def _provider_hosts_expected(root: Path, data: dict[str, Any]) -> tuple[set[str], list[str]]:
