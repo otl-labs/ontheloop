@@ -218,7 +218,7 @@ def test_plan_template_records_gate_rounds_not_a_gates_line() -> None:
     assert "gate_rounds: # REQUIRED on new plans; one row per gate round (+gate_run_id if dispatched)" in planning
     assert (
         "- {gate: decision-scout, round: 1, verdict: NO_FLAGS} # critique rows add blocking, nits, "
-        "category_consistency (12p per drafted entry); escalated + escalation_choice when asked"
+        "findings list, category_consistency (12p); escalated + escalation_choice when asked"
     ) in planning
     assert "**Verdict handling** (add a `gate_rounds` row per scout round):" in planning
 

@@ -12,7 +12,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_serializer, model_validator
 
 from scripts.contract_rules import parse_yaml
-from scripts.roadmap.plan_gate_rounds import _GATE_VERDICTS, GateRound
+from scripts.roadmap.plan_gate_rounds import _GATE_VERDICTS, GateRound, version_errors
 from scripts.roadmap.vp_literals import (
     _BACKTICK_LITERAL_RE,
     SELF_SATISFYING_VERDICT,
@@ -21,7 +21,7 @@ from scripts.roadmap.vp_literals import (
     find_unsatisfiable_literals,
 )
 
-_SUPPORTED_VERSIONS: frozenset[int] = frozenset({1, 2, 3, 4, 5, 6})
+_SUPPORTED_VERSIONS: frozenset[int] = frozenset({1, 2, 3, 4, 5, 6, 7})
 _V2_PHASE_ENUM: frozenset[str] = frozenset({"pre-deploy", "post-deploy"})
 _MIN_WAIVER_CHARS = 20
 _REC_ID_RE = re.compile(r"rec-\d+")
@@ -364,15 +364,17 @@ class PlanDocument(BaseModel):
             rounds = [row.round for row in self.gate_rounds if row.gate == gate]
             if rounds != list(range(1, len(rounds) + 1)):
                 raise ValueError(f"gate_rounds for {gate} must number 1..N in order with no gap, got {rounds}")
+        if errors := version_errors(self.schema_version, self.gate_rounds):
+            raise ValueError("; ".join(errors))
 
     def _validate_handoff_policy(self) -> None:
-        if self.schema_version in {3, 4, 5, 6}:
+        if self.schema_version in {3, 4, 5, 6, 7}:
             if self.plan_type == "IMPLEMENTATION" and self.handoff_policy is None:
                 raise ValueError(f"schema_version {self.schema_version} IMPLEMENTATION plans require handoff_policy")
             if self.plan_type != "IMPLEMENTATION" and self.handoff_policy is not None:
                 raise ValueError(f"handoff_policy is only valid on schema_version {self.schema_version} IMPLEMENTATION plans")
         elif self.handoff_policy is not None:
-            raise ValueError("handoff_policy is only valid with schema_version 3, 4, 5 or 6")
+            raise ValueError("handoff_policy is only valid with schema_version 3, 4, 5, 6 or 7")
 
     def _validate_expected_literals(self) -> None:
         """schema_version 5's assertion carrier (docs/contracts/vp-red-before.yaml#carrier_rule):
