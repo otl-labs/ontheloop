@@ -42,11 +42,12 @@ def test_ci_rca_prompt_commands_are_all_permitted_by_allowed_tools() -> None:
     allowed = _allowed_tools()
     assert _bullet_tokens(_section("Tools Allowed")) == allowed
 
-    lines = [ln for ln in _step_run().splitlines() if not ln.strip().startswith("#")]
+    script = (ROOT / "scripts" / "ci" / "ci_rca_steps.sh").read_text(encoding="utf-8")
+    lines = [ln for ln in script.splitlines() if not ln.strip().startswith("#")]
     assert not any("enumerate" in ln.lower() for ln in lines)
-    bundle_lines = [ln for ln in lines if ln.strip().startswith("EVIDENCE_CONTEXT=") and "/tmp/ci-rca-bundles" in ln]
+    bundle_lines = [ln for ln in lines if ln.strip().startswith("EVIDENCE_CONTEXT=") and '$(ls "$BUNDLES"/*.json' in ln]
     assert bundle_lines
-    assert all("$(ls /tmp/ci-rca-bundles/*.json" in ln for ln in bundle_lines)
+    assert 'BUNDLES="${1:-/tmp/ci-rca-bundles}"' in script
 
     prefixes = [m.group(1) for e in allowed if (m := re.fullmatch(r"Bash\((.*):\*\)", e))]
     for block in re.findall(r"```bash\n(.*?)```", PROMPT, re.S):
