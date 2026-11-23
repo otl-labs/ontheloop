@@ -1,0 +1,549 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "persona-verdict-app-post"
+intent: >-
+  Egress plan 5 (T4.32 hint PLAN-persona-verdict-app-post; T4.2 c9's verdict-identity leg): persona-verdict.yml's post
+  job, in the persona-verdict-app Environment behind the block-mode egress filter, builds every check body first, then
+  assumes the verdict App role through OIDC, reads the App key from SSM in its own process, mints one installation token
+  (checks write, metadata read), posts every persona-verdict check run with it and revokes it; GITHUB_TOKEN drops to
+  checks read. override.py's origin rule pins the gates.verdict_app.app_id row, which this PR sets (operator GitHub-UI
+  merge, Decision 271 cl.3). Proves Decision 273 cl.7's live assume, refusal outside the Environment and cannot-approve
+  probe. Serves NS.9: a persona check counts only when the chain on main posted it.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-persona-verdict-app-post.yaml
+phase: >-
+  T4.32 (persona foundation) hint PLAN-persona-verdict-app-post, toward T4.2 c9 (verdict identity) and T4.32 c7 (the post
+  job becomes a secret-bearing job under the filter). Closes no criterion: c9's executor-App leg waits for T4.21, and c7
+  stays open for the container leg.
+cites: [dec:212, dec:248, dec:263, dec:267, dec:271, dec:273]
+scope:
+  - file: .github/workflows/persona-verdict.yml
+    action: Modify
+    purpose: >-
+      keyprep's condition becomes KEYPREP_IF = "!cancelled() && needs.prepare.result == 'success'", so the wheelhouse and
+      the aws-region output exist on every run that can reach post; smoke and refusal keep their conditions (KEYED_IF and
+      the KEYPREP_OK conjunct) unchanged. post: needs [prepare, run, keyprep]; if unchanged (!cancelled()); environment
+      persona-verdict-app (bare name, as smoke); timeout-minutes 10; permissions exactly {checks: read, contents: read,
+      actions: read, id-token: write}. Steps in order: the pinned filter (block; allowed-endpoints as one folded >- line,
+      Amendment 1 of PLAN-persona-verdict-first-key-read, holding sts.${{ needs.keyprep.outputs.aws_region }}.amazonaws.com:443
+      and ssm.${{ needs.keyprep.outputs.aws_region }}.amazonaws.com:443 only; telemetry, sudo and containers off;
+      api.github.com is already filter-supplied as *.github.com); checkout of main (ref github.sha, path main,
+      persist-credentials false); mkdir (id post-mkdir); the egress self-check (id post-self-check); setup-python 3.12; the
+      download of persona-verdict-wheels (no continue-on-error); the offline install (id post-install, the keyed PIP_INSTALL
+      line); the two existing downloads (prepared, results; continue-on-error kept, so a run whose run job uploaded nothing
+      still posts its failure checks); the post step (id post-post) with env GH_TOKEN ${{ github.token }}, AWS_ACCOUNT_ID
+      ${{ secrets.AWS_ACCOUNT_ID }}, PERSONA_AWS_REGION ${{ needs.keyprep.outputs.aws_region }} and PERSONA_SNAPSHOT. The
+      PyPI pip line is removed. The header comment names this plan and the post job as the only App-token holder.
+  - file: config/persona_verdict_egress.yaml
+    action: Modify
+    purpose: >-
+      jobs .github/workflows/persona-verdict.yml gains post: [sts.{aws_region}.amazonaws.com:443,
+      ssm.{aws_region}.amazonaws.com:443]. No other row changes; no region id, account id or wildcard is added.
+  - file: scripts/personas/app_token.py
+    action: Create
+    purpose: >-
+      The verdict App token, a context manager session(repo, env) used only by post_verdict. In order: app_id() reads the
+      gates.verdict_app.app_id row from ROOT/docs/contracts/project-configuration.yaml through merge_checks.verdict_app_id
+      (a null, absent or unreadable row raises before any network call; both callers run on main: post checks out the
+      workflow_run's main commit, and persona-verdict-override.yml's render job runs only when github.ref is main, a
+      condition validate_persona_verdict_chain pins as OVERRIDE_RENDER_IF); oidc_assume.token(), claims() whose sub must
+      end ':environment:persona-verdict-app' and whose job_workflow_ref must equal $GITHUB_REPOSITORY +
+      '/.github/workflows/persona-verdict.yml@refs/heads/main' (else fail before the assume); oidc_assume.assume(ROLE,
+      jwt) with ROLE = agent-platform-github-ci-persona-verdict-app, reported through oidc_assume.report(ROLE, 'ok', ...);
+      a boto3.Session from the returned credentials and PERSONA_AWS_REGION, ssm get_parameter(Name=KEY_PARAMETER =
+      /secret/agent-platform-persona-verdict-app-key, WithDecryption=True); github_app_token.app_jwt(str(app_id), pem,
+      now) and installation_token(api, jwt, repo, PERMISSIONS = {checks: write, metadata: read}); the PEM, JWT and
+      credentials are dropped (del) before the session yields the token. Exit: revoke in finally; SIGTERM and SIGINT
+      handlers installed before the mint call revoke then re-raise as KeyboardInterrupt, and the previous handlers are
+      restored on exit. A botocore ClientError is reported by its error code only, any other exception by its type only.
+      Prints only fixed lines: OIDC-CLAIMS sub=<sub> job_workflow_ref=<ref>, OIDC-ASSUME role=<name> expect=ok
+      got=<code>, APP-TOKEN minted app_id=<id>, APP-TOKEN revoked, APP-TOKEN FAIL <stage>:<class>. Never a key, JWT,
+      token, credential, ARN, account id or exception text. Imports src.data.handlers.github_app_token unchanged (a
+      Lambda-packaged module this plan does not edit, so no Lambda deploy follows).
+    new_imports: [scripts.personas.oidc_assume, scripts.session.merge_checks, src.data.handlers.github_app_token]
+  - file: scripts/personas/post_verdict.py
+    action: Modify
+    purpose: >-
+      Two phases. plan_all(root, work, repo, read_token) returns the list of check bodies (name, head_sha, conclusion,
+      title, summary, text) exactly as post_all computes them today, with every GitHub read (override.lookup, origin) on
+      GH_TOKEN; it never touches the App role or key. post_all then: an empty list returns before any assume; otherwise one
+      app_token.session(...) posts each body with the App token (post_check unchanged apart from returning the parsed 201
+      body), and the first created run's app.id must equal app_token.app_id(), else RuntimeError before any further POST.
+      main() reads GH_TOKEN for reads only. The conclusion mapping, titles, summaries and record text are unchanged. The
+      downloaded results are data: only results/<route>.json for route ids from the prepared routes.json are read, each
+      through _read (json.loads, no other evaluation), and no value read from them reaches an environment variable, a
+      path, a URL other than the check-runs POST body, or the session's arguments.
+    new_imports: [scripts.personas.app_token]
+  - file: scripts/personas/override.py
+    action: Modify
+    purpose: >-
+      origin(): the check run's app.id must equal app_token.app_id() (the gates.verdict_app.app_id row read from the
+      local main checkout); a null, absent or unreadable row refuses ("no verdict App is set"), and a run from any other
+      app, github-actions included, refuses. The slug rule and its merge_checks.APP use here are removed. The producing-run,
+      record and newest-run tests are unchanged. The module docstring's dependency line names the row.
+    new_imports: [scripts.personas.app_token]
+  - file: scripts/personas/key_refusal.py
+    action: Modify
+    purpose: >-
+      ATTEMPTS gains the row (app_token.ROLE, "AccessDenied"), the verdict App role refused to a job outside every
+      Environment; the import keeps the verb stdlib-only (app_token imports boto3 and the token helper lazily, inside the
+      functions that need them, so importing it does no work and needs no package).
+    new_imports: [scripts.personas.app_token]
+  - file: scripts/personas/inference_smoke.py
+    action: Modify
+    purpose: >-
+      _prelude, after the claim checks and before its own assume, attempts app_token.ROLE with the same jwt and reports
+      OIDC-ASSUME role=<app role> expect=AccessDenied got=<code>; any outcome other than HTTP 403 AccessDenied returns the
+      failure line class app_role before the persona-verdict assume, so no key is read.
+    new_imports: [scripts.personas.app_token]
+  - file: scripts/checks/ci_guards/_persona_verdict_keyed.py
+    action: Modify
+    purpose: >-
+      CONDITIONS keyprep becomes KEYPREP_IF; smoke and refusal unchanged. _secret_rules counts secrets.AWS_ACCOUNT_ID also
+      in post's post step when it follows post's self-check. Exposes KEYPREP_IF, PIP_INSTALL, SELF_CHECK, REGION_ENV,
+      ACCOUNT_ENV and WHEELS to the post helper (already module constants). No other rule changes.
+    new_imports: []
+  - file: scripts/checks/ci_guards/_persona_verdict_post.py
+    action: Create
+    purpose: >-
+      post_problems(doc, workflows) pins the post job: exact condition !cancelled(); needs exactly [prepare, run, keyprep];
+      environment exactly persona-verdict-app; permissions exactly {checks: read, contents: read, actions: read, id-token:
+      write}; no container, services, uses or job-level continue-on-error; the step sequence filter, checkout, mkdir,
+      self-check, setup-python, wheels download, offline install, prepared download, results download, post step (by uses
+      prefix or exact run line); continue-on-error only on the prepared and results downloads; no configure-aws-credentials
+      step, no local action, no docker command (the egress check's command-token rule, imported), every run step carries
+      an id; exactly one pip line, the keyed PIP_INSTALL; uploads nothing and downloads exactly persona-verdict-prepared,
+      persona-verdict-results and persona-verdict-wheels; run.py verbs exactly [egress-self-check, post]; the post step's
+      env keys exactly {GH_TOKEN, AWS_ACCOUNT_ID, PERSONA_AWS_REGION, PERSONA_SNAPSHOT} with GH_TOKEN ${{ github.token }},
+      the keyed REGION_ENV and ACCOUNT_ENV. Across every file under .github/workflows/, no job other than persona-verdict.yml
+      post names the persona-verdict-app Environment, and no file other than persona-verdict.yml holds the App role name.
+      Imports nothing from scripts/personas/.
+  - file: scripts/checks/ci_guards/validate_persona_verdict_chain.py
+    action: Modify
+    purpose: >-
+      Table edits and one call, net lines added at or under the measured headroom (457 raw on main b5326b3d; the 500 limit
+      is decomposed, never raised): JOB_PERMISSIONS post becomes {checks: read, contents: read, actions: read, id-token:
+      write}; PIP_SETS drops post; the environment and id-token rules admit post (the post helper pins it exactly); the
+      python-step rule admits post's self-check line as it admits smoke's and refusal's; the secrets rule admits what the
+      keyed helper allows; ARTIFACT_DIRS reads persona-verdict-wheels as wheels for post; verdict_problems calls
+      post_problems. If the net lines would pass 500 effective, the post-specific branches move into the post helper.
+    new_imports: [scripts.checks.ci_guards._persona_verdict_post]
+  - file: docs/contracts/project-configuration.yaml
+    action: Modify
+    purpose: >-
+      gates.verdict_app.app_id: defaults.local and defaults.cloud become the App's numeric id, which the operator gives the
+      build (public; read on the App's settings page); readers gain scripts/personas/app_token.py; this_repository.note
+      re-worded to name PLAN-persona-verdict-app-grant's App and this plan as its token mint ("the merge gate and the
+      verdict chain read this value from origin/main; the operator merges any change to it"); status and owning_item
+      unchanged (T4.24:c16 homes App ids). One terse amendment_log row.
+  - file: scripts/session/workflow_dispatcher_probe.py
+    action: Modify
+    purpose: >-
+      --app {dispatcher, verdict}, default dispatcher (unchanged behaviour and checks). verdict: key parameter fixed to
+      app_token.KEY_PARAMETER (a different --key-parameter refuses before any read), issuer str(app_token.app_id()) read
+      from the checked-out row (null refuses before any read), permissions app_token.PERMISSIONS, repository from the
+      dispatcher register's repository (the same repository). The child, redaction, revoke and exit-code rules are shared.
+      The module docstring names both Apps and Decision 273 cl.5.
+    new_imports: [scripts.personas.app_token]
+  - file: docs/contracts/ports.yaml
+    action: Modify
+    purpose: >-
+      coupling_findings gains PC-14 (ports [verdict_plane, secrets], location .github/workflows/persona-verdict.yml post
+      and scripts/personas/app_token.py, status accepted, owning_item dec-273): the verdict plane's check identity rests on
+      an OIDC assume and an SSM key read on the secrets port's AWS adapter. SA-14 also names the GitHub App
+      installation-token shapes (app JWT, /repos/{repo}/installation, access_tokens, DELETE /installation/token) and the
+      scripts/personas -> src/data/handlers/github_app_token import. One terse amendment_log row. Decision 275 byte cap
+      (50162 of 50251 on main b5326b3d): the build pays every added byte by shortening SA-14's or PC-12's description by
+      citation (docs/plans/approved/ or this plan's path) or by compacting an older full amendment_log row to a terse
+      summary of its own change, never a protected log row, measured against main at build time; the file is also at 499 of
+      500 effective lines, so the build frees at least the two lines it adds (PC-14 and the row) by compacting multi-line
+      amendment_log rows to terse one-line rows; kept verbatim: "Decision
+      263 clause 4", "assumes no AWS identity" and SA-14's pinned token tuple.
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: One r3 row per new or changed inline run body in persona-verdict.yml's post job, each at its line count.
+  - file: tests/personas/test_post_verdict_app_token.py
+    action: Create
+    purpose: >-
+      rec-5486's acceptance. With app_token's network seams patched (oidc_assume opener, boto3.Session replaced by a fake
+      recording its client calls, github_app_token.GitHubApi given a fake opener returning GitHub's real shapes: the
+      installation object {id, app_id, ...}, the access_tokens 201 body {token, expires_at, permissions {checks: write,
+      metadata: read}, repository_selection: selected}, 204 on DELETE /installation/token, and a check-runs 201 body with
+      app {id, slug}): every GH_TOKEN read happens before the first OIDC request (an ordered call log); zero bodies make no
+      OIDC request; the check-runs POSTs carry the App token and every read carries GH_TOKEN; a 201 whose app.id differs
+      from the row stops before the second POST and still revokes; an exception mid-POST revokes; a SIGTERM delivered
+      after the mint revokes once (os.kill to the test process with the handler installed); a hostile results file (a
+      route id not in routes.json, a symlink, a JSON body naming a path or an environment key) changes only its own route's
+      check body and never the session's arguments.
+  - file: tests/personas/test_app_token.py
+    action: Create
+    purpose: >-
+      A null row, a missing row and an unreadable file fail before any network call; a sub without
+      ':environment:persona-verdict-app' or a foreign job_workflow_ref fails before the assume; an AccessDenied assume, an
+      SSM ParameterNotFound and a mint permission mismatch each print one APP-TOKEN FAIL line with a code or type only;
+      capfd shows no PEM marker, JWT (eyJ...), token, AKIA/ASIA id, ARN or 12-digit account id across every case; the JWT
+      issuer is str(app_id); the minted token is revoked on exit and the handlers restored; importing the module imports
+      neither boto3 nor jwt.
+  - file: tests/personas/test_post_verdict.py
+    action: Modify
+    purpose: >-
+      Existing cases call plan_all for the bodies (fixture base, not an assertion change: the conclusion, title, summary
+      and text assertions are unchanged) and post_all through a fake app_token.session; an unresolved resolution and an
+      empty route list post nothing and open no session.
+  - file: tests/personas/test_override.py
+    action: Modify
+    purpose: >-
+      origin admits a run whose app.id equals the row; refuses app slug github-actions with any id, another App's id, and
+      a null row ("no verdict App is set"); the existing producing-run, record and newest-run refusals keep their
+      assertions with the fixture run's app changed to the row's id (fixture base).
+  - file: tests/personas/test_key_refusal.py
+    action: Modify
+    purpose: >-
+      Two rows: passes only when both roles return 403 AccessDenied; an ok on the App role fails; ATTEMPTS names the role
+      in terraform/personal's verdict App role file.
+  - file: tests/personas/test_inference_smoke.py
+    action: Modify
+    purpose: >-
+      The App-role attempt precedes the persona-verdict assume (ordered opener log); an ok or a non-403 code on it fails
+      with class app_role and no SSM client is built; the existing subprocess fd-1 order case expects the App-role
+      OIDC-ASSUME line between OIDC-CLAIMS and the persona-verdict OIDC-ASSUME line (planned change, disposition below).
+  - file: tests/personas/test_run.py
+    action: Modify
+    purpose: >-
+      ALLOWED gains app_token: the import names its closure measures at build time (boto3, botocore, jwt, cryptography,
+      yaml and the repository's own scripts and src packages), each provided by a distribution pinned in
+      docker/persona/requirements-persona.txt; post_verdict's set gains the same; key_refusal stays set() (the lazy imports
+      keep it stdlib at import).
+  - file: tests/checks/ci_guards/test__persona_verdict_post.py
+    action: Create
+    purpose: >-
+      Red fixtures, each a mutation of the live persona-verdict.yml: post without the Environment or with persona-verdict;
+      checks: write on post; id-token missing; a needs list without keyprep; a pip line from an index; the self-check after
+      the post step; AWS_ACCOUNT_ID on another step; GH_TOKEN as a secret; an upload; a download of another artifact; a
+      continue-on-error on the wheels download; a configure-aws-credentials step; another run.py verb; a second workflow
+      job naming persona-verdict-app; the App role name in another workflow; each fails with its own message, and
+      test_live_file_passes passes on the live file.
+  - file: tests/checks/ci_guards/test__persona_verdict_keyed.py
+    action: Modify
+    purpose: >-
+      keyprep's condition is KEYPREP_IF (a fixture with KEYED_IF on keyprep is red); smoke and refusal keep theirs; the
+      existing "AWS_ACCOUNT_ID outside a key-reading step" fixture stays red for every job but post's post step after its
+      self-check.
+  - file: tests/checks/ci_guards/test_validate_persona_verdict_chain.py
+    action: Modify
+    purpose: >-
+      The post permission map and environment admission (red: checks: write on post; an Environment on run or wake); the
+      seven-job set unchanged; the live tree passes.
+  - file: tests/checks/iam_tf/test_persona_verdict_app_role.py
+    action: Modify
+    purpose: >-
+      The fence also requires persona-verdict.yml's post job to name the persona-verdict-app Environment and no other job
+      in .github/workflows/ to name it (today the Environment is named by no job).
+  - file: tests/test_session_workflow_dispatcher_probe.py
+    action: Modify
+    purpose: >-
+      --app verdict reads the fixed key parameter, signs with str(row id), requests {checks: write, metadata: read} and
+      refuses before any read on a null row or another --key-parameter; the default stays the dispatcher's.
+  - file: tests/checks/contracts/test_ports_verdict_chain_records.py
+    action: Modify
+    purpose: SA-14 names the App installation-token shapes; PC-14 is accepted with owning_item dec-273.
+bundled_recommendations: [rec-5486]
+followon_recs: []
+closes_criteria: []
+infrastructure_dependencies:
+  - "No terraform change. Uses the live role agent-platform-github-ci-persona-verdict-app, the persona-verdict-app Environment (terraform/github) and the SSM key put by the operator (PLAN-persona-verdict-app-grant, Decision 273; VP 11 key put and VP 17 clean 2026-11-20)."
+acceptance_criteria:
+  - After the operator's UI merge, every persona-verdict/* check run that the chain posts on main's definition carries the gates.verdict_app.app_id App id, and the post job shows APP-TOKEN minted and APP-TOKEN revoked after EGRESS-SELF-CHECK PASS.
+  - The post job holds no checks write on GITHUB_TOKEN, no package index host and no host beyond regional STS and SSM on its own list.
+  - On a fixture PR, the no-Environment refusal job and the persona-verdict smoke job each get AccessDenied for the App role.
+  - The operator's CloudShell probe with --app verdict, before the merge, mints with the row's App id and shows the token cannot approve a pending deployment (TOKEN_LACKS_PERMISSION or NOT_REVIEWER), discharging Decision 273 cl.5's proof (the operator's 2026-11-23 choice).
+  - override.origin refuses a github-actions-posted run and any run while the row is null.
+  - No public log line or committed file carries a key, JWT, installation token, credential, ARN or account id.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: Live read-back of the App role's trust before any job assumes it.
+    command: >-
+      aws iam get-role --role-name agent-platform-github-ci-persona-verdict-app --profile agent_platform --query
+      'Role.AssumeRolePolicyDocument.Statement[0].Condition.StringEquals' --output json
+    expected: >-
+      Prints the audience sts.amazonaws.com, job_workflow_ref otl-labs/ontheloop/.github/workflows/persona-verdict.yml@refs/heads/main
+      and a sub naming environment:persona-verdict-app.
+    fix_if: Any other value or an error is a STOP to the plan owner; no workflow edit merges until the role matches.
+    hermetic: false
+    graduation: not-applicable
+  - step: 2
+    phase: pre-deploy
+    action: Unit tests for the token session, the post phases, origin, the refusal rows, the probe flag and the checks.
+    command: >-
+      bin/venv-python -m pytest tests/personas/test_post_verdict_app_token.py tests/personas/test_app_token.py
+      tests/personas/test_post_verdict.py tests/personas/test_override.py tests/personas/test_key_refusal.py
+      tests/personas/test_inference_smoke.py tests/personas/test_run.py tests/checks/ci_guards/test__persona_verdict_post.py
+      tests/checks/ci_guards/test__persona_verdict_keyed.py tests/checks/ci_guards/test_validate_persona_verdict_chain.py
+      tests/checks/iam_tf/test_persona_verdict_app_role.py tests/test_session_workflow_dispatcher_probe.py
+      tests/checks/contracts/test_ports_verdict_chain_records.py tests/checks/misc/test_validate_persona_verdict_egress.py
+      tests/ci/test_persona_verdict_egress.py -q
+    expected: All tests pass.
+    expected_literals: [passed]
+    fix_if: A test fails; fix the code inside scope, never the assertion (Decision 235).
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: persona-verdict-app-post-units
+  - step: 3
+    phase: pre-deploy
+    action: The registered checks pass on the live tree and the app_id row holds a positive integer.
+    command: >-
+      bin/venv-python -c "from pathlib import Path; from scripts.session.merge_checks import verdict_app_id; from scripts.checks.misc.validate_persona_verdict_egress import validate_persona_verdict_egress as a; from scripts.checks.ci_guards.validate_persona_verdict_chain import validate_persona_verdict_chain as b; from scripts.checks.ci_guards.validate_persona_trigger_policy import validate_persona_trigger_policy as c; from scripts.checks.contracts.validate_project_configuration import validate_project_configuration as d; from scripts.checks.ci_guards.validate_composite_action_shell_bodies import validate_composite_action_shell_bodies as e; f=[]; [g(f) for g in (a,b,c,d,e)]; assert not f, f; v = verdict_app_id(Path('docs/contracts/project-configuration.yaml').read_text()); assert isinstance(v, int) and not isinstance(v, bool) and v > 0, v; print('APP_POST_CHECKS_OK')"
+    expected: Prints the ok marker.
+    expected_literals: [APP_POST_CHECKS_OK]
+    fix_if: A rule refuses the live tree; fix the workflow or file to its scope row's shape, never the rule.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      Duplicates five registered checks the fast and full tiers run on every PR and on main, so a graduated copy adds no
+      guard.
+  - step: 4
+    phase: pre-deploy
+    action: No account id or ARN was committed, and no region id under .github/ or in config/persona_verdict_egress.yaml.
+    command: >-
+      a=$(git diff origin/main...HEAD -- .github config scripts tests docs ':!docs/plans' | grep -E '^\+' | grep -cE '\b[0-9]{12}\b|arn:aws:[^:]*:[^:]*:[0-9]{12}:');
+      b=$(git diff origin/main...HEAD -- .github config/persona_verdict_egress.yaml | grep -E '^\+' | grep -cE 'arn:aws:|(eu|us|ap|ca|sa|me|af)-(west|east|north|south|central|northeast|southeast)-[0-9]');
+      test "$a$b" = 00 && echo NO_LEAK
+    expected: Prints NO_LEAK.
+    expected_literals: [NO_LEAK]
+    fix_if: Any match is removed before push; test fixtures use a synthetic non-12-digit account placeholder.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: >-
+      A PR-relative diff scan with no meaning on main once merged; the pre-commit never-commit hook and the fast tier's
+      secret-shape checks are the standing guards.
+  - step: 5
+    phase: pre-deploy
+    action: Fast tier, then the full tier before handoff.
+    command: >-
+      bin/venv-python -m scripts.validate --pre && bin/venv-python -m scripts.validate &&
+      bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: >-
+      Both tiers pass and --verify-head confirms the head. The full tier outlasts the foreground cap: start it as a
+      harness-tracked background run with a 2 h limit from the top-level session; the verdict is --verify-head.
+    fix_if: A failure in scope is fixed; one outside scope is a STOP to the plan owner (main reds owned elsewhere are deferred).
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: pre-deploy
+    action: >-
+      Operator admin step (needs his words naming it): the cannot-approve probe (Decision 248 cl.8, Decision 273 cl.5;
+      the Decision 267 cl.5 precedent), run at the PR head after the full tier passes and before the UI merge. The build
+      dispatches one deployment-approval-probe.yml run from main (mcp__github__actions_run_trigger, method run_workflow)
+      and hands the operator a CloudShell block written to /mnt/project-files/persona-verdict-app-post/ that checks out the
+      PR head, installs PyJWT and cryptography, and runs the probe with the run id.
+    command: >-
+      python3.12 -m scripts.session.workflow_dispatcher_probe --app verdict --run-id <pending probe run id>
+      --key-parameter /secret/agent-platform-persona-verdict-app-key
+    expected: >-
+      The operator pastes the last two lines: a JSON line whose verdict is TOKEN_LACKS_PERMISSION or NOT_REVIEWER, and
+      child_exit=0; the probe's own exit is 0. A successful mint also proves the row's App id matches the key's App (a
+      wrong issuer fails the mint with 401). The build reports the probe run id and the pasted lines.
+    fix_if: >-
+      APPROVED is a STOP to the plan owner and Decision 273's probe-approves reversal condition fires; a 401 mint means the
+      row's id is wrong (fix the row, re-run); anything else (exit 2) proves nothing and is re-run once, then a STOP.
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: post-deploy
+    action: >-
+      Operator admin step: the operator merges the PR in the GitHub UI (Decision 271 cl.3 refuses an agent merge of a
+      change to the app_id row); that merge is also his final-diff review of the credential code. Read the merge back.
+    command: mcp__github__pull_request_read(method="get", owner="otl-labs", repo="ontheloop", pullNumber=<PR>)
+    expected: merged true, merged_by the operator, and the merge SHA reported.
+    fix_if: Not merged is a wait, never an agent merge.
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: post-deploy
+    action: >-
+      First App-posted verdict: on the first persona-verdict run on main's definition after the merge that posts at least
+      one check (the build's own fixture PR in step 9 qualifies), read the post job log and the head's check runs.
+    command: >-
+      mcp__github__actions_list(method="list_workflow_runs", owner="otl-labs", repo="ontheloop",
+      resource_id="persona-verdict.yml") for that run, list_workflow_jobs with workflow_jobs_filter {filter: "all"},
+      mcp__github__get_job_logs(job_id=<post job>, return_content=true), then
+      mcp__github__pull_request_read(method="get_check_runs", owner="otl-labs", repo="ontheloop", pullNumber=<PR>)
+    expected: >-
+      The post job shows, in order, EGRESS-SELF-CHECK PASS, OIDC-CLAIMS with a sub ending environment:persona-verdict-app,
+      OIDC-ASSUME role=agent-platform-github-ci-persona-verdict-app expect=ok got=ok, APP-TOKEN minted app_id=<row id>,
+      PERSONA-VERDICT posted=<n> and APP-TOKEN revoked; every persona-verdict/* check run that run created carries app.id
+      equal to the row (none from github-actions); the post job log gives zero matches (counts reported) for each of
+      arn:aws:, \b[0-9]{12}\b, eyJ[A-Za-z0-9_-]{10,}, \b(AKIA|ASIA)[A-Z0-9]{16}\b, IQoJb3JpZ2lu, ghs_[A-Za-z0-9]{20,} and
+      BEGIN (RSA )?PRIVATE KEY. An attempt that stops as UNSUPPORTED_PLACEMENT is re-run with
+      mcp__github__actions_run_trigger(method="rerun_failed_jobs", run_id=<id>), at most 10 attempts; report the run id
+      and attempt numbers.
+    fix_if: >-
+      Any FAIL line, a check run from another app, or a non-zero scan count is a STOP to the plan owner with the job, step
+      and line number, never the matched text; never widen the list or retry the assume in code.
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: post-deploy
+    action: >-
+      Refusals on main: on the build branch restarted from main, commit one head that REWRITES (>, never appends)
+      tests/fixtures/persona_verdict/fixture_pr/proceed.txt with printf '\n%s\n' proceed and nothing else; run the full
+      tier and --verify-head; push once and open one draft fixture PR; read refusal's and smoke's logs.
+    command: >-
+      mcp__github__actions_list(method="list_workflow_runs", owner="otl-labs", repo="ontheloop",
+      resource_id="persona-verdict.yml") for the fixture head, list_workflow_jobs, mcp__github__get_job_logs for refusal,
+      smoke and post; then mcp__github__update_pull_request(state="closed") for the fixture PR.
+    expected: >-
+      refusal shows OIDC-ASSUME role=agent-platform-github-ci-persona-verdict-app expect=AccessDenied got=AccessDenied and
+      KEY-REFUSAL PASS; smoke shows, for each tier role, OIDC-ASSUME role=agent-platform-github-ci-persona-verdict-app
+      expect=AccessDenied got=AccessDenied before OIDC-ASSUME role=agent-platform-github-ci-persona-verdict expect=ok
+      got=ok and INFERENCE-SMOKE outcome=PASS; the same run's post job meets step 8. UNSUPPORTED_PLACEMENT attempts are
+      re-run as step 8.
+    fix_if: >-
+      An App-role outcome other than AccessDenied is a STOP to the plan owner and Decision 273's key-exposed review (the
+      role's trust admits a job it must not); any other FAIL is a STOP with the log lines.
+    hermetic: false
+    graduation: not-applicable
+  - step: 10
+    phase: post-deploy
+    action: >-
+      Close rec-5486 by update_rec after steps 8 and 9 pass (the UI merge carries no agent trailer step), then read it
+      back.
+    command: >-
+      bin/venv-python -m scripts.ops_data_portal --update-rec rec-5486 --status closed --execution_result success
+      --execution_pr_url <PR url> --resolution "PLAN-persona-verdict-app-post: post job posts with the verdict App token;
+      run <step 8 run id>, refusals run <step 9 run id>, probe run <step 6 run id>" && bin/venv-python -c "from
+      src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader; rows, _ = fetch_recs_by_ids(make_reader(),
+      ['rec-5486']); print(rows[0]['id'], rows[0]['status'])"
+    expected: Prints rec-5486 closed; rec-5486's acceptance command passes on main first.
+    fix_if: A write that fails loudly is re-filed after connectivity returns (Decision 84 I-4).
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: scripts/personas/app_token.py
+    behavior: Row read first, claims checked before the assume, exact permission request, revoke on exit and signal, no secret printed.
+    verification_step: 2
+    test_selector: tests/personas/test_app_token.py
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/personas/post_verdict.py
+    behavior: Every body built before any key read; App token only for the POST; app.id asserted; results read as data.
+    verification_step: 2
+    test_selector: tests/personas/test_post_verdict_app_token.py
+    red_green_expectation: red before (file absent), green after
+  - source: scripts/personas/override.py
+    behavior: origin admits only the row's App id; a null row refuses.
+    verification_step: 2
+    test_selector: tests/personas/test_override.py
+    red_green_expectation: red before (github-actions admitted), green after
+  - source: scripts/personas/key_refusal.py
+    behavior: The App role is refused outside every Environment.
+    verification_step: 2
+    test_selector: tests/personas/test_key_refusal.py
+    red_green_expectation: red before (one row), green after
+  - source: scripts/personas/inference_smoke.py
+    behavior: The persona-verdict Environment cannot assume the App role, checked before any key read.
+    verification_step: 2
+    test_selector: tests/personas/test_inference_smoke.py
+    red_green_expectation: red before, green after
+  - source: scripts/checks/ci_guards/_persona_verdict_post.py
+    behavior: Each post-job mutation fails; only post names the App Environment and role.
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test__persona_verdict_post.py
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/checks/ci_guards/_persona_verdict_keyed.py
+    behavior: keyprep's widened condition and post's AWS_ACCOUNT_ID admission are exact.
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test__persona_verdict_keyed.py
+    red_green_expectation: red before, green after
+  - source: scripts/checks/ci_guards/validate_persona_verdict_chain.py
+    behavior: post's permission map and Environment admission.
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test_validate_persona_verdict_chain.py
+    red_green_expectation: red before, green after
+  - source: scripts/session/workflow_dispatcher_probe.py
+    behavior: --app verdict mints with the row's id and the post job's permission map.
+    verification_step: 2
+    test_selector: tests/test_session_workflow_dispatcher_probe.py
+    red_green_expectation: red before (flag absent), green after
+  - source: .github/workflows/persona-verdict.yml
+    behavior: Only post names the App Environment; its shape is pinned.
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test__persona_verdict_post.py::test_live_file_passes
+    red_green_expectation: red before (post holds checks write, no Environment), green after
+  - source: config/persona_verdict_egress.yaml
+    behavior: post's row equals its filter.
+    verification_step: 2
+    test_selector: tests/ci/test_persona_verdict_egress.py::test_the_live_tree_passes_check_tree
+    red_green_expectation: red before (post is a covered job with no row), green after
+  - source: docs/contracts/project-configuration.yaml
+    behavior: The app_id row holds a positive integer.
+    verification_step: 3
+    command: >-
+      bin/venv-python -c "from pathlib import Path; from scripts.session.merge_checks import verdict_app_id; from scripts.checks.misc.validate_persona_verdict_egress import validate_persona_verdict_egress as a; from scripts.checks.ci_guards.validate_persona_verdict_chain import validate_persona_verdict_chain as b; from scripts.checks.ci_guards.validate_persona_trigger_policy import validate_persona_trigger_policy as c; from scripts.checks.contracts.validate_project_configuration import validate_project_configuration as d; from scripts.checks.ci_guards.validate_composite_action_shell_bodies import validate_composite_action_shell_bodies as e; f=[]; [g(f) for g in (a,b,c,d,e)]; assert not f, f; v = verdict_app_id(Path('docs/contracts/project-configuration.yaml').read_text()); assert isinstance(v, int) and not isinstance(v, bool) and v > 0, v; print('APP_POST_CHECKS_OK')"
+    waiver_reason: >-
+      Data row; validate_project_configuration's rule (m) and the merge gate's reader already test its shape, and the
+      command proves the value is set.
+  - source: docs/contracts/ports.yaml
+    behavior: PC-14 and SA-14 record the coupling and the token shapes.
+    verification_step: 2
+    test_selector: tests/checks/contracts/test_ports_verdict_chain_records.py
+    red_green_expectation: red before, green after
+  - source: config/composite_action_body_baseline.yaml
+    behavior: Ratchet rows for post's inline run bodies.
+    verification_step: 3
+    command: >-
+      bin/venv-python -c "from pathlib import Path; from scripts.session.merge_checks import verdict_app_id; from scripts.checks.misc.validate_persona_verdict_egress import validate_persona_verdict_egress as a; from scripts.checks.ci_guards.validate_persona_verdict_chain import validate_persona_verdict_chain as b; from scripts.checks.ci_guards.validate_persona_trigger_policy import validate_persona_trigger_policy as c; from scripts.checks.contracts.validate_project_configuration import validate_project_configuration as d; from scripts.checks.ci_guards.validate_composite_action_shell_bodies import validate_composite_action_shell_bodies as e; f=[]; [g(f) for g in (a,b,c,d,e)]; assert not f, f; v = verdict_app_id(Path('docs/contracts/project-configuration.yaml').read_text()); assert isinstance(v, int) and not isinstance(v, bool) and v > 0, v; print('APP_POST_CHECKS_OK')"
+    waiver_reason: >-
+      Ratchet data with no behaviour of its own; the registered check refuses a new inline body without its row.
+weakening_dispositions:
+  - candidate: "[assertion-changed] tests/personas/test_override.py::test_origin_refuses"
+    disposition: planned-change
+    cite: "acceptance_criteria[4]"
+  - candidate: "[assertion-changed] tests/personas/test_inference_smoke.py::test_stdout_as_a_pipe_holds_only_the_three_marker_lines_in_order"
+    disposition: planned-change
+    cite: "acceptance_criteria[2]"
+constraints:
+  - No key, JWT, installation token, credential, ARN or account id in any committed file or public log line (Decision 101).
+  - No package index host and no host beyond regional STS and SSM on post's list; no wildcard; no list widened to obtain green (Decisions 181, 235).
+  - Every check body is built before the App role is assumed; the App token is used for the check-runs POST and the revoke only.
+  - No job but persona-verdict.yml post names persona-verdict-app or holds the App role name (Decision 273 cl.3).
+  - src/data/handlers/github_app_token.py is not edited (Lambda-packaged).
+  - "No agent merge: the operator merges in the GitHub UI (Decision 271 cl.3); the probe and the merge are admin steps that need his words naming each."
+  - "500-SLOC limit (Decision 128): decompose, never raise."
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - "Decision-scout r1 FLAGS_FOUND; CITE 248, 263, 267, 271, 273; CONTRADICT WARN 212 (the verdict plane's identity now rests on the secrets port's AWS adapter) adopted as accepted PC-14 owned by dec-273; SPIRIT NOTE 271 (origin's row read) satisfied by reading the local main checkout: post checks out main and persona-verdict-override.yml's render runs only on refs/heads/main (OVERRIDE_RENDER_IF, pinned). Decisions triaged: 228 of 228. Roadmap items intersected: 8; CONFLICT: 0; RELATED: 7. Serves: NS.9 4/5."
+  - "Operator 2026-11-23: probe fork -> CloudShell probe before the UI merge with a plan note (no Decision 273 Update): the Decision 267 cl.5 precedent discharged the same 'first run proves' wording with an operator CloudShell run of workflow_dispatcher_probe.py; the same key and permission request prove the same capability, before any job holds the key. Then 'write the plan'."
+  - "Consult: /mnt/project-files/persona-verdict-app-post/advisor-brief/ADVICE.md (2026-11-18). Adopted F3 (iss = App id row), F4 (CloudShell probe), F5 (refusal rows in E3's jobs), F6 (App token for POST only), F7 (in-process, bodies first), F8 (closes_criteria []). F2's two PRs replaced by one PR: a plan is one PR until rec-5411 lands, and one PR removes the window where origin and the row disagree."
+  - "Primary rec rec-5486 (depends on rec-5166). PLAN-persona-verdict-first-key-read's build is on main (keyprep, smoke, refusal, oidc_assume, key_refusal, inference_smoke); its Amendment 1 (#2360, folded allowed-endpoints) and its VP 9 re-run are in flight: this build starts after that amendment's build merges and its VP 9 passes, and uses the folded >- form."
+  - "Wheelhouse: docker/persona/requirements-persona.txt already pins pyjwt 2.15.1, cryptography 50.0.2, boto3 1.44.4, pyyaml and jsonschema, so post installs the same hash-locked set offline; keyprep's wider condition adds one keyless job per verdict run that reaches post."
+  - "Residual (named): the post job runs on every verdict run, and about one runner in five lands on an AWS placement where the self-check stops as UNSUPPORTED_PLACEMENT (rec-5455, vendor issue). Such a run posts no check, and the wake job's existing fault wake tells the session to re-run failed jobs. Nothing gates on it while every gates.<persona>.verdict_source row reads in_session; a persona flip plan must weigh rec-5455's state."
+  - "Residual (named): a cancelled post job killed by SIGKILL between mint and revoke leaves a checks-only installation token live for at most one hour; SIGTERM and SIGINT revoke it."
+  - "Cut-over: origin refuses every github-actions-posted run after the merge, so a pending override on an open PR needs a fresh verdict run (push or re-run). Reported with the merge."
+  - "red_overlap (2026-11-23, main b5326b3d): blocked by rec-5491 (telemetry-arrival reader error) and rec-5497 (full-tier xdist worker crash), both slo_breached, no shared files. Deferral: this plan neither touches nor repairs scripts/telemetry_verify/ or the check scaffolding; the build re-runs red_overlap before it starts and waits while a red past its SLO blocks dispatch (Decision 226)."
+  - "Breadth: selection_budget breadth_waived (239 tests selected, test half 202-770 s of a 770 s allowance); hermetic VP replays are steps 2 to 4 only."
+  - "Notice-class files: docs/contracts/project-configuration.yaml, docs/contracts/ports.yaml, config/persona_verdict_egress.yaml, config/composite_action_body_baseline.yaml. No gated text."
+  - "Owner: this planning session (thread 'Plan verdict persona App posting')."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:14ec5b53fbecf5502f69cb478a96d57be0f1ade5a41d04150fda35b6ae5dbb21'}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - Start only after PLAN-persona-verdict-first-key-read Amendment 1's build merges and its VP 9 passes; re-run red_overlap; VP 1 read-back; STOP on a mismatch.
+  - Ask the operator (through the coordinator) for the App's numeric id; write it to the app_id row.
+  - scripts/personas app_token.py, post_verdict.py, override.py, key_refusal.py, inference_smoke.py; scripts/session/workflow_dispatcher_probe.py -- as their scope rows.
+  - Checks -- _persona_verdict_post.py, _persona_verdict_keyed.py, validate_persona_verdict_chain.py.
+  - persona-verdict.yml, config/persona_verdict_egress.yaml, composite_action_body_baseline.yaml, project-configuration.yaml, ports.yaml (bytes measured on main).
+  - Tests per scope rows.
+  - Execute the Verification Plan in order; steps 6 and 7 wait for the operator's words; on unrecoverable V3 failure stop and RCA (Decision 55).
+  - 'Report: what was implemented, verification results, probe run id, step 8 and 9 run ids and attempts'
+rollback: >-
+  Revert the merged PR (it changes the app_id row, so the operator merges the revert in the GitHub UI): post returns to
+  GITHUB_TOKEN and origin to the github-actions rule. No infrastructure changes; the role and key stay unused.
