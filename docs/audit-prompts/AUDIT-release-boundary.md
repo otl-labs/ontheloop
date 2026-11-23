@@ -34,24 +34,33 @@ Adjudicate every candidate to exactly one outcome, and record it where the mappi
 |---|---|
 | CONFIRMED defect, no owning roadmap item / Decision / open rec | `findings[]`, `roadmap_crossref.classification: novel` |
 | Planned, and the owning item's remedy is insufficient | `findings[]`, `classification: planned-insufficient` |
-| Planned, owning item's remedy is sufficient but unbuilt | `findings[]`, `classification: planned-unbuilt` |
-| Planned and fully covered (built, or sufficient and correctly sequenced so no new action is needed) | `rejected_candidates[]`, naming the owning item |
+| Planned, owning item's remedy is sufficient but unbuilt (deferred or not) | `findings[]`, `classification: planned-unbuilt` |
+| Planned and fully covered: the owning remedy is BUILT and works | `rejected_candidates[]`, naming the owning item |
 | Not a defect | `rejected_candidates[]`, naming the compensating control or the reason |
 
-A `deferred_post_mvp` status is never by itself a defect (Section 13). Whether a deferred item should be pulled
-forward is answered in the `pull_forward_sequencing` block (Q4), not as a finding.
+A `deferred_post_mvp` status is never by itself a defect (Section 13): absence of a deliberately deferred build is not
+a finding. A finding on deferred work exists only where the design is insufficient (`planned-insufficient`), or where
+the design is sufficient but the pull-forward needs it built (`planned-unbuilt`). When to build it is answered in the
+`pull_forward_sequencing` block (Q4).
 
-Candidates (C1-C20). Each is phrased as an observation plus the hypothesis to test:
+A candidate may be partly confirmed and partly dismissed: then it appears in one or more findings for the confirmed
+part AND in one `rejected_candidates` row for the dismissed part. Every candidate appears at least once.
+
+Candidates (C1-C23) are numbered with an upper-case C; they are unrelated to T4.24's lower-case criteria c1-c17. Each
+is phrased as an observation plus the hypothesis to test. C21-C23 are counter-hypotheses that existing mechanisms
+already suffice; adjudicate them with the same rigour:
 
 - C1. The only recorded release classification in the repository is `binds` (repository / release / both) and
   `adopters` (bound / may_override / set_scale) on the nine `docs/contracts/north-star.yaml` principles. Hypothesis:
   decisions, contracts, checks, skills and config files have no equivalent machine-readable classification.
 - C2. `docs/contracts/ports.yaml` `structural_assumptions` rows are recorded by hand as work meets them; the
-  validator checks row shape and owning references. A literal-path census finds roughly 165 of roughly 834 tracked
-  `scripts/` and `src/` Python files containing a quoted repository path. Hypothesis: the SA list is not a complete
-  source for deriving the `otl init` specification (T4.24 c9).
+  validator checks row shape and owning references. The Section 5 censuses find, as a floor, roughly 165 of roughly
+  834 tracked `scripts/` and `src/` Python files quoting a `docs/`-or-`config/` repository path, and roughly 300 when
+  path joins and other repository paths (`.claude/`, `AGENTS.md`, `logs/`, `terraform/`, `.github/`) are included.
+  Hypothesis: the SA list is not a complete source for deriving the `otl init` specification (T4.24 c9).
 - C3. `ports.yaml` sits within about 100 bytes of its byte budget; rec-5134 records an SA row deferred partly for
-  size. Hypothesis: the contract size budget suppresses recording of structural assumptions.
+  size; rec-5274 (open) proposes a size relief valve for `ports.yaml`. Hypothesis: the contract size budget
+  suppresses recording of structural assumptions.
 - C4. Roughly 88 `scripts/`/`src/` files define their own module-level repository-root constant. Hypothesis: there is
   no single path-resolution seam through which repository-specific paths could be redirected to an `ontheloop/` root
   or a release-installed location.
@@ -68,22 +77,26 @@ Candidates (C1-C20). Each is phrased as an observation plus the hypothesis to te
   adopter or agent needs before superseding a decision.
 - C9. The decision metadata envelope accepts `supersedes`; no field records what a superseding decision accepts in
   exchange. Hypothesis: an adopter's override is not required to acknowledge the rationale it overrules.
-- C10. The SLOC check's failure text names the budget file and "with justification" but no pointer to the Decision
-  carrying the limit's rationale. Hypothesis: rule enforcement messages do not deliver rationale at the point of
-  violation.
-- C11. Persona contracts carry this repository's specifics in their prompt templates and in typed inputs computed
-  from this repository's files (`project_context`, `review_guidance`); the rendered prompt is pinned by
-  `rendered_prompt_sha256`. Hypothesis: no input slot or mechanism exists for adopter domain guidance, and adding one
-  conflicts with the hash pin unless designed for.
+- C10. The SLOC check's output names Decision 43 (its section header and failure label, and the waiver text cites
+  `decision-43`); its per-file over-budget message names the budget file and "with justification". It names neither
+  Decision 128 (the raise guardrails) nor any reason text. Hypothesis: rule enforcement output does not deliver the
+  rule's reason at the point of violation, only a Decision number.
+- C11. Persona contracts carry this repository's specifics in their prompt templates, and declare typed inputs whose
+  contract descriptions name this repository's files (`project_context` "The project context document, at main";
+  `review_guidance` "Shell pre-computation, at main: deploy-paths.yaml's admin_out_of_band ..."). The input producers
+  are not yet built: `scripts/personas/materialise.py` holds an empty `PROVIDERS` registry that "a later add plan"
+  fills. The rendered prompt is pinned by `rendered_prompt_sha256`. Hypothesis: no input slot or mechanism exists for
+  adopter domain guidance, and adding one conflicts with the hash pin unless designed for.
 - C12. `docs/contracts/instruction-architecture.yaml` lists layers 1-5 and consumers `claude_code_interactive`,
   `executor`, `repo_less_coordinator`, `coordinated_worker`. Hypothesis: neither run_persona personas nor adopter
   guidance has a layer or consumer row.
 - C13. The executor leash `boundary_patterns` lists `.claude/agents/`, `CLAUDE.md` and `docs/contracts/personas/` but
   no `.claude/skills/` entry. Hypothesis: where adopter guidance or skills would live, the governed agent is not
   barred from editing its own instructions.
-- C14. Skill entry files mix generic method with this repository's references (for example `planning` cites about
-  24 Decision numbers and 34 repository paths; `audit-prompt` cites none). Hypothesis: shippable skill method and
-  repository-only content are not separated.
+- C14. Skill entry files mix generic method with this repository's references (for example `planning` carries about
+  24 Decision citations, 16 distinct, and 34 repository path-prefix references by the Section 5 census, which counts
+  occurrences and covers only four path prefixes). Hypothesis: shippable skill method and repository-only content are
+  not separated.
 - C15. No Decision, roadmap criterion or open rec found at compose time addresses adopters customising persona prompts
   or skills to their domain. Hypothesis: this is an unowned design gap.
 - C16. `.claude-plugin/marketplace.json` publishes the `.claude/` directory as a Claude Code plugin named `ontheloop`
@@ -100,6 +113,14 @@ Candidates (C1-C20). Each is phrased as an observation plus the hypothesis to te
 - C20. Decision 196 clause 6 leaves Tier B / Tier C id prefixes undecided; code and check labels cite bare Decision
   numbers (for example the SLOC check's failure label). Hypothesis: shipping Tier B requires rewriting citations
   across code.
+- C21. Counter-hypothesis: Decision 196 clause 5's trimming rule ("a decision ships in B iff a shipped mechanism
+  cites it") is already a machine-checkable test of Tier B membership once shipped mechanisms are known, so no new
+  per-decision classification field is needed.
+- C22. Counter-hypothesis: the settings registry, the SA rows, `.importlinter` and `boundary_patterns` together
+  already form a partial classification and enforcement mechanism that can be extended rather than replaced.
+- C23. Counter-hypothesis: the persona contract's typed-input design (inputs materialised by a shell, a pinned
+  template) already provides the seam adopter guidance needs: guidance would be one more typed input, and the hash pin
+  covers only the template, not input values.
 
 ## 3. READ FIRST -- DISAMBIGUATION TRAPS
 
@@ -122,7 +143,13 @@ Candidates (C1-C20). Each is phrased as an observation plus the hypothesis to te
   `clouds.aws.profile`). In this audit "profile" means the house-style profile unless stated.
 - "Executor": the legacy Python executor is retired (Decision 247). Layer 5 of `instruction-architecture.yaml`
   (`config/agent/executor/prompts/`) belongs to it. The Decision 185 loop's personas (`docs/contracts/personas/`,
-  run via `run_persona`) are its successors and are a different surface.
+  run via `run_persona`) are its successors and are a different surface. Do NOT read "executor" in a file name as
+  "legacy": `config/agent/executor/capabilities.yaml` and its `boundary_patterns` are live, read by current checks
+  (verify by grepping `scripts/checks/` for `capabilities.yaml`), and C13 concerns that live list.
+- Identifier collisions inside this prompt: candidates C1-C23 (upper-case C) are not T4.24 criteria c1-c17
+  (lower-case c, always written `T4.24 c<n>` or `T4.24:c<n>`); north-star principles P1-P7 (Section 6) are not method
+  phases M1-M9 (Section 12); audit surfaces S1-S5 are not the prose-budget classes S1/S2/S4/S8 of
+  `config/prose_budgets.yaml` (written here as "prose class S<n>"); surface classes K01-K29 are this prompt's own.
 - Persona contracts versus skills: a persona contract (`docs/contracts/personas/*.yaml`) is rendered to a prompt and
   run through LiteLLM; a skill (`.claude/skills/*/SKILL.md`) is loaded by an interactive Claude Code session. A
   persona's `skill_tether` names the skill whose verdict rule it mirrors. They are two surfaces.
@@ -145,11 +172,11 @@ Surfaces (state as of compose time; verify):
 
 | Id | Surface | State |
 |---|---|---|
-| S1 | Core code: `scripts/`, `src/`, `bin/`, root packaging files | built |
-| S2 | Contracts and configuration: `docs/contracts/`, `config/`, `docs/contracts/project-configuration.yaml` (settings registry), `docs/contracts/ports.yaml`; the tracked `ontheloop/` root, `ontheloop/platform.yaml`, gitignored `.ontheloop/` | registry built; `ontheloop/` roots designed-unbuilt (T4.24 c12, c14, c15) |
+| S1 | Core code: `scripts/`, `src/`, `bin/` | built |
+| S2 | Contracts and configuration: `docs/contracts/`, `config/`, `docs/contracts/project-configuration.yaml` (settings registry), `docs/contracts/ports.yaml`; the tracked `ontheloop/` root, `ontheloop/platform.yaml`, the `.ontheloop/` runtime root | registry built; tracked `ontheloop/` and `ontheloop/platform.yaml` designed-unbuilt (T4.24 c12, c14, c15); `.ontheloop/` partly in use: `.gitignore` ignores only `/.ontheloop/maps/`, which `docs/contracts/visual-grammar.yaml` uses as a default folder "until T4.24 c12 creates and ignores that whole root" |
 | S3 | Decision corpus and tiers: `docs/DECISIONS.md`, `docs/DECISIONS_ARCHIVE.md`, `docs/contracts/north-star.yaml`, `docs/contracts/decision-entry.yaml`; the Tier B release snapshot, Tier B/C id prefixes, the house-style profile | corpus built; Tier B snapshot, prefixes and profile designed-unbuilt (Decision 196 clause 8; T4.24 c7, c9) |
-| S4 | Agent instruction surfaces: `AGENTS.md`, `CLAUDE.md`, `**/CLAUDE.md`, `.claude/skills/`, `.claude/commands/`, `.claude/hooks/`, `.claude/settings.json`, the `ontheloop` Claude Code plugin manifests, `docs/contracts/personas/`, `docs/contracts/executor-personas.yaml`, `docs/contracts/instruction-architecture.yaml` | built for this repository; adopter customisation undesigned (C15 to adjudicate) |
-| S5 | Packaging and bootstrap: root `pyproject.toml`, `packages/`, the released-version rule (Decision 185 clause 3), its dependency on SIT/PROD (T2.57, T2.58), the three-repository topology (Decision 209 clause 3) | placeholders only; designed-unbuilt (T4.24 c1, c3, c5) |
+| S4 | Agent instruction surfaces: `AGENTS.md`, `CLAUDE.md`, `**/CLAUDE.md`, `.claude/skills/`, `.claude/commands/`, `.claude/hooks/`, `.claude/settings.json`, the `ontheloop` Claude Code plugin manifests, `docs/contracts/personas/`, `docs/contracts/executor-personas.yaml`, `docs/contracts/instruction-architecture.yaml` | built for this repository; no design for adopter customisation found at compose time (C15 to adjudicate) |
+| S5 | Packaging and bootstrap: root packaging and tool config (`pyproject.toml`, `requirements*`), `packages/`, the released-version rule (Decision 185 clause 3), its dependency on SIT/PROD (T2.57, T2.58), the three-repository topology (Decision 209 clause 3) | placeholders only; designed-unbuilt (T4.24 c1, c3, c5) |
 
 Release classification buckets (the vocabulary of Q1; pinned):
 
@@ -163,9 +190,11 @@ Release classification buckets (the vocabulary of Q1; pinned):
   records (Decision 211 clause 2).
 - `repository_only` -- this repository's maintainer-only content (glossary `this_repository`): its CI, Terraform,
   roadmap, plans, audits, its own Tier A and Tier C entries, operator deployment configuration.
-- `split` -- the surface class mixes buckets; the block entry names each part and its bucket.
+- `split` -- the surface class mixes buckets; the block entry's `mechanism` names each part and its bucket.
 
-Surface classes for the `release_classification` block (K01-K28). Classify every one; `split` is expected for several:
+Surface classes for the `release_classification` block (K01-K29). Classify every one; `split` is expected for several.
+Every tracked path belongs to exactly one class: a path matched by K01-K28 belongs there, and K29 takes everything
+else.
 
 K01 `scripts/checks/` | K02 `scripts/validate.py` and `scripts/checks/registry.py` dispatch | K03 `scripts/ops_portal/`,
 `scripts/ops_data_portal.py`, `scripts/ops/` | K04 `scripts/roadmap/` | K05 `scripts/personas/`,
@@ -179,19 +208,26 @@ K08 `scripts/ci/`, `scripts/ci_rca/` | K09 `scripts/telemetry_capture/`, `script
 `docs/contracts/executor-personas.yaml` | K18 `docs/DECISIONS.md`, `docs/DECISIONS_ARCHIVE.md` | K19
 `docs/contracts/north-star.yaml` | K20 `docs/contracts/glossary.yaml` | K21 `docs/ROADMAP-PLATFORM.yaml`, `docs/plans/`,
 `docs/audit-prompts/`, `audits/` | K22 `config/` | K23 `AGENTS.md`, `CLAUDE.md`, `**/CLAUDE.md`,
-`docs/PROJECT_CONTEXT.md` | K24 `.claude/skills/`, `.claude/commands/` | K25 `.claude/hooks/`, `.claude/settings.json`,
-plugin manifests | K26 `.github/workflows/`, `.github/actions/` | K27 `terraform/`, `docker/`, `migrations/` | K28
-`tests/`, `bin/`, root packaging and tool config (`pyproject.toml`, `requirements*`, `.importlinter`,
-`.pre-commit-config.yaml`), `packages/`.
+`docs/PROJECT_CONTEXT.md` | K24 `.claude/skills/`, `.claude/commands/`, `.claude/agents/` | K25 `.claude/hooks/`,
+`.claude/settings.json`, plugin manifests | K26 `.github/` (workflows, actions and the rest) | K27 `terraform/`,
+`docker/`, `migrations/` | K28 `tests/`, `bin/`, root packaging and tool config (`pyproject.toml`, `requirements*`,
+`.importlinter`, `.pre-commit-config.yaml`), `packages/` | K29 every other tracked path (one entry; name notable
+members, for example `src/` packages not listed in K13-K15, other `docs/` files, root files such as `README.md`, the
+licence files and `EVALUATION-PROMPTS.yaml`, and the partly used `.ontheloop/` root).
 
 Classify at surface-class granularity. Do not classify file by file except inside the bounded samples of Section 11.
 The operator did not settle whether `tests/` and `terraform/` belong in the classification; they are included as
 whole classes (K27, K28), and you may argue in Q10 that either should be excluded or split further.
 
+Surface assignment of a finding: every finding names exactly ONE primary surface S1-S5 (the surface whose change fixes
+it); there is no `shared` value. A finding that spans surfaces names the primary one and lists the others in `gap`.
+
 Out of scope (one line each; do not produce findings on them): the paid service and its control plane (Decisions 209
-clause 2, 233); licensing and the Additional Use Grant (Decisions 171, 194; T4.24 c6); reducing this repository's own
+clause 2, 233); licensing and the Additional Use Grant (Decisions 171, 194; T4.24 c6 -- still give it a
+`pull_forward_sequencing` entry, `at_first_release`, without assessing it); reducing this repository's own
 agent-session cost (in flight elsewhere); the verdict-persona migration to GitHub Actions (T4.28-T4.30, T4.32);
-Terraform and IaC changes; whether the content of any individual Decision is right.
+Terraform and IaC changes; whether the content of any individual Decision is right; recommending a hard context-size
+budget for adopter personas (the operator has directed visibility only; there is no Decision for this direction).
 
 ## 5. SETUP
 
@@ -204,12 +240,17 @@ Run these first. NEVER abort on a failure -- take the named degraded path.
    deliverable filenames, the branch name and `meta.audited_commit`. Then
    `git switch -c audit/release-boundary-<sha> origin/main` now, so everything you read is the audited tree. IF that
    branch already exists (locally per `git branch --list`, or on the remote per `git ls-remote --heads origin <name>`),
-   append `-r2` (then `-r3`, ...) to the branch name only; the deliverable filenames keep `<sha>`. IF fetch fails:
-   use `git rev-parse --short HEAD`, branch off `HEAD` instead, and record "base is local HEAD" in
-   `meta.contract_notes`.
+   append `-r2` (then `-r3`, ...) to the branch name only; the deliverable filenames keep `<sha>`. IF deliverables
+   named `audits/release-boundary-<sha>.yaml` or `.md` already exist in the tree, name yours
+   `audits/release-boundary-<sha>-r2.yaml` / `.md` (then `-r3`, ...), use those names everywhere this prompt says
+   `release-boundary-<sha>`, and record the suffix in `meta.contract_notes`. IF fetch fails: use
+   `git rev-parse --short HEAD`, branch off `HEAD` instead, and record "base is local HEAD" in `meta.contract_notes`.
 2. `bin/venv-python -m scripts.session.preflight --roadmap-detail full` -- writes `logs/.preflight-report.json`
-   (gitignored; expected). Recommendations have NO local cache in this repository; rec dedup uses the live reader
-   (step 3). IF this fails: record the error in `meta.contract_notes` and continue to step 3.
+   (gitignored; expected). Use it in phase M1 as context only: its roadmap section gives current item statuses to
+   compare with Section 10, and its CI-RCA section tells you whether `main` is red (record a red `main` in
+   `meta.contract_notes`; it does not change your task). Recommendations have NO local cache in this repository; rec
+   dedup uses the live reader (step 3). IF this fails: record the error in `meta.contract_notes` and continue to
+   step 3.
 3. Rec dedup probe -- run it whatever step 2 did:
    `bin/venv-python -m scripts.recs_related --terms "otl init ontheloop root" --limit 5 --table`.
    IF this fails: do NOT abort -- set `meta.degraded_dedup = true`, mark every finding whose classification rests on
@@ -219,18 +260,24 @@ Run these first. NEVER abort on a failure -- take the named degraded path.
    `bin/venv-python -c "import yaml; d=yaml.safe_load(open('docs/ROADMAP-PLATFORM.yaml')); print(len(d['tier_items']))"`.
    IF it errors, record it in `meta.contract_notes` and read the YAML as text.
 5. Census commands (re-derive every count quoted in this prompt with these; record your values in the evidence of
-   the findings that use them):
-   - Path-literal census, core code:
+   the findings that use them). Every census here is a FLOOR, not an exact count: it misses paths built in other
+   ways (f-strings, constants defined in another module). Say "at least" when you report a census value.
+   - Path-literal census, core code (narrow; `docs/` and `config/` literals):
      `git grep -lE '"(docs/contracts|docs/DECISIONS\.md|docs/plans|docs/ROADMAP|config/)' -- 'scripts/*.py' 'src/*.py' | wc -l`
      against `git ls-files 'scripts/*.py' 'src/*.py' | wc -l`; per-package breakdown:
      `git grep -lE '"(docs/contracts|docs/DECISIONS\.md|docs/plans|docs/ROADMAP|config/)' -- 'scripts/*.py' 'src/*.py' | awk -F/ '{print $1"/"$2}' | sort | uniq -c | sort -rn`.
-   - Same census over `'tests/*.py'`.
+   - Broad census, core code (adds path joins and other repository paths; report the union):
+     `{ git grep -lE '"(docs/contracts|docs/DECISIONS\.md|docs/plans|docs/ROADMAP|config/|\.claude/|AGENTS\.md|CLAUDE\.md|logs/|terraform/|\.github/)' -- 'scripts/*.py' 'src/*.py'; git grep -lE '"(docs|config|logs|audits)" */|/ *"(contracts|plans|DECISIONS\.md|agent)"' -- 'scripts/*.py' 'src/*.py'; } | sort -u | wc -l`.
+   - Same narrow census over `'tests/*.py'`.
    - Root-constant census:
      `git grep -lE '^(REPO_ROOT|ROOT|_ROOT|_REPO_ROOT|PROJECT_ROOT) *=' -- 'scripts/*.py' 'src/*.py' | wc -l`.
-   - Skill reference census: for each `.claude/skills/*/SKILL.md`, count `grep -oE 'Decision [0-9]+'` and
-     `grep -oE '(docs/contracts|scripts/|config/|docs/plans)'` matches.
+   - Skill reference census: for each `.claude/skills/*/SKILL.md`, count `grep -oE 'Decision [0-9]+'` occurrences
+     (and distinct values with `| sort -u | wc -l`) and `grep -oE '(docs/contracts|scripts/|config/|docs/plans)'`
+     occurrences. These four prefixes are a floor; a skill with zero matches may still name other repository paths
+     (`AGENTS.md`, `audits/`, `bin/venv-python`), so read before calling any skill free of repository content.
    - Decision rationale census: `grep -c '^## Decision [0-9]' docs/DECISIONS.md` and, for each of `Problem`,
-     `Intent`, `Rationale`, `Reversal conditions`, `grep -cE '^\*\*<marker>:?\*\*' docs/DECISIONS.md`.
+     `Intent`, `Rationale`, `Reversal conditions`, `grep -cE '^\*\*<marker>:?\*\*' docs/DECISIONS.md` (the pattern
+     matches both `**Rationale:**` and `**Rationale**:`).
    A literal match is a lead, not a defect: a quoted path in a check that enforces this repository's own house style
    may be correct `repository_only` or `optional_profile` behaviour (Q1 decides).
 6. External lookups (Q9 only, and any Q7 claim about how a named tool layers agent instructions): you MAY use web
@@ -239,7 +286,9 @@ Run these first. NEVER abort on a failure -- take the named degraded path.
    knowledge and marked HYPOTHESIS. IF web access is unavailable: set `meta.web_unavailable = true`, answer from your
    own knowledge, and mark every checklist row and finding resting on an external fact `confidence: HYPOTHESIS`.
 
-Repository-wide `validate` is advisory outside CI; running it is optional and never a gate (Section 16).
+Repository-wide `validate` is advisory outside CI; running it is optional and never a gate (Section 16). The full
+validation tier that AGENTS.md runs before a code handoff does not apply to this audit: your deliverables are two
+data files under `audits/`, not code; do not run it.
 
 ## 6. NORTH STAR
 
@@ -273,7 +322,7 @@ NS.8 (autonomy is earned) and NS.9 (humans hold approval authority) are the most
 
 Answer every question in its own `question_answers` entry (Section 14). Verdict enums are pinned.
 
-- Q1 Release classification. Classify each surface class K01-K28 into one bucket (Section 4) in the
+- Q1 Release classification. Classify each surface class K01-K29 into one bucket (Section 4) in the
   `release_classification` block. Then answer: is there an existing mechanism sufficient to record and enforce such a
   classification machine-readably (consider north-star.yaml `binds`/`adopters`, Decision 196 clause 5's trimming
   rule, `ports.yaml` structural assumptions, the settings registry, `.importlinter`, `config/agent/executor/
@@ -290,9 +339,13 @@ Answer every question in its own `question_answers` entry (Section 14). Verdict 
   configuration? Verdict (about current enforcement): `sufficient | partial | insufficient`.
 - Q4 Pull-forward viability and order. The operator has decided to pull the separation forward while the rest of
   T4.24 stays deferred. Is a pull-forward viable now, and in what order? Fill the `pull_forward_sequencing` block for
-  every T4.24 criterion c1-c17 and for rec-4191, rec-4673, rec-5134, rec-5405 and rec-4391, and add any new slice you
-  propose (id `NEW-<n>`). Each slice must be sized for one plan (one verifiable, revertible outcome; Decision 247).
-  Verdict: `viable | viable_with_preconditions | not_viable`.
+  every T4.24 criterion c1-c17 and for rec-4191, rec-4673, rec-5134, rec-5274, rec-5405 and rec-4391, and add any new
+  slice you propose (id `NEW-<n>`). Each slice must be sized for one plan (one verifiable, revertible outcome; Decision
+  247). Mapping rules: a criterion whose status is `met`, or a rec that is `closed` with its acceptance satisfied, is
+  `already_met`; a rec that is `declined` or `superseded` is `not_applicable`; a rec still `open` whose acceptance
+  command already passes on the audited tree is `already_met` with that stated in `rationale` (check each rec's
+  acceptance this way); T4.24 c6 is `at_first_release` (out of scope, Section 4). Verdict:
+  `viable | viable_with_preconditions | not_viable`.
 - Q5 Repository topology (operator instinct: keep Decision 209 clause 3 -- this public repository holds the core; a
   public adopter products monorepo depends on On The Loop as an external dependency; a private monorepo holds the paid
   service). Does that topology hold given your Q1-Q3 answers, and what must the separation deliver before the
@@ -323,7 +376,9 @@ Answer every question in its own `question_answers` entry (Section 14). Verdict 
   style rules are enforced in code paths an adopter cannot switch off. Verdict: `sufficient | partial | insufficient`.
 - Q9 Industry practice. Rate the designed and built state against the external checklist below, property by
   property, in `external_checklist` (rating `met | partial | missed`; `partial` requires an argued, property-matched
-  compensating control in evidence). Verdict: `at_practice | partially_at_practice | below_practice`.
+  compensating control in evidence). Verdict: `at_practice | partially_at_practice | below_practice`. Each row is
+  relevant to the surfaces fixed here (used by Section 15's maturity rule; do not change them): E1 S1, S2; E2 S2;
+  E3 S2, S5; E4 S5; E5 S3, S4; E6 S4; E7 S3; E8 S3; E9 S1, S4; E10 S1; E11 S5; E12 S4.
   External checklist (E1-E12; you may cite external sources within the Section 5 lookup cap):
   E1 Engine/project separation: a shipped engine reads the adopter's project through configuration and never copies
   itself into it (dbt Core and a dbt project; Terraform core and configuration).
@@ -354,6 +409,13 @@ Answer every question in its own `question_answers` entry (Section 14). Verdict 
   neutral; answer on evidence.
   (d) How do Tier B/Tier C id prefixes interact with bare Decision numbers cited in code and check labels (C20)?
   (e) Should `terraform/` and `tests/` be inside or outside the release classification at all?
+  (f) What is a release's stable interface (CLI verbs, contract schemas, check ids, persona contract shape), and how
+  do an adopter's `ontheloop/` content and Tier C `supersedes` records migrate when a shipped schema changes?
+  `contract_version` and `semantic_break` in contract amendment logs are a candidate existing mechanism.
+  (g) The decision corpus has a warehouse half: `ops_decisions` is rebuilt from `docs/DECISIONS.md`
+  (`ops_data_portal --backfill-decisions-md`, AGENTS.md), with read caches `logs/.decisions-index.jsonl` and
+  `docs/decisions-index.json`. How does a release locate and rebuild these for an adopter, and does Tier B appear in
+  an adopter's `ops_decisions`?
 
 ## 8. RUBRIC
 
@@ -385,8 +447,10 @@ where a dimension does not structurally apply; never manufacture a rating or a f
   non-SLOC house-style rule of your choice (for example the glossary lint, SA-03).
 - DD-C Persona instruction assembly (feeds Q7). For `docs/contracts/personas/code_reviewer.yaml`, trace how the
   rendered prompt is built (`docs/contracts/executor-personas.yaml` `rendered_prompt` rules, `scripts/persona_contracts/
-  render.py`), which inputs are computed from this repository's files (find the producers under `scripts/personas/`),
-  and where an adopter-guidance input would attach. State what the hash pin covers and what it does not.
+  render.py`), which declared inputs name this repository's files in their contract descriptions, and where an
+  adopter-guidance input would attach. The input producers are NOT built yet: `scripts/personas/materialise.py`
+  holds an empty `PROVIDERS` registry that a later plan fills, so assess the declared design, not a producer; do not
+  search further for one. State what the hash pin covers and what it does not.
 - DD-D Bootstrap path (feeds Q4, Q6). Using Decision 185 clause 3, Decision 252, T2.57, T2.58 and T4.22 c5 ("Loads the
   installed kernel, never the target repo tree"), describe the concrete sequence by which this repository would stop
   running its own working tree, and the earliest point each step is possible.
@@ -441,22 +505,39 @@ Contracts and config:
   `supersedes`.
 - `docs/contracts/instruction-architecture.yaml`: `layers` (~96), `consumers` (~155).
 - `docs/contracts/executor-personas.yaml`: persona contract shape; `rendered_prompt` rules (~205).
-- `docs/contracts/personas/code_reviewer.yaml`: inputs `project_context` (~19), `review_guidance` (~25, computed from
-  this repository's deploy-paths and tests guidance), `skill_tether` (~122), `rendered_prompt_sha256` (~127),
+- `docs/contracts/personas/code_reviewer.yaml`: inputs `project_context` (~19, described "The project context
+  document, at main"), `review_guidance` (~25, described as a "Shell pre-computation, at main" of deploy-paths.yaml's
+  admin-only roots and sections of the tests guidance), `skill_tether` (~122), `rendered_prompt_sha256` (~127),
   `prompt_template` (~129). Rendered prompts in `docs/contracts/personas/rendered/` are roughly 10-16 KB each.
+- `scripts/personas/materialise.py` (~20): `PROVIDERS: dict[str, Provider] = {}`; its docstring says "A later add
+  plan registers its persona's own fields in PROVIDERS." No file under `scripts/`, `src/` or `.github/` computes
+  `review_guidance` at compose time.
+- `.gitignore` (~117): `/.ontheloop/maps/`; `docs/contracts/visual-grammar.yaml` (~196-200) names `.ontheloop/maps/`
+  as a default folder.
 - `config/agent/executor/capabilities.yaml`: `boundary_patterns` (~4), includes `.claude/agents/` (~32) and
   `docs/contracts/personas/` (~46).
-- `config/prose_budgets.yaml`: byte budgets on ambient instruction prose (S1, S2, S4, S8 classes).
-- `scripts/checks/sloc/sloc_limits.py`: `validate_sloc_limits` (~81); over-budget message (~110); failure label
-  "SLOC limits (Decision 43)" (~133).
+- `config/agent/executor/capabilities.yaml` is read by live checks, for example
+  `scripts/checks/contracts/validate_persona_contracts.py` and `scripts/checks/executor/validate_executor_boundary.py`.
+- `config/prose_budgets.yaml`: byte budgets on ambient instruction prose (prose classes S1, S2, S4, S8).
+- `scripts/checks/sloc/sloc_limits.py`: `validate_sloc_limits` (~81); section header "=== SLOC limits (Decision 43)
+  ===" (~83); over-budget message (~110); unregistered-file message citing `decision-43` (~119-121); failure label
+  "SLOC limits (Decision 43)" (~133). Decision 43 is "Directed Growth Governance" (`docs/DECISIONS.md` ~14026).
 - `.claude-plugin/marketplace.json`: plugin `ontheloop`, source `./.claude`, "for project threads, which do not load
   .claude/settings.json".
 - `packages/ontheloop-py/pyproject.toml`: name `ontheloop`, version `0.0.0`, "Reserved namespace placeholder".
 - `.importlinter`: contracts govern first-party layering within `src` and `scripts`.
 
-Open recs at compose time (verify status with the reader; content summarised neutrally):
+Open recs at compose time (content summarised neutrally). Verify each status with the ducklake-reads named verb
+`recs_by_ids` (MCP tool `mcp__ducklake-reads__recs_by_ids`, one call with the comma-joined ids). IF that tool is
+unavailable: `bin/venv-python -m scripts.recs_related --terms "<title words>" --table` returns OPEN recs only, so a
+rec it returns is open and a rec it does not return has unknown status -- treat that rec's sequencing entry as
+`confidence: HYPOTHESIS`.
 - rec-4191 (open, Medium): seed `structural_assumptions` from hard-coded repository-path and AWS-identity assumptions
-  in `scripts/executor/` and `src/`; acceptance is at least 8 SA rows.
+  in `scripts/executor/` and `src/`; acceptance is
+  `test "$(grep -c '^  - id: SA-' docs/contracts/ports.yaml)" -ge 8` plus the ports contract test. At compose time
+  that grep returns 12 (block-form rows only; 4 further rows are flow-form).
+- rec-5274 (open, Low): give `docs/contracts/ports.yaml` a real size relief valve instead of flow-style compaction
+  near its cap.
 - rec-4673 (open, Medium): rename `ontheloop/platform.yaml` to `ontheloop/project.yaml` before the first release.
 - rec-5134 (open, Low): record the merge gate's read of `project-configuration.yaml` as an SA row; deferred because
   `ports.yaml` was at budget.
@@ -486,15 +567,15 @@ you ran). At equal severity, observed findings outrank static ones. Hard bounds 
 
 ## 12. METHOD
 
-- P1 Read: Sections 2-4 and 10; resolve anchors.
-- P2 Trace: DD-A to DD-D.
-- P3 Classify: fill `release_classification` (Q1).
-- P4 Empirical: Section 11 samples.
-- P5 Adjudicate: every candidate C1-C20 to findings or `rejected_candidates`, plus any new findings.
-- P6 Rate: rubric cells; external checklist (Q9).
-- P7 Dedup: Section 13 before any finding is final.
-- P8 Sequence: fill `pull_forward_sequencing` (Q4) from surviving findings and dependencies.
-- P9 Synthesize LAST: question answers, maturity, summary, report.
+- M1 Read: Sections 2-4 and 10; resolve anchors; skim the preflight report (Section 5 step 2).
+- M2 Trace: DD-A to DD-D.
+- M3 Classify: fill `release_classification` (Q1).
+- M4 Empirical: Section 11 samples.
+- M5 Adjudicate: every candidate C1-C23 to findings and/or `rejected_candidates`, plus any new findings.
+- M6 Rate: rubric cells; external checklist (Q9).
+- M7 Dedup: Section 13 before any finding is final.
+- M8 Sequence: fill `pull_forward_sequencing` (Q4) from surviving findings and dependencies.
+- M9 Synthesize LAST: question answers, maturity, summary, report.
 
 ## 13. DEDUP DISCIPLINE
 
@@ -521,8 +602,9 @@ exist):
 - Public-content boundary (Decision 101).
 - GitHub as approval authority; no identity system in the core (Decision 233 clause 4).
 - Glossary names (Decision 240).
-- A hard context-size budget for adopter personas: excluded by operator direction; recommend visibility only.
 - Persona contracts' and the loop kernel's place in `boundary_patterns` (Decision 185 clause 3).
+- (Scope, not a Decision: a hard context-size budget for adopter personas is out of scope by operator direction,
+  Section 4; recommend visibility only.)
 
 ## 14. OUTPUT
 
@@ -559,7 +641,7 @@ audit:
     - q: Q10
       answers:
         - {question: "", answer: "", basis: [<finding ids>]}
-        # seeds (a)-(e) plus at least two of your own
+        # seeds (a)-(g) plus at least two of your own
   per_surface_assessment:
     - {surface: S1, maturity: frontier|strong|solid|nascent, strengths: "", top_gaps: [<finding ids>]}
     # one per S1..S5
@@ -569,18 +651,20 @@ audit:
   release_classification:
     K01: {verdict: core_engine|release_schema_defaults|init_scaffold|optional_profile|repository_only|split,
           mechanism: "", what_changes: "", cost: XS|S|M|L, rationale: "", confidence: CONFIRMED|HYPOTHESIS}
-    # one entry per K01..K28; for split, mechanism names each part and its bucket;
+    # one entry per K01..K29. mechanism: for split, each part and its bucket; for any other verdict, how the
+    # class reaches its target (move into a release package, read through configuration, ship as profile, stay put).
     # what_changes = what must move or change for the class to reach its target; cost = effort to get there
   pull_forward_sequencing:
     T4.24:c1: {verdict: now|after_prerequisite|after_sit_prod|at_first_release|already_met|not_applicable,
                order: <int or null>, blocked_behind: [<criterion, rec, finding or item ids>],
                slice: "", rationale: "", confidence: CONFIRMED|HYPOTHESIS}
-    # one per T4.24:c1..c17, rec-4191, rec-4673, rec-5134, rec-5405, rec-4391, and NEW-<n> slices you propose;
+    # one per T4.24:c1..c17, rec-4191, rec-4673, rec-5134, rec-5274, rec-5405, rec-4391, and NEW-<n> slices;
+    # verdict mapping rules for met criteria and closed/declined recs: Q4 text;
     # order is a 1-based global execution order across verdicts now and after_prerequisite (null otherwise);
     # slice = the one-plan outcome, phrased so /plan can take it
   findings:
     - id: RB-01
-      surface: S1|S2|S3|S4|S5|shared
+      surface: S1|S2|S3|S4|S5      # the ONE primary surface (Section 4)
       question: Q1..Q10
       dimension: VD1..VD8
       title: ""
@@ -609,8 +693,9 @@ audit:
     novel_count: 0
     planned_insufficient_count: 0
     planned_unbuilt_count: 0
-    top_improvements: [<finding ids>]
+    top_improvements: [<finding ids>]   # 3 to 5 ids, highest leverage first
     highest_leverage_change: <finding id>
+    degraded: ""                        # "none", or the meta flags set to true plus the stale_anchors count
     maturity_S1: <value>
     maturity_S2: <value>
     maturity_S3: <value>
@@ -623,18 +708,19 @@ Invariants (state them to yourself and hold them):
   novel_count + planned_insufficient_count + planned_unbuilt_count`. Fully covered candidates live in
   `rejected_candidates`, NOT findings. `rubric_ratings`, `question_answers`, `release_classification` and
   `pull_forward_sequencing` are systems of record referenced FROM findings, never re-counted. `top_improvements` and
-  `highest_leverage_change` MUST be finding ids.
-- Every candidate C1-C20 appears exactly once: as the subject of at least one finding (cite it in the finding's
-  `title` or `gap` as "(C<n>)") or as one `rejected_candidates` row.
+  `highest_leverage_change` MUST be finding ids. Order `top_improvements` by leverage; where two candidates for a
+  place have equal severity and leverage, the `observed` one ranks first.
+- Every candidate C1-C23 appears at least once: in one or more findings (cite it in the finding's `title` or `gap` as
+  "(C<n>)"), in one `rejected_candidates` row, or in both when partly confirmed and partly dismissed (Section 2).
 - `control_property_match` is REQUIRED whenever a compensating control is the reason for dismissal: name the property
   the control exercises, where it operates (mechanism or file:line), and why the control would FAIL if the defect were
   real.
 - CONFIRMED requires the behaviour traced to file:line or an observed sampled artifact; anything less is HYPOTHESIS.
-- Every `release_classification` key K01-K28 and every listed `pull_forward_sequencing` key is present.
+- Every `release_classification` key K01-K29 and every listed `pull_forward_sequencing` key is present.
 
 Write `audits/release-boundary-<sha>.md`, prose, at most 1500 words, the layer the operator reads first:
 1. A five-to-eight sentence synopsis: the answer to "what does a release ship, what stays here, and what do we do
-   first".
+   first". If `summary.degraded` is not "none", the synopsis's first sentence says which degraded paths ran.
 2. One line per question Q1-Q9 with its verdict.
 3. The proposed first five slices from `pull_forward_sequencing`, in order, one line each.
 4. The highest-leverage change and why.
@@ -661,25 +747,30 @@ property AND would fail if the defect were real (apply the counterfactual to the
 catch the break does neither.
 
 Maturity: compute LAST, per surface, top-down, first match wins:
-- frontier = 0 open critical or high findings on the surface AND every Q9 `external_checklist` row relevant to the
-  surface rated `met` or `partial` (never `missed`). A row is relevant to a surface if its evidence cites that
-  surface; state relevance in the row's evidence.
+- frontier = 0 critical or high findings whose `surface` is this surface AND every Q9 `external_checklist` row
+  relevant to the surface (the fixed mapping in Q9) rated `met` or `partial` (never `missed`).
 - strong = 0 critical AND at most 1 high.
 - solid = at most 1 critical.
 - nascent = otherwise.
-The top rating remains reachable where you argued a property-matched compensating control; this prompt's framing
-does not foreclose it. Designed-unbuilt state is rated as found: a surface whose target exists only as a design is
-not penalised for being unbuilt where a deferral is deliberate, but its findings count.
+Count every finding whose `surface` is this surface, of every classification (`novel`, `planned-insufficient` and
+`planned-unbuilt` alike). Deliberate deferral is handled before this point, by the Section 2 rule that unbuilt-ness
+alone is never a finding; it does not discount findings here. The top rating remains reachable where you argued a
+property-matched compensating control; this prompt's framing does not foreclose it.
 
 ## 16. COMMIT / PR MECHANICS
 
-1. The base was derived ONCE in Section 5 step 1 and you are on `audit/release-boundary-<sha>` created from it. This
-   is a deliberate exception to the harness-assigned session branch rule (`docs/contracts/git-ops.yaml` agent branch
-   prefixes): the audit needs a clean two-file diff off the audited base. The branch base MUST equal
-   `meta.audited_commit`; the branch name carries any `-rN` suffix Section 5 step 1 added.
+1. The base was derived ONCE in Section 5 step 1 and you are on `audit/release-boundary-<sha>` created from it. The
+   `audit/` branch is SANCTIONED, not a conflict for Section 17 to resolve: `docs/contracts/git-ops.yaml` registers
+   `extra_destination_prefixes: ["audit/"]` (its `handoff_evidence_gate` block), the governing rule for audit
+   deliverables, which need a clean two-file diff off the audited base. The branch base MUST equal
+   `meta.audited_commit`; the branch name carries any `-rN` suffix Section 5 step 1 added. IF creating or pushing the
+   `audit/` branch is refused by a hook or the git remote: keep the commit local, do not open a PR, and end the turn
+   with a final message naming the local branch, the commit sha, the exact refusal and the `summary:` block, so the
+   human can push it. (The same block registers `audits/*` as exempt from the pre-push validation-evidence hook, so
+   the two deliverables need no validation run to push.)
 2. Pre-push gate: the YAML parses
    (`bin/venv-python -c "import yaml,sys; yaml.safe_load(open(sys.argv[1]))" audits/release-boundary-<sha>.yaml`),
-   the counting invariant and the candidate-coverage rule hold, every K01-K28 key is present, and the report is within
+   the counting invariant and the candidate-coverage rule hold, every K01-K29 key is present, and the report is within
    its cap (`wc -w` on the `.md` <= 1500). Running `bin/venv-python -m scripts.validate --pre` is OPTIONAL (advisory
    outside CI); if you run it and an unrelated failure appears, record it in `meta.contract_notes` before committing
    -- never fix it.
@@ -688,12 +779,13 @@ not penalised for being unbuilt where a deferral is deliberate, but its findings
    (do not override the author, do not disable or force signing, do not amend). If a pre-commit hook rejects the
    commit, fix the cause inside your two deliverables and commit again; never bypass the hook.
 4. Run `git push -u origin HEAD` as a tool call on its own (no pipe, redirect or second command). On a network error
-   retry up to 4 times with backoff. IF the push still fails, or fails for a non-network reason: do not open a PR;
+   retry immediately, up to 4 more attempts (no sleep needed). IF the push still fails, or fails for a non-network reason: do not open a PR;
    end the turn with a final message naming the branch, the commit sha, the exact error and the `summary:` block.
 5. Open the PR via `mcp__github__create_pull_request` (owner `otl-labs`, repo `ontheloop`, base `main`, head your
    branch, ready for review, NOT draft), title
-   `audit: release boundary between the core and this repository (S1-S5)`, body = a 2-3 sentence lede plus the
-   `summary:` block in a yaml fence, plus any PR footer your harness instructs. IF the tool is unavailable or the
+   `audit: release boundary between the core and this repository (S1-S5)`, body = a 2-3 sentence lede (its first
+   sentence states any degraded path, per `summary.degraded`) plus the `summary:` block in a yaml fence, plus any PR
+   footer your harness instructs. IF the tool is unavailable or the
    call fails: end the turn with a final message naming the pushed branch, the sha, the error and the intended title
    and body, so the human can open it. Then END THE TURN -- do not poll, do not merge, do not subscribe, do not
    self-approve. The human disposes of the PR.
