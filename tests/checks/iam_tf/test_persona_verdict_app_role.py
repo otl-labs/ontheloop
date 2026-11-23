@@ -130,6 +130,16 @@ def test_workflow_fence() -> None:
     assert workflow_problems(_real_workflows()) == []
 
 
+def test_only_the_post_job_names_the_app_environment() -> None:
+    named = {
+        (fname, jname)
+        for fname, wf in _real_workflows().items()
+        for jname, job in _jobs(wf).items()
+        if _workflow_env(job) == _ENV
+    }
+    assert named == {(_ENV_WORKFLOW, _ENV_JOB)}
+
+
 def test_red_environment_shape() -> None:
     base = _tf_github_text()
     env = _blocks(base, "github_repository_environment")["persona_verdict_app"]

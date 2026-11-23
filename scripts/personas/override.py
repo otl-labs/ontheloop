@@ -14,10 +14,13 @@ import os
 import re
 import sys
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from scripts.personas import resolve_pr
 from scripts.session import merge_checks
+
+ROOT = Path(__file__).resolve().parents[2]
 
 RECORD_PREFIX = "<!-- persona-verdict-record v1 "
 RECORD_RE = re.compile(r"^<!-- persona-verdict-record v1 (\{.*\}) -->$")
@@ -128,13 +131,26 @@ def _get(path: str, token: str | None) -> Any:
         raise Refused(f"API error: {str(exc)[:120]}") from exc
 
 
+def app_id() -> int:
+    """The gates.verdict_app.app_id row of the checked-out main; a null, absent or unreadable row refuses."""
+    try:
+        text = (ROOT / "docs" / "contracts" / "project-configuration.yaml").read_text(encoding="utf-8")
+    except OSError as exc:
+        raise Refused("no verdict App is set") from exc
+    value = merge_checks.verdict_app_id(text)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise Refused("no verdict App is set")
+    return value
+
+
 def origin(repo: str, token: str | None, head_sha: str, route: str, check_run_id: int) -> tuple[dict[str, Any], str]:
     """Return (record, output text) for a check run that is a genuine verdict-run check, else raise Refused."""
     run = _get(f"/repos/{repo}/check-runs/{check_run_id}", token)
     if not isinstance(run, dict):
         raise Refused("the check run is unreadable")
-    if (run.get("app") or {}).get("slug") != merge_checks.APP:
-        raise Refused("the check run is not from github-actions")
+    verdict_app = app_id()
+    if (run.get("app") or {}).get("id") != verdict_app:
+        raise Refused("the check run is not from the verdict App")
     if run.get("name") != f"persona-verdict/{route}" or run.get("head_sha") != head_sha:
         raise Refused("the check run name or head does not match")
     text = str((run.get("output") or {}).get("text") or "")
@@ -152,7 +168,11 @@ def origin(repo: str, token: str | None, head_sha: str, route: str, check_run_id
         raise Refused("the record's producing run is not a verdict run for this head")
     listed = _get(f"/repos/{repo}/commits/{head_sha}/check-runs?check_name=persona-verdict%2F{route}&per_page=100", token)
     rows = listed.get("check_runs") if isinstance(listed, dict) else None
-    ids = [int(r["id"]) for r in rows or [] if isinstance(r, dict) and isinstance(r.get("id"), int)]
+    ids = [
+        int(r["id"])
+        for r in rows or []
+        if isinstance(r, dict) and isinstance(r.get("id"), int) and (r.get("app") or {}).get("id") == verdict_app
+    ]
     if not ids or max(ids) != check_run_id:
         raise Refused("the check run is not the newest persona-verdict check of that name on the head")
     return rec, text

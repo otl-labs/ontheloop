@@ -12,6 +12,7 @@ from scripts.personas import run
 
 ROOT = Path(__file__).resolve().parents[2]
 STDLIB = set(sys.stdlib_module_names)
+APP_TOKEN_ALLOWED = {"boto3", "botocore", "jwt", "cryptography", "yaml", "src"}
 INFERENCE_SMOKE_ALLOWED = {"boto3", "botocore", "yaml", "litellm", "src"}
 ALLOWED = {
     "resolve_pr": {"yaml"},
@@ -20,7 +21,8 @@ ALLOWED = {
     "override": {"yaml"},
     "materialise": {"yaml"},
     "execute": {"jsonschema"},
-    "post_verdict": {"yaml", "jsonschema"},
+    "post_verdict": {"yaml", "jsonschema", *APP_TOKEN_ALLOWED},
+    "app_token": APP_TOKEN_ALLOWED,
     "wake": {"yaml"},
     "egress_probe": set(),
     "egress_self_check": set(),

@@ -22,7 +22,8 @@ KEYED_IF = (
     "needs.prepare.outputs.allowlisted == 'true' && needs.prepare.outputs.fixture == 'true'"
 )
 KEYPREP_OK = "needs.keyprep.result == 'success'"
-CONDITIONS = {"keyprep": KEYED_IF, "smoke": f"{KEYED_IF} && {KEYPREP_OK}", "refusal": f"{KEYED_IF} && {KEYPREP_OK}"}
+KEYPREP_IF = "!cancelled() && needs.prepare.result == 'success'"
+CONDITIONS = {"keyprep": KEYPREP_IF, "smoke": f"{KEYED_IF} && {KEYPREP_OK}", "refusal": f"{KEYED_IF} && {KEYPREP_OK}"}
 NEEDS = {"keyprep": ["prepare"], "smoke": ["prepare", "keyprep"], "refusal": ["prepare", "keyprep"]}
 PERMISSIONS = {
     "keyprep": {"contents": "read"},
@@ -173,11 +174,11 @@ def _run_py_rules(name: str, job: dict[str, Any]) -> list[str]:
 def _secret_rules(jobs: dict[str, Any], doc_text: str) -> list[str]:
     """Every secrets reference in the file is AWS_ACCOUNT_ID as the env key of a key-reading step after the self-check."""
     allowed = 0
-    for name in ("smoke", "refusal"):
+    for name in ("smoke", "refusal", "post"):
         steps = _steps(_map(jobs.get(name)))
         check = next((i for i, s in enumerate(steps) if _run(s) == SELF_CHECK), None)
         for i, step in enumerate(steps):
-            if _verb(step) in ("inference-smoke", "key-refusal") and check is not None and i > check:
+            if _verb(step) in ("inference-smoke", "key-refusal", "post") and check is not None and i > check:
                 allowed += json.dumps(step, default=str).count("secrets.AWS_ACCOUNT_ID")
     total = len(re.findall(r"secrets\.AWS_ACCOUNT_ID", doc_text))
     out = (

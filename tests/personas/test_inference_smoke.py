@@ -46,12 +46,24 @@ def _env(tmp_path: Path, role: str = "primary") -> dict[str, str]:
 
 @pytest.fixture
 def stubbed(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    state: dict[str, Any] = {"assumed": 0, "run": [], "sub": GOOD_SUB, "ref": GOOD_REF, "code": 0, "text": ""}
+    state: dict[str, Any] = {
+        "assumed": 0,
+        "run": [],
+        "sub": GOOD_SUB,
+        "ref": GOOD_REF,
+        "code": 0,
+        "text": "",
+        "calls": [],
+        "app": (403, "AccessDenied"),
+    }
     FakeSession.instances = []
     monkeypatch.setattr(oidc_assume, "token", lambda env=None: "jwt")
     monkeypatch.setattr(oidc_assume, "claims", lambda jwt: {"sub": state["sub"], "job_workflow_ref": state["ref"]})
 
     def assume(role: str, jwt: str, env: Any = None) -> oidc_assume.Outcome:
+        state["calls"].append(role)
+        if role == oidc_assume.APP_ROLE:
+            return oidc_assume.Outcome(*state["app"])
         state["assumed"] += 1
         return oidc_assume.Outcome(200, "ok", dict(CREDS))
 
@@ -75,6 +87,7 @@ def test_a_pass_prints_only_marker_lines(stubbed: dict[str, Any], capfd: pytest.
     assert code == 0 and saved is None
     assert out.out.splitlines() == [
         f"OIDC-CLAIMS sub={GOOD_SUB} job_workflow_ref={GOOD_REF}",
+        f"OIDC-ASSUME role={oidc_assume.APP_ROLE} expect=AccessDenied got=AccessDenied",
         f"OIDC-ASSUME role={oidc_assume.ROLE} expect=ok got=ok",
         "INFERENCE-SMOKE role=primary outcome=PASS class=none",
     ]
@@ -114,6 +127,21 @@ def test_a_failure_class_comes_from_a_closed_set(
 def test_each_tier_role_runs_alone(stubbed: dict[str, Any], tmp_path: Path) -> None:
     inference_smoke.work(_env(tmp_path, "warm_fetched_escape_hatch"))
     assert [r[0] for r in stubbed["run"]] == ["warm_fetched_escape_hatch"]
+
+
+def test_the_app_role_is_attempted_before_the_persona_verdict_assume(stubbed: dict[str, Any], tmp_path: Path) -> None:
+    inference_smoke.work(_env(tmp_path))
+    assert stubbed["calls"] == [oidc_assume.APP_ROLE, oidc_assume.ROLE]
+
+
+@pytest.mark.parametrize("app", [(200, "ok"), (403, "InvalidIdentityToken"), (400, "AccessDenied"), (0, "neterror")])
+def test_an_app_role_outcome_other_than_access_denied_fails_before_any_key_read(
+    stubbed: dict[str, Any], tmp_path: Path, app: tuple[int, str]
+) -> None:
+    stubbed["app"] = app
+    code, line, _ = inference_smoke.work(_env(tmp_path))
+    assert code == 1 and "class=app_role" in line
+    assert stubbed["calls"] == [oidc_assume.APP_ROLE] and stubbed["run"] == [] and FakeSession.instances == []
 
 
 def test_an_unknown_role_fails_before_any_token(stubbed: dict[str, Any], tmp_path: Path) -> None:
@@ -159,7 +187,9 @@ CHILD = textwrap.dedent(
 
     oidc_assume.token = lambda env=None: "jwt"
     oidc_assume.claims = lambda jwt: {{"sub": {sub!r}, "job_workflow_ref": {ref!r}}}
-    oidc_assume.assume = lambda *a, **k: oidc_assume.Outcome(200, "ok", {creds!r})
+    oidc_assume.assume = lambda role, *a, **k: (
+        oidc_assume.Outcome(403, "AccessDenied") if role == oidc_assume.APP_ROLE else oidc_assume.Outcome(200, "ok", {creds!r})
+    )
 
     class Client:
         def get_parameter(self, **kw):
@@ -231,6 +261,7 @@ def test_stdout_as_a_pipe_holds_only_the_three_marker_lines_in_order(tmp_path: P
     assert done.returncode == 0, done.stderr[-500:]
     assert done.stdout.splitlines() == [
         f"OIDC-CLAIMS sub={GOOD_SUB} job_workflow_ref={GOOD_REF}",
+        f"OIDC-ASSUME role={oidc_assume.APP_ROLE} expect=AccessDenied got=AccessDenied",
         f"OIDC-ASSUME role={oidc_assume.ROLE} expect=ok got=ok",
         "INFERENCE-SMOKE role=primary outcome=PASS class=none",
     ]
@@ -244,7 +275,7 @@ def test_a_real_litellm_401_echoes_no_part_of_the_planted_key(tmp_path: Path) ->
     assert done.returncode == 1, done.stderr[-500:]
     lines = done.stdout.splitlines()
     assert lines[-1].startswith("INFERENCE-SMOKE role=primary outcome=FAIL class=cold_start:")
-    assert len(lines) == 3
+    assert len(lines) == 4
     both = done.stdout + done.stderr
     assert PLANTED not in both and PLANTED[:12] not in both and "LATE-" not in both
     assert list(tmp_path.iterdir()) == []

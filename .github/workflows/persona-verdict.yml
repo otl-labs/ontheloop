@@ -7,7 +7,8 @@ name: persona-verdict
 # Only the keyed jobs (PLAN-persona-verdict-first-key-read: keyprep, smoke, refusal; fixture PRs only) read a secret other
 # than GITHUB_TOKEN, hold id-token: write or name an Environment. smoke, in the persona-verdict Environment, first assumes
 # the persona-verdict role and runs each tier role's cold start; refusal shows the role refuses a job outside the
-# Environment. Only the post job holds checks: write.
+# Environment. The post job (PLAN-persona-verdict-app-post) is the only App-token holder: in the persona-verdict-app
+# Environment it builds every check body first, then mints one verdict App installation token and posts with it.
 on:
   workflow_run:
     workflows: [persona-verdict-trigger, persona-verdict-override]
@@ -140,7 +141,7 @@ jobs:
 
   keyprep:
     needs: prepare
-    if: ${{ !cancelled() && needs.prepare.result == 'success' && github.event.workflow_run.event == 'pull_request' && needs.prepare.outputs.allowlisted == 'true' && needs.prepare.outputs.fixture == 'true' }}
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -309,15 +310,27 @@ jobs:
         run: python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" egress-self-check
 
   post:
-    needs: [prepare, run]
+    needs: [prepare, run, keyprep]
     if: ${{ !cancelled() }}
+    environment: persona-verdict-app
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
-      checks: write
+      checks: read
       contents: read
       actions: read
+      id-token: write
     steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: block
+          allowed-endpoints: >-
+            sts.${{ needs.keyprep.outputs.aws_region }}.amazonaws.com:443
+            ssm.${{ needs.keyprep.outputs.aws_region }}.amazonaws.com:443
+          disable-telemetry: true
+          disable-sudo-and-containers: false
+
       - name: Check out main
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -325,16 +338,33 @@ jobs:
           path: main
           persist-credentials: false
 
+      - name: Lay the egress floor
+        id: post-floor
+        run: sudo python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" egress-floor
+
       - name: Create the work directory
+        id: post-mkdir
         run: mkdir -p "$RUNNER_TEMP/work"
+
+      - name: Check the egress filter
+        id: post-self-check
+        run: python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" egress-self-check
 
       - name: Set up Python 3.12
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
 
-      - name: Install dependencies
-        run: pip install pyyaml jsonschema -c "$GITHUB_WORKSPACE/main/requirements.txt"
+      - name: Download the wheelhouse
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: persona-verdict-wheels
+          path: ${{ runner.temp }}/work/wheels
+
+      - name: Install the wheelhouse offline
+        id: post-install
+        run: |
+          pip install --no-index --find-links "$RUNNER_TEMP/work/wheels" --require-hashes --no-deps --only-binary :all: -r "$GITHUB_WORKSPACE/main/docker/persona/requirements-persona.txt"
 
       - name: Download prepared inputs
         continue-on-error: true
@@ -351,11 +381,19 @@ jobs:
           path: ${{ runner.temp }}/work/results
 
       - name: Post the check runs
+        id: post-post
         env:
           GH_TOKEN: ${{ github.token }}
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          PERSONA_AWS_REGION: ${{ needs.keyprep.outputs.aws_region }}
           PERSONA_SNAPSHOT: ${{ runner.temp }}/snapshot
         working-directory: ${{ runner.temp }}/work
         run: python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" post
+
+      - name: Check the egress filter again
+        id: post-final-check
+        if: always()
+        run: python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" egress-self-check
 
   wake:
     needs: [prepare, post]
