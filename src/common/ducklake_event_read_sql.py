@@ -484,11 +484,18 @@ _REPEAT_ORDER = "ORDER BY op.event_timestamp, coalesce(op.source_ordinal, -1), o
 TOOL_USE_ROLLUP_SQL = compose(
     (SESSIONS, OBSERVATIONS, AGENTS, TRANSCRIPTS),
     _USAGE_TREE + ", " + _AGENT_NAME + ", "
-    "op AS (SELECT " + _TREE_KEY + ", producer, parser_version, session_id, observation_id, name, external_ref, "
-    "event_timestamp, source_ordinal, event_id, "
-    "json_extract_string(metadata, '$.attribution_mcp_server') AS attribution_mcp_server FROM o "
+    # metadata is read beside o, not through it (rec-5490): the wide column dragged through the o dedupe windows overflows the
+    # reader's memory. am takes the R5b survivor's own value (earliest created_timestamp, NULL included); a created_timestamp
+    # tie in a conflicted grain key is Decision 207's unspecified survivor. am skips R5a retirement for a grain key spanning
+    # sessions (outside Decision 207 grain).
+    "am AS (SELECT producer, event_id, parser_version, arg_min_null(json_extract_string(metadata, "
+    "'$.attribution_mcp_server'), created_timestamp) AS attribution_mcp_server FROM {observations} WHERE {scope} AND "
+    "observation_type = 'tool_call' AND event_kind = 'open' GROUP BY producer, event_id, parser_version), "
+    "op AS (SELECT " + _TREE_KEY + ", o.producer, o.parser_version, session_id, observation_id, name, external_ref, "
+    "event_timestamp, source_ordinal, o.event_id, am.attribution_mcp_server AS attribution_mcp_server FROM o "
+    "LEFT JOIN am ON (am.producer, am.event_id, am.parser_version) = (o.producer, o.event_id, o.parser_version) "
     "WHERE observation_type = 'tool_call' AND event_kind = 'open' QUALIFY row_number() OVER (PARTITION BY session_id, "
-    "observation_id ORDER BY event_timestamp, coalesce(source_ordinal, -1), event_id) = 1), "
+    "observation_id ORDER BY event_timestamp, coalesce(source_ordinal, -1), o.event_id) = 1), "
     "oc AS (SELECT session_id, observation_id, outcome, output_bytes, "
     "CASE WHEN output_sha256 IS NOT NULL AND output_bytes > 0 THEN output_sha256 END AS osha FROM o "
     "WHERE observation_type = 'tool_call' AND event_kind = 'close' "
