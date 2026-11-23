@@ -57,13 +57,13 @@ Candidates:
 - C2 Confirming rounds. In the sample frame, 201 rounds are confirming rounds as defined in T3, and
   32 of them returned REVISE. Side A: confirming rounds catch items that matter and that nothing
   downstream would catch. Side B: confirming-round blocking items are no more consequential than
-  other late items.
+  other LATE-stratum items.
 - C3 Origin of late items. Side A: late blocking items are mostly defects that an earlier round's
   fix introduced. Side B: late blocking items are mostly in text that predates the earlier fixes
   and that earlier rounds did not flag.
-- C4 Mechanical share. Side A: a large share of late blocking items are mechanical (a
-  deterministic check could catch them from the plan text and repository state); state the share
-  you call large. Side B: late blocking items are mostly critic judgement.
+- C4 Mechanical share. Side A: most late blocking items are mechanical (a deterministic check
+  could catch them from the plan text and repository state). Side B: late blocking items are mostly
+  critic judgement.
 - C5 Blocking tag fit. The critique skill tags a finding blocking for correctness, safety, scope,
   a Decision conflict or a failed check, and "when unsure" (Section 10). Side A: late items tagged
   blocking mostly fit one of the named classes on their merits. Side B: a material share are
@@ -75,11 +75,27 @@ Candidates:
   the build rework. Side B: the build redoes or departs from that detail anyway, or rework traces
   to that detail being wrong.
 
-Pinned reading of the sides: "mostly" means more than half of the items relevant to the candidate.
-Choose `side_a` or `side_b` when more than half of the relevant items support that side (for C5
-side B, at least a quarter suffices, as it claims a "material share"); `mixed` when neither side
-reaches its share; `insufficient_evidence` when fewer than 5 relevant items exist. Name the
-relevant items and the count.
+Pinned reading of the sides. "Late" in C1-C5 means the late group (samples 1-30). "Mostly" means
+more than half of the relevant items. Per candidate, the relevant items and what supports each
+side:
+- C1: late items whose counterfactual is not `undeterminable`. A: `shipped_defect`,
+  `shipped_guard_gap`, `needs_operator`, `caught_post_merge`. B: `caught_by_ci`, `caught_by_build`,
+  `caught_by_vp`, `no_effect`.
+- C2: a comparison, not a vote. Apply Q2's decision rule to the CONF items against the LATE-stratum
+  items (core mattered set): A if CONF is higher, B if similar or lower, else
+  `insufficient_evidence`.
+- C3: late items with `fix_induced` `yes` (A) or `no` (B); `unclear` items are not relevant.
+- C4: late items with `mechanical` true (A) or false (B).
+- C5: late items with `item_source` `gate_rounds_annotation` or `commit_message` (DD-A step 3
+  selects `diff_inferred` items from non-nit-looking changes, so they cannot test C5). B if at least
+  a quarter are blocking only by the "when unsure" default (B takes precedence, as it claims only a
+  "material share"); else A if more than half fit a named class; else `mixed`.
+- C6: the DD-B build PRs (ids `B<sample number>`). Follows Q6's verdict: A for
+  `detail_prevents_rework`, B for `detail_causes_rework`, `mixed` for `no_measurable_effect`,
+  `insufficient_evidence` for `insufficient_evidence`.
+For C1, C3 and C4: the side with more than half of the relevant items wins; `mixed` when neither
+does; `insufficient_evidence` when fewer than 5 relevant items exist. Name the relevant items and
+the count.
 
 ## 3. READ FIRST -- DISAMBIGUATION TRAPS
 
@@ -118,14 +134,18 @@ relevant items and the count.
   build commits the composer found: commits on `main` after the plan PR, other than `plan(...)` or
   `plan:` commits, that change the plan's `implementation_declared` field or whose subject names
   the slug. Later `plan(...)` commits (amendments, closure declarations) are listed separately.
-  Some builds have no PR number (a sha only); their PR ref cannot be fetched, so read the commit on
-  `main`, and assume it went through PR CI like other builds (record "PR CI assumed" in the item's
-  `evidence`). "none found" means neither test matched: the plan may be unbuilt, or its build used
-  another route. For each such plan you may run ONE search,
+  Two builds (samples 22 and 39) matched neither test and were added by hand after checking their
+  diffs against the plans' scope tables. Every listed build was merged from a PR. "none found" means
+  nothing matched: the plan may be unbuilt, or its build used another route. For each such plan you
+  may run up to TWO searches: first
   `git log --first-parent origin/main --oneline --grep "<rec id>"`, with the first rec id in the
   plan's `bundled_recommendations` (else the first rec id in its `intent` or `context`; if it names
-  none, skip the search). A hit counts as the build only if it changes that plan's
-  `implementation_declared` field or its message names the plan; otherwise the plan is unbuilt.
+  none, skip it); then, if that finds no build,
+  `git log --first-parent origin/main --oneline -- <path>` on the `file` of the plan's first
+  `scope` row with `action: Create` (else its first `scope` row). A hit counts as the build only if it is later than the plan PR and it
+  changes that plan's `implementation_declared` field, or its message names the plan, or its diff
+  matches the plan's scope rows (your judgement; say so in the item's `evidence`). A commit that
+  builds an earlier plan in the same series is not this plan's build. Otherwise the plan is unbuilt.
 - T7 Three meanings of "block". In this prompt, blocking and nit are the critic's finding tags
   (plan-critique SKILL.md:156). They are not a red `--pre` check and not the decision-scout's BLOCK
   verdict (Decision 262).
@@ -142,6 +162,10 @@ relevant items and the count.
   (planning SKILL.md:418) whose rows also read `gate: plan-critique`, so the frame counts include
   a few such rows. All 40 sampled plans are IMPLEMENTATION plans; the rules in scope are the
   IMPLEMENTATION critique gate's (Section 10).
+- T11 Two pairs of near-names. "Late group" (samples 1-30: CONF and LATE) is not the "LATE
+  stratum" (samples 9-30), and neither is the frame's "late tail" in C1 (rounds 4 and later). A
+  "control" (Section 4: a mechanism that would surface an item after the gate) is not the "control
+  group" (samples 31-40). This prompt always writes the full term.
 
 ## 4. SCOPE
 
@@ -195,7 +219,9 @@ Run these first. NEVER abort on a failure -- take the named degraded path.
    name only; the deliverable filenames keep `<sha>`. IF the switch is refused (for example by a
    hook), stay on the session branch, read files at the audited sha with `git show <sha>:<path>`
    where the session branch differs from it, and record "audited on the session branch" in
-   `meta.contract_notes`. IF the fetch fails: use `git rev-parse --short HEAD`, branch off `HEAD`
+   `meta.contract_notes`; the audited sha is unchanged, and Section 16's branch-base rule is then
+   waived (the deliverables are new files under `audits/`, so a different branch base cannot
+   conflict with them). IF the fetch fails: use `git rev-parse --short HEAD`, branch off `HEAD`
    instead, and record "base is local HEAD" in `meta.contract_notes`.
 2. `bin/venv-python -m scripts.session.preflight --roadmap-detail full` -- writes
    `logs/.preflight-report.json` (gitignored; expected), which gives roadmap item statuses (open,
@@ -213,11 +239,16 @@ Run these first. NEVER abort on a failure -- take the named degraded path.
    `git fetch origin pull/<N>/head:refs/remotes/pr/<N>` (one PR per command; at most 60 fetches in
    total, retries included), then confirm each sampled fix commit with `git cat-file -t <fix sha>`
    (expect `commit`). IF a fetch fails, retry it once; IF it still fails, or a fix commit is not
-   found: append the PR number to `meta.pr_refs_unavailable`, and judge that sample's item from its
-   `gate_rounds` row, the merged plan and the code, with `item_source: unavailable` and
-   `confidence: HYPOTHESIS`. For a Q6 build PR whose ref cannot be fetched, record what the commit
-   on `main` shows and mark the row `confidence: HYPOTHESIS`.
-5. No web access is needed or permitted for this audit.
+   found: append the PR number to `meta.pr_refs_unavailable`. For that sample, if the row's trailing
+   comment names its B-items (samples 6, 14, 16, 31, 34), select the item from it as DD-A step 3(a)
+   says and trace it against the merged plan and the code, with `confidence: HYPOTHESIS`; otherwise
+   set `item_source: unavailable`, `item_number: 0` and `counterfactual: undeterminable`, naming the
+   missing fix commit as the missing evidence. For a Q6 build PR whose ref cannot be fetched, record
+   what the commit on `main` shows and mark the row `confidence: HYPOTHESIS`.
+5. No web access is needed or permitted for this audit. Read-only GitHub MCP calls
+   (`mcp__github__*` get, list and read tools) count as repository reads, not web access; use them
+   only where a git read cannot answer (for example a build PR's check results), and Section 16
+   uses one to open the PR.
 
 Repo-wide `validate` is advisory outside CI; running it is optional and never a gate (Section 16).
 You may use read-only search subagents to locate code; every counterfactual verdict, rule
@@ -252,11 +283,11 @@ plan received is kept) and the plan merged that way. Which outcome follows? Per-
   itself: the fix changes the approved-text sidecar (`docs/plans/approved/`) or Decision text; or
   it changes the plan's scope, tier or approach where the plan records that choice as the
   operator's (an `escalation_choice` on a `gate_rounds` row, or a `context` line naming an operator
-  answer); or it touches an item of `docs/contracts/coordinator.yaml` `always_ask.items` (line
-  161: IAM and security, spend, gated wording, public-surface files, manual or admin steps,
-  non-CI deploys, loosened tests, secret-publishing runs). An edit inside already-approved text
-  that needs no new approval is not `needs_operator`. Without such evidence, trace the stages
-  below instead. This value takes precedence over all below.
+  answer); or the record shows the operator was asked about this item (a commit message, plan
+  line or `gate_rounds` comment saying so). That the item's subject is IAM, security or another
+  sensitive area is not such evidence on its own. An edit inside already-approved text that needs
+  no new approval is not `needs_operator`. Without such evidence, trace the stages below instead.
+  This value takes precedence over all below.
 - Otherwise find the control that would fail EARLIEST, in this stage order: (1) plan PR CI;
   (2) the build agent, following `.claude/skills/implement/SKILL.md`, before it opens its PR
   (including its own run of the plan's pre-deploy VP steps); (3) build PR CI (including
@@ -293,30 +324,45 @@ Pinned rules for Q1:
 - Build agent: credit it with a catch only when a step it must run (a planned test, a VP command,
   its pytest loop, a scope check) would fail, or the code it must write cannot work without
   resolving the item. Do not credit it with noticing an omission nothing leads it to.
+- LLM reviewers are never a catch: the build's code-review step (implement SKILL.md:138) and any
+  LLM persona-verdict workflow on a PR (`.github/workflows/persona-verdict*.yml`) give judgement,
+  not a property check that must fail. If one would plainly have raised the item, say so in
+  `catching_control_note`; it does not change the counterfactual.
 - Unbuilt plans (no build after the T6 search): judge from the plan and the code at the audited
   base, set `build_merged: no`, and cap the item's confidence at HYPOTHESIS unless the trace needs
   no build.
 Also record per item:
 - `catch_route`: `none` (no catch: `no_effect`, `needs_operator`, `shipped_defect`,
-  `shipped_guard_gap`, `undeterminable`) | `in_build_fix` (fixed inside the build PR
-  with no plan change) | `plan_amendment` (the catch forces a plan amendment PR: a scope or
-  contract deviation, implement SKILL.md deviation trigger (b)) | `forward_fix_on_main`.
+  `shipped_guard_gap`, `undeterminable`) | `in_plan_pr_fix` (stage 1: the planner fixes it on the
+  plan PR before merge) | `in_build_fix` (fixed inside the build PR with no plan change) |
+  `plan_amendment` (the catch forces a plan amendment PR: a scope or contract deviation, implement
+  SKILL.md deviation trigger (b)) | `forward_fix_on_main`.
+- `always_ask_surface`: `true` when the fix touches a surface listed in
+  `docs/contracts/coordinator.yaml` `always_ask` (line 161: IAM and security, spend, gated wording,
+  public-surface files, manual or admin steps, non-CI deploys, loosened tests, secret-publishing
+  runs), else `false`. It records sensitivity only; it does not set the counterfactual.
 - `note_would_suffice`: had the item travelled as a one-line build note instead of a plan fix,
   would a build agent following the note avoid the consequence? `yes | no | unclear | n/a` (`n/a`
   for `no_effect`).
-Question-level verdict, over the late group: the share of late items in the core mattered set --
+Question-level verdict, over the late group: the pool-weighted share of late-group items in the
+core mattered set. The strata were sampled at different rates (CONF 8 of 32 rows, LATE 22 of 303),
+so weight each stratum's share by its pool: (32 x CONF share + 303 x LATE share) / 335. Bands:
 `none` (0) | `few` (above 0, under 15%) | `some` (15% to 40%) | `many` (above 40%) |
-`insufficient_evidence` (counting every `undeterminable` late item as mattered, and then as not
-mattered, gives different bands). The prose also gives the extended-set share.
+`insufficient_evidence` (counting every `undeterminable` late-group item as mattered, and then as
+not mattered, gives different bands). The prose also gives the unweighted share, the LATE-stratum
+share, the extended-set share, and the weighted share with `needs_operator` items excluded and
+with `always_ask_surface` items excluded.
 
-Q2 Late vs control. Do late items differ from round 1-2 items in consequence if unfixed? For each
-group report items, core-mattered items, extended-mattered items, undeterminable items, and a 95%
-interval for the core-mattered share (exact binomial or Wilson; name it; undeterminable items
-count as not mattered). Verdict: `late_lower_value | similar_value | late_higher_value |
-insufficient_evidence`. Choose `insufficient_evidence` when either group's point estimate lies
-inside the other group's 95% interval and the two estimates differ by more than 10 percentage
-points (a difference the sample cannot confirm); `similar_value` when they differ by 10 points or
-less; otherwise the direction. Say what group size would settle an `insufficient_evidence` call.
+Q2 Late vs control. Do round-3-and-later items differ from round 1-2 items in consequence if
+unfixed? Compare the LATE stratum (samples 9-30) with the control group (samples 31-40); CONF is
+compared with LATE in C2. For each of LATE, CONF and the control group report items,
+core-mattered items, extended-mattered items, undeterminable items, and a Wilson 95% interval for
+the core-mattered share (undeterminable items count as not mattered). Then compute the 95% interval
+for the difference, LATE share minus control share, by Newcombe's hybrid score method (built from
+the two Wilson intervals). Verdict, first match wins: `late_higher_value` if the difference
+interval lies entirely above 0; `late_lower_value` if entirely below 0; `similar_value` if it lies
+entirely within -15 to +15 percentage points; else `insufficient_evidence`. Say what group sizes
+would settle an `insufficient_evidence` call.
 
 Q3 Candidate blocking rules. Rules, listed in no order:
 - R0 (today's rule): blocking = correctness, safety, scope, a Decision conflict or a failed
@@ -328,9 +374,16 @@ Q3 Candidate blocking rules. Rules, listed in no order:
   with a Decision; (ii) the scope cannot deliver the intent; (iii) an acceptance criterion has no
   falsifiable verification; (iv) a safety or never-weaken invariant is at stake; (v) it needs an
   operator decision.
-- RX (optional): a better rule you propose, in at most two sentences, applied the same way.
-Apply R1, R2, R3 and RX to every item EX ANTE: as a careful critic reading the pre-fix plan and
-the repository of that time would apply the rule, without hindsight from your Q1 trace. Record
+- R1v and R2v: R1 and R2 with R3's clause (v) added (an item that needs an operator decision also
+  blocks). R1 and R2 have no operator clause, so any `needs_operator` item they demote makes them
+  `unsafe`; R1v and R2v separate that effect from the rest of each rule.
+- RX (optional): a better rule you propose, in at most two sentences, applied the same way. You
+  write RX after seeing the Q1 traces, so it can be fitted to this sample: report its counts and
+  verdict, but RX never decides Q3's question-level verdict, and its rationale names which traced
+  items shaped it.
+Apply R1, R1v, R2, R2v, R3 and RX to every item EX ANTE: as a careful critic reading the pre-fix
+plan and the repository of that time would apply the rule, without hindsight from your Q1 trace.
+Record
 `rule_blocks` per item. R0 blocks every sampled item by construction (each was tagged blocking);
 do not re-apply it -- it is the baseline. A demoted item is judged in two worlds: the Q1 world (the
 item is dropped; this is the worst case, since today the planner fixes nits too, planning
@@ -338,16 +391,19 @@ SKILL.md:412) and the note world (`note_would_suffice`). For each rule and each 
 blocked, core-mattered blocked, core-mattered demoted, extended-only items demoted (guard gaps and
 plan amendments), undeterminable items demoted, other items demoted, and precision (core-mattered
 blocked / blocked), plus `core_tested` (the core-mattered items in the group, which is what "safe"
-was tested against) and `demoted_upper_95` (the one-sided 95% upper bound on the core-mattered
-share among the items the rule demotes, from core demoted out of all demoted). Per-rule verdict, late group: `no_change` if it demotes no
+was tested against) and `demoted_upper_95` (the exact Clopper-Pearson one-sided 95% upper bound
+on the core-mattered share among the items the rule demotes, from core demoted out of all demoted;
+`n/a` when the rule demotes nothing). Per-rule verdict, late group: `no_change` if it demotes no
 item; else `unsafe` if it demotes at least one core-mattered item whose counterfactual is
 CONFIRMED; else `insufficient_evidence` if it demotes a core-mattered HYPOTHESIS item or an
 undeterminable item; else `safe`. Also record `safe_extended` (`yes` if it
 demotes no extended-mattered item, else `no`) and, for an `unsafe` rule, `safe_with_notes` (`yes`
-if every core-mattered item it demotes has `note_would_suffice: yes`). Question-level verdict:
-`safe_rule_found` if any of R1-R3 or RX is `safe` for the late group; else `insufficient_evidence`
-if any is `insufficient_evidence`; else `no_safe_rule`. The prose names the rule(s), and any rule
-that is safe only for a subset of rounds (for example from round 2, or from round 3).
+if every core-mattered item it demotes has `note_would_suffice: yes`). Question-level verdict,
+over R1, R1v, R2, R2v and R3 only: `safe_rule_found` if any is `safe` for the late group; else
+`insufficient_evidence` if any is `insufficient_evidence`; else `no_safe_rule`. The prose names
+the rule(s), any rule that is safe only for a subset of rounds (for example from round 2, or from
+round 3), each rule's verdict with `always_ask_surface` items excluded where that changes it, and
+RX's result as a proposal to test on a fresh sample.
 
 Q4 Deterministic checks. For every item, set `mechanical: true` when a deterministic check could
 have caught it from the plan text plus repository state before a critic ran, and name that check.
@@ -359,24 +415,35 @@ something already checks it (`already_exists: yes | partial | no`, naming the ch
 it would have caught. Anti-vacuity: for each check, state that it would be red on the pre-fix text
 and green on the post-fix text of every item it lists, and whether it would stay silent on the
 other sampled plans' merged text (`red_green: yes | partial | no`, with a line of evidence).
-Verdict: `some_recurring | none_recurring`.
+Verdict: `some_recurring` if `deterministic_checks` has at least one row, else `none_recurring`.
 
 Q5 Confirming rounds and rounds after 5. This is the planning skill's own pending revisit question
 (planning SKILL.md:414: "did a confirming round ever find a blocking finding, and were findings
 after round 5 real?"). Q5a: among the 8 CONF items, did any have a core-mattered counterfactual?
 Verdict: `yes` (at least one, CONFIRMED) | `no` (none, and every CONF item's counterfactual is
-CONFIRMED) | `insufficient_evidence` (otherwise). State what the result can and cannot rule out:
-with 8 rounds and none mattered, the one-sided 95% upper bound on the true share is about 31%.
-The prose also gives the frame-level fact from C2 (how often confirming rounds return REVISE).
+CONFIRMED) | `insufficient_evidence` (otherwise). The unit is the item: one blocking item per
+round was traced, and some rounds had more, so a round's yield can only be higher than its traced
+item shows. State what the result can and cannot rule out: with 8 items and none mattered, the
+one-sided 95% upper bound on the true per-item share is about 31%. The prose also gives the
+frame-level fact from C2 (how often confirming rounds return REVISE).
 Q5b, in prose and in `q5b`: among items from rounds numbered 6 or higher (samples 1, 8, 11, 12,
 19, 23 and 25), report the counterfactual distribution and how many were real (a counterfactual
 other than `no_effect` and `undeterminable`).
+Q5c, in `q5c`: the number a stopping rule needs. For each round band (confirming rounds; round 3;
+rounds 4-5; rounds 6 and later, non-confirming), estimate core-mattered items per round = mean
+blocking findings per round in that band (from the frame's `gate_rounds` rows, counting PROCEED
+rounds as 0) x the core-mattered share of the sampled items in that band. Give the sampled item
+count behind each band; treat a band with fewer than 5 items as indicative only.
 
 Q6 Plan detail and build rework (DD-B). Does plan-level detail prevent build rework? Verdict:
 `detail_prevents_rework | detail_causes_rework | no_measurable_effect | insufficient_evidence`,
 with a `confidence`. Every sampled plan is detailed, so there is no thin-plan contrast group:
 `detail_prevents_rework` can be argued from the evidence but not measured; its confidence is
-HYPOTHESIS.
+HYPOTHESIS. Verdict rule over the `build_rework` rows, first match wins: `insufficient_evidence`
+if fewer than 8 PRs were classified; `detail_causes_rework` if at least 3 PRs carry a
+`plan_detail_wrong` commit; `detail_prevents_rework` if at most 1 PR carries one, at least 80% of
+the checked named nodes are verbatim, and at most 2 PRs carry a `ci_fix` commit; else
+`no_measurable_effect`.
 
 Q7 Questions the operator did not think to ask. Answer these, then add your own:
 - Recall: while doing DD-A step 3, glance at each sampled round's nit changes (no full trace) and
@@ -398,7 +465,10 @@ Q7 Questions the operator did not think to ask. Answer these, then add your own:
 ## 8. RUBRIC
 
 Rate S1 on each dimension: `strong | adequate | weak | absent | n/a`. `n/a` is correct and costless
-where a dimension does not apply; never manufacture a rating or a finding to fill a cell.
+where a dimension does not apply; never manufacture a rating or a finding to fill a cell. Anchors:
+`strong` = the property holds for nearly all the evidence, with no core-mattered counterexample;
+`adequate` = it holds for most, and the counterexamples are minor; `weak` = it fails for a
+substantial share, or for any core-mattered item; `absent` = S1 does not attempt it.
 
 - VD1 Late-round yield (NS1; Q1, Q5): the blocking items of late rounds are consequential (core
   mattered set) rather than caught later or without effect.
@@ -409,7 +479,10 @@ where a dimension does not apply; never manufacture a rating or a finding to fil
 - VD4 Deterministic ownership (NS3; Q4): properties a script can check are owned by scripts, not
   left to critic rounds.
 - VD5 Convergence (NS4; Q5, C1, C2): later rounds yield materially fewer consequential items than
-  earlier rounds, and the stopping rule ends the loop when they no longer do.
+  earlier rounds, and the stopping rule ends the loop when they no longer do. The sample holds only
+  REVISE rounds, so under-blocking (a loop that stopped with a consequential item open) is not
+  observable here except through Q7's incidental notes; over-blocking is. Rate the stopping half
+  on what you can observe, and say that the sample cannot show the other direction.
 - VD6 Detail value (NS5; Q6, C6): the build-level detail the gate asks plans to carry is detail
   builds use and that prevents rework. The evidence is asymmetric: rework caused by wrong detail
   can be observed, rework prevented by detail can only be argued (Q6); weigh it accordingly.
@@ -417,14 +490,14 @@ where a dimension does not apply; never manufacture a rating or a finding to fil
 ## 9. DEEP-DIVES
 
 DD-A Per-item counterfactual trace (feeds Q1-Q5, Q7, C1-C5). Process samples in this order, so
-that a truncated run keeps every group represented: 1-8, then 9, 10, 31, 11, 12, 32, 13, 14, 33,
-15, 16, 34, 17, 18, 35, 19, 20, 36, 21, 22, 37, 23, 24, 38, 25, 26, 39, 27, 28, 40, 29, 30. For each
-sample:
+that a truncated run answers Q5 first and keeps every group represented: 1-8 (CONF, Q5a), then
+11, 31, 12, 19, 32, 23, 25, 33 (the rest of Q5b, with control items), then 9, 10, 34, 13, 14, 35,
+15, 16, 36, 17, 18, 37, 20, 21, 38, 22, 24, 39, 26, 27, 40, 28, 29, 30. For each sample:
 1. Row. In `docs/plans/PLAN-<slug>.yaml` at the audited base, find the `gate: plan-critique` row
    with the sample's round number in the right series (T3). Record its blocking and nits counts and
    any trailing comment (`row_blocking`, `row_nits`, `row_comment`). If the row differs from
    Section 11 (round, verdict or blocking count), use the repository row and record the difference
-   in `meta.contract_notes`.
+   in `meta.contract_notes`. The sample's stratum stays as Section 11 gives it.
 2. Fix. `git log -1 --format=%B <fix sha>`; `git show --stat <fix sha>`;
    `git show <fix sha> -- docs/plans/` (this includes any approved-text sidecar under
    `docs/plans/approved/`). Pre-fix plan: `git show <fix sha>^:docs/plans/PLAN-<slug>.yaml`.
@@ -433,8 +506,8 @@ sample:
    (a) The row's trailing comment names B-items: they are the items in B order ->
        `item_source: gate_rounds_annotation`.
    (b) Else, the commit subject or body names the round's changes and separates blocking ones from
-       nits, or the round's diff (after the exclusions in (c)) holds a single change ->
-       `commit_message`.
+       nits (the items are the blocking ones in the order the message lists them), or the round's
+       diff (after the exclusions in (c)) holds a single change -> `commit_message`.
    (c) Else, the diff -> `diff_inferred`. A change is one edited plan row: the top-level key plus
        its list index where the key holds a list (e.g. `verification_plan[3]`, `scope[2]`,
        `rollback`); several edited subkeys of one row are one change. An edit to the approved-text
@@ -444,10 +517,12 @@ sample:
        SKILL.md:156: a change touching only wording, citation form or ordering answers a nit; the
        rest are blocking candidates. The blocking candidates in diff order are the items.
    n is the number of items the source yields, even when it differs from the row's blocking count
-   (record both; note the difference in `item_note`). If the source yields none, set
-   `item_source: unavailable`, `item_number: 0`, `finding_type: other`, `plan_field: ""`,
-   describe the round's whole change, and continue. Describe the item in at most 30 words of your
-   own. Note any consequential-looking nit change for Q7.
+   (record both; note the difference in `item_note`). If the fix commit is available but no source
+   yields an item (for example every change looks like a nit), set `item_source: unavailable` and
+   `item_number: 0`, treat the round's whole non-excluded change as the item, trace it as one item
+   with `confidence: HYPOTHESIS`, and give it the `finding_type` and `plan_field` of its largest
+   change. (A sample whose fix commit is unavailable follows Section 5 step 4.) Describe the item in
+   at most 30 words of your own. Note any consequential-looking nit change for Q7.
 4. `finding_type` (pinned): `test_case_or_fixture | test_node_or_obligation_row | vp_step |
    line_pin_or_size_arithmetic | scope_row | approach_or_design | decision_conflict |
    invariant_or_safety | definition_or_wording | procedural_bookkeeping | rollback | approved_text
@@ -455,14 +530,16 @@ sample:
 5. Counterfactual (Q1): read what the change touched, the plan fields that consume it, the code
    the build wrote (`git show --stat <build sha>` and the relevant files at that commit) and the
    candidate controls. Record `counterfactual`, `catching_control` (file:line, check name or
-   workflow job; empty when none), `control_property_match`, `catch_route`, `note_would_suffice`.
+   workflow job; empty when none), `control_property_match`, `catching_control_note`,
+   `catch_route`, `note_would_suffice`, `always_ask_surface`.
 6. Origin (C3): one
    `git log -S"<distinctive pre-fix text>" --oneline refs/remotes/pr/<N> -- docs/plans/PLAN-<slug>.yaml`
    search, where the pre-fix text is the faulty text the fix removed or changed; for an omission
    (the fix only added text), use the distinctive text of the row the addition completes.
-   `fix_induced: yes` when a commit on the PR before the fix commit (a fix for any gate)
-   introduced that text; `no` when it was in the PR's first commit or, for an amendment PR,
-   already on `main` before it; `unclear` when there is no distinctive text or the search is
+   `fix_induced: yes` when any commit on the PR after its first and before the fix commit
+   introduced that text (nearly always a fix for some gate; name that commit's subject in
+   `evidence`); `no` when it was in the PR's first commit or, for an amendment PR, already on
+   `main` before it; `unclear` when there is no distinctive text or the search is
    inconclusive.
 7. Rules and checks: `rule_blocks` (Q3), `mechanical` and `deterministic_check` (Q4).
 8. Write the row to the YAML deliverable now. The file is your working memory across any context
@@ -471,7 +548,9 @@ Effort bound: spend at most about 12 tool calls on any item; when an item exceed
 you have with `confidence: HYPOTHESIS` and move on. Grep for anchors rather than reading whole
 large files. IF you judge you cannot finish (context or tool budget), finish the current sample,
 list the unprocessed sample numbers in `meta.unprocessed_samples`, skip DD-B (Q6
-`insufficient_evidence`), and answer every question from the processed samples, saying so.
+`insufficient_evidence`), and answer every question from the processed samples, saying so. When
+truncated, write the answers in this order of priority: Q5, Q1, Q3, Q2, Q4, Q7, then the rubric
+and findings.
 
 DD-B Build rework (feeds Q6, C6). For the 10 build PRs in Section 11's Q6 list -- do NOT exceed:
 1. The PR's own commits:
@@ -585,7 +664,8 @@ eligibility is. You may NOT widen or replace the sample. One item per round (DD-
 
 Columns: sample number | stratum | plan slug (file `docs/plans/PLAN-<slug>.yaml`) | round |
 blocking count in the row | plan PR (A = an amendment PR) | fix commit | build commits per T6
-(PR number and sha, or sha only).
+(PR number and sha). Build PR refs need not be fetched except for the Q6 list; read a build's
+squash commit on `main`.
 
 ```
  1 | CONF | actions-sha-pin-codeowners             | 6  | 1 | #2193   | 2cc38b9f87da | #2196 b2e60819, #2218 c39dcdeb
@@ -603,22 +683,22 @@ blocking count in the row | plan PR (A = an amendment PR) | fix commit | build c
 13 | LATE | bootstrap-ci-gated-apply               | 4  | 3 | #2026   | 1eb17d0bb71a | #2033 f43a1624, #2037 0d51ede0
 14 | LATE | telemetry-session-ref-stability        | 4  | 1 | #2328   | a66a488902be | #2335 9689890a
 15 | LATE | sit-organization                       | 5  | 2 | #1968   | f415d93dbbee | #2296 ae53954b, #2310 4ba820b3
-16 | LATE | weakening-dispositions-per-diff        | 3  | 2 | #2287   | cffe3620f4c7 | 05b2815d
-17 | LATE | decision-chain-consolidation-rule      | 5  | 1 | #2260   | e0c8756a5129 | 5d5bd40c
+16 | LATE | weakening-dispositions-per-diff        | 3  | 2 | #2287   | cffe3620f4c7 | #2313 05b2815d
+17 | LATE | decision-chain-consolidation-rule      | 5  | 1 | #2260   | e0c8756a5129 | #2266 5d5bd40c
 18 | LATE | bootstrap-trusted-pr-plan              | 5  | 3 | #2235   | 9bf027918a14 | none found
-19 | LATE | friction-signature-coverage            | 6  | 1 | #2248   | b054f590f295 | 24757464
+19 | LATE | friction-signature-coverage            | 6  | 1 | #2248   | b054f590f295 | #2281 24757464
 20 | LATE | terraform-company-emails-closing       | 3  | 2 | #1859   | 7c3eb6fdc16d | none found
 21 | LATE | telemetry-content-deploy-channel       | 4  | 1 | #2165   | 2bd4647cb10d | #2203 6bbd7f5c
-22 | LATE | agent-proxy-signed-access              | 3  | 3 | #2022   | f549a9c7cd4a | none found
+22 | LATE | agent-proxy-signed-access              | 3  | 3 | #2022   | f549a9c7cd4a | #2036 4bdf58a9 (added by hand)
 23 | LATE | actions-capacity-gauge                 | 9  | 1 | #1959   | 436eff815046 | #1974 9af7f997
-24 | LATE | persona-image-pin                      | 4  | 1 | #2256   | d69597954054 | 2faa7054
+24 | LATE | persona-image-pin                      | 4  | 1 | #2256   | d69597954054 | #2277 2faa7054
 25 | LATE | secret-read-exact-target               | 6  | 2 | #2007   | 0701fbdb1f7c | #2017 fdc9f86b
-26 | LATE | actions-sha-pin-native-policy          | 3  | 2 | #2237   | 4ea02a92917c | 0befb87e
+26 | LATE | actions-sha-pin-native-policy          | 3  | 2 | #2237   | 4ea02a92917c | #2261 0befb87e
 27 | LATE | friction-daily-detector                | 3  | 2 | #2352   | f43f0c7f22dc | none found
 28 | LATE | run-persona-mcp-bridge                 | 3  | 1 | #2149   | 85cdc5027b10 | #2174 e644a11f
 29 | LATE | telemetry-planning-cost-reads          | 3  | 1 | #2213   | 63c93937c727 | #2244 324d2fc7
 30 | LATE | scout-input-fingerprint                | 4  | 1 | #1999 A | 01a1530dd9e8 | #2003 755944d2
-31 | CTRL | graduation-rows-on-main                | 2  | 1 | #2291   | c75ecd15fd4e | 3e19f461
+31 | CTRL | graduation-rows-on-main                | 2  | 1 | #2291   | c75ecd15fd4e | #2302 3e19f461
 32 | CTRL | capture-pin-live-main-base             | 1  | 2 | #2117   | b93ebffc3178 | #2143 1be31e65
 33 | CTRL | litellm-call-record                    | 1  | 4 | #2154   | fb5db833188f | #2175 b7210a3e
 34 | CTRL | rec-writer-session-tripwire            | 2  | 2 | #2141   | 9c12761bdec2 | #2157 f9a50132
@@ -626,7 +706,7 @@ blocking count in the row | plan PR (A = an amendment PR) | fix commit | build c
 36 | CTRL | persona-check-origin                   | 1  | 3 | #2115   | ca598d762dd9 | #2144 bc0f0714
 37 | CTRL | plugin-hooks-locate-checkout           | 1  | 3 | #1954   | 60d13256abf3 | #1955 6d595bb0, #1956 33fe369d
 38 | CTRL | persona-verdict-app-grant              | 1  | 8 | #2207   | 8fc146b64ae8 | #2214 1658ce1e, #2221 9b549344, #2239 37d66d4d, #2273 589f2e30
-39 | CTRL | telemetry-hook-block-markers           | 1  | 2 | #2230   | 5d208935407d | none found
+39 | CTRL | telemetry-hook-block-markers           | 1  | 2 | #2230   | 5d208935407d | #2245 ead42923 (added by hand)
 40 | CTRL | bridge-teardown-end-record             | 1  | 1 | #2294   | fca6a7ac1397 | #2304 c05772ba
 ```
 
@@ -635,8 +715,10 @@ and follow-ups), for DD-B step 3 and for context: sample 1 #2210; 3 #2339; 10 #2
 #2211; 12 #1951; 13 #2029; 15 #2055, #2069, #2226, #2240, #2272; 20 #2265; 21 #2190, #2195;
 22 #2027; 24 #2280, #2299, #2325; 26 #2259; 38 #2231, #2290.
 
-Q6 list (DD-B): 10 samples drawn at random from the 28 whose first build has a PR number, using
-that first build -- do NOT exceed: sample 4 #2228 (bc29d718), 5 #2189 (9f4dce72), 8 #1973
+Q6 list (DD-B): 10 samples drawn at random, using each one's first build, from the 28 samples
+whose first build's squash subject carried its PR number when the composer drew them (six more
+builds came from PRs whose squash subjects omit the number, and two builds were added by hand
+after the draw; the draw stands) -- do NOT exceed: sample 4 #2228 (bc29d718), 5 #2189 (9f4dce72), 8 #1973
 (c379bc46), 10 #2191 (b12809af), 11 #2198 (619c7e99), 13 #2033 (f43a1624), 25 #2017 (fdc9f86b),
 30 #2003 (755944d2), 37 #1955 (6d595bb0), 40 #2304 (c05772ba). The sha in brackets is the build
 commit on `main`.
@@ -702,15 +784,20 @@ audit:
          degraded_dedup: false, pr_refs_unavailable: [], unprocessed_samples: [],
          contract_notes: "", stale_anchors: []}
   question_answers:
-    - {q: Q1, verdict: none|few|some|many|insufficient_evidence, basis: [<item or finding ids>], prose: ""}
+    - {q: Q1, verdict: none|few|some|many|insufficient_evidence, basis: [<item or finding ids>], prose: "",
+       shares: {weighted: "", unweighted: "", late_stratum: "", extended_weighted: "",
+                weighted_without_needs_operator: "", weighted_without_always_ask: ""}}
     - {q: Q2, verdict: late_lower_value|similar_value|late_higher_value|insufficient_evidence,
-       basis: [], prose: "", interval_method: exact_binomial|wilson,
-       groups: {late: {items: <int>, core_mattered: <int>, extended_mattered: <int>, undeterminable: <int>, interval_95: ""},
-                control: {items: <int>, core_mattered: <int>, extended_mattered: <int>, undeterminable: <int>, interval_95: ""}}}
+       basis: [], prose: "", difference_interval_95: "<newcombe, LATE minus control, in points>",
+       groups: {late_stratum: {items: <int>, core_mattered: <int>, extended_mattered: <int>, undeterminable: <int>, wilson_95: ""},
+                conf: {items: <int>, core_mattered: <int>, extended_mattered: <int>, undeterminable: <int>, wilson_95: ""},
+                control: {items: <int>, core_mattered: <int>, extended_mattered: <int>, undeterminable: <int>, wilson_95: ""}}}
     - {q: Q3, verdict: safe_rule_found|no_safe_rule|insufficient_evidence, basis: [], prose: "see blocking_rules"}
     - {q: Q4, verdict: some_recurring|none_recurring, basis: [], prose: "see deterministic_checks"}
     - {q: Q5, verdict: yes|no|insufficient_evidence, basis: [], prose: "",
-       q5b: {items: <int>, real: <int>, core_mattered: <int>, distribution: {<counterfactual value>: <int>}}}
+       q5b: {items: <int>, real: <int>, core_mattered: <int>, distribution: {<counterfactual value>: <int>}},
+       q5c: [{band: confirming|round_3|rounds_4_5|rounds_6_plus, blocking_per_round: <float>,
+              sampled_items: <int>, core_share: "", core_items_per_round: <float>}]}
     - {q: Q6, verdict: detail_prevents_rework|detail_causes_rework|no_measurable_effect|insufficient_evidence,
        confidence: CONFIRMED|HYPOTHESIS, basis: [], prose: "see build_rework"}
     - {q: Q7, answers: [{question: "", answer: "", basis: []}]}
@@ -729,19 +816,19 @@ audit:
        item: "<= 30 words", plan_field: "<field path the fix touched>",
        finding_type: <DD-A step 4 enum>,
        counterfactual: needs_operator|caught_by_ci|caught_by_build|caught_by_vp|caught_post_merge|shipped_defect|shipped_guard_gap|no_effect|undeterminable,
-       catching_control: "", control_property_match: "",
-       catch_route: none|in_build_fix|plan_amendment|forward_fix_on_main,
-       note_would_suffice: yes|no|unclear|n/a, fix_induced: yes|no|unclear,
-       rule_blocks: {R1: yes|no, R2: yes|no, R3: yes|no, RX: yes|no|n/a},
+       catching_control: "", control_property_match: "", catching_control_note: "",
+       catch_route: none|in_plan_pr_fix|in_build_fix|plan_amendment|forward_fix_on_main,
+       note_would_suffice: yes|no|unclear|n/a, fix_induced: yes|no|unclear, always_ask_surface: true|false,
+       rule_blocks: {R1: yes|no, R1v: yes|no, R2: yes|no, R2v: yes|no, R3: yes|no, RX: yes|no|n/a},
        mechanical: true|false, deterministic_check: "<what it asserts and its home, or empty>",
        build_merged: yes|no, evidence: "<file:line, sha or command>", confidence: CONFIRMED|HYPOTHESIS}
   blocking_rules:
     rx_text: "<your RX rule, or empty>"
     rules:
-      - {rule: R0|R1|R2|R3|RX, group: late|control, blocked: <int>, core_blocked: <int>,
+      - {rule: R0|R1|R1v|R2|R2v|R3|RX, group: late|control, blocked: <int>, core_blocked: <int>,
          core_demoted: <int>, extended_only_demoted: <int>, undeterminable_demoted: <int>,
          other_demoted: <int>, precision: "<core_blocked>/<blocked>", core_tested: <int>,
-         demoted_upper_95: "<percent>",
+         demoted_upper_95: "<percent, or n/a>",
          verdict: safe|unsafe|insufficient_evidence|no_change|baseline, safe_extended: yes|no|n/a,
          safe_with_notes: yes|no|n/a, rationale: "", confidence: CONFIRMED|HYPOTHESIS}
   deterministic_checks:
@@ -806,8 +893,8 @@ Rules for the contract:
 
 Write `audits/plan-critique-late-findings-<sha>.md`, at most 1500 words, the layer the operator
 reads first: (0) one line naming any degraded mode (`degraded_dedup`, `pr_refs_unavailable`,
-`unprocessed_samples`, stale anchors, or "base is local HEAD" in `contract_notes`) or "no degraded
-mode"; (1) a five-line answer: do late blocking items matter, and which rule, if any, is safe;
+`unprocessed_samples`, stale anchors, or "base is local HEAD" or "audited on the session branch"
+in `contract_notes`) or "no degraded mode"; (1) a five-line answer: do late blocking items matter, and which rule, if any, is safe;
 (2) the counterfactual distribution by group as a small table; (3) the Q3 rule table; (4) the Q5
 answer, worded so it can close the planning skill's revisit clause; (5) the deterministic checks;
 (6) Q6; (7) top findings (those in `summary.top_improvements`); (8) Q7 highlights. Any count it
@@ -819,13 +906,18 @@ Assign severity AFTER judgment, by defect class, never inherited from this promp
 - critical: S1's rules can let a wrong-but-trusted outcome merge -- for example, a class of
   core-mattered defect the blocking rule tags as a nit, or a stopping rule that can end the loop
   with a core-mattered item open -- or a loop the rules cannot end.
-- high: either (a) mis-sorting: more than half of a group's blocked items have CONFIRMED
-  counterfactuals outside the extended mattered set, so a REVISE verdict usually predicts no
-  consequence; or (b) a core-mattered class that S1 catches only by chance (it surfaces in late
-  rounds only, with no rule or check aimed at it) AND no property-matched control compensates.
-- medium: mis-sorting affecting between a quarter and a half of a group's blocked items; a
-  deterministic-check gap with a clear home; an ambiguous rule; a recording gap with a clear fix.
+- high: a core-mattered class that S1 catches only by chance (it surfaces in late rounds only,
+  with no rule or check aimed at it) AND no property-matched control compensates.
+- medium: mis-sorting: more than a quarter of a group's blocked items have CONFIRMED
+  counterfactuals outside the extended mattered set, so a REVISE verdict often predicts no
+  consequence (the harm is a noisy blocking signal; cost is out of scope, so this caps at medium).
+  Mis-sorting is one finding, carried by the blocking rule, however many groups it affects. Also
+  medium: a deterministic-check gap with a clear home; an ambiguous rule; a recording gap with a
+  clear fix.
 - low: clarity or wording.
+The sample holds only REVISE rounds, so a critical stopping-rule defect (the loop ending with a
+core-mattered item open) can be shown only from Q7's incidental notes. Absence of such a finding
+is not evidence the stopping rule is safe; say so in the report.
 
 Compensating controls must PROPERTY-MATCH: the control exercises the same property AND would fail
 if the defect were real (apply the counterfactual to the control). A control that cannot catch the
