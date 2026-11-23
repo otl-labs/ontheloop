@@ -1,0 +1,156 @@
+name: CI RCA Smoke
+run-name: CI RCA smoke for ${{ github.sha }}
+# rec-5493: after a push to main that changes a file CI RCA's smoke-proven steps depend on, run CI RCA end to end on a
+# committed fixture failure, with every rec write going to a dry-run sink (scripts/ops_portal/writer_transport.py).
+# Push to main only: no schedule, dispatch or pull_request trigger (Decision 205 cl.1). "CI RCA Smoke" is in ci-rca.yml's
+# watched list, so a red smoke is a red on main.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  select:
+    if: github.repository == 'otl-labs/ontheloop'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.select.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - name: Install select dependencies
+        run: python -m pip install pyyaml networkx -c requirements.txt
+
+      - name: Select
+        id: select
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: python -m scripts.ci_rca.smoke select --before "$BEFORE" --after "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
+  smoke:
+    needs: select
+    if: needs.select.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    concurrency:
+      group: ci-rca-smoke
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Claude Code CLI
+        run: |
+          bash scripts/ci/install_claude_cli.sh "$GITHUB_WORKSPACE"
+          claude --version
+
+      - uses: ./.github/actions/aws-region
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - name: Activate venv
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --quiet --upgrade pip
+          .venv/bin/pip install -r requirements.txt
+
+      - name: Configure AWS credentials (OIDC -- branch role)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        env:
+          MASK_AWS_ROLE_ID_ACCOUNT_PART: ${{ secrets.AWS_ROLE_ID_ACCOUNT_PART }}
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/agent-platform-github-ci-branch
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Stage fixture
+        run: bin/venv-python -m scripts.ci_rca.smoke stage tests/fixtures/ci_rca/smoke/failed.log tests/fixtures/ci_rca/smoke/jobs.json tests/fixtures/ci_rca/smoke/log-evidence.json
+
+      - name: Generate evidence bundle
+        id: evidence
+        env:
+          S3_LOG_BUCKET: agent-platform-data-lake
+        run: |
+          bin/venv-python -m scripts.ci_rca.evidence --no-upload \
+            --log-file /tmp/ci-rca-failed.log \
+            --retrieval-envelope /tmp/ci-rca-log-evidence.json \
+            --jobs-file /tmp/ci-rca-jobs.json \
+            --workflow-name CI \
+            --workflow-run-id 900000001 \
+            --emit-dir /tmp/ci-rca-bundles \
+            > /tmp/ci-rca-evidence-out.txt
+          bin/venv-python -m scripts.ci_rca.smoke outputs /tmp/ci-rca-evidence-out.txt /tmp/ci-rca-bundles >> "$GITHUB_OUTPUT"
+
+      - name: Run ci-rca agent
+        id: rca_agent
+        timeout-minutes: 17
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CI_RCA_BUNDLE_EMIT_DIR: /tmp/ci-rca-bundles
+          CI_RCA_FORCE_RCA: 'true'
+          RANGE_NOTE: ''
+          RUN_ID: '900000001'
+          BUNDLE_SHA: ${{ steps.evidence.outputs.bundle_sha }}
+          BUNDLE_S3_URI: ${{ steps.evidence.outputs.bundle_s3_uri }}
+          BUNDLE_PATH: ${{ steps.evidence.outputs.bundle_path }}
+          BUNDLE_LOCAL: ${{ steps.evidence.outputs.bundle_local }}
+          BUNDLE_ABSENT: ${{ steps.evidence.outputs.bundle_absent }}
+          CI_RCA_SMOKE_SINK: /tmp/ci-rca-smoke-sink.jsonl
+          CI_RCA_SMOKE_ID: smoke-${{ github.run_id }}
+        run: |
+          # The prompt goes in on stdin: the variadic --allowedTools would swallow a trailing positional prompt
+          # ("Input must be provided either through stdin or as a prompt argument when using --print").
+          bash scripts/ci/ci_rca_steps.sh prompt > /tmp/ci-rca-prompt.txt
+          ${GITHUB_WORKSPACE}/scripts/ci/claude_p_retry.sh /tmp/ci-rca-output.json -- \
+            --output-format json --model "opus[1m]" --effort high \
+            --max-turns 30 --mcp-config "${GITHUB_WORKSPACE}/.mcp.json" --strict-mcp-config \
+            --allowedTools "Read,Glob,Grep,Bash(grep:*),Bash(cat:*),Bash(git log:*),Bash(bin/venv-python -m scripts.ops_data_portal:*),mcp__ducklake-reads__ci_rca_since,mcp__ducklake-reads__ci_rca_open,mcp__ducklake-reads__recs_by_ids" < /tmp/ci-rca-prompt.txt || true
+          bash scripts/ci/ci_rca_steps.sh check
+
+      - name: Fallback on an empty agent output
+        id: fallback
+        timeout-minutes: 4
+        if: ${{ !cancelled() }}
+        env:
+          CI_RCA_SMOKE_SINK: /tmp/ci-rca-smoke-fallback.jsonl
+          CI_RCA_SMOKE_ID: smoke-${{ github.run_id }}
+          CI_RCA_FORCE_RCA: 'true'
+          CI_RCA_BUNDLE_EMIT_DIR: /tmp/ci-rca-bundles
+          S3_LOG_BUCKET: agent-platform-data-lake
+        run: |
+          : > /tmp/ci-rca-smoke-empty.json
+          if bin/venv-python -m scripts.ci_rca.fallback file --agent-output /tmp/ci-rca-smoke-empty.json --bundles-dir /tmp/ci-rca-bundles --jobs /tmp/ci-rca-jobs.json --run-id 900000001 --head-sha "$GITHUB_SHA" --workflow-name CI --force-rca true --out /tmp/ci-rca-smoke-fallback.txt; then
+            echo "::error::CI RCA smoke fallback filed nothing for an empty agent output"
+            exit 1
+          fi
+
+      - name: Verify
+        id: verify
+        env:
+          CI_RCA_SMOKE_SINK: /tmp/ci-rca-smoke-sink.jsonl
+          CI_RCA_SMOKE_ID: smoke-${{ github.run_id }}
+        run: bin/venv-python -m scripts.ci_rca.smoke verify --smoke-id "$CI_RCA_SMOKE_ID" --bundles-dir /tmp/ci-rca-bundles /tmp/ci-rca-smoke-sink.jsonl /tmp/ci-rca-smoke-fallback.jsonl /tmp/ci-rca-output.json
+
+      - name: Capture agent telemetry
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: ./.github/actions/telemetry-ci-capture
+        with:
+          manifests: /tmp/ci-rca-output.json.sessions.jsonl
