@@ -11,11 +11,13 @@ intent: >-
   workflow's own steps (scripts.ci_rca.coverage, rec-5537), and only when they meet does the smoke job run the pinned CLI
   install, venv, AWS role, evidence generator (--no-upload), the agent through the same claude_p_retry.sh call and
   ci_rca_steps.sh prompt/check as ci-rca.yml (rec-5500), and the deterministic fallback on an empty agent output. Every
-  warehouse write goes to a dry-run sink that never reaches the writer. "CI RCA Smoke" joins CI RCA's watched
+  rec write goes to a dry-run sink that never reaches the writer (only the telemetry capture step writes outside the run,
+  until rec-5508). "CI RCA Smoke" joins CI RCA's watched
   workflows, so a red smoke is a red on main: CI RCA diagnoses it, the fallback files when CI RCA cannot, and the
   watchdog (rec-5504) opens an issue when neither records it. The coverage rows the smoke really proves flip from
   watchdog_only to main_smoke, each naming its smoke step, and coverage.check() fails a flipped row whose smoke step no
-  longer reaches every direct input and action pin of the CI RCA step it claims to prove.
+  longer reaches every direct input and action pin of the CI RCA step it claims to prove, or can be masked
+  (continue-on-error, or an if: other than none, success() or ${{ !cancelled() }}).
 plan_type: IMPLEMENTATION
 implementation_declared: true
 verification_tier: V2
@@ -33,8 +35,8 @@ scope:
       name: CI RCA Smoke; run-name: CI RCA smoke for ${{ github.sha }}; on: push, branches [main] only (no schedule, no
       workflow_dispatch, no pull_request; Decision 205 cl.1); workflow permissions contents: read. Job select (ubuntu,
       timeout 5, if: github.repository == the base repo): checkout with fetch-depth 2 and persist-credentials false;
-      setup-python 3.12 at ci-rca.yml's pin; `python -m pip install pyyaml -c requirements.txt` (the watchdog's
-      precedent); `python -m scripts.ci_rca.smoke select --before "$BEFORE" --after "$GITHUB_SHA" >> "$GITHUB_OUTPUT"`
+      setup-python 3.12 at ci-rca.yml's pin; `python -m pip install pyyaml networkx -c requirements.txt` (the
+      watchdog's precedent plus networkx, which coverage.py's import graph needs); `python -m scripts.ci_rca.smoke select --before "$BEFORE" --after "$GITHUB_SHA" >> "$GITHUB_OUTPUT"`
       with BEFORE bound from github.event.before in env, never interpolated into run:. Output run. Job smoke: needs
       select, if: needs.select.outputs.run == 'true', timeout 30, concurrency group ci-rca-smoke with cancel-in-progress
       false (a running smoke is never cancelled; GitHub may replace an older queued run with a newer one, which proves a
@@ -45,8 +47,8 @@ scope:
       refs/heads/main already; no IAM change); Stage fixture (`bin/venv-python -m scripts.ci_rca.smoke stage
       tests/fixtures/ci_rca/smoke/failed.log tests/fixtures/ci_rca/smoke/jobs.json
       tests/fixtures/ci_rca/smoke/log-evidence.json`, which copies them to /tmp/ci-rca-failed.log, /tmp/ci-rca-jobs.json
-      and /tmp/ci-rca-log-evidence.json); Generate evidence bundle (id evidence: `bin/venv-python -m
-      scripts.ci_rca.evidence --no-upload` with the rca step's flags and the fixture's workflow name and run id, stdout to
+      and /tmp/ci-rca-log-evidence.json); Generate evidence bundle (id evidence, no continue-on-error and no `|| true`, so a
+      generator failure reds the smoke: `bin/venv-python -m scripts.ci_rca.evidence --no-upload` with the rca step's flags and the fixture's workflow name and run id, stdout to
       /tmp/ci-rca-evidence-out.txt, then `bin/venv-python -m scripts.ci_rca.smoke outputs /tmp/ci-rca-evidence-out.txt
       /tmp/ci-rca-bundles >> "$GITHUB_OUTPUT"`, which writes bundle_sha, bundle_s3_uri, bundle_path, bundle_local and
       bundle_absent exactly as the rca step derives them); Run ci-rca agent (id rca_agent, timeout-minutes 17: the rca
@@ -54,13 +56,17 @@ scope:
       model, --max-turns 30 and allow list, and ci_rca_steps.sh check; env holds CLAUDE_CODE_OAUTH_TOKEN,
       CI_RCA_BUNDLE_EMIT_DIR, CI_RCA_FORCE_RCA 'true', RANGE_NOTE '', RUN_ID (the fixture's run id), the five bundle
       values from steps.evidence.outputs, CI_RCA_SMOKE_SINK /tmp/ci-rca-smoke-sink.jsonl and CI_RCA_SMOKE_ID
-      smoke-${{ github.run_id }}); Fallback on agent failure (id fallback, timeout-minutes 4, if: !cancelled(): with
-      CI_RCA_SMOKE_SINK /tmp/ci-rca-smoke-fallback.jsonl and the same CI_RCA_SMOKE_ID, `: > /tmp/ci-rca-smoke-empty.json`
-      then `bin/venv-python -m scripts.ci_rca.fallback file --agent-output /tmp/ci-rca-smoke-empty.json` with the rca
-      step's other flags (--force-rca true, fixture run id and workflow name, head sha github.sha, --out
-      /tmp/ci-rca-smoke-fallback.txt) where exit 1 (it filed) passes and exit 0 or any other code fails the step);
-      Verify (`bin/venv-python -m scripts.ci_rca.smoke verify /tmp/ci-rca-smoke-sink.jsonl /tmp/ci-rca-smoke-fallback.jsonl
-      /tmp/ci-rca-output.json`); Capture agent telemetry (the rca step's text: always(), continue-on-error,
+      smoke-${{ github.run_id }}); Fallback on agent failure (id fallback, timeout-minutes 4, if: ${{ !cancelled() }}; env
+      CI_RCA_SMOKE_SINK /tmp/ci-rca-smoke-fallback.jsonl, the same CI_RCA_SMOKE_ID, CI_RCA_FORCE_RCA 'true',
+      CI_RCA_BUNDLE_EMIT_DIR /tmp/ci-rca-bundles and S3_LOG_BUCKET as the rca step: `: > /tmp/ci-rca-smoke-empty.json` then
+      `bin/venv-python -m scripts.ci_rca.fallback file --agent-output /tmp/ci-rca-smoke-empty.json --bundles-dir
+      /tmp/ci-rca-bundles --jobs /tmp/ci-rca-jobs.json --run-id <fixture id> --head-sha "$GITHUB_SHA" --workflow-name
+      <fixture name> --force-rca true --out /tmp/ci-rca-smoke-fallback.txt`, where exit 0 fails the step (it filed
+      nothing) and exit 1 passes it; exit 1 does not by itself mean it filed, so Verify, not the exit code, is the
+      authority);
+      Verify (env CI_RCA_SMOKE_SINK /tmp/ci-rca-smoke-sink.jsonl and CI_RCA_SMOKE_ID, so the FILED parser admits the
+      smoke id: `bin/venv-python -m scripts.ci_rca.smoke verify --smoke-id "$CI_RCA_SMOKE_ID" --bundles-dir
+      /tmp/ci-rca-bundles /tmp/ci-rca-smoke-sink.jsonl /tmp/ci-rca-smoke-fallback.jsonl /tmp/ci-rca-output.json`); Capture agent telemetry (the rca step's text: always(), continue-on-error,
       ./.github/actions/telemetry-ci-capture). No dedup, persona gate, mark, comment or status step: the smoke posts
       nothing outside its own run.
   - file: scripts/ci_rca/smoke.py
@@ -68,18 +74,21 @@ scope:
     purpose: >-
       The smoke's verbs; standard library plus yaml and repository modules; no network. select --before SHA --after SHA
       [--changed PATH ...]: changed files from `git diff --name-only BEFORE AFTER` (or --changed, for tests and the VP);
-      run=true when any is in coverage's union of inputs(step) over every step of .github/workflows/ci-rca-smoke.yml
-      (direct plus closure, which includes the workflow file itself, the fixtures the stage step names, the agent prompt
-      and .mcp.json). Fails toward run=true, with a ::warning:: line, when BEFORE is all zeros, unknown to the clone, or
+      run=true when any is in coverage.workflow_inputs(.github/workflows/ci-rca-smoke.yml) (see coverage.py: every
+      smoke step's direct inputs and closure, the workflow file itself, and the declared_inputs of each main_smoke row
+      mapped to its smoke step, so a change to the smoke's own claude flags or to config/ci_rca_taxonomy.yaml runs it). Fails toward run=true, with a ::warning:: line, when BEFORE is all zeros, unknown to the clone, or
       git fails, so an unreadable push is proven rather than skipped. Prints run=true or run=false. stage SRC...: copies
       the three fixtures to their /tmp names; a missing source exits 1. outputs OUT BUNDLES_DIR: parses the evidence
       generator's BUNDLE_* lines and bundle_absent (no BUNDLE_SHA and no *.json in BUNDLES_DIR) as the rca step does,
-      printing key=value lines. verify SINK FALLBACK_SINK AGENT_OUTPUT: SINK holds at least one line whose action is
-      file_ops, table ops_recommendations and record.source ci_rca; FALLBACK_SINK holds at least one such line whose
-      record carries rca_confidence undetermined (the fallback's agent-failure filing); scripts.ci_rca.filing finds a
-      FILED pair naming CI_RCA_SMOKE_ID in AGENT_OUTPUT (the agent's marker survives the real CLI's output); any miss
-      exits 1 with one ::error:: line naming it. Imports only scripts.ci_rca.coverage and scripts.ci_rca.filing at module
-      level, so select runs with pyyaml as its only third-party package.
+      printing key=value lines. verify --smoke-id ID --bundles-dir DIR SINK FALLBACK_SINK AGENT_OUTPUT: DIR holds at least one
+      bundle (bundle_absent would be a generator break); SINK holds at least one line whose action is file_ops, table
+      ops_recommendations and record.source ci_rca, and whose record.context_v2_json (a JSON string, parsed) has
+      evidence_bundle_ref.sha256 equal to an emitted bundle's sha (the agent used the bundle); FALLBACK_SINK holds at
+      least one such line whose parsed context_v2_json carries rca_confidence undetermined (the fallback's agent-failure
+      filing); scripts.ci_rca.filing finds a FILED pair naming ID in AGENT_OUTPUT (the agent's marker survives the real
+      CLI's output; the step's env sets CI_RCA_SMOKE_SINK so the parser admits it); any miss exits 1 with one ::error::
+      line naming it. Module-level imports are scripts.ci_rca.coverage and scripts.ci_rca.filing only, so select needs
+      just pyyaml and networkx (coverage's import graph) as third-party packages.
   - file: tests/fixtures/ci_rca/smoke/failed.log
     action: Create
     purpose: >-
@@ -122,18 +131,23 @@ scope:
       The table may name smoke_workflow (.github/workflows/ci-rca-smoke.yml). A row whose proven_by is main_smoke must
       carry smoke_step, a step key of that workflow under the same key grammar; check() fails when it is missing, names
       no step, or the smoke step's direct inputs do not include every direct input of the row's CI RCA step, or its
-      third-party uses: pin differs (direct-only, so check() still builds no import graph). A row of any other
-      proven_by carrying smoke_step fails. workflow_inputs(workflow) returns the union of inputs(step) (direct plus
-      closure) over every step of any workflow, for smoke.select. Stays under the 500 SLOC budget (Decision 128;
+      third-party uses: pin differs (direct-only, so check() still builds no import graph). It also fails a main_smoke row whose smoke step can
+      be masked: continue-on-error true, or an if: other than none, success() or ${{ !cancelled() }}. A row of any other
+      proven_by carrying smoke_step fails. A smoke_workflow naming a missing file is a reported problem, never an
+      exception. workflow_inputs(workflow) returns the union of inputs(step) (direct plus closure) over every step of
+      the workflow, plus the workflow file itself and the declared_inputs of every main_smoke row whose smoke_step is in
+      it, for smoke.select. Stays under the 500 SLOC budget (Decision 128;
       decompose into a package if not).
   - file: config/agent/ci_rca/coverage.yaml
     action: Modify
     purpose: >-
       Adds smoke_workflow: .github/workflows/ci-rca-smoke.yml. Flips to main_smoke, each with its smoke_step:
       rca::install-claude-code-cli, rca::#2 (aws-region), rca::set-up-python-3-12, rca::activate-venv,
-      rca::configure-aws-credentials-oidc-branch-role, rca::evidence, rca::rca_agent, rca::fallback and
-      rca::capture-agent-telemetry. Every other row stays watchdog_only (the fetches, range, dedup, persona gate, mark,
-      PR comment, checkout at the failing commit and the watchdog job): the smoke does not run them. The keys follow the
+      rca::configure-aws-credentials-oidc-branch-role, rca::evidence (note: the fixture exercises no junit, selection
+      manifest or validation-result input; those flags stay proven only by real runs), rca::rca_agent and rca::fallback.
+      Every other row stays watchdog_only (the fetches, range, dedup, persona gate, mark, PR comment, checkout at the
+      failing commit, capture-agent-telemetry, whose required continue-on-error means the smoke cannot fail on it, and
+      the watchdog job): the smoke does not prove them. The keys follow the
       real smoke workflow; measure them with derive at build.
   - file: .github/workflows/ci-rca.yml
     action: Modify
@@ -161,6 +175,11 @@ scope:
     purpose: >-
       r3_workflows entries for every ci-rca-smoke.yml inline run body at its exact measured count (registration of a new
       workflow, not a raise; Decision 162 R3). The agent body equals the rca entry's count.
+  - file: docs/contracts/account-credential-inventory.yaml
+    action: Modify
+    purpose: >-
+      ANT-04's location lists .github/workflows/ci-rca-smoke.yml as a CLAUDE_CODE_OAUTH_TOKEN consumer, with one new
+      amendment_log entry (correction, semantic_break false, location field only), as rec-4639 did for subagent-review-smoke.
   - file: tests/ci_rca/test_ci_rca_smoke_wiring.py
     action: Create
     purpose: >-
@@ -171,14 +190,20 @@ scope:
       CLI install, venv and AWS steps equal their rca partners; CI_RCA_SMOKE_ appears in no other workflow, ci-rca.yml
       included; the smoke job's permissions are id-token write and contents read only; the select job references no
       secret; "CI RCA Smoke" is in ci-rca.yml's watched list and the taxonomy row says watched; a coverage fixture whose
-      main_smoke row's smoke step lacks a direct input, or has a different pin, fails check().
+      main_smoke row's smoke step lacks a direct input, or has a different pin, fails check(); the Verify step's env
+      sets CI_RCA_SMOKE_SINK and CI_RCA_SMOKE_ID.
   - file: tests/test_ci_rca_smoke.py
     action: Create
     purpose: >-
       smoke.py's home (map_source_to_test). In process, argv monkeypatched, subprocess and git mocked: select (a changed
       input runs, an unrelated path does not, zero or unknown BEFORE and git failure run with a warning, the real tree's
       CLI pin config/claude-cli-version runs); stage (copies, a missing source exits 1); outputs (bundle present, absent,
-      multiple); verify (passes on a good pair of sinks and output; each missing piece exits 1 with its ::error:: line).
+      multiple); verify (passes on a good pair of sinks and output; no bundle, a sha mismatch, a missing undetermined
+      fallback record and a missing marker each exit 1 with its ::error:: line); select runs for a change to only
+      ci-rca-smoke.yml and to only config/ci_rca_taxonomy.yaml; the three committed fixtures run through
+      scripts.ci_rca.evidence main in process with --no-upload yield exactly one bundle of the expected category; a
+      subprocess imports scripts.ci_rca.smoke under a meta-path finder that refuses any top-level module outside
+      sys.stdlib_module_names, scripts, src, yaml and networkx (pins select's third-party set).
       100% line coverage (validate_test_coverage).
   - file: tests/ops_data_portal/test_writer_transport.py
     action: Modify
@@ -197,15 +222,17 @@ scope:
   - file: tests/test_ci_rca_coverage.py
     action: Modify
     purpose: >-
-      Fixture nodes for smoke_step (missing, unknown key, a smoke step missing a direct input, a different pin, a non
-      main_smoke row carrying it) and for workflow_inputs. New nodes only; test_real_tree_checks_clean (rec-5537's
+      Fixture nodes for smoke_step (missing, unknown key, a smoke step missing a direct input, a different pin,
+      continue-on-error, a skipping if:, a non main_smoke row carrying it, a missing smoke_workflow file) and for
+      workflow_inputs (includes the workflow file and the mapped declared inputs). New nodes only; test_real_tree_checks_clean (rec-5537's
       acceptance) keeps its id, and the graduated shard ci-rca-coverage-derive is kept.
 bundled_recommendations: [rec-5493]
 followon_recs: []
 infrastructure_dependencies: []
 acceptance_criteria:
   - bin/venv-python -m pytest tests/ci_rca/test_ci_rca_smoke_wiring.py::test_smoke_workflow_proves_flipped_rows -q (rec-5493's stored acceptance, updated and read back 2026-11-23) passes, and fails on main (file absent)
-  - The first push to main after the merge that changes a smoke input runs ci-rca-smoke.yml's smoke job to success, with one agent filing and one fallback filing in the sinks and no warehouse write
+  - The first push to main after the merge that changes a smoke input runs ci-rca-smoke.yml's smoke job to success, with one agent filing that cites the emitted bundle and one undetermined fallback filing in the sinks and no
+    warehouse rec write
   - A push that changes no smoke input runs only the select job (smoke job skipped)
   - A red smoke run is a watched red on main (ci-rca.yml's filter and the taxonomy row both name CI RCA Smoke)
   - rec-5493 is closed by the merge's Resolves trailer
@@ -245,10 +272,10 @@ verification_plan:
     graduation_waiver_reason: New nodes inside existing suites the fast and full tiers already run; steps 1-2 graduate the new files.
   - step: 4
     phase: pre-deploy
-    action: Real tree - the table checks clean, and select runs for the CLI pin and not for a doc, with pyyaml as the only third-party package.
-    command: bin/venv-python -m scripts.ci_rca.coverage check && python3 -m venv /tmp/smoke-select && /tmp/smoke-select/bin/pip install -q pyyaml -c requirements.txt && /tmp/smoke-select/bin/python -m scripts.ci_rca.smoke select --before HEAD --after HEAD --changed config/claude-cli-version && /tmp/smoke-select/bin/python -m scripts.ci_rca.smoke select --before HEAD --after HEAD --changed docs/PROJECT_CONTEXT.md
+    action: Real tree - the table checks clean, and select runs for the CLI pin and not for a doc, in a venv holding only pyyaml and networkx.
+    command: bin/venv-python -m scripts.ci_rca.coverage check && bin/venv-python -m venv /tmp/smoke-select && /tmp/smoke-select/bin/pip install -q pyyaml networkx -c requirements.txt && /tmp/smoke-select/bin/python -m scripts.ci_rca.smoke select --before HEAD --after HEAD --changed config/claude-cli-version && /tmp/smoke-select/bin/python -m scripts.ci_rca.smoke select --before HEAD --after HEAD --changed docs/PROJECT_CONTEXT.md
     expected: check exits 0; the first select prints run=true, the second run=false
-    fix_if: an import needs more than pyyaml (trim smoke.py's imports), or a selection is wrong
+    fix_if: an import needs a package beyond pyyaml and networkx (add it to the select job's install and the import-pin node), or a selection is wrong
     hermetic: false
     graduation: waive
     graduation_waiver_reason: A real-tree and clean-venv replay of code steps 1-2 graduate; pip needs the network.
@@ -264,7 +291,7 @@ verification_plan:
   - step: 6
     phase: post-deploy
     action: The merge's own push runs the smoke (the build changes smoke inputs); read its run for the merge SHA.
-    command: mcp__github__actions_list(method=list_workflow_runs, owner=otl-labs, repo=ontheloop, resource_id=ci-rca-smoke.yml, workflow_runs_filter={branch=main, event=push}) then mcp__github__actions_get(method=list_workflow_jobs, resource_id=<that run id>)
+    command: mcp__github__actions_list(method=list_workflow_runs, owner=otl-labs, repo=ontheloop, resource_id=ci-rca-smoke.yml, workflow_runs_filter={branch=main, event=push}) then mcp__github__actions_list(method=list_workflow_jobs, owner=otl-labs, repo=ontheloop, resource_id=<that run id>)
     expected: the run whose head_sha is the merge SHA concluded success, its smoke job concluded success (not skipped), and its Verify step passed
     fix_if: red or skipped; a red smoke is a red on main, so CI RCA files on it; diagnose from that run's log and forward-fix (Decision 226), never revert the sink or the watched-list line to quiet it
     hermetic: false
@@ -314,7 +341,7 @@ test_obligations:
     test_selector: tests/test_ci_rca_coverage.py
     red_green_expectation: red before, green after
   - source: config/agent/ci_rca/coverage.yaml
-    behavior: the nine rows flipped to main_smoke with smoke steps that reach their inputs
+    behavior: the eight rows flipped to main_smoke with unmasked smoke steps that reach their inputs
     verification_step: 1
     test_selector: tests/ci_rca/test_ci_rca_smoke_wiring.py
     red_green_expectation: red before (rows watchdog_only, no smoke workflow), green after
@@ -341,7 +368,7 @@ test_obligations:
 constraints:
   - Push to main only; no schedule, no dispatch, no pull_request (Decision 205 cl.1). The smoke rides ci-rca's Decision 205 cl.4 carve-out for CLAUDE_CODE_OAUTH_TOKEN and retires with it at T4.26; the wiring test forces the lane swap to change both workflows.
   - The sink never reaches the writer, and refuses anything but a smoke file_ops on ops_recommendations; ci-rca.yml never sets its variables.
-  - The smoke posts nothing outside its run - no status, comment, mark, issue or S3 object.
+  - The smoke posts nothing outside its run - no status, comment, mark, issue, S3 object or warehouse rec; the one exception is its telemetry capture, a Decision 236 cl.1 residual until rec-5508.
   - Only rows the smoke really runs flip to main_smoke; the rest stay watchdog_only.
 context:
   - "Operator rulings 2026-11-23: blind Fable consult and 'watchdog first, rework smoke' (11:22Z); the 18:29Z card chose 'Auto after CI RCA changes; write it' over dispatch-only. Design note: /mnt/project-files/ci-rca-smoke-run/PRESENTATION-rec-5493.md. Decided with notice there: a separate workflow (no trigger-policy change, one ci-rca.yml line, CI RCA can watch it) and the file-open check as its own rec, rec-5544 (filed and read back, depends on rec-5493)."
@@ -350,9 +377,9 @@ context:
   - "Decision scout r1 FLAGS_FOUND. Decisions triaged: 228 of 228. Roadmap items intersected: 5; CONFLICT: 1; RELATED: 3. Serves: NS.6 3/5. CITE 72, 74, 84, 162, 181, 205, 226. CONTRADICT NOTE 205 cl.4 (a second unattended token consumer) put to the operator as the trigger choice; he chose the automatic smoke. T4.26 CONFLICT resolved by the wiring test pinning identical claude calls."
   - "red_overlap: rec-5536 (Critical, scripts/ci/claude_p_retry.sh) is open but its acceptance passes on main (checked 2026-11-23); deferred under the standing accept-with-deferral ruling. The smoke would have caught it."
   - "Decision 100 note (scout r2 WARN): the select job deliberately does not use GitHub's native on.push.paths filter. The smoke's input set is derived and moves with imports, so a static paths list would be a second, hand-regenerated list of about 150 paths that every unrelated import change must touch (the frame rec-5537 removed); the native filter also sees only the first 300 changed files and skips silently, where select fails toward run=true."
-  - "Residuals: smoke telemetry mixes with real ci_rca sessions until rec-5508; files the smoke opens are not yet checked against the derived inputs (rec-5544); pre-merge proof stays rec-5510; the sink stops before the writer, so writer-side write-boundary rules (Decision 210) are not proven by the smoke."
+  - "Residuals: smoke telemetry mixes with real ci_rca sessions until rec-5508 (Decision 236 cl.1; its context updated to this design and read back 2026-11-23); files the smoke opens are not yet checked against the derived inputs (rec-5544); pre-merge proof stays rec-5510; the sink stops before the writer, so writer-side write-boundary rules (Decision 210) are not proven by the smoke."
   - "Selection breadth: breadth_waived (selection_budget on the scope 2026-11-23: CI test half 121.5-458.6s, elapsed 177.8-616.6s; writer_transport.py is widely imported). Declared, one plan, not split."
-  - "Cost: select is a sub-minute pyyaml-only job per push to main; the smoke job runs only on a CI RCA input change, capped at 30 turns and a 30-minute job timeout (Decision 212 cl.2(b))."
+  - "Cost: select is a sub-minute pyyaml-only job per push to main; the smoke job runs only on a CI RCA input change, capped at 30 turns and a 30-minute job timeout (Decision 212 cl.2(b)). Frequency (measured 2026-11-23 over the last 100 first-parent merges, 2026-11-20 to 11-23, a CI RCA-heavy window): 15 would have run it (about 5 a day), mostly ci_rca_taxonomy rows and CI RCA work; expect fewer in a normal week. An agent miss on the fixture is a red on main and costs one real CI RCA run."
 gate_rounds:
   - gate: decision-scout
     round: 1
@@ -362,6 +389,28 @@ gate_rounds:
     round: 2
     verdict: FLAGS_FOUND
     scout_input_fingerprint: "v1:9a9826e9dab5ea39263212f881e7d123e6430366e6384d0799556e3ecd3b07d1"
+  - gate: plan-critique
+    round: 1
+    verdict: REVISE
+    blocking: 5
+    nits: 11
+    findings:
+      - {id: PC-B1, severity: blocking, origin: mechanical, anchor: "scope[ci-rca-smoke.yml] select install; verification_plan[4]", subject: "select cannot import coverage.py with pyyaml only (needs networkx)", disposition: fixed}
+      - {id: PC-B2, severity: blocking, origin: judgement, anchor: "scope[ci-rca-smoke.yml] Verify step", subject: "Verify lacks the sink variables, so the smoke-N marker is ignored", disposition: fixed}
+      - {id: PC-B3, severity: blocking, origin: judgement, anchor: "scope[coverage.py] workflow_inputs", subject: "select union omits the smoke workflow file and mapped declared inputs", disposition: fixed}
+      - {id: PC-B4, severity: blocking, origin: judgement, anchor: "scope[smoke.py] verify", subject: "verify passes when the evidence generator produced no bundle", disposition: fixed}
+      - {id: PC-B5, severity: blocking, origin: judgement, anchor: "scope[coverage.yaml] capture flip; scope[coverage.py] smoke_step rule", subject: "capture row cannot be main_smoke; rule ignores continue-on-error and if:", disposition: fixed}
+      - {id: PC-N1, severity: nit, origin: judgement, anchor: "scope[ci-rca-smoke.yml] Fallback step", subject: "fallback env and required flags", disposition: applied-wording}
+      - {id: PC-N2, severity: nit, origin: mechanical, anchor: "verification_plan[6]", subject: "list_workflow_jobs is an actions_list method", disposition: applied-wording}
+      - {id: PC-N3, severity: nit, origin: mechanical, anchor: "verification_plan[4]", subject: "VP 4 used python3", disposition: applied-wording}
+      - {id: PC-N4, severity: nit, origin: judgement, anchor: "intent; constraints; context residuals", subject: "capture writes outside the sink; Decision 236; rec-5508 stale", disposition: applied-wording}
+      - {id: PC-N5, severity: nit, origin: judgement, anchor: "scope (absent row)", subject: "ANT-04 does not list the smoke as a token consumer", disposition: applied-wording}
+      - {id: PC-N6, severity: nit, origin: mechanical, anchor: "scope[ci-rca-smoke.yml] Fallback if:", subject: "bare !cancelled() is a YAML tag", disposition: applied-wording}
+      - {id: PC-N7, severity: nit, origin: judgement, anchor: "scope[ci-rca-smoke.yml] fallback exit rule", subject: "fallback exit 1 does not mean it filed", disposition: applied-wording}
+      - {id: PC-N8, severity: nit, origin: mechanical, anchor: "scope[smoke.py] verify", subject: "context_v2_json is a JSON string", disposition: applied-wording}
+      - {id: PC-N9, severity: nit, origin: judgement, anchor: "context Cost", subject: "run frequency and LLM miss risk unstated", disposition: applied-wording}
+      - {id: PC-N10, severity: nit, origin: judgement, anchor: "scope[coverage.py]", subject: "missing smoke_workflow file raises instead of reporting", disposition: applied-wording}
+      - {id: PC-N11, severity: nit, origin: judgement, anchor: "scope[coverage.yaml] rca::evidence", subject: "fixture exercises no junit, manifest or validation-result path", disposition: applied-wording}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
