@@ -1,0 +1,378 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: derived-list-scan
+intent: >-
+  Find the files that are hand-kept lists of things the repo can already enumerate (check manifests, the CI RCA
+  taxonomy, workflow paths filters, CODEOWNERS and the like), rank them by how often they are hand-extended alongside
+  new files, and file at most three recs a week naming the worst unmarked ones with a remediation order (rec-5516). It
+  reports and never gates, so a hand-kept list becomes visible work instead of a silent source of drift, cap pressure
+  and parallel-plan collisions.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-derived-list-scan.yaml
+phase: >-
+  ad_hoc_rec (soft-warn exception category: rec-5516, Medium, operator ask 2026-11-23 11:42Z; no tier_item claimed, so
+  the Tier Item Freshness Gate is skipped; closes no criterion). New scripts, one scheduled workflow, two config rows
+  and tests; no Lambda, Terraform or warehouse schema change, so V2 with one post-merge live read.
+cites: [dec:61, dec:84, dec:162, dec:166, dec:201, dec:215, dec:267, dec:275]
+scope:
+  - file: scripts/checks/hygiene/derived_list_scan.py
+    action: Create
+    purpose: >-
+      The scanner's static pass and CLI (not a registered check; never in --pre or the full tier). Walks tracked
+      *.yaml/*.yml under config/ and docs/contracts/, src/lambdas/*/manifest.yaml, every scripts/checks/*/_manifest.py
+      (ast: Entry(name=...) literals), .github/CODEOWNERS (path column) and every .github/workflows/*.yml
+      on.<event>.paths list (class trigger_paths). Skips files config/structural_size_budgets.yaml classes as generated
+      (generated_pinned or the GENERATED banner). A collection is a mapping or list of at least 10 siblings (3 for
+      trigger_paths); an entry's token is its key (mappings) or first scalar (lists), also tried by its first "::"
+      segment. A token resolves when it names an enumerable repo entity: a tracked path, a glob matching at least one
+      tracked path, a check name (the Entry(name=...) literals parsed by ast from scripts/checks/*/_manifest.py, the same
+      parse the manifest walk does; the scanner never imports a check module or calls all_checks()), a dotted scripts./src. module, a workflow
+      name: or file stem, or a tracked file stem that is not one of the generic stems __init__, README, main, index,
+      conftest. Collection class: derived_candidate (at least 60% of entries resolve and values are not mostly
+      numeric), baseline (entries resolve and at least 80% of values are numeric: a ratchet, reported, never filed),
+      or none. File class is the strongest collection class (derived_candidate over baseline over none), so a file
+      such as structural_size_budgets.yaml with a resolvable path list and numeric budgets is a derived_candidate.
+      Disposition markers, read from comment lines in the first 15 lines: "hand-kept: rec-NNNN <reason>",
+      "verified-against: <check name>" (counts only when the name is one of those manifest Entry names), or a GENERATED banner; a marked
+      candidate is reported as dispositioned and never filed. Calls derived_list_rank for score fields unless
+      --no-history. Writes a JSON result (--result; top-level key files, a list of {path, class, entries,
+      resolved_share, coupled_appends, size_pressure, score, marker}) and a Markdown table (--summary). Exit 0 on a
+      completed scan, 2 when it cannot complete. --assert-dispositioned <path> exits 0 when <path> is not a
+      derived_candidate or carries a valid marker, else 1 (the filed recs' acceptance).
+  - file: scripts/checks/hygiene/derived_list_rank.py
+    action: Create
+    purpose: >-
+      The ranking pass, split from the scanner now so neither module nears 500 SLOC. Over --history-days (default 90)
+      of `git log --no-merges -U0`, a coupled append is an added line of the file that contains the stem or path of a
+      file added or renamed in the same commit (an unrelated file added in the same squash commit does not count).
+      score = coupled-append commits x (1 + size pressure); size pressure = used / limit from the structural or SLOC
+      budget when the file has one, else 0. With shallow history (git rev-parse --is-shallow-repository true, or fewer
+      than 30 commits in the window) it returns zero scores and a note the summary prints.
+  - file: scripts/checks/hygiene/derived_list_recs.py
+    action: Create
+    purpose: >-
+      The filer, in decision-census's shape (scripts/checks/decisions/append_only_census_recs.py): reads the scan
+      result (untrusted input, schema-checked) and the open derived-list recs (find_recs over code-smell, filtered on a
+      first context line starting derived_list=). Every open derived-list rec holds one of the --max (default 3)
+      slots whatever its file's current rank (counted unchanged, nothing written), so at most --max of these recs are
+      open at once and a weekly run never stacks more. The remaining slots go to the highest-scored unmarked
+      derived_candidate files with no open rec; for each it files one rec through the portal's file_rec with source code-smell, tag derived-list, title
+      "Derived-list candidate: <path> (<n> entries naming <entity kind>)", context first line "derived_list=<path>",
+      the evidence (entries, resolved share, coupled appends, size pressure) and the fixed remediation order (derive at
+      read time; move a judgment field onto the source; generate with a drift check; one file per entry; verify both
+      directions; or accept with a hand-kept marker), naming the step the scan suggests (step 2 when a registered check
+      already enumerates the same source). Acceptance: "bin/venv-python -m scripts.checks.hygiene.derived_list_scan
+      --assert-dispositioned <path>". Dedup lookup, as the precedent does it: rec_episode.find_recs over source code-smell, then
+      a first-context-line token filter (the precedent's token parsing is append_only_census_recs.py:178-187); a rec
+      closed while the file is still an unmarked candidate is re-filed. Stdout grammar: one line per filed rec,
+      "[derived_list] filed <path> rec=<id>", then exactly one summary line "[derived_list] summary candidates=<n>
+      filed=<n> unchanged=<n> skipped_marked=<n>". Every write is attempted; a failed write exits 1 (Decision 84 I-4,
+      no outbox); a malformed result or failed lookup exits 2 with nothing written. --dry-run prints the same lines
+      with "would_file" in place of "filed" and writes nothing. The rec text says that adding a hand-kept marker is
+      the way to decline, since a rec closed without one is re-filed (Decision 103).
+  - file: tests/checks/hygiene/test_derived_list_scan.py
+    action: Create
+    purpose: >-
+      rec-5516's acceptance. Synthetic-repo nodes (tmp git repos): node test_classes_on_synthetic_repo builds a tmp
+      repo mirroring the known shapes (a _manifest.py of Entry names that are registered-check-like, a workflows map
+      keyed by workflow file stems, a numeric path ratchet, a free-text list of prose items) and asserts
+      derived_candidate, derived_candidate, baseline, none. Also: a mixed file takes the strongest class
+      (test_mixed_file_takes_the_strongest_class); generic stems do not resolve; a hand-kept marker and a valid
+      verified-against marker disposition a candidate and an unknown check name does not
+      (test_markers_disposition_a_candidate); test_check_names_resolve_without_importing_checks (a check name
+      resolves from a tmp _manifest.py whose module does not exist, and the scan runs with a sys.modules guard that
+      fails on any scripts.checks.* import beyond the scanner's own); --assert-dispositioned exit codes; exit 2 on an unreadable tree. No
+      committed node asserts on this repo's live files (Decision 244 cl.4: the scan's own remediation would make such
+      a claim false); the live-tree known answers are VP 6's one-time evidence. 100% line coverage of the scanner.
+  - file: tests/checks/hygiene/test_derived_list_rank.py
+    action: Create
+    purpose: >-
+      Ranking nodes on tmp git repos: test_coupled_append_needs_a_named_new_file (an append naming a file added in the
+      same commit counts; a squash commit adding unrelated files does not); size pressure multiplies the score; shallow
+      history returns zero scores and the note. 100% line coverage of the ranker.
+  - file: tests/checks/hygiene/test_derived_list_recs.py
+    action: Create
+    purpose: >-
+      Filer nodes with an injected portal and rows: test_files_at_most_max_and_skips_marked (at most --max recs,
+      highest score first, skipping marked and baseline files); test_open_rec_keeps_its_slot (an open same-token rec
+      is unchanged and no lower-ranked file is filed in its place); test_open_rec_on_a_lower_ranked_file_holds_a_slot
+      (an open rec for a file now outside the top --max still holds a slot, so with --max 3 and one such rec at most
+      two new recs are filed); re-files after a close; a failed write exits 1
+      after attempting the rest; a malformed result exits 2 with no write; --dry-run writes nothing; the stdout lines
+      match the grammar; the rec text carries the token, the remediation order and a decidable acceptance. Class
+      TestWorkflowJob, node test_workflow_runs_weekly_on_main_and_never_on_a_pr: triggers are exactly {schedule,
+      workflow_dispatch}; the cron's day-of-week field is a single day; the scan job's effective permissions (the
+      workflow-level block merged with any job-level block, an absent block counting as the workflow's) hold no
+      id-token;
+      the file-recs job runs only on refs/heads/main, holds id-token write and contents read, needs scan, assumes the
+      agent-platform-github-ci-branch role on a SHA-pinned action, and its filer step comes after the credential step
+      and reads the downloaded artifact; the root job carries the Decision 267 bot guard. Class TestRegistration: the
+      derived-list-scan taxonomy row is not_a_gate and excluded with rec-5516 in its rationale; the scan upload is
+      classified ephemeral_handoff in github-actions-evidence.yaml. 100% line coverage of the filer.
+  - file: .github/workflows/derived-list-scan.yml
+    action: Create
+    purpose: >-
+      Weekly schedule (cron '17 6 * * 1', a weekly-by-dow shape sensor_liveness.cron_period_seconds accepts, so loop
+      liveness derives it as a peer) plus workflow_dispatch; never pull_request or push; not a required check.
+      Workflow permissions contents read; concurrency group derived-list-scan. Two jobs, as decision-census splits
+      them so the scanner never runs beside a credential: scan (root job, with the dispatcher-bot exclusion
+      decision-census uses; timeout 15; credential-free full-history checkout with persist-credentials false and
+      fetch-depth 0; setup-python 3.12; pip install pyyaml -c requirements.txt; run the scanner to
+      $RUNNER_TEMP/derived-list-result.json with the summary to $GITHUB_STEP_SUMMARY; upload the result as
+      derived-list-result-${{ github.run_id }}, retention 1 day) and file-recs (needs scan, if github.ref ==
+      'refs/heads/main', permissions id-token write and contents read; credential-free checkout, aws-region action,
+      setup-python, venv install, OIDC branch role, download the artifact, run the filer). Every run body at most 3
+      effective lines.
+  - file: config/ci_rca_taxonomy.yaml
+    action: Modify
+    purpose: >-
+      One flow-style workflows-map row for derived-list-scan: tier not_a_gate, ci_rca excluded, owner "platform",
+      rationale naming it a report over main that files its own code-smell recs (rec-5516), with loop_liveness_stale
+      as the backstop for a run that cannot complete (decision-census's row is the model). One effective line. Relief,
+      measured after rebasing at build time: if the row would take the file past 500 effective lines, compact one
+      existing block-style workflows row (for example cost-reconciliation) to a single flow-style line with its text
+      unchanged, in this file only (the precedent's relief and the operator's compact-not-raise ruling for capped
+      files); never a raise.
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: One r3_workflows row (key <workflow>::<job>::<step>) per new inline run body in derived-list-scan.yml, valued at its measured effective line count, no headroom (Decision 162).
+  - file: docs/contracts/github-actions-evidence.yaml
+    action: Modify
+    purpose: >-
+      One artifact_uploads row for derived-list-scan.yml's scan-job upload (derived-list-result-${{ github.run_id }},
+      retention_class ephemeral_handoff) and one terse amendment_log field_add row, as PLAN-decision-census-rec-filing
+      did. The file is NEAR_CAP (499 of 500 effective lines, plan_obligations 2026-11-23), so the build first applies
+      the contract's own first relief valve (contract-population.yaml amendment_log_retention): compact the 2026-11-11
+      PLAN-actions-capacity-gauge amendment_log entry from block style to one terse flow row carrying the same date,
+      flags and a shortened summary (frees 7 lines), measured after rebasing; never a raise, and no pointer key is
+      touched.
+  - file: scripts/checks/ops_governance/check_source_registry.py
+    action: Modify
+    purpose: SCANNED_PATHS gains scripts/checks/hygiene/derived_list_recs.py, so its hardcoded code-smell literal is checked against the source registry like every other producer.
+  - file: tests/checks/ops_governance/test_check_source_registry.py
+    action: Modify
+    purpose: test_scanned_paths_includes_portal_and_producer_modules expects the new producer path (an added expectation; nothing removed).
+bundled_recommendations: [rec-5516]
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - On a synthetic repo the scanner classes a check-name manifest and a workflow map as candidates, a numeric ratchet as baseline and a free-text list as none; on this repo (VP 6, one-time evidence) ci_rca_taxonomy and a check manifest are candidates and prose_budgets and composite_action_body_baseline are baselines.
+  - A coupled append counts only when an added line names a file added or renamed in the same commit.
+  - A file carrying a valid hand-kept or verified-against marker is never filed.
+  - The filer files at most three recs per run, deduplicated per path, an open rec keeps its slot, with source code-smell and a decidable acceptance; a second run on an unchanged tree files nothing.
+  - The scan costs nothing in --pre or the full tier; the workflow runs weekly on main and never on a PR, and only the main-only file-recs job holds a credential.
+  - rec-5516 closes on the build's merge.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: "Classes on a synthetic repo mirroring the known shapes (red before: file absent)."
+    command: bin/venv-python -m pytest "tests/checks/hygiene/test_derived_list_scan.py::test_classes_on_synthetic_repo" -q
+    expected: exit 0, 1 passed
+    fix_if: a manifest or workflow map is missed, or a ratchet or free-text list is classed derived_candidate (fix the rule, never the expectation)
+    hermetic: true
+    expected_literals: ["1 passed"]
+    graduation: graduate
+    graduation_check_id: derived-list-scan-classes
+  - step: 2
+    phase: pre-deploy
+    action: "Coupled appends are squash-proof (red before: file absent)."
+    command: bin/venv-python -m pytest "tests/checks/hygiene/test_derived_list_rank.py::test_coupled_append_needs_a_named_new_file" -q
+    expected: exit 0, 1 passed
+    fix_if: an unrelated added file in the same commit counts as coupling
+    hermetic: true
+    expected_literals: ["1 passed"]
+    graduation: graduate
+    graduation_check_id: derived-list-scan-squash-proof-coupling
+  - step: 3
+    phase: pre-deploy
+    action: "Markers disposition a candidate (red before: file absent)."
+    command: bin/venv-python -m pytest "tests/checks/hygiene/test_derived_list_scan.py::test_markers_disposition_a_candidate" -q
+    expected: exit 0, 1 passed
+    fix_if: a marked file is classed undispositioned, or an unknown check name dispositions it
+    hermetic: true
+    expected_literals: ["1 passed"]
+    graduation: graduate
+    graduation_check_id: derived-list-scan-markers
+  - step: 4
+    phase: pre-deploy
+    action: "The filer caps at --max, skips marked files, and an open rec keeps its slot (red before: file absent)."
+    command: >-
+      bin/venv-python -m pytest "tests/checks/hygiene/test_derived_list_recs.py::test_files_at_most_max_and_skips_marked"
+      "tests/checks/hygiene/test_derived_list_recs.py::test_open_rec_keeps_its_slot" -q
+    expected: exit 0, 2 passed
+    fix_if: a marked file is filed, more than --max recs are filed, or a lower-ranked file is filed beside an open rec
+    hermetic: true
+    expected_literals: ["2 passed"]
+    graduation: graduate
+    graduation_check_id: derived-list-recs-cap-and-slots
+  - step: 5
+    phase: pre-deploy
+    action: "The workflow runs weekly on main, never on a PR, with the credential only in file-recs (red before: workflow absent)."
+    command: bin/venv-python -m pytest "tests/checks/hygiene/test_derived_list_recs.py::TestWorkflowJob::test_workflow_runs_weekly_on_main_and_never_on_a_pr" -q
+    expected: exit 0, 1 passed
+    fix_if: a pull_request or push trigger, an id-token on the scan job, or the filer before the credential step (fix the workflow)
+    hermetic: true
+    expected_literals: ["1 passed"]
+    graduation: graduate
+    graduation_check_id: derived-list-scan-workflow-shape
+  - step: 6
+    phase: pre-deploy
+    action: >-
+      One-time evidence on this repo (never committed as a test, Decision 244 cl.4): full scan with history, the
+      live-tree known answers asserted on the JSON result, then the dry-run filer. The PR body carries the dry-run
+      lines and the first 20 rows of the table (all classes, not only the top three) as evidence of resolver precision.
+    command: >-
+      bin/venv-python -m scripts.checks.hygiene.derived_list_scan --result /tmp/dls.json --summary /tmp/dls.md
+      && bin/venv-python -c "import json; c={f['path']: f['class'] for f in json.load(open('/tmp/dls.json'))['files']};
+      assert c['config/ci_rca_taxonomy.yaml'] == 'derived_candidate';
+      assert any(p.endswith('/_manifest.py') and k == 'derived_candidate' for p, k in c.items());
+      assert c['config/prose_budgets.yaml'] == 'baseline'; assert c['config/composite_action_body_baseline.yaml'] == 'baseline'; print('known answers ok')"
+      && bin/venv-python -m scripts.checks.hygiene.derived_list_recs --file /tmp/dls.json --dry-run && head -n 24 /tmp/dls.md
+    expected: scan exit 0; known answers ok; the dry run prints at most three would_file lines and one summary line; config/ci_rca_taxonomy.yaml or a check manifest is among them
+    fix_if: the top three hold none of the pilot's known lists (stop and report to the planner; the advice says a scan that cannot reproduce the known answers is not shipped)
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: pre-deploy
+    action: Whole-file runs of the new test files plus the guards the new workflow and rows touch.
+    command: >-
+      bin/venv-python -m pytest tests/checks/hygiene/test_derived_list_scan.py tests/checks/hygiene/test_derived_list_rank.py
+      tests/checks/hygiene/test_derived_list_recs.py tests/checks/ops_governance/test_check_source_registry.py
+      tests/verify_ci_workflow/test_dispatch_bot_guard.py tests/checks/ci_guards/test_validate_ci_rca_adjudication.py
+      tests/checks/ci_guards/test_validate_composite_action_shell_bodies.py
+      tests/checks/ci_guards/test_validate_workflow_dependency_install.py -q
+    expected: exit 0, no failures
+    fix_if: an existing case fails (fix the code or row, never loosen an assertion, Decision 235)
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Whole-file regression run; VP 1-5 graduate the new guards.
+  - step: 8
+    phase: pre-deploy
+    action: >-
+      Fast tier, then the full tier before handoff (handoff_policy): bin/venv-python -m scripts.validate --pre in the
+      foreground (exit 0), then this command backgrounded with a 2 h limit from the top-level session.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: "--pre exited 0 first; this command exits 0 for HEAD"
+    fix_if: a failure in this plan's files is fixed at root and the full tier rerun
+    hermetic: false
+    graduation: not-applicable
+  - step: 9
+    phase: post-deploy
+    action: >-
+      Live proof: after merge the build dispatches derived-list-scan.yml on main twice from its own session
+      (mcp__github__actions_run_trigger, never the dispatcher bot; Decision 205 cl.1 limits LLM workflows only, and
+      this one is deterministic), the second after the first completes. It saves the first run's file-recs job log
+      to $FILE_LOG, the second's to $FILE_LOG2, and both runs' jobs JSON to $RUN_JOBS and $RUN_JOBS2.
+    command: >-
+      grep -E '\[derived_list\] summary candidates=[0-9]+ filed=[0-3] unchanged=[0-9]+ skipped_marked=[0-9]+'
+      "$FILE_LOG" && grep -E '\[derived_list\] summary .* filed=0 ' "$FILE_LOG2" && bin/venv-python -c "import
+      json,os,re;from src.common.ducklake_reader_client import make_reader,fetch_recs_by_ids;
+      ok=lambda p:{x['name']:x.get('conclusion') for x in (lambda j:j.get('jobs') if isinstance(j,dict) else
+      j)(json.load(open(p)))};[(lambda d:(d.get('scan')=='success' and d.get('file-recs')=='success') or
+      (_ for _ in ()).throw(AssertionError(d)))(ok(os.environ[k])) for k in ('RUN_JOBS','RUN_JOBS2')];
+      log=open(os.environ['FILE_LOG']).read();filed=re.findall(r'\[derived_list\] filed (\S+) rec=(rec-\d+)',log);
+      n=int(re.search(r'\[derived_list\] summary .* filed=(\d+) ',log).group(1));assert len(filed)==n,(filed,n);
+      rows,missing=fetch_recs_by_ids(make_reader(),[i for _,i in filed]);assert not missing,missing;
+      by={r['id']:r for r in rows};assert all(by[i]['status']=='open' and by[i]['source']=='code-smell' and
+      (by[i]['context'] or '').splitlines()[0]=='derived_list='+p for p,i in filed),filed;print('RUN_OK',filed)"
+    expected: Both summary lines match (the second with filed=0), then RUN_OK naming each filed path and rec id. Report the ids.
+    fix_if: >-
+      A red run: read the job log; a scan defect is a rec routed to this planner. filed above 0 on the second run is a
+      slot or dedup defect (fix the lookup, then close the duplicates through the portal). Never add continue-on-error.
+    hermetic: false
+    graduation: not-applicable
+  - step: 10
+    phase: post-deploy
+    action: 'After the squash merge carries "Resolves: rec-5516", the closure job closed it.'
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import make_reader,
+      fetch_recs_by_ids;rows,missing=fetch_recs_by_ids(make_reader(),['rec-5516']);assert not missing and
+      rows[0]['status']=='closed';print('REC_CLOSED')"
+    expected: REC_CLOSED
+    fix_if: still open after ci.yml's closure job ran; check the closure job on the squash commit, then close it with update_rec citing the merge SHA
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: scripts/checks/hygiene/derived_list_scan.py
+    behavior: Static classification separates derivable lists, ratchets and free text.
+    verification_step: 1
+    test_selector: tests/checks/hygiene/test_derived_list_scan.py::test_classes_on_synthetic_repo
+    red_green_expectation: red before (module and node absent), green after.
+  - source: scripts/checks/hygiene/derived_list_rank.py
+    behavior: A coupled append needs an added line naming a file added in the same commit.
+    verification_step: 2
+    test_selector: tests/checks/hygiene/test_derived_list_rank.py::test_coupled_append_needs_a_named_new_file
+    red_green_expectation: red before (module and node absent), green after.
+  - source: scripts/checks/hygiene/derived_list_recs.py
+    behavior: At most --max recs, never for a marked file, and an open rec keeps its slot.
+    verification_step: 4
+    test_selector: tests/checks/hygiene/test_derived_list_recs.py::test_open_rec_keeps_its_slot
+    red_green_expectation: red before (module and node absent), green after.
+  - source: .github/workflows/derived-list-scan.yml
+    behavior: Weekly schedule and dispatch only, credential only in the main-only file-recs job, bot guard on the root job.
+    verification_step: 5
+    test_selector: tests/checks/hygiene/test_derived_list_recs.py::TestWorkflowJob::test_workflow_runs_weekly_on_main_and_never_on_a_pr
+    red_green_expectation: red before (workflow absent), green after.
+  - source: config/ci_rca_taxonomy.yaml
+    behavior: derived-list-scan is a not_a_gate, ci_rca-excluded workflow whose rationale names rec-5516.
+    verification_step: 7
+    test_selector: tests/checks/hygiene/test_derived_list_recs.py::TestRegistration
+    red_green_expectation: red before (row absent), green after.
+  - source: docs/contracts/github-actions-evidence.yaml
+    behavior: The scan upload is classified ephemeral_handoff.
+    verification_step: 7
+    test_selector: tests/checks/hygiene/test_derived_list_recs.py::TestRegistration
+    red_green_expectation: red before (row absent), green after.
+  - source: config/composite_action_body_baseline.yaml
+    behavior: Every new inline run body in derived-list-scan.yml has its measured r3_workflows row.
+    verification_step: 7
+    test_selector: tests/checks/ci_guards/test_validate_composite_action_shell_bodies.py
+    red_green_expectation: red before (workflow bodies unregistered once the workflow exists), green after.
+  - source: scripts/checks/ops_governance/check_source_registry.py
+    behavior: The new producer is in the scan set.
+    verification_step: 7
+    test_selector: tests/checks/ops_governance/test_check_source_registry.py::TestScannedPaths::test_scanned_paths_includes_portal_and_producer_modules
+    red_green_expectation: red before (path absent from SCANNED_PATHS once the test expects it), green after.
+constraints:
+  - Report, never gate (operator lean confirmed by the blind consult); no registered check, no --pre or full-tier cost, no required check.
+  - No registry of hand-kept lists and no exclusion list for the scanner; dispositions live as markers in each file.
+  - Source code-smell (an existing scheduled static-analysis source), so no writer accepted_values change and no Lambda deploy.
+  - Every existing assertion stays (Decision 235). No rescue agents or workaround loops (Decision 55).
+context:
+  - "Decision-scout verdict FLAGS_FOUND (round 1). CITE: Decision 61 (findings through ops_recommendations by source), Decision 84 (I-2 writer-allocated ids, I-4 no outbox: a failed write exits 1), Decision 162 (r3_workflows baseline rows), Decision 166 (structural budgets read for generated skips and size pressure; the taxonomy row fits under 500), Decision 201 (filed recs carry a decidable acceptance), Decision 215 (a failed dedup lookup exits 2 with nothing written), Decision 267 (cl.3: workflow_dispatch refuses the dispatcher bot, as decision-census does). Flag: Decision 244 WARN (a live-tree node would go red once the scan's own advice is followed) -> round 1 waived VP 1; round 2 (SPIRIT WARN: the committed node still re-runs every tier) -> fixed, no committed node reads live files: VP 1 is a synthetic-repo node and the live-tree known answers moved to VP 4 as uncommitted one-time evidence. Related notes applied: r3_workflows section (162), marker-to-decline wording (103); Decision 128: the scanner is split into scan and rank modules from the start (critique round 1 B4), so no build-time facade is needed. Round 3 (after critique round 1 added the rank split, the two-job workflow, the evidence-contract row and check_source_registry): FLAGS_FOUND; CITE adds Decision 275 (the github-actions-evidence.yaml relief is cl.3 valve 1 under cl.4 retention). Flag: Decision 275 SPIRIT NOTE (reflowing a ci_rca_taxonomy.yaml row to flow style frees lines but keeps bytes, the line-neutral pattern 275 names) -> kept with a note: ci_rca_taxonomy.yaml is config class, outside 275's contracts scope; the build confirms the reflowed row stays under Decision 166 cl.3's 2,000-character longest line; the durable relief is the derive-at-read remediation this scan will itself recommend for that file (rec-5275 owns it today). Decisions triaged: 228 of 228. Roadmap items intersected: 4; CONFLICT: 0; RELATED: 4. Serves: NS.4 4/5."
+  - "Origin: rec-5516 (filed this session, read back open); operator ask 2026-11-23 11:42Z; blind Fable 5.2 consult /mnt/project-files/hand-kept-lists/advisor-brief/ADVICE.md (brief BRIEF.md beside it). Adopted: static shape plus resolvability for candidacy, history only to rank, entry-level coupling, census-shaped weekly report, max three recs, in-file markers, fixed remediation order, trigger_paths as a named class. Adapted: weekly schedule only (no push trigger) to spend fewer Actions minutes. Deferred to follow-on recs: a new-file-only gate, the planning-skill question, stale-row checks in validate_ci_rca_taxonomy."
+  - "Pilot 2026-11-23 (main, 90 days, 1,380 commits): small-append share ci_rca_taxonomy 78% of 91 touches, composite_action_body_baseline 70%, CODEOWNERS 70%, verification/_manifest.py 55%; file-level co-change saturates at 93-100% under squash merges, hence the token rule."
+  - "Source fork settled with notice: code-smell, not a new decision_census-style source, because a new source needs accepted_values rows in config/lambda/ducklake/field_semantics.yaml (Lambda-bundled) and a governed DuckLake deploy (PLAN-decision-census-rec-filing needed V3 for that)."
+  - "config/ci_rca_taxonomy.yaml is NEAR_CAP (494 of 500 effective lines, plan_obligations 2026-11-23); rec-5504's watchdog plan, rec-5509's seam plan and other unbuilt plans also add rows. This plan adds exactly one line. Relief, measured at build time after rebasing: compact one existing block-style workflows row to flow style with its text unchanged, in this file only (the decision-census precedent and the operator's compact-not-raise ruling for capped files); never a raise. docs/contracts/github-actions-evidence.yaml is NEAR_CAP too (499 of 500); its relief is the contract's first valve, a terse amendment_log row (scope row)."
+  - "red_overlap verdict (2026-11-23 ~12:20Z, scratch draft): blocked. rec-5491 and rec-5497 slo_breached (shared: none); rec-5517 overlap on fast-tier selection neighbours only (tests/checks/ci_guards/*; none in scope). Deferral rationale: the operator handed rec-5491 and rec-5497 to Feedback Loop on 2026-11-23 and this project proceeds with red deferrals; rec-5517 repeats rec-5491's telemetry-arrival red (run 44945189064). This plan edits none of their files and neither repairs nor worsens them; the build dispatch faces the same check (Decision 226 cl.3)."
+  - "rec-5516 acceptance set 2026-11-23 to tests/checks/hygiene/test_derived_list_scan.py::test_classes_on_synthetic_repo so it is decidable (Decision 201); read back."
+  - "Graduated shards kept (plan_obligations registry_shard_disposition): actions-capacity-evaluator-and-steps, backlog-health-package-suite and source-registry-guard-producer-scan each name tests/checks/ops_governance/test_check_source_registry.py; this plan only adds an expectation to it and keeps all three green, entry files untouched."
+  - "Source description unchanged (critique N9): code-smell's registry description ('Scheduled agent that performs lightweight static analysis for code quality issues') still fits a scheduled static scanner, and editing source_registry.yaml would widen scope to the schema_to_field_semantics output for no behavior gain. The second tag (derived-list-path) was dropped: the tag grammar cannot carry a path, so the first context line carries the derived_list token."
+  - "Related, not bundled: rec-5408 (fragment the hottest registries), rec-5275, rec-5460; the scan's recs may become their evidence. rec-5509's plan derives its own paths filter in a test, the pattern a trigger_paths finding would recommend."
+  - "Operator said write the plan 2026-11-23 12:11Z in the owning thread; the plan PR merges on green and the build merges on green (rulings 2026-11-12, 2026-11-16). No red_overlap override given; that stays a dispatch-time question."
+  - "No approved-text sidecar: nothing in scope is gated wording (approval-routing.yaml). The plan file and the two config/ files are notice-class; scripts, tests and the workflow are neither."
+  - "Build notes (critique round 3 PROCEED nits, applied at build): run the import-guard node in a subprocess or behind a meta_path blocker so a shared pytest process cannot pass it vacuously; assert every module the scan imports is in sys.stdlib_module_names, yaml/_yaml, or first-party scripts.* (the scanner, derived_list_rank and their parent packages; no src.* and no third-party); report open derived-list recs whose file is now marked or no longer a candidate as stale_open=<n> in the summary line (after skipped_marked) so stale slots are visible; add test_open_rec_on_a_lower_ranked_file_holds_a_slot to VP 4 (3 passed); the workflow walk reads on: under both the key 'on' and the boolean True that yaml.safe_load yields, pinned by a trigger_paths fixture."
+  - "Owning planning thread: 'Detect hand-maintained lists and seam test' (Agents in GitHub). Plan defects go to the coordinator, which forwards them here."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:e6b203c1ad6c54e4a799d18428002033a9825e2196ca8912ca8fb939c2ed0f9d'}
+  - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:e6b203c1ad6c54e4a799d18428002033a9825e2196ca8912ca8fb939c2ed0f9d'}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 5, nits: 9}
+  - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:7c4aa805a03f14e3a1306d224370c57455f9b7adbeb3de0f33bb0c1b923579ba'}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 2, nits: 5}
+  - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 6, escalated: true, escalation_choice: accept-with-deferral}  # operator accept-with-deferral 2026-11-23 12:54Z (no confirming round, usage rule); nits recorded as build notes
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - scripts/checks/hygiene/derived_list_scan.py, derived_list_rank.py and their tests (scope rows 1, 2, 4, 5)
+  - scripts/checks/hygiene/derived_list_recs.py and its tests, including TestWorkflowJob and TestRegistration (scope rows 3, 6)
+  - The workflow and its config and contract rows, with the measured compaction reliefs (scope rows 7-10)
+  - check_source_registry SCANNED_PATHS and its test (scope rows 11, 12)
+  - Execute Verification Plan -- run each step; loop until pass; on unrecoverable failure stop and RCA (Decision 55)
+  - 'Report: what was implemented, verification results, the dry-run lines and the first 20 table rows, the build PR number and its squash-merge SHA'
