@@ -51,25 +51,31 @@ scope:
       at OUTPUT position 1, and the ip6tables mangle chain EGRESS_FLOOR (-o lo RETURN; --uid-owner 0 RETURN; DROP);
       writes /etc/systemd/system/agent.service.d/egress-floor.conf with ExecStopPost=<absolute iptables> -w -t mangle -A
       EGRESS_FAIL_CLOSED -j DROP and runs systemctl daemon-reload; stops docker.socket, docker.service and
-      containerd.service and chmods /var/run/docker.sock and /run/containerd/containerd.sock to 000 when present;
+      containerd.service and masks all three (systemctl mask --now, so the agent's revert-time systemctl restart docker
+      fails), and chmods /var/run/docker.sock and /run/containerd/containerd.sock to 000 when present;
       writes /etc/sudoers.d/zz-egress-floor (runner ALL=(ALL) !ALL, mode 0440, checked with visudo -cf) last; then
       verifies as root that iptables -S and ip6tables -S of both chains equal the rendered rules, that OUTPUT's first
-      rule jumps to EGRESS_FLOOR, and that systemctl show agent.service -p ExecStopPost carries the hook, printing one
+      rule jumps to EGRESS_FLOOR, that systemctl show agent.service -p ExecStopPost carries the hook, and that each of the
+      three container units reads LoadState=masked, printing one
       EGRESS-FLOOR line per check and EGRESS-FLOOR PASS, else EGRESS-FLOOR FAIL and exit 1. Refuses to run unless uid
-      is 0. Stdlib only; rules are module constants (render_rules()), never read from a file.
+      is 0. Stdlib only; rules are module constants (render_rules()), never read from a file, written in the canonical form
+      iptables -S prints back (for example -d 168.63.129.16/32, -m owner --uid-owner 0) so verify() compares like with
+      like.
   - file: scripts/personas/egress_revert_drill.py
     action: Create
     purpose: >-
       Verb egress-revert-drill, probe workflow only: egress_floor.apply() then, when it passed, systemd-run
-      --on-active=120 --unit=egress-revert-drill /bin/sh -c 'iptables -w -F OUTPUT; systemctl kill -s KILL
-      agent.service' (the agent's revert flushes filter OUTPUT, then the agent exits), printing EGRESS-DRILL ARMED.
+      --on-active=120 --unit=egress-revert-drill /bin/sh -c with the agent's revert side effects in its order
+      (agent.go RevertChanges; dnsconfig.go:226-250 and 194-219): iptables -w -F OUTPUT; iptables -w -F DOCKER-USER;
+      systemctl restart systemd-resolved; systemctl daemon-reload; systemctl restart docker (expected to fail on the
+      mask; the drill continues); then systemctl kill -s KILL agent.service, printing EGRESS-DRILL ARMED.
   - file: scripts/personas/egress_fail_closed.py
     action: Create
     purpose: >-
       Verb egress-fail-closed (drill job, as runner): requires agent.service active and the listed host reached at
       start (else EGRESS-FAIL-CLOSED LATE, exit 1); polls systemctl is-active agent.service each second for up to 180 s
-      until it is not active (else EGRESS-FAIL-CLOSED NO-DRILL, exit 1); waits 2 s; then attempts the listed host and
-      raw_ip_443 and prints each result; PASS (exit 0) only when both are refused. With the hook working, its output
+      until it is not active (else EGRESS-FAIL-CLOSED NO-DRILL, exit 1); waits 2 s; then attempts the listed host,
+      raw_ip_443 and docker_socket and prints each result; PASS (exit 0) only when all three are refused. With the hook working, its output
       never leaves the runner; without it, raw_ip_443 is reached and the step fails visibly.
   - file: scripts/personas/egress_fail_closed_verdict.py
     action: Create
@@ -78,8 +84,9 @@ scope:
       /repos/{GITHUB_REPOSITORY}/actions/runs/{GITHUB_RUN_ID}/attempts/{GITHUB_RUN_ATTEMPT}/jobs with stdlib urllib,
       prints EGRESS-FAIL-CLOSED-VERDICT observed job=<conclusion> plus each step's name and conclusion for job
       egress-fail-closed, and passes only when that job's drill-floor and drill-self-check steps concluded success and
-      its drill-fail-closed step concluded neither success nor failure (the runner was cut off mid-step), and the job
-      did not conclude success.
+      its drill-fail-closed step concluded neither success nor failure and its drill-final-check (if: always()) step
+      never concluded (the runner was cut off mid-step; a runner not cut off runs that step), and the job did not
+      conclude success.
   - file: scripts/personas/egress_probe.py
     action: Modify
     purpose: >-
@@ -92,8 +99,9 @@ scope:
   - file: scripts/personas/egress_control.py
     action: Modify
     purpose: >-
-      Control expects wireserver_http, imds and docker_socket reached (each refusal the probe shows is the floor's);
-      dns_tcp_azure stays reported in the control only; module docstring updated.
+      Control expects imds and docker_socket reached (each of those refusals in the probe is the floor's);
+      wireserver_http joins dns_tcp_azure as reported in the control only, because Azure's guest agent may itself drop
+      non-root TCP to 168.63.129.16 (the floor's own root-side verify proves its rule); module docstring updated.
   - file: scripts/personas/run.py
     action: Modify
     purpose: "VERBS gains egress-floor, egress-revert-drill, egress-fail-closed and egress-fail-closed-verdict."
@@ -113,7 +121,8 @@ scope:
       sts.amazonaws.com:443; checkout; drill-floor sudo ... egress-revert-drill; drill-self-check; drill-fail-closed;
       drill-final-check if: always()). New job egress-fail-closed-verdict (needs egress-fail-closed, if: always(),
       timeout-minutes 30, permissions actions read and contents read; checkout; fail-closed-verdict with env GH_TOKEN:
-      github.token). egress-control unchanged. Header comment names the floor and the drill.
+      github.token). egress-control unchanged. Header comment names the floor, the drill, and that the PR's own code
+      runs with sudo until the floor step (keyless jobs; the filter no longer revokes sudo in its pre: entry).
   - file: config/persona_verdict_egress.yaml
     action: Modify
     purpose: "Row for persona-verdict-egress-probe.yml egress-fail-closed: [sts.amazonaws.com:443]; header comment names the floor."
@@ -133,15 +142,26 @@ scope:
       _step0_problems requires disable-sudo-and-containers false (was true); _order_problems lets the floor step stand
       between the checkouts and the self-check; calls _persona_verdict_floor for each covered job; PROBE_STEPS gains
       the floor and final-check lines for egress-probe and the egress-fail-closed and egress-fail-closed-verdict jobs,
-      and _probe_problems admits continue-on-error true on egress-fail-closed, needs/if on the verdict job and
-      actions read only there.
+      and _probe_problems pins per job: timeout-minutes 5 (egress-probe, egress-control), 10 (egress-fail-closed) and
+      30 (egress-fail-closed-verdict); continue-on-error true only on egress-fail-closed; needs and if: always() only on
+      the verdict job; actions read only there. Crossing 500 SLOC is a STOP to the plan owner, never a raise.
     new_imports: [scripts.checks.misc._persona_verdict_floor]
+  - file: scripts/checks/ci_guards/validate_persona_verdict_chain.py
+    action: Modify
+    purpose: >-
+      _python_step_problems accepts exactly the floor run line (FLOOR, exported from _persona_verdict_keyed) with no env
+      or working-directory, and the if: always() final SELF_CHECK; the mkdir-before-python rule counts python steps
+      after the floor, so the floor may stand before the work-directory mkdir. No other python step is admitted.
+    new_imports: []
+  - file: tests/checks/ci_guards/test_validate_persona_verdict_chain.py
+    action: Modify
+    purpose: "Live pair stays green with the floor; red fixtures: a floor line with env or a working-directory, a second sudo python step, a final check without always()."
   - file: scripts/checks/ci_guards/_persona_verdict_keyed.py
     action: Modify
     purpose: >-
-      _run_py_rules: smoke and refusal run.py verbs are exactly [egress-floor, egress-self-check, <key steps>,
-      egress-self-check]; the env rules apply to the key steps only; _secret_rules counts key steps after the first
-      self-check, unchanged.
+      Exports FLOOR (the sudo floor run line). _run_py_rules: smoke and refusal run.py verbs are exactly [egress-floor,
+      egress-self-check, <key steps>, egress-self-check]; the env rules apply to the key steps only; _secret_rules
+      counts key steps after the first self-check, unchanged.
     new_imports: []
   - file: config/composite_action_body_baseline.yaml
     action: Modify
@@ -198,10 +218,11 @@ scope:
   - file: docs/plans/PLAN-persona-verdict-egress-floor.yaml
     action: Modify
     purpose: "Flip implementation_declared to true in the build PR."
-bundled_recommendations: []
+bundled_recommendations: [rec-5362]
 followon_recs: []
 closes_criteria: []
-infrastructure_dependencies: []
+infrastructure_dependencies:
+  - "data-pipeline (active) bundles docs/ROADMAP-PLATFORM.yaml; this plan changes tier-item text only, so no build, deploy or smoke step is owed."
 acceptance_criteria:
   - "bin/venv-python -m pytest tests/ci/test_persona_verdict_azure_openings.py -q passes (rec-5362's acceptance)."
   - The governed files carry exactly the sidecar's three blocks (approved_text verify --base origin/main exits 0).
@@ -230,7 +251,7 @@ verification_plan:
       tests/personas/test_egress_fail_closed_verdict.py tests/personas/test_egress_probe.py tests/personas/test_run.py
       tests/checks/misc/test_validate_persona_verdict_egress.py tests/checks/misc/test__persona_verdict_floor.py
       tests/checks/misc/test__manifest.py tests/checks/ci_guards/test__persona_verdict_keyed.py
-      tests/ci/test_persona_verdict_egress.py -q
+      tests/checks/ci_guards/test_validate_persona_verdict_chain.py tests/ci/test_persona_verdict_egress.py -q
     expected: All tests pass.
     expected_literals:
       - passed
@@ -262,15 +283,20 @@ verification_plan:
       bin/venv-python -c "from scripts.checks.structural._classify import effective_lines;
       n=effective_lines(open('docs/contracts/ports.yaml').read()); assert n<=500, n; print('PORTS_OK', n)" &&
       bin/venv-python -c "from scripts.checks.contracts.validate_ports_contract import validate_ports_contract as v; f=[];
-      v(f); assert not f, f; print('PORTS_CONTRACT_OK')"
-    expected: Prints the approved-text, ports-size and ports-contract markers.
+      v(f); assert not f, f; print('PORTS_CONTRACT_OK')" && test $(wc -c < docs/contracts/ports.yaml) -le 50251 && echo
+      PORTS_BYTES_OK
+    expected: Prints the approved-text, ports-size, ports-contract and ports-bytes markers.
     expected_literals:
       - APPROVED-TEXT OK
       - PORTS_OK
       - PORTS_CONTRACT_OK
+      - PORTS_BYTES_OK
     fix_if: Drift means re-place the blocks from the sidecar; over 500 lines, over the byte budget or an anchor not unique on main is a STOP to the plan owner.
     hermetic: true
-    graduation: not-applicable
+    graduation: waive
+    graduation_waiver_reason: >-
+      A one-shot landing check of placed words; the line budget, the byte budget and the ports contract are registered
+      checks the fast and full tiers already run.
   - step: 4
     phase: pre-deploy
     action: Fast tier.
@@ -305,7 +331,8 @@ verification_plan:
       The run concluded success. egress-probe: its first probe line is EGRESS-PLACEMENT iface=eth0 with a Cloud: line
       reading Azure; the floor step prints one EGRESS-FLOOR line per check and EGRESS-FLOOR PASS; listed got=reached,
       dns_tcp_azure, wireserver_http, imds, ipv6, sudo, docker_socket and every other refused-expected case got=refused,
-      EGRESS-PROBE PASS; the final check prints EGRESS-SELF-CHECK PASS; actions/setup steps and the job's log upload
+      EGRESS-PROBE PASS; the final check prints EGRESS-SELF-CHECK PASS; the filter's post step prints "Warning: Could not
+      fetch service logs" (its sudo journalctl is refused by the floor's sudo lock; expected); actions/setup steps and the job's log upload
       complete (the runner works under the floor). egress-control: wireserver_http, imds and docker_socket got=reached,
       a got= line for dns_tcp_azure, VENDOR-LIST ok, EGRESS-CONTROL PASS. egress-fail-closed-verdict: its observed line
       shows egress-fail-closed not success, drill-floor and drill-self-check success and drill-fail-closed neither
@@ -437,6 +464,11 @@ test_obligations:
     verification_step: 1
     test_selector: tests/checks/misc/test_validate_persona_verdict_egress.py
     red_green_expectation: red before (switch-true accepted, no floor rule), green after
+  - source: scripts/checks/ci_guards/validate_persona_verdict_chain.py
+    behavior: the chain check accepts exactly the floor line and the always() final self-check and refuses variants
+    verification_step: 1
+    test_selector: tests/checks/ci_guards/test_validate_persona_verdict_chain.py
+    red_green_expectation: red before (the floor step fails the pinned run.py argv rule), green after
   - source: scripts/checks/ci_guards/_persona_verdict_keyed.py
     behavior: keyed jobs' run.py verbs include the floor first and the final self-check last
     verification_step: 1
@@ -461,20 +493,21 @@ constraints:
   - Never loosen a check or drop a probe case to obtain green (Decisions 181, 235); a live surprise is a STOP to the plan owner.
   - The floor changes nothing before the filter; the PLACEMENT ruling stands (an AWS-placed job still stops UNSUPPORTED_PLACEMENT).
   - No region id, account id or unpublished host in any file (Decision 101).
-  - "Decision 246 cl.4: the build PR merges only after the operator's final-diff word on egress_floor.py, egress_revert_drill.py and both workflows (security code)."
+  - "Decision 246 cl.4: the build PR merges only after the operator's final-diff word on the security and guard code: egress_floor.py, egress_revert_drill.py, egress_fail_closed.py, egress_fail_closed_verdict.py, both workflows, _persona_verdict_floor.py, validate_persona_verdict_egress.py, validate_persona_verdict_chain.py and _persona_verdict_keyed.py."
 context:
   - "Decision-scout r2 FLAGS_FOUND (notes only: CONTRADICT NOTE 100, SPIRIT NOTE 143, both carried); CITE 212, 246, 263, 273, 279; reports /mnt/project-files/egress-azure-gaps/SCOUT-r1.md and SCOUT-r2.md."
   - "Decisions triaged: 228 of 228. Roadmap items intersected: 5; CONFLICT: 0; RELATED: 4."
   - "Serves: NS.9 3/5 -- Closing the verdict shell's Azure openings and its fail-open keeps the persona-gate trust root (the App key) contained."
   - "Scout notes adopted: 275 (ports diff +74 bytes inside 89 free, terse log row, SA-16 shortened); 181 (switch flip recorded as planned-change, acceptance_criteria[2]); SPIRIT 143 (c7 text names Decision 273 cl.5's agent-mergeable residual); 279 (sidecar used because the c7 text re-grounds an operator-accepted residual)."
   - "Operator 2026-11-23 10:54 UTC: 'excellent, write the plan' on /mnt/project-files/egress-azure-gaps/PRESENTATION.md (blind Fable consult advisor-brief/ADVICE.md)."
-  - "Vendor facts (agent v0.18.1 firewall.go, agent.go, sudo.go; harden-runner v2.22.4 setup.ts/cleanup.ts, read 2026-11-23): ACCEPTs for 168.63.129.16, 169.254.169.254 and RFC1918 apply to every uid on -o eth0; RevertFirewallChanges clears only filter OUTPUT and DOCKER-USER and nothing touches mangle or ip6tables; revertDisableSudo restores only a backup taken when its switch was on; the agent is installed and sudo revoked in the action's pre: entry, before any job step; agent.service has no Restart=; post_event.json does not stop the agent."
+  - "Vendor facts (agent v0.18.1 firewall.go, agent.go, sudo.go; harden-runner v2.22.4 setup.ts/cleanup.ts, read 2026-11-23): ACCEPTs for 168.63.129.16, 169.254.169.254 and RFC1918 apply to every uid on -o eth0; RevertFirewallChanges clears only filter OUTPUT and DOCKER-USER and nothing touches mangle or ip6tables; revertDisableSudo restores only a backup taken when its switch was on; with the switch off the agent sets Docker's DNS at start and its revert restores daemon.json and runs systemctl daemon-reload && systemctl restart docker, after stopping and restarting systemd-resolved, before it exits (agent.go:207-216, 458-476; dnsconfig.go:162-250), so the floor masks the container units; the agent is installed and sudo revoked in the action's pre: entry, before any job step; agent.service has no Restart=; post_event.json does not stop the agent."
   - "Results store [verified 2026-11-23]: productionresultssa0, 1, 5 and 12 CNAME to shared stamp hosts (blob.<stamp>.store.core.windows.net), so allow-by-IP admits other accounts there."
-  - "UNPROVEN until VP 6: the runner's own process needs none of the floor's addresses; daemon-reload applies the ExecStopPost drop-in to the running agent.service (egress_floor's verify reads it back each run); how GitHub records a job whose runner is cut off mid-step (the verdict prints the observed shape)."
+  - "UNPROVEN until VP 6: the runner's own process needs none of the floor's addresses; daemon-reload applies the ExecStopPost drop-in to the running agent.service (egress_floor's verify reads it back each run); how GitHub records a job whose runner is cut off mid-step and whether job-level continue-on-error holds for it (the verdict prints the observed shape); whether Azure's guest agent already drops non-root TCP to the wireserver (control reports it)."
   - "Order: the E3 Amendment 1 build merged as #2372 (9d886fd4; smoke list folded to one line, egress check splits as the agent does); the build rebases onto it and starts once E3's VP 9 is green (rec-5166 closed), because VP 7 relies on smoke. rec-5362 depends on rec-5166 (set 2026-11-23, read back)."
-  - "E5 (rec-5486, PLAN-persona-verdict-app-post) waits for this build; its post job inherits the floor and final check because the check requires them on every covered job. ports.yaml reaches 500/500 effective lines: E5 pays its own relief."
+  - "E5 (rec-5486, PLAN-persona-verdict-app-post) waits for this build; the merged PLAN-persona-verdict-app-post (#2368) pins post's run.py verbs as [egress-self-check, post] and sudo off, which this plan's rules refuse, so its planner writes E5 Amendment 1 (floor, final check, switch off, fresh ports relief) after this plan merges. ports.yaml reaches 500/500 effective lines with about 15 bytes free."
   - "Not rec-5455 (AWS placement); the floor does not change the eth0 condition. The fixture-run container leg (forwarded docker traffic is not OUTPUT) re-decides containers."
-  - "Graduated shard persona-verdict-egress-units is kept: its node test_self_check_stops_as_unsupported_placement_when_default_iface_is_reached stays unchanged."
+  - "Graduated shards kept unchanged: persona-verdict-egress-units (test_self_check_stops_as_unsupported_placement_when_default_iface_is_reached) and persona-verdict-chain-shape (test_green_on_the_live_pair, which stays green on the live pair with the floor)."
+  - "test_validate_persona_verdict_egress.py is at 363/500 SLOC: crossing 500 is a STOP to the plan owner, never a raise."
   - "red_overlap 2026-11-23: blocked by rec-5491 and rec-5497 (slo_breached, product_regression, shared files none); deferral: Feedback Loop owns both (operator handed them over 2026-11-23 09:46 UTC, coordinator log 7097070191) and this plan touches none of their files."
   - "Decision 100 (scout r2 NOTE): the filter's native sudo/container switch is turned off because its revert restores sudo from its own backup, which defeats FAIL-CLOSED; the mangle, IPv6 and exit-hook legs have no native equivalent. Revisit if a pinned vendor release makes its revocation non-restorable."
   - "Budget: selection_budget breadth_waived (274 tests, 249-950 s of 950 s)."
