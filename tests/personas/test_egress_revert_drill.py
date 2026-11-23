@@ -16,15 +16,17 @@ def _floor(monkeypatch: pytest.MonkeyPatch, ok: bool = True) -> None:
 def test_the_schedule_is_the_agents_revert_in_order_then_the_kill() -> None:
     argv = D.schedule_argv()
     assert argv[:5] == ["systemd-run", "--on-active=120", "--unit=egress-revert-drill", "/bin/sh", "-c"]
-    steps = [s.strip() for s in argv[5].split(";")]
+    script = argv[5]
+    steps = [s.strip() for s in script.split(";")]
     assert steps[0] == "iptables -w -F OUTPUT" and steps[1] == "iptables -w -F DOCKER-USER"
     assert "DNS=1.1.1.1" in steps[2] and "Domains=~." in steps[2] and steps[2].endswith("> /etc/systemd/resolved.conf")
-    assert steps[3:] == [
+    assert steps[3:7] == [
         "systemctl restart systemd-resolved",
         "systemctl daemon-reload",
         "systemctl restart docker",
         "systemctl kill -s KILL agent.service",
     ]
+    assert "journalctl -u agent.service" in script and script.endswith("chmod 644 /run/egress-drill-diag.txt")
 
 
 def test_hooked_arm_schedules_after_a_passing_verify(
