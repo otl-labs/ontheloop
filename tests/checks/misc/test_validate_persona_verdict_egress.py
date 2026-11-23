@@ -161,7 +161,7 @@ def _templated(row: list[str] | None = None, filt: str | None = None, smoke: boo
         }
         _job(d)["needs"] = ["keyprep"]
         want = row or [STS_T]
-        _step0(d)["with"]["allowed-endpoints"] = filt if filt is not None else "\n".join(_expr(h) for h in want)
+        _step0(d)["with"]["allowed-endpoints"] = filt if filt is not None else " ".join(_expr(h) for h in want)
         d["cfg"]["jobs"][KEYED]["smoke"] = want
         if smoke:
             _job(d)["steps"].insert(4, {"id": "s", "run": SMOKE_RUN})
@@ -171,6 +171,11 @@ def _templated(row: list[str] | None = None, filt: str | None = None, smoke: boo
 
 def _expr(host: str) -> str:
     return host.replace("{aws_region}", "${{ needs.keyprep.outputs.aws_region }}")
+
+
+def _smoke_filter(joiner: str, trail: str = "") -> Callable[[Docs], None]:
+    want = [STS_T, SSM_T, DEEPSEEK, ANTHROPIC]
+    return _templated(want, joiner.join(_expr(h) for h in want) + trail, smoke=True)
 
 
 def _stale_row(d: Docs) -> None:
@@ -345,7 +350,35 @@ RED = [
     _red("docker-backslash", "docker command", _insert(4, {"run": "\\docker ps"})),
     _red("docker-after-a-hash-in-quotes", "docker command", _insert(4, {"run": 'echo "#"; docker ps'})),
     _red("docker-on-a-continued-line", "docker command", _insert(4, {"run": "echo a \\\n  && docker ps"})),
+    _red("agent-value-one-entry-per-line", "folded block", _smoke_filter("\n", trail="\n")),
+    _red("agent-value-joined-by-a-tab", "folded block", _smoke_filter("\t")),
+    _red("agent-value-joined-by-crlf", "folded block", _smoke_filter("\r\n")),
+    _red("agent-value-joined-by-a-no-break-space", "non-ASCII", _smoke_filter("\u00a0")),
+    _red("agent-port-zero", "port from 1 to 65535", _set_endpoints("github.com:0", ["github.com:0"])),
+    _red("agent-port-too-large", "port from 1 to 65535", _set_endpoints("github.com:65536", ["github.com:65536"])),
+    _red(
+        "agent-port-arabic-indic-digits",
+        "non-ASCII",
+        _set_endpoints("github.com:\u0664\u0664\u0663", ["github.com:\u0664\u0664\u0663"]),
+    ),
+    _red("agent-port-not-a-number", "port from 1 to 65535", _set_endpoints("github.com:44x", ["github.com:44x"])),
+    _red("agent-entry-with-two-colons", "port from 1 to 65535", _set_endpoints("github.com:4:43", ["github.com:4:43"])),
 ]
+
+
+@pytest.mark.parametrize(
+    ("lead", "joiner", "trail"),
+    [("", " ", ""), (" \t\n", " ", "\n  "), ("", "  ", "")],
+    ids=["single-spaces", "surrounding-whitespace", "double-spaces"],
+)
+def test_the_agents_single_line_forms_are_green(tmp_path: Path, lead: str, joiner: str, trail: str) -> None:
+    want = [STS_T, SSM_T, DEEPSEEK, ANTHROPIC]
+    value = lead + joiner.join(_expr(h) for h in want) + trail
+    assert _problems(tmp_path, _templated(want, value, smoke=True)) == []
+
+
+def test_one_entry_with_a_trailing_newline_is_green(tmp_path: Path) -> None:
+    assert _problems(tmp_path, _templated([STS_T], _expr(STS_T) + "\n")) == []
 
 
 def test_a_malformed_provider_hosts_map_is_refused(tmp_path: Path) -> None:
@@ -456,3 +489,11 @@ def test_the_registered_check_reports_problems_and_declares_what_it_examined(
 
 def test_the_check_is_registered() -> None:
     assert registry.resolve("validate_persona_verdict_egress") is v.validate_persona_verdict_egress
+
+
+@pytest.mark.parametrize(
+    "raw", ["", " ", ":", "::", "a:", ":443", "\x00", "a:\ud800", "\u0085", "h:99999999999999999999", "\x1c"]
+)
+def test_the_endpoint_split_never_raises(raw: str) -> None:
+    listed, problems = v._tokenised_endpoints("w", raw, {"jobs": {}}, {})
+    assert isinstance(listed, set) and isinstance(problems, list)
