@@ -17,11 +17,13 @@ phase: >-
   PLAN-telemetry-repeated-tool-calls (#2353). No tier_item is targeted and no exit criterion is closed.
 closes_criteria: []
 cites:
+  - dec:79
   - dec:199
   - dec:207
   - dec:236
   - dec:249
   - dec:254
+  - dec:272
 scope:
   - file: src/common/ducklake_event_read_sql.py
     action: Modify
@@ -34,8 +36,9 @@ scope:
       value is the R5b survivor's own, NULL included (arg_min_null, never arg_min, which skips a NULL value and would
       return a later row's attribution; Decision 207: within one grain key the survivor is the earliest created_timestamp;
       R5a retirement already fixed parser_version through o). No other CTE, verb or the shared dedupe_ctes/compose text
-      changes, so only tool_use_rollup's read_version moves. A one-line comment states why metadata is read beside o, not
-      through it (rec-5490).
+      changes, so only tool_use_rollup's read_version moves. A short comment states why metadata is read beside o, not
+      through it (rec-5490), and that a created_timestamp tie inside a conflicted grain key falls under Decision 207's
+      unspecified survivor (R5b has no further tiebreak either).
     new_imports: []
   - file: scripts/telemetry_usage.py
     action: Modify
@@ -44,7 +47,9 @@ scope:
       error_class OutOfMemoryException (the reader's typed answer for a DuckDB out-of-memory, src/common/ducklake_handler_errors.py
       unmapped), exactly as for ResponseTooLargeError and ReadDeadlineExceededError: a one-day window still fails closed
       naming error_type unmapped, and the MAX_CALLS cap is unchanged. Any other 500 keeps failing closed. The module
-      docstring and _Reads docstring name the third halving cause.
+      docstring and _Reads docstring name the third halving cause, and the _Reads docstring names the source of the match:
+      the body shape of ducklake_handler_errors.unmapped, so a later typed out-of-memory row must update this match and its
+      acceptance test.
     new_imports: []
   - file: tests/common/test_ducklake_event_read_memory.py
     action: Modify
@@ -58,7 +63,8 @@ scope:
       (tests.fixtures.duckdb_connect, threads 1, ev.TELEMETRY_MEMORY_LIMIT, ev.TELEMETRY_MAX_TEMP_SIZE). Node
       test_tool_use_week_fits_the_reader_memory runs ev.execute(con, verb="tool_use_rollup", 7-day window) and asserts the
       summed call_count equals the planted open count and the attribution_mcp_server values are exactly the five planted
-      names. Red before (OutOfMemoryException), green after; measured at plan time on this shape at 450,000 (current SQL
+      names. The module docstring's first line covers both reads (root sessions and tool use). Red before
+      (OutOfMemoryException), green after; measured at plan time on this shape at 450,000 (current SQL
       out of memory, side scan 4.6 s).
     new_imports: []
   - file: tests/common/test_ducklake_event_read_tool_usage.py
@@ -82,15 +88,19 @@ scope:
       halves. The fail-closed cases join the existing cases tuple of test_a_failed_chunk_prints_no_total_and_exits_1 (two
       added rows, none changed): the same out-of-memory error on a one-day window exits 1 naming error_type unmapped, and a
       500 unmapped with error_class RuntimeError on a 7-day window exits 1 naming error_type unmapped with no halving (the
-      test's existing assertions; exit 1 already shows no halving, since halves would return rows and exit 0). The halving
-      match names its source in a docstring line: the body shape of ducklake_handler_errors.unmapped, so a later typed
-      out-of-memory row must update this match and its acceptance test. The file is 474 of 500 SLOC, so the additions stay
+      test's existing assertions; exit 1 already shows no halving, since halves would return rows and exit 0). The module
+      docstring's "halving on 413/504" names the out-of-memory 500 too. The file is 474 of 500 SLOC, so the additions stay
       within about 20 lines (relief in execution steps).
     new_imports: []
 bundled_recommendations:
   - rec-5490
 followon_recs: []
-infrastructure_dependencies: []
+infrastructure_dependencies:
+  - "ducklake_telemetry_reader (active): governed deploy-ducklake-lambdas run after merge (Decisions 249, 254); VP 6 reads the
+    deployed stamp, VP 7 and VP 8 are the live smoke."
+  - "ducklake_telemetry_content_reader (active; packages ducklake_event_read_sql.py, serves no tool_use_rollup): Decision 79
+    step is VP 10, its next operator-approved deploy-telemetry-content run (Decision 272 cl.1, residual while rec-5333 is
+    open); the build never dispatches one. VP 4 proves the change is inert there."
 acceptance_criteria:
   - A 7-day tool_use_rollup over the 450,000-observation tool-shaped corpus completes under the reader's own memory and spill limits with the planted counts and attributions (red before, green after).
   - tool_use_rollup output is unchanged, the oracle tests pass unedited and the two survivor nodes pass before and after.
@@ -189,7 +199,9 @@ verification_plan:
     fix_if: >-
       A FAIL line with error_class OutOfMemoryException means production rows are heavier than the probe corpus: read the
       reader log group at that time and report a plan-defect to the coordinator with the request id; never raise the
-      reader's limits. Any other FAIL is the client or reader's own recovery (the client already retries a 503).
+      reader's limits. A FAIL with status 504 (read deadline) is the same class of evidence: report it to the coordinator
+      with the request id as a plan-defect, never retry into green. Any other FAIL is the client or reader's own recovery
+      (the client already retries a 503).
     hermetic: false
   - step: 8
     phase: post-deploy
@@ -208,6 +220,26 @@ verification_plan:
     expected: closed, exit 0
     fix_if: open means the squash body lacks the Resolves trailer for rec-5490 or its acceptance failed in the closure job.
     hermetic: false
+  - step: 10
+    phase: post-deploy
+    action: >-
+      Decision 79 for the content reader (Decision 272 residual while rec-5333 is open): its next deploy-telemetry-content run
+      that the operator approves (this build never dispatches one) is on a commit that contains this build. Waits on the
+      operator; the build reports it pending with this step named, and the coordinator keeps it on the waiting list.
+    command: >-
+      git fetch -q origin main && build=$(git log -1 --format=%H -E --grep='^Resolves: .*rec-5490([^0-9]|$)' origin/main) && test -n
+      "$build" && ok= && for id in $(gh api
+      'repos/otl-labs/ontheloop/actions/workflows/deploy-telemetry-content.yml/runs?status=success&per_page=100' --jq
+      '.workflow_runs[].id'); do job=$(gh api "repos/otl-labs/ontheloop/actions/runs/$id/jobs" --jq '.jobs[] |
+      select(.name=="record" and .conclusion=="success") | .id'); [ -n "$job" ] || continue; deployed=$(gh api
+      "repos/otl-labs/ontheloop/actions/jobs/$job/logs" | grep -oE 'LAMBDA_ARTIFACT_SHA: [0-9a-f]{40}' | head -1 | cut -d' '
+      -f2); echo "run $id deployed $deployed"; if git merge-base --is-ancestor "$build" "$deployed"; then echo contains; ok=1;
+      fi; break; done; test -n "$ok"
+    expected: >-
+      "run <id> deployed <sha>" then contains, exit 0: the newest deploy-telemetry-content run whose record job succeeded
+      deployed a commit containing the squash commit that carries the rec-5490 Resolves trailer.
+    fix_if: No approved run since the merge yet (wait, never dispatch), or the run failed (the content channel's own recovery).
+    hermetic: false
 test_obligations:
   - source: src/common/ducklake_event_read_sql.py
     behavior: A 7-day tool_use_rollup fits the reader's memory and spill limits with the same rows.
@@ -220,10 +252,10 @@ test_obligations:
     test_selector: tests/test_telemetry_usage.py::test_a_reader_out_of_memory_500_halves_the_window
     red_green_expectation: red before (exit 1, no total), green after
 constraints:
-  - No raise of the reader's memory_size, DuckDB memory_limit or spill cap (spend, and it hides the cause).
+  - No raise of the reader's memory_size (spend), DuckDB memory_limit or spill cap (they risk a Lambda out-of-memory kill and hide the cause).
   - No test, assertion or oracle is loosened (Decision 235); tool_use_rollup's rows must not change.
   - The telemetry reader deploys only through the governed deploy-ducklake-lambdas channel (Decisions 125, 126, 249, 254); no local deploy.
-  - The content reader is never deployed by this build; VP 4 proves its stamps unchanged.
+  - The content reader is never deployed by this build; VP 4 proves its stamps unchanged and VP 10 waits for its next operator-approved deploy.
   - The merge waits for rec-5491's live watch (execution step 1); no AWS account id in any log excerpt, PR text or rec.
 context:
   - "Decision-scout verdict NO_FLAGS (round 2, 228 of 228 triaged; roadmap items intersected 1, CONFLICT 0, RELATED 1); CITE: dec:207, dec:199, dec:236, dec:249, dec:254. Serves: NS.5 2/5."
@@ -232,7 +264,7 @@ context:
   - "Production estimate (one-day reads 2026-11-20): about 18,000 tool calls and 16,000 model calls a day, so roughly 360,000 observations a week; inferred, not measured. tool_use_rollup is the only verb reading metadata (grep of ducklake_event_read_sql.py)."
   - "The sibling probe's earlier finding (rec-5491 plan context) used a corpus with no tool_call rows; its out-of-memory came from the same metadata read, not tool_use_rollup's repeat CTEs."
   - "Deploy order: merging ships the telemetry reader through deploy-ducklake-lambdas once main's full tier passes (Decisions 249, 254). rec-5491's fix went live 2026-11-23 14:41Z and its VP 7 watch runs to about 25 Nov; a second reader deploy inside that watch would not reset it but would confound it, so the merge waits (execution step 1)."
-  - "Content reader (Decision 272): packages ducklake_event_read_sql.py but serves no tool_use_rollup; VP 4 proves its stamps unchanged, so no content deploy is needed (precedent: PLAN-telemetry-repeated-tool-calls)."
+  - "Content reader (Decision 272): packages ducklake_event_read_sql.py but serves no tool_use_rollup; VP 4 proves its stamps unchanged, and VP 10 meets Decision 79 on its next operator-approved deploy, never dispatched by the build (precedent: PLAN-telemetry-repeated-tool-calls VP 7)."
   - "read_version: only tool_use_rollup's stamp moves; the telemetry-smoke and golden-gate smokes treat a stamp mismatch as deploy skew until the reader deploy lands."
   - "Reader error body: a DuckDB out-of-memory answers 500 with error_type unmapped and error_class OutOfMemoryException (ducklake_handler_errors.unmapped); the client does not retry a 500 (_READER_TRANSIENT_STATUS)."
   - "Related-work check (red_overlap, 2026-11-23 on 9d167c64): blocked; rec-5536 and rec-5538 overlap on selector-selected test paths only (no scope file is shared). Deferral rationale for rec-5536: the CI RCA filing-check red in scripts/ci/claude_p_retry.sh, Agents in GitHub's lane, unrelated to the reader. Deferral rationale for rec-5538: the telemetry-arrival red (session_presence.py _walk repeats a deadline-exceeded 7-day read), raised with the coordinator 2026-11-23 for an owner; this plan edits none of its files. Neither red's repair depends on this plan; the build re-runs red_overlap (execution step 2)."
@@ -243,6 +275,7 @@ gate_rounds:
   - {gate: decision-scout, round: 1, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:ebdacf369a5d9fef284475e9769bd3c165e1a05f99f4cf164bf1fcff6232f79c'}
   - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:a979ace8a5afed552df1bf78f4ef764ccfc20b6c3217cb2a8a2599194cb9c776'}
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 3, nits: 5}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 5}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -259,5 +292,5 @@ execution_steps:
   - Write the acceptance node and the two added cases in tests/test_telemetry_usage.py, confirm the acceptance node fails, then change _Reads in scripts/telemetry_usage.py; run VP 3.
   - Execute Verification Plan -- run each step; loop until pass; on unrecoverable V3 failure stop and RCA (Decision 55)
   - "Squash-merge body carries Resolves: rec-5490. After the deploy run VP 6-9."
-  - 'Report: what was implemented, verification results, VP 1 duration, VP 7 lines'
+  - 'Report: what was implemented, verification results, VP 1 duration, VP 7 lines, VP 10 pending'
 rollback: Revert the squash commit; the reader redeploys the previous SQL through the same channel, and the CLI returns to halving on 413 and 504 only.
