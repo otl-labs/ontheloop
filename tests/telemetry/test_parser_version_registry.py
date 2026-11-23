@@ -110,6 +110,7 @@ LITELLM_CASES = (
     "repair_loss_markers.json",
     "aborted_transport.json",
     "partial_no_end.json",
+    "local_container_run.json",
 )
 
 

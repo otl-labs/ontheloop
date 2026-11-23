@@ -24,6 +24,7 @@ import yaml
 
 from src.persona_hosts.image_pin import load_pin
 from src.persona_hosts.local_container import build_image, run_argv, run_image
+from src.turn_capture.host_run import LOCAL_RUNTIMES, LocalRun, parse_persona_host_run
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
@@ -203,6 +204,27 @@ def test_complete_input_returns_a_valid_success(
     header = (result.events or {}).get("header", {})
     assert header.get("persona") == FIXTURE
     assert re.fullmatch(r"[0-9a-f]{64}", header.get("rendered_prompt_sha256", ""))
+
+
+def test_run_returns_a_host_run_sidecar_the_producer_roots(
+    adapter: str, fixture_image: str, env: dict[str, str], network: str
+) -> None:
+    result = ADAPTERS[adapter](
+        fixture_image,
+        FIXTURE,
+        _input("input_complete.json"),
+        key_variable=env["key"],
+        base_url_variable=env["base"],
+        network=network,
+        timeout_s=300,
+        project_ref="example/project",
+        agent="plan-critique",
+    )
+    host = parse_persona_host_run(result.host_run)
+    assert host is not None, result.host_run
+    if adapter in LOCAL_RUNTIMES:
+        assert isinstance(host, LocalRun) and host.runtime == adapter
+    assert (host.project_ref, host.agent) == ("example/project", "plan-critique")
 
 
 def test_incomplete_input_fails_without_a_provider_call(
