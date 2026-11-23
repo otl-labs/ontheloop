@@ -55,7 +55,7 @@ def test_seam_names_are_used_and_the_barrier_is_called_with_seam_true(tmp_path: 
         return barrier_module.BarrierResult(examined=2, compared=1)
 
     monkeypatch.setattr(barrier_module, "barrier", spy)
-    docs = {"PLAN-a.yaml": _doc(6), "PLAN-b.yaml": _doc(6)}
+    docs = {"PLAN-a.yaml": _doc(module.newest_schema_version()), "PLAN-b.yaml": _doc(module.newest_schema_version())}
     kw = _kw(
         tmp_path,
         docs,
@@ -138,7 +138,12 @@ def test_real_barrier_over_a_fixture_tree_fails_a_stale_row(tmp_path: Path) -> N
     }
     (tmp_path / "PLAN-p.yaml").write_text(yaml.safe_dump(plan), encoding="utf-8")
     row = SimpleNamespace(gate="decision-scout", verdict="NO_FLAGS", scout_input_fingerprint="v1:" + "0" * 64)
-    kw = _kw(tmp_path, {"PLAN-p.yaml": _doc(6, row)}, added_plan_names={"PLAN-p.yaml"}, modified_plan_names=set())
+    kw = _kw(
+        tmp_path,
+        {"PLAN-p.yaml": _doc(module.newest_schema_version(), row)},
+        added_plan_names={"PLAN-p.yaml"},
+        modified_plan_names=set(),
+    )
     failures, _, line = module.run(**kw)
     assert len(failures) == 1 and "re-scout required" in failures[0]
     assert line == " re-scout barrier: 1 plan(s) examined, 1 compared, 1 failing"

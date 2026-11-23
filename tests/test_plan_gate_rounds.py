@@ -225,3 +225,67 @@ def test_a_revise_entry_needs_a_revise_row_with_enough_blocking() -> None:
         GateRound.model_validate(_critique(("a", "REVISE"), ("b", "REVISE"), verdict="REVISE", blocking=1))
     ok = GateRound.model_validate(_critique(("a", "REVISE"), ("b", "REVISE"), verdict="REVISE", blocking=2))
     assert ok.blocking == 2
+
+
+def _finding(id_: str = "N1", severity: str = "nit", disposition: str = "build-note", **extra) -> dict:
+    return {
+        "id": id_,
+        "severity": severity,
+        "origin": "judgement",
+        "anchor": "scope",
+        "subject": "s",
+        "disposition": disposition,
+        **extra,
+    }
+
+
+def test_findings_accepts_matching_counts_and_dispositions() -> None:
+    row = _row(findings=[_finding("N1", disposition="applied-wording"), _finding("N2", disposition="disputed")], nits=2)
+    assert len(GateRound(**row).findings or []) == 2
+    assert GateRound(**_row(findings=[])).findings == []
+    revise = _row(verdict="REVISE", blocking=1, findings=[_finding("B1", "blocking", "fixed")])
+    assert GateRound(**revise).findings
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {"gate": "decision-scout", "round": 1, "verdict": "NO_FLAGS", "findings": []},
+        _row(nits=2, findings=[_finding("N1"), _finding("N1")]),
+        _row(nits=1, findings=[]),
+        _row(nits=0, findings=[_finding("N1")]),
+        _row(verdict="REVISE", blocking=1, findings=[_finding("B1", "blocking", "build-note")]),
+        _row(verdict="REVISE", blocking=1, findings=[_finding("B1", "blocking", "deferred")]),
+        _row(nits=1, findings=[_finding("N1", disposition="deferred")]),
+        _row(nits=1, findings=[_finding("N1", subject="a\nb")]),
+        _row(nits=1, findings=[_finding("N1", subject="x" * 201)]),
+        _row(nits=1, findings=[_finding("N1", anchor=" ")]),
+    ],
+)
+def test_findings_refuses_bad_rows(row: dict) -> None:
+    with pytest.raises(ValidationError):
+        GateRound(**row)
+
+
+def test_deferred_blocking_accepted_only_under_accept_with_deferral() -> None:
+    row = _row(
+        verdict="REVISE",
+        blocking=1,
+        escalated=True,
+        escalation_choice="accept-with-deferral",
+        findings=[_finding("B1", "blocking", "deferred")],
+    )
+    assert GateRound(**row).findings
+
+
+def test_version_errors_at_6_and_7() -> None:
+    from scripts.roadmap.plan_gate_rounds import version_errors
+
+    bare = [GateRound(**_row())]
+    with_findings = [GateRound(**_row(findings=[]))]
+    deferral = [GateRound(**_row(escalated=True, escalation_choice="accept-with-deferral", findings=[]))]
+    assert version_errors(6, bare) == [] and version_errors(7, with_findings) == []
+    assert "findings requires schema_version 7" in version_errors(6, with_findings)[0]
+    assert "findings: [{id" in version_errors(7, bare)[0]
+    assert "accept-with-deferral on a PROCEED" in version_errors(7, deferral)[0]
+    assert version_errors(7, [GateRound(gate="decision-scout", round=1, verdict="NO_FLAGS")]) == []
