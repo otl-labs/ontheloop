@@ -102,4 +102,12 @@ ENTRIES: tuple[Entry, ...] = (
         pre=True,
         full_segment="full_after_lint",
     ),
+    # PLAN-ci-rca-coverage-table: ungated (no pre_globs) so renaming any file ci-rca.yml references fails the PR.
+    Entry(
+        name="validate_ci_rca_coverage",
+        module="scripts.checks.misc.validate_ci_rca_coverage",
+        attr="validate_ci_rca_coverage",
+        pre=True,
+        full_segment="full_after_lint",
+    ),
 )
