@@ -1,0 +1,281 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: ci-rca-step-extraction
+intent: >-
+  Solves rec-5500. Moves the prompt assembly and FILED-marker check of ci-rca.yml's "Run ci-rca agent" step, and the
+  whole "Mark failure as RCA'd" body, into one tested script, scripts/ci/ci_rca_steps.sh, with no change in what CI RCA
+  does (Decision 162 cl.3 touch-it-fix-it, owed since #2311). The claude_p_retry.sh call, its flags and the allow list
+  stay in the workflow. ci-rca.yml drops from 453 to about 424 effective lines, which leaves room for rec-5493's smoke job.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-ci-rca-step-extraction.yaml
+phase: >-
+  ad_hoc_rec (soft-warn exception category: rec-5500, Medium, a Decision 162 cl.3 obligation deferred by #2311, rec-5494
+  and rec-4678; no tier_item claimed, so the Tier Item Freshness Gate is skipped; closes no criterion). One new script,
+  two step bodies in ci-rca.yml, two baseline ceilings lowered, one new test file and three test files repointed. V3: CI
+  RCA is the operator's most important workflow, so the proof is one operator-fired live run on main.
+closes_criteria: []
+cites: [dec:72, dec:74, dec:117, dec:162, dec:205]
+scope:
+  - file: scripts/ci/ci_rca_steps.sh
+    action: Create
+    purpose: >-
+      Bash, `set -e` only (the runner runs these two steps with its default `bash -e`, so pipefail and nounset stay off
+      exactly as they were inline; a header line says so). Three subcommands, else usage on stderr and exit 2. Every path
+      is an optional positional argument defaulting to today's literal, so the workflow passes none and tests pass temp
+      paths; the script reads no new environment variable. (1) `prompt [BUNDLES_DIR=/tmp/ci-rca-bundles]`: the body
+      lines of today's rca_agent step from `EVIDENCE_CONTEXT=""` through the `PROMPT=` line, moved verbatim except that
+      the bundle directory is the argument and step outputs come from env (RUN_ID, BUNDLE_SHA, BUNDLE_S3_URI,
+      BUNDLE_PATH, BUNDLE_LOCAL, BUNDLE_ABSENT, RANGE_NOTE); it ends `printf '%s' "$PROMPT"` (no trailing newline, as
+      today's printf). The PROMPT assignment stays one line ending `${RANGE_NOTE}"` and the EVIDENCE_CONTEXT bundle line
+      keeps `$(ls "$BUNDLES"/*.json` (tests read both). (2) `check [OUTPUT=/tmp/ci-rca-output.json]`: today's body from
+      `cat /tmp/ci-rca-output.json` to the `rec_id=` line, verbatim but for the path argument and lowercase locals; the
+      `::error::ci-rca agent filed no recommendation (no FILED: marker in output)` line and exit 1 are kept, as is
+      the CIRCA-07 rec_id preference (legacy last-marker value, else the last --all pair). (3) `mark
+      [OUTPUT=/tmp/ci-rca-output.json] [FALLBACK_FILED=/tmp/ci-rca-fallback-filed.txt]`: today's mark_rca body with
+      ANCHOR_SHA and WORKFLOW_SLUG from env and the repository from GITHUB_REPOSITORY (the runner's default env, same
+      value as github.repository); the `{ fallback pairs || filing --all; } | while ... gh api .../statuses/...` chain,
+      the "unknown" category default and the description string "ci-rca filed ${REC_ID} for this failure"
+      (scripts/ci_rca/convergence_dedup.py's _FILED_REC_RE parses it) are unchanged. A prototype of this script passed
+      the VP 3 parity harness against main 29db835c on all eight cases.
+  - file: .github/workflows/ci-rca.yml
+    action: Modify
+    purpose: >-
+      rca job only, two steps; every other line, both jobs' if:, the trigger and the watchdog job are untouched. (a) "Run
+      ci-rca agent": name, id, timeout-minutes 17, if: and the five existing env keys stay; env gains RUN_ID
+      (steps.meta.outputs.run_id) and BUNDLE_SHA, BUNDLE_S3_URI, BUNDLE_PATH, BUNDLE_LOCAL, BUNDLE_ABSENT
+      (steps.evidence.outputs.*), bound in env, never interpolated into run:. The run body becomes six lines: `bash
+      scripts/ci/ci_rca_steps.sh prompt > /tmp/ci-rca-prompt.txt`, then today's four claude_p_retry.sh lines byte for
+      byte except that the leading `printf '%s' "$PROMPT" | ` is gone and the last line ends `--allowedTools "<today's
+      list>" < /tmp/ci-rca-prompt.txt || true`, then `bash scripts/ci/ci_rca_steps.sh check`. The flags and the allow list
+      stay in this default-branch file on purpose: the claude_p_retry.sh pairing check and the Decision 205 LLM-step
+      detector find the call here, and the rec-5494/rec-4677 tests read the list here. Writing the prompt to a file first means a missing script stops the step before any LLM
+      call. (b) "Mark failure as RCA'd": id and if: unchanged; env GH_TOKEN plus ANCHOR_SHA and WORKFLOW_SLUG
+      (steps.meta.outputs.*); run `bash scripts/ci/ci_rca_steps.sh mark`. Measured on a prototype: 455 -> 426 effective
+      lines (main is 453 since #2391, so about 424); rca_agent body 29 -> 6, mark_rca 14 -> 1. Stale-checkout window: the rca job runs from the failing commit,
+      so a red on a commit made before this merge whose CI RCA runs after it has no script; the prompt line fails, the
+      step fails, rec-4678's fallback files an undetermined rec and the mark step fails too (job red, watchdog alarms).
+      Accepted as decided-with-notice (fork F3): it lasts only for reds already in flight at merge.
+  - file: config/agent/executor/capabilities.yaml
+    action: Modify
+    purpose: >-
+      Fork F4 (scout WARN 117, operator's card): append `scripts/ci/ci_rca_steps.sh` to boundary_patterns next to
+      `scripts/ci/telemetry_content_deploy.sh` (the #2203 precedent), so the moved prompt, check and mark logic stays
+      inside the executor self-modification boundary it had in .github/workflows/. Append-only, so approval-routing.yaml's
+      exempt row (an entry added to boundary_patterns only tightens) applies and no gated wording is needed.
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: >-
+      r3_workflows ceilings lowered to the measured counts (test__workflow_shell_bodies pins ceiling == measured):
+      ".github/workflows/ci-rca.yml::rca::rca_agent" 29 -> 6 and ".github/workflows/ci-rca.yml::rca::mark_rca" 14 -> 1.
+      Decreases only; no raise marker. Re-measure at build HEAD.
+  - file: tests/ci_rca/test_rca_agent_entrypoint.py
+    action: Create
+    purpose: >-
+      rec-5500's acceptance file. test_rca_agent_step_calls_extracted_entrypoint: the parsed rca_agent run is exactly
+      the prompt line, the four wrapper lines and the check line; it holds no `PROMPT=`, `EVIDENCE_CONTEXT` or
+      `scripts.ci_rca.filing`; every evidence output it used to interpolate is now an env key; the mark_rca run is the
+      one mark line with ANCHOR_SHA and WORKFLOW_SLUG in env and no `${{` in run. Script legs run `bash
+      scripts/ci/ci_rca_steps.sh` from the repo root with tmp paths and literal expected strings: prompt with two
+      bundle files (exact text naming both files and the four bundle fields, ending with RANGE_NOTE), with
+      BUNDLE_ABSENT=true (the mandatory human-review text), with neither (no evidence text), and no trailing newline;
+      check with two category markers (stdout holds the output, GITHUB_OUTPUT gets rec_id=<last>), with a trailing
+      `FILED: none` after a filed marker (rec_id is the filed one), and with no marker (exit 1, the ::error:: line,
+      nothing written); mark with a fake gh on PATH (argv logged) for agent pairs plus a fallback line (one POST per
+      pair, contexts ci-rca/<slug>/<cat>, an uncategorised marker posts "unknown"), with empty ANCHOR_SHA (no call), and
+      the posted description matched by convergence_dedup._FILED_REC_RE; an unknown subcommand exits 2. Real
+      scripts.ci_rca.filing and fallback modules, no mocks.
+  - file: tests/ci_rca/test_agent_tool_allowlist.py
+    action: Modify
+    purpose: >-
+      rec-4677's bundle-list assertions (no "enumerate", an EVIDENCE_CONTEXT line naming the bundles dir via `$(ls`)
+      read scripts/ci/ci_rca_steps.sh instead of the step run; the --allowedTools read stays on the step. Same
+      assertions, new source. The graduated shard ci-rca-prompt-allowlist-agree is kept unchanged (its node id stays).
+  - file: tests/verify_ci_workflow/test_ci_rca_range_step.py
+    action: Modify
+    purpose: >-
+      test_agent_prompt_ends_with_range_note keeps the RANGE_NOTE env assertion on the step and reads the `PROMPT=` line
+      from scripts/ci/ci_rca_steps.sh (still ends `${RANGE_NOTE}"`).
+  - file: tests/test_ci_rca_fallback.py
+    action: Modify
+    purpose: >-
+      test_workflow_wiring's three mark_rca run assertions (fallback pairs, filing --all, the one-line chain) read
+      scripts/ci/ci_rca_steps.sh's mark function; its if: assertions stay on the step. Net-zero lines (coverage home of
+      scripts/ci_rca/fallback.py).
+bundled_recommendations:
+  - rec-5500
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - bin/venv-python -m pytest tests/ci_rca/test_rca_agent_entrypoint.py::test_rca_agent_step_calls_extracted_entrypoint -q (rec-5500's acceptance) passes, with every other node of the file, and fails on main (file absent).
+  - For eight fixed cases (three prompt, three check, two mark), the new script and today's inline bodies at main 29db835c give identical exit codes, stdout, GITHUB_OUTPUT text and gh argv (VP 3).
+  - The rec-5494, rec-4677, range, fallback-wiring, model-pin and telemetry-capture tests, the claude_p_retry.sh pairing check, the persona trigger policy and the Decision 162 ratchet all pass, with the two ceilings lowered and no raise marker.
+  - ci-rca.yml is at most 428 effective lines (453 on main at fad3c606).
+  - One operator-fired CI RCA dispatch on main after the merge ends with the agent's FILED marker parsed by the check subcommand, rec_id set, and a ci-rca/<slug>/<category> success status posted by the mark subcommand (VP 6).
+  - rec-5500 is closed by the merge's Resolves trailer.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: rec-5500's acceptance file, every script and wiring leg.
+    command: bin/venv-python -m pytest tests/ci_rca/test_rca_agent_entrypoint.py -q
+    expected: Exit 0. Red before (the file is absent, pytest exits 4).
+    expected_literals:
+      - ' passed'
+    fix_if: Any failure; fix the script or the step, never loosen a test.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: It is rec-5500's own acceptance, evaluated by the trailer-closure job at merge, and the file runs in every tier that selects scripts/ci or .github/workflows.
+  - step: 2
+    phase: pre-deploy
+    action: The repointed tests and the standing guards over ci-rca.yml pass, and the ceilings match.
+    command: bin/venv-python -m pytest tests/ci_rca/ tests/verify_ci_workflow/test_ci_rca_range_step.py tests/test_ci_rca_fallback.py tests/test_claude_cli_model_pin.py tests/test_telemetry_ci_capture_action.py tests/test_check_workflow_agent_safety.py tests/test_ci_rca_watchdog.py tests/checks/ci_guards/ -q
+    expected: Exit 0. Red before the baseline edit (test__workflow_shell_bodies reports rca_agent (29, 6) and mark_rca (14, 1)).
+    expected_literals:
+      - ' passed'
+    fix_if: A node fails; fix the script, step or baseline row, never add a raise marker, an exemption or a weaker assertion.
+    hermetic: true
+    graduation: waive
+    graduation_waiver_reason: Standing suites every tier selects for .github/workflows, scripts/ci and config.
+  - step: 3
+    phase: pre-deploy
+    action: >-
+      Behaviour parity against main. The harness takes today's rca_agent and mark_rca bodies from the base commit
+      (step outputs mapped to the same env names), runs them and the new script on eight fixed cases with a fake gh, and
+      compares exit code, stdout, GITHUB_OUTPUT and gh argv. It writes /tmp/ci-rca-* paths, so run it in the build
+      container only.
+    command: bin/venv-python /mnt/project-files/ci-rca-step-extraction/parity.py 29db835c3c60fd8b009d604ba95569e49a77334e scripts/ci/ci_rca_steps.sh
+    expected: Eight PARITY lines then "PARITY OK 8".
+    expected_literals: []
+    fix_if: An AssertionError naming a case; make the script match the old body, never edit the harness to agree.
+    hermetic: false
+    graduation: not-applicable
+  - step: 4
+    phase: pre-deploy
+    action: Pre-handoff full tier on the committed, rebased tree, read through its evidence file.
+    command: bin/venv-python -m scripts.validate; bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: Started backgrounded with a 2 h limit from the top-level session; --verify-head reports the full tier passed on HEAD's tree.
+    fix_if: Any failure; fix and re-run both from the start (HOME an empty dir for tests/test_aws_profile.py).
+    hermetic: false
+    graduation: not-applicable
+  - step: 5
+    phase: post-deploy
+    action: rec-5500's acceptance holds on main and the rec is closed.
+    command: bin/venv-python -m pytest tests/ci_rca/test_rca_agent_entrypoint.py::test_rca_agent_step_calls_extracted_entrypoint -q && AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader; r,_=fetch_recs_by_ids(make_reader(),['rec-5500']); print(r[0]['status']); assert r[0]['status']=='closed'"
+    expected: Run after ci.yml's trailer-closure job finished on the merge SHA (name its run id). Exit 0, prints closed.
+    fix_if: Open; run bin/venv-python -m scripts.session.merge_step readback and follow git-ops resolves_trailer; never close by hand after an acceptance refusal (Decision 201).
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: post-deploy
+    action: >-
+      One live CI RCA agent run on main after the merge. The operator fires it himself from GitHub (ci-rca.yml
+      workflow_dispatch, force_rca true, Decision 74 escape hatch; Decision 205 cl.1: an agent-fired dispatch does not
+      qualify). The build names the run_id: the newest failed watched run on main whose ci_rca rec is closed, so the
+      duplicate can be superseded; 44945189064 (rec-5494's proof run) only when none qualifies. The build session asks
+      him for it by name and reads the run; it never dispatches ci-rca.yml itself.
+    command: >-
+      gh api "repos/otl-labs/ontheloop/actions/workflows/ci-rca.yml/runs?event=workflow_dispatch&per_page=3" --jq
+      '.workflow_runs[] | [.id, .created_at, .conclusion, .display_title] | @tsv'; then
+      mcp__github__get_job_logs(owner=otl-labs, repo=ontheloop, job_id=<its rca job id>, return_content=true) and gh api
+      "repos/otl-labs/ontheloop/commits/<the dispatched run's head sha>/statuses" --jq '.[] | select(.context|startswith("ci-rca/")) | [.context, .state, .description, .created_at] | @tsv'
+    expected: >-
+      The run is titled "CI RCA for run <run_id>" and its rca job succeeds. In the Run ci-rca agent step the log shows
+      the printed output JSON, no "No such file", no "Input must be provided", and the step concluded success with
+      the agent's FILED marker; the Fallback filing step filed nothing; Mark failure as RCA'd ran and a ci-rca/<slug>/<category>
+      success status created after the run started carries "ci-rca filed <that rec> for this failure"; the Comment and
+      telemetry steps behave as before; the watchdog job succeeds. Record the run id and the duplicate rec id, then set
+      the duplicate --status superseded through update_rec naming the original rec.
+    fix_if: >-
+      The prompt or check line errors, the marker is not parsed, or no status is posted: stop and report to the
+      planner (forward-fix, no rescue loop). If update_rec refuses the supersede (Decision 186 closure artifact), leave
+      it open and name it in the report; file nothing.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: scripts/ci/ci_rca_steps.sh
+    behavior: prompt text for bundles, bundle-absent and neither cases ending with RANGE_NOTE and no trailing newline; check prints the output, writes rec_id with the CIRCA-07 preference, and fails loud with the error annotation on no marker; mark posts one status per filed pair with the unknown default and the parseable description, and nothing without an anchor; unknown subcommand exits 2.
+    verification_step: 1
+    test_selector: tests/ci_rca/test_rca_agent_entrypoint.py
+    red_green_expectation: red before (script and test file absent), green after.
+  - source: .github/workflows/ci-rca.yml
+    behavior: rca_agent runs prompt, the unchanged wrapper call reading the prompt file, then check, with every step output bound in env; mark_rca runs the mark subcommand; no PROMPT, EVIDENCE_CONTEXT or filing parse left inline (rec-5500's acceptance node).
+    verification_step: 1
+    test_selector: tests/ci_rca/test_rca_agent_entrypoint.py::test_rca_agent_step_calls_extracted_entrypoint
+    red_green_expectation: red before (test file absent; with it on main, the step holds the inline prompt and check), green after.
+  - source: config/composite_action_body_baseline.yaml
+    behavior: The two ceilings equal the measured bodies (6 and 1); no raise marker.
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test__workflow_shell_bodies.py::TestWorkflowRatchetLiveSurface::test_seeded_ceiling_equals_measured
+    red_green_expectation: red before the baseline edit ((29, 6) and (14, 1) mismatches), green after.
+constraints:
+  - 'One build PR. "Resolves: rec-5500" goes in a branch commit message and in the squash commit body.'
+  - >-
+    Behaviour-preserving only: no new step, no changed if:, timeout, permission, flag, allow-list entry, prompt word,
+    marker rule or status string. rec-5494's flags and allow list, rec-4678's fallback step and rec-5504's watchdog
+    job and run-name are untouched. PLAN-claude-cli-seam-contract (rec-5509) merged as #2391 and moved the Install Claude Code CLI
+    step; keep its lines. If rec-5493's smoke job or any other plan editing ci-rca.yml builds first,
+    rebase and never undo its lines.
+  - The build session never dispatches ci-rca.yml (Decision 205 cl.1); VP 6's run is the operator's own.
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - >-
+    Decision scout r2 (2026-11-23 14:45 UTC, after the capabilities.yaml row): FLAGS_FOUND. Decisions triaged: 228 of
+    228. Roadmap items intersected: 8; CONFLICT: 0; RELATED: 8. Serves: NS.4 3/5. CITE 72, 74, 117, 162, 205 (WARN 117
+    cleared by the boundary row). WARN 226 stands (red_overlap line). RELATED adds 185 and T2.29, T2.31, T4.28 (T4.28 c6
+    also appends to boundary_patterns; append-only, no conflict).
+  - >-
+    Decision scout r1 (2026-11-23 14:25 UTC): FLAGS_FOUND. Decisions triaged: 228 of 228. Roadmap items intersected: 5;
+    CONFLICT: 0; RELATED: 5. Serves: NS.4 3/5. CITE 72, 74, 162, 205. WARN 117: moving the prompt, check and mark logic
+    out of .github/workflows/ (a boundary_patterns path in config/agent/executor/capabilities.yaml) into scripts/ci/
+    shrinks the executor self-modification boundary (claude_p_retry.sh is already outside it); taken to the operator.
+    WARN 226: see the red_overlap line. RELATED 55, 166, 235, 244, 132, 163, 201, 186, 142, 206, 279, 131; T1.13, T3.20,
+    T4.26 (c5 later moves the prompt into run_persona and now starts from ci_rca_steps.sh), T4.9, T4.23.
+  - >-
+    red_overlap at plan draft (main 29db835c, re-run by scout r2 at fad3c606): blocked, rule overlap only (no
+    slo_breached): rec-5538 (Critical, 14:40Z, arrival _walk deadline; shares test files through selection, no source
+    file), rec-5518 (dedup SLI, shared tests/test_ci_rca_fallback.py) and rec-5536 (Critical, filed 13:43Z, shared
+    tests/ci_rca/test_agent_permissions_untrusted_workspace.py through test selection). Deferral: this plan repairs
+    none of them and changes no behaviour any of them names. rec-5518 is handed to Feedback Loop (operator ruling 2026-11-23,
+    coordinator log #1963 comment 7097070191). rec-5536's acceptance already passes on main 29db835c (its fix is
+    #2366 and #2369); its closure was reported to the coordinator, not done here. Scout WARN 226: a deferral note alone does
+    not clear cl.3, so the build re-runs red_overlap first and proceeds only if it is clear or blocked solely by rec-5518
+    (operator ruling by reference); rec-5536 or rec-5538 still open at build means stop and tell the coordinator.
+  - >-
+    Origin: rec-5500 (filed by the rec-5494 planner 2026-11-21; dependency rec-5494 closed, #2369). The coordinator
+    dispatched this plan 2026-11-23 14:06Z because rec-5493's smoke job needs ci-rca.yml headroom (455 of 500); the
+    operator wants it small and unbundled (rec-5493 thread, 2026-11-23 11:24Z); "write the plan" 2026-11-23 14:31Z in this plan's
+    thread).
+  - >-
+    Fork notices (decided-with-notice): F1 bash script, not a Python entrypoint (a verbatim move is the smallest
+    behaviour risk; scripts/ci/telemetry_content_deploy.sh plus tests/ci/test_telemetry_content_deploy_script.py are the
+    subcommand-and-fake-binary precedent). F2 the claude_p_retry.sh call, flags and allow list stay in the workflow
+    (validate_claude_p_retry_wrapper pairs call sites by step run text; _persona_llm_signatures finds LLM steps by it;
+    tests pin the list there; the flags stay in the reviewed default-branch file, though claude_p_retry.sh itself already
+    runs from the failing commit's tree, a main-only exposure). F3 no hashFiles guard for the
+    stale-checkout window (scope row for ci-rca.yml). F4 (operator, decision card 2026-11-23 14:31Z, option 1 "Add the
+    script to the boundary"): capabilities.yaml boundary_patterns gains the script.
+  - 'Parity harness: /mnt/project-files/ci-rca-step-extraction/parity.py (VP 3; prototype script beside it); the prototype of the script passed it on all eight cases and a trial run of VP 2 against the prototype failed only the four nodes this plan edits (the ceiling pin and the three repointed tests); 2379 passed.'
+gate_rounds:
+  - {gate: decision-scout, round: 1, scout_input_fingerprint: "v1:ea2acc647b170f4f934c05bee0472f612beb45801bb34d3f8e960b33b5eff884", verdict: FLAGS_FOUND}  # WARN 117 boundary shrink (operator); WARN 226 red_overlap build precondition
+  - {gate: decision-scout, round: 2, scout_input_fingerprint: "v1:611a1e99fd4e5c62bb8c90764627bbea2dfe2998940bdf68e0545ac574ea104b", verdict: FLAGS_FOUND}  # operator card 14:31Z added the boundary row; 117 now CITE; WARN 226 adds rec-5538
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Only the plan-cited decision sections read
+  - All files in scope located and readable
+execution_steps:
+  - Run bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-ci-rca-step-extraction.yaml; proceed only when it is clear or blocked solely by rec-5518 (operator ruling, coordinator log #1963 comment 7097070191); any other red, rec-5536 and rec-5538 included, means stop and report.
+  - Create scripts/ci/ci_rca_steps.sh per its scope row (move the lines, do not rewrite them).
+  - Edit the two ci-rca.yml steps and lower the two baseline ceilings to the measured counts.
+  - Write tests/ci_rca/test_rca_agent_entrypoint.py and repoint the three test files per their scope rows.
+  - Commit, then run VP 1-3; loop until pass; on an unrecoverable failure stop and report (Decision 55).
+  - Code review via a fresh code-review subagent; fix blocking findings; rerun VP 1-3.
+  - >-
+    CLOSURE per the implement skill Commit Flows; VP 4 on the committed clean HEAD; push; PR; squash-merge on green
+    with "Resolves: rec-5500"; merge_step readback; VP 5; then ask the operator for VP 6 by name and read it.
+  - 'Report: what was implemented, verification results, PR and merge SHA, the VP 6 run id and duplicate rec disposition.'
+rollback: >-
+  Revert the build's squash commit: the two step bodies return inline and the ceilings return to 29 and 14; the script
+  is deleted. Nothing else reads it.
