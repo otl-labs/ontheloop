@@ -272,8 +272,8 @@ def test_critic_tags_every_finding_with_a_stable_anchor() -> None:
 def test_critic_tags_severity_and_states_figures_as_hypotheses() -> None:
     """Blocking/nit severity is the critic's call; Frame Challenge is never a nit; figures are re-measured (rec-3742)."""
     critique = _CRITIQUE_SKILL.read_text(encoding="utf-8")
-    assert "blocking (correctness, safety, scope, a Decision conflict or failed check above; when unsure)" in critique
-    assert "nit (wording, citation form, ordering; never a Frame Challenge contradiction)" in critique
+    assert "blocking only when the finding states what reaches main if left unfixed and which control fails first" in critique
+    assert "a Frame Challenge contradiction is never a nit" in critique
     assert "**Recommendation:** PROCEED (no blocking finding; list nits) / REVISE (any blocking finding)" in critique
     assert "State each measured figure as a hypothesis with the command that produced it" in critique
     assert "the reviser will re-measure it and dispute, with evidence, any it cannot reproduce" in critique

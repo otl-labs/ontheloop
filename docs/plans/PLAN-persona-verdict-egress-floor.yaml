@@ -56,14 +56,16 @@ scope:
       mangle chains EGRESS_FLOOR (rules in order: -o lo RETURN; --uid-owner 0 RETURN; -j EGRESS_FAIL_CLOSED; DROP to
       168.63.129.16, 169.254.0.0/16, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) and an empty EGRESS_FAIL_CLOSED, inserted
       at OUTPUT position 1, and the ip6tables mangle chain EGRESS_FLOOR (-o lo RETURN; --uid-owner 0 RETURN; DROP);
-      writes /etc/systemd/system/agent.service.d/egress-floor.conf with ExecStopPost=<absolute iptables> -w -t mangle -A
-      EGRESS_FAIL_CLOSED -j DROP and runs systemctl daemon-reload; stops docker.socket, docker.service and
-      containerd.service and masks all three (systemctl mask --now, so the agent's revert-time systemctl restart docker
+      writes /etc/systemd/system/egress-fail-closed.service ([Unit] BindsTo=agent.service and After=agent.service; [Service]
+      Type=oneshot, RemainAfterExit=yes, ExecStart=/bin/true, ExecStop=<absolute iptables> -w -t mangle -A
+      EGRESS_FAIL_CLOSED -j DROP), runs systemctl daemon-reload and systemctl start egress-fail-closed.service (Amendment 2:
+      the hook runs in its own cgroup, so a cgroup-wide kill of agent.service cannot kill it); stops docker.socket,
+      docker.service and containerd.service and masks all three (systemctl mask --now, so the agent's revert-time systemctl restart docker
       fails), and chmods /var/run/docker.sock and /run/containerd/containerd.sock to 000 when present;
       writes /etc/sudoers.d/zz-egress-floor (runner ALL=(ALL) !ALL, mode 0440, checked with visudo -cf) last; then
       verifies as root that iptables -S and ip6tables -S of both chains equal the rendered rules, that OUTPUT's first
-      rule jumps to EGRESS_FLOOR, that systemctl show agent.service -p ExecStopPost carries the hook, and that each of the
-      three container units reads LoadState=masked, printing one
+      rule jumps to EGRESS_FLOOR, that systemctl show egress-fail-closed.service reads ActiveState=active and
+      BindsTo=agent.service with ExecStop carrying the hook, and that each of the three container units reads LoadState=masked, printing one
       EGRESS-FLOOR line per check and EGRESS-FLOOR PASS, else EGRESS-FLOOR FAIL and exit 1. Refuses to run unless uid
       is 0. Stdlib only; rules are module constants (render_rules()), never read from a file, written in the canonical form
       iptables -S prints back (for example -d 168.63.129.16/32, -m owner --uid-owner 0) so verify() compares like with
@@ -79,8 +81,9 @@ scope:
       the agent's restored copy so that without the hook names still resolve after the agent's DNS proxy dies) and
       systemctl restart systemd-resolved; systemctl daemon-reload; systemctl restart docker (expected to fail on the
       mask; the drill continues); then systemctl kill -s KILL agent.service, printing EGRESS-DRILL ARMED. arm(hooked=False)
-      first removes the floor's agent.service drop-in, runs systemctl daemon-reload and requires systemctl show
-      agent.service -p ExecStopPost to carry no hook (printing EGRESS-DRILL UNHOOKED, else EGRESS-DRILL FAIL and exit 1),
+      first writes /etc/systemd/system/egress-fail-closed.service.d/unhook.conf ([Service] and an empty ExecStop=), runs
+      systemctl daemon-reload and requires systemctl show egress-fail-closed.service -p ExecStop to carry no hook (never
+      systemctl stop, which would fire it), printing EGRESS-DRILL UNHOOKED (else EGRESS-DRILL FAIL and exit 1),
       then arms the same revert. main() is arm(hooked=True).
   - file: scripts/personas/egress_revert_drill_control.py
     action: Create
@@ -197,19 +200,20 @@ scope:
       rec-5362 acceptance on the live tree: every covered job in .github/workflows/persona-verdict*.yml has the filter
       switch false, the floor step after its checkouts and the always() self-check last; egress_floor.render_rules()
       drops each of 168.63.129.16, 169.254.0.0/16 and the three private ranges and all IPv6 for non-root and carries the
-      ExecStopPost hook; the probe and the self-check expect dns_tcp_azure, wireserver_http, imds, ipv6, sudo and
+      fail-closed unit's ExecStop hook; the probe and the self-check expect dns_tcp_azure, wireserver_http, imds, ipv6,
+      sudo and
       docker_socket refused; config/persona_verdict_egress.yaml has the drill job's row.
   - file: tests/personas/test_egress_floor.py
     action: Create
     purpose: >-
-      Rule rendering and order, the hook drop-in text, the sudoers line, the verify step against fake iptables -S and
+      Rule rendering and order, the fail-closed unit text (pinned name egress-fail-closed.service), the sudoers line, the verify step against fake iptables -S and
       systemctl output (PASS and each FAIL), refusal when not root (subprocess faked, never run).
   - file: tests/personas/test_egress_revert_drill.py
     action: Create
     purpose: >-
       The drill arms only after a passing verify(), with the exact systemd-run command including the resolver write;
-      arm(hooked=False) removes the drop-in and refuses when ExecStopPost still carries the hook (subprocess faked, never
-      run).
+      arm(hooked=False) writes the empty-ExecStop drop-in (pinned path egress-fail-closed.service.d/unhook.conf) and refuses when ExecStop still carries the hook (subprocess
+      faked, never run).
   - file: tests/personas/test_egress_revert_drill_control.py
     action: Create
     purpose: "main() arms the hook-less drill (arm faked, never run)."
@@ -429,12 +433,12 @@ test_obligations:
     command: bin/venv-python -m scripts.roadmap.approved_text verify --slug persona-verdict-egress-floor --base origin/main
     red_green_expectation: red before (blocks not placed), green after
   - source: scripts/personas/egress_floor.py
-    behavior: rendered mangle rules and order, hook drop-in, sudoers line, root-side verify, refusal when not root
+    behavior: rendered mangle rules and order, fail-closed unit, sudoers line, root-side verify, refusal when not root
     verification_step: 1
     test_selector: tests/personas/test_egress_floor.py
     red_green_expectation: red before (module absent), green after
   - source: scripts/personas/egress_revert_drill.py
-    behavior: arms the simulated revert only after a passing verify(), with the exact systemd-run command; the hook-less arm removes the hook first
+    behavior: arms the simulated revert only after a passing verify(), with the exact systemd-run command; the hook-less arm writes the empty-ExecStop drop-in first
     verification_step: 1
     test_selector: tests/personas/test_egress_revert_drill.py
     red_green_expectation: red before (module absent), green after
@@ -547,7 +551,7 @@ context:
   - "Operator 2026-11-23 10:54 UTC: 'excellent, write the plan' on /mnt/project-files/egress-azure-gaps/PRESENTATION.md (blind Fable consult advisor-brief/ADVICE.md)."
   - "Vendor facts (agent v0.18.1 firewall.go, agent.go, sudo.go; harden-runner v2.22.4 setup.ts/cleanup.ts, read 2026-11-23): ACCEPTs for 168.63.129.16, 169.254.169.254 and RFC1918 apply to every uid on -o eth0; RevertFirewallChanges clears only filter OUTPUT and DOCKER-USER and nothing touches mangle or ip6tables; revertDisableSudo restores only a backup taken when its switch was on; with the switch off the agent sets Docker's DNS at start and its revert restores daemon.json and runs systemctl daemon-reload && systemctl restart docker, after stopping and restarting systemd-resolved, before it exits (agent.go:207-216, 458-476; dnsconfig.go:162-256), so the floor masks the container units; the agent is installed and sudo revoked in the action's pre: entry, before any job step; agent.service has no Restart=; post_event.json does not stop the agent."
   - "Results store [verified 2026-11-23]: productionresultssa0, 1, 5 and 12 CNAME to shared stamp hosts (blob.<stamp>.store.core.windows.net), so allow-by-IP admits other accounts there."
-  - "UNPROVEN until VP 6: the runner's own process needs none of the floor's addresses; daemon-reload applies the ExecStopPost drop-in to the running agent.service (egress_floor's verify reads it back each run); how GitHub records a job whose runner is cut off mid-step and whether job-level continue-on-error holds for it (the verdict prints the observed shape); whether Azure's guest agent already drops non-root TCP to the wireserver (control reports it); systemctl mask fails
+  - "UNPROVEN until VP 6: the runner's own process needs none of the floor's addresses; BindsTo stops the fail-closed unit, running its ExecStop, when agent.service fails from the drill's cgroup-wide kill; daemon-reload applies the control's empty-ExecStop drop-in to the running unit (verify and arm read both back each run); how GitHub records a job whose runner is cut off mid-step and whether job-level continue-on-error holds for it (the verdict prints the observed shape); whether Azure's guest agent already drops non-root TCP to the wireserver (control reports it); systemctl mask fails
     if the image ships a container unit in /etc/systemd/system (verify() reports it; --runtime is no fix, since /etc
     outranks /run); that the runner reports the hook-less control's failing step through the drill's public resolver."
   - "Order: the E3 Amendment 1 build merged as #2372 (9d886fd4; smoke list folded to one line, egress check splits as the agent does); E3's VP 9 passed (run 45166608964), so the build starts once rec-5166 reads closed, because VP 7 relies on smoke. rec-5362 depends on rec-5166 (set 2026-11-23, read back)."
@@ -557,13 +561,20 @@ context:
   - "test_validate_persona_verdict_egress.py is at 396/500 SLOC: crossing 500 is a STOP to the plan owner, never a raise."
   - "red_overlap 2026-11-23: blocked by rec-5491 and rec-5497 (slo_breached, product_regression, shared files none); deferral: Feedback Loop owns both (operator handed them over 2026-11-23 09:46 UTC, coordinator log 7097070191) and this plan touches none of their files."
   - "Decision 100 (scout r4 NOTE): the filter's native sudo/container switch is turned off because its revert restores sudo from its own backup, which defeats FAIL-CLOSED; the mangle, IPv6 and exit-hook legs have no native equivalent. Revisit if a pinned vendor release makes its revocation non-restorable."
-  - "Critique r3 PROCEED; nits for the build: (1) the jobs API gives step names, not ids, so pin each drill step's name: in both drill jobs to the string the verdict matches and use names in its fixtures; (2) arm(hooked=False) runs apply() and requires verify() as arm(hooked=True) does before removing the drop-in, and its test pins that; (3) re-run off-eth0 attempts of the probe workflow with rerun_workflow_run, not rerun_failed_jobs, so both drill jobs share the attempt the verdict reads; this overrides VP 6's rerun_failed_jobs parenthetical (critique r4 nit)."
+  - "Critique r3 PROCEED; nits for the build: (1) the jobs API gives step names, not ids, so pin each drill step's name: in both drill jobs to the string the verdict matches and use names in its fixtures; (2) arm(hooked=False) runs apply() and requires verify() as arm(hooked=True) does before unhooking, and its test pins that; (3) re-run off-eth0 attempts of the probe workflow with rerun_workflow_run, not rerun_failed_jobs, so both drill jobs share the attempt the verdict reads; this overrides VP 6's rerun_failed_jobs parenthetical (critique r4 nit)."
   - >-
     Amendment 1 (2026-11-23, from the E5 planner's measurement): #2370 (2aa043e4) added a ports.yaml amendment_log row,
     leaving ports.yaml at 500 effective lines and 50162 bytes, so the approved blocks alone would make 501 and hit this
     plan's STOP. The oracle_gap reflow frees one line without touching the approved words (approved_text verify
     compares whitespace-split words; checked in a scratch tree at 2aa043e4: APPROVED-TEXT OK, ports contract and drift
     clean, parsed oracle_gap equal). The sidecar and its approval run 45168451346 are unchanged.
+  - >-
+    Amendment 2 (2026-11-23, VP 6 stop on #2395, diagnostic run 45206858554, /mnt/project-files/egress-azure-gaps/
+    DIAG-run-45206858554.txt): the agent's protection makes a direct kill of its PID fail with EPERM, so systemctl kill
+    falls back to a cgroup-wide SIGKILL that also killed the ExecStopPost control process in the agent's cgroup, leaving
+    EGRESS_FAIL_CLOSED empty. The hook moves to its own unit bound to agent.service (an OOM cgroup kill would have hit
+    ExecStopPost the same way). The sidecar names no mechanism, so its words and approval run are unchanged. The intent's
+    "ExecStopPost hook" reads as this unit's ExecStop (left as written so the scout fingerprint holds).
   - "Budget: selection_budget breadth_waived (274 tests, 249-950 s of 950 s)."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:b303936a4d881f30a6b4e9f0d241b6dae7407ce047e636f486b11d2e3659137f"}
@@ -578,6 +589,7 @@ gate_rounds:
   - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 4}
   - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 1}
   - {gate: plan-critique, round: 5, verdict: PROCEED, blocking: 0, nits: 3}  # amendment 1 only (lean round, coordinator); N1 relief wording, N2 words-exact note, N3 key line; all three folded
+  - {gate: plan-critique, round: 6, verdict: PROCEED, blocking: 0, nits: 3}  # amendment 2 only (lean round); stale test_obligations line, pinned unit and drop-in names in tests; folded; intent read-as accepted
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -586,6 +598,8 @@ pre_implementation_checklist:
   - All files in scope located and readable
   - Acceptance criteria understood and verifiable
 execution_steps:
+  - "Amendment 2 on #2395: revert the DIAGNOSTIC commit, rebase on main, replace the agent.service drop-in with the
+    fail-closed unit and its empty-ExecStop unhook as the scope rows say, then rerun VP 6."
   - "egress_floor.py: render_rules(), apply() and verify() as its scope row; main() refuses unless os.geteuid()==0."
   - "egress_revert_drill.py, egress_revert_drill_control.py, egress_fail_closed.py and egress_fail_closed_verdict.py as their scope rows; register the five verbs in run.py."
   - "egress_probe.py, egress_self_check.py and egress_control.py: the new cases and expectations."
