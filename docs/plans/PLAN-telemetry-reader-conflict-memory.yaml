@@ -173,12 +173,13 @@ verification_plan:
       --jq '.workflow_runs[] | select(.status == "completed") | .id'); do line=$(gh run view $id -R otl-labs/ontheloop --log 2>/dev/null
       | grep -o -E 'ARRIVAL status=[a-z]+|ARRIVAL_UNREADABLE cause=[A-Za-z]+' | tail -1); echo "$id ${line:-no-arrival-line}"; done
       | tee /tmp/reader-conflict-memory-arrival.txt && ! grep -q 'unreadable\|ARRIVAL_UNREADABLE' /tmp/reader-conflict-memory-arrival.txt
-      && n=$(grep -c 'ARRIVAL status=' /tmp/reader-conflict-memory-arrival.txt) && echo "readable_runs=$n" && test "$n" -ge 31
+      && echo "no_line_runs=$(grep -c 'no-arrival-line' /tmp/reader-conflict-memory-arrival.txt)"
+      && n=$(grep -c -E 'ARRIVAL status=(green|red)' /tmp/reader-conflict-memory-arrival.txt) && echo "readable_runs=$n" && test "$n" -ge 31
     expected: >-
       readable_runs=31 or more, none unreadable, exit 0. Base rate re-measured 2026-11-23 11:30Z with this loop: 3 of 41 completed
       runs in 48 h were unreadable (4 schedule, 37 workflow_run events), so 31 clean runs leave about a 10 percent chance of a
       false pass (ceil(log 0.1 / log(38/41)) = 31). At about 20 runs a day that is about a day and a half after VP 5, so the build
-      reports this step pending and the coordinator runs it at the 48 h re-read; green and red (missing keys) both count as readable.
+      reports this step pending and the coordinator runs it at the 48 h re-read; green and red (missing keys) both count as readable. A skipped run (no commit in the judged range) never reads the reader and does not count, so the 3-of-41 rate over all completed runs understates the rate over reading runs and 31 is conservative. no_line_runs (a job that died before its ARRIVAL line) is printed as evidence, not counted; open each one and treat a reader cause in its log as unreadable.
     fix_if: An unreadable status now names its HTTP status, error_type and request_id; follow that cause and stop with an RCA.
     hermetic: false
   - step: 8
@@ -236,8 +237,9 @@ verification_plan:
     action: rec-5491 closed by the merge's Resolves trailer
     command: >-
       OTL_OPS_VERBS_TRANSPORT=execute_api bin/venv-python -c "from src.common.ducklake_reader_client import make_reader, fetch_recs_by_ids;
-      rows, missing = fetch_recs_by_ids(make_reader(profile='agent_platform'), ['rec-5491']); print(rows[0]['status'] if rows else missing)"
-    expected: closed
+      rows, missing = fetch_recs_by_ids(make_reader(profile='agent_platform'), ['rec-5491']); print(rows[0]['status'] if rows else missing);
+      raise SystemExit(0 if rows and rows[0]['status'] == 'closed' else 1)"
+    expected: closed, exit 0
     fix_if: open means the squash body lacks the Resolves trailer for rec-5491 or its acceptance failed in the closure job.
     hermetic: false
 test_obligations:
@@ -267,6 +269,7 @@ context:
   - "rec-5490 (7-day tool_use_rollup OOM) is NOT shown fixed by this change: the same probe corpus still runs out of memory in tool_use_rollup's own body after the rewrite. It stays its own rec, and VP 8 counts its out-of-memory events as evidence only."
   - "read_version: every compose() verb's stamp moves once; the monitor and golden-gate smokes already treat a stamp mismatch as deploy skew until the reader deploy lands."
   - "Data-model: no table, column or stored field is added."
+  - "telemetry-arrival.yml header (Counts and commit shas only in the log, Decision 101): left unedited by choice. The four new reader fields are not confidential, and adding the workflow to scope for a comment-only line would change the approved scope; the PR body records the wider log content, and the next edit of that workflow updates the line."
   - "Shared file: src/common/ducklake_event_read_sql.py (474 of 500 SLOC; this edit adds about 3) is also scoped by unbuilt plans billing-shape-local, merge-annotate-contract-reader, telemetry-claude-p-capture-adapter, telemetry-planning-cost-reads and telemetry-repeated-tool-calls; only conflict_select changes here, so whichever builds second rebases."
   - "rec-5491 acceptance was a whole-file pytest path (out of the trailer census grammar, so the Resolves trailer could not close it); re-keyed at plan time 2026-11-23 through update_rec to the ::test_unreadable_cause_names_status_and_error_type node, read back."
   - "Related-work check (red_overlap, 2026-11-23 on fd930248): blocked; rec-5491 clear (repairs_this_red); rec-5497 overlap on selector-selected test paths only (no scope file is shared). Deferral rationale for rec-5497: it is the sibling Critical red (full-tier xdist worker crash on the golden-gates tree test, cause low-confidence) being repaired in another thread of this workspace; this plan repairs the other open red and edits none of its files. The build waits for rec-5497's repair before its full-tier handoff and deploy."
@@ -280,6 +283,7 @@ gate_rounds:
   - {gate: plan-critique, round: 5, verdict: REVISE, blocking: 1, nits: 5}
   - {gate: plan-critique, round: 6, verdict: REVISE, blocking: 1, nits: 4}
   - {gate: plan-critique, round: 7, verdict: REVISE, blocking: 1, nits: 4}
+  - {gate: plan-critique, round: 8, verdict: PROCEED, blocking: 0, nits: 3}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
