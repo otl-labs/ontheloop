@@ -62,21 +62,3 @@ def test_agent_active_reads_systemctl(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(FC.subprocess, "run", boom)
     assert FC.agent_active() is False
-
-
-def test_diag_lines_are_printed_before_the_verdict(
-    monkeypatch: pytest.MonkeyPatch, tmp_path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    diag = tmp_path / "diag.txt"
-    diag.write_text("a\nb\n", encoding="utf-8")
-    monkeypatch.setattr(FC, "DIAG_PATH", str(diag))
-    _setup(monkeypatch, [True, False], {"listed"})
-    FC.main([])
-    out = capsys.readouterr().out
-    assert "EGRESS-DRILL-DIAG a\nEGRESS-DRILL-DIAG b\n" in out
-
-
-def test_diag_absent_is_reported(monkeypatch: pytest.MonkeyPatch, tmp_path, capsys: pytest.CaptureFixture[str]) -> None:
-    monkeypatch.setattr(FC, "DIAG_PATH", str(tmp_path / "none.txt"))
-    FC.print_diag()
-    assert "EGRESS-DRILL-DIAG absent" in capsys.readouterr().out

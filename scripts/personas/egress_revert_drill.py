@@ -19,12 +19,6 @@ REVERT = (
     f"printf '[Resolve]\\nDNS={DRILL_RESOLVER}\\nDomains=~.\\n' > /etc/systemd/resolved.conf; "
     "systemctl restart systemd-resolved; systemctl daemon-reload; systemctl restart docker; "
     "systemctl kill -s KILL agent.service"
-    "; sleep 3; { date -u; "
-    "systemctl show agent.service -p ActiveState -p SubState -p Result -p ExecStopPost -p ExecMainStatus; "
-    "journalctl -u agent.service -n 20 --no-pager -o short-precise; "
-    "journalctl -u egress-revert-drill -n 20 --no-pager -o short-precise; "
-    "iptables -w -t mangle -S EGRESS_FAIL_CLOSED; iptables -w -t mangle -S OUTPUT; "
-    "} > /run/egress-drill-diag.txt 2>&1; chmod 644 /run/egress-drill-diag.txt"
 )
 
 

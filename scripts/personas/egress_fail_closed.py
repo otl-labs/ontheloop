@@ -7,7 +7,6 @@ is reached and the step fails visibly. Stdlib only.
 
 from __future__ import annotations
 
-import os
 import subprocess
 import time
 from collections.abc import Sequence
@@ -17,8 +16,6 @@ from scripts.personas import egress_probe
 POLL_SECONDS = 180
 SETTLE_SECONDS = 2
 CASE_IDS = ("listed", "raw_ip_443", "docker_socket")
-DIAG_PATH = "/run/egress-drill-diag.txt"
-DIAG_WAIT_SECONDS = 15
 
 
 def agent_active() -> bool:
@@ -35,19 +32,6 @@ def agent_active() -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     return done.stdout.strip() == "active"
-
-
-def print_diag() -> None:
-    for _ in range(DIAG_WAIT_SECONDS):
-        if os.path.exists(DIAG_PATH):
-            break
-        time.sleep(1)
-    else:
-        print("EGRESS-DRILL-DIAG absent")
-        return
-    with open(DIAG_PATH, encoding="utf-8", errors="replace") as handle:
-        for line in handle.read().splitlines():
-            print(f"EGRESS-DRILL-DIAG {line}")
 
 
 def main(argv: Sequence[str]) -> int:
@@ -68,6 +52,5 @@ def main(argv: Sequence[str]) -> int:
         print(f"EGRESS-FAIL-CLOSED case={case_id} got={'reached' if got else 'refused'}")
         if got:
             reached.append(case_id)
-    print_diag()
     print("EGRESS-FAIL-CLOSED PASS" if not reached else "EGRESS-FAIL-CLOSED FAIL " + " ".join(reached))
     return 0 if not reached else 1
