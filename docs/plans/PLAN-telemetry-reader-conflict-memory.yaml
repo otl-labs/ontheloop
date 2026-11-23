@@ -66,7 +66,8 @@ scope:
       ^[A-Za-z0-9_.-]{1,64}$) so a failure traces to its reader log line. The Unreadable docstring ("the class name alone is
       reported"), _walk's noqa comment and the module docstring's "Output is counts and commit shas only" are updated to
       match. A Lambda request_id is a UUID, which scripts/ci_rca/fingerprint.py normalize_message_head scrubs to <uuid>, so the
-      ci-rca fingerprint of the junit message stays stable per error class. rec-5491's preventive note also names the commits
+      ci-rca fingerprint of the junit message stays stable per error class. The PR body notes that the telemetry-arrival.yml
+      header ("Counts and commit shas only in the log") now also covers these four reader fields, none confidential (Decision 101). rec-5491's preventive note also names the commits
       path (_judge's commits() failure, :228-229): it reads git and GitHub, never the reader, so it carries no reader status and
       keeps the bare class name.
     new_imports: []
@@ -93,12 +94,12 @@ verification_plan:
   - step: 1
     phase: pre-deploy
     action: Memory regression on the reader's own limits
-    command: bin/venv-python -m pytest tests/common/test_ducklake_event_read_memory.py -q
-    expected: All nodes pass; before the change the node fails with an OutOfMemoryException.
+    command: bin/venv-python -m pytest tests/common/test_ducklake_event_read_memory.py::test_root_sessions_week_fits_the_reader_memory -q
+    expected: The node passes; before the change it fails with an OutOfMemoryException.
     fix_if: An out-of-memory error means a heavy operator is left in the composed root-sessions SQL; find it with EXPLAIN ANALYZE on the same corpus.
     hermetic: false
-    graduation: waive
-    graduation_waiver_reason: The target needs duckdb, which the fast tier does not install, so pr-validate collects no test; the full tier runs it as an ordinary test.
+    graduation: graduate
+    graduation_check_id: telemetry-conflict-report-fits-reader-memory
   - step: 2
     phase: pre-deploy
     action: Decision 207 conflict and dedupe semantics unchanged
@@ -122,7 +123,7 @@ verification_plan:
     phase: pre-deploy
     action: Full tier, then HEAD attestation, after the build commit and rebase and before the push (handoff_policy); start it from the top-level session, backgrounded with a 2 h limit, and read only the attestation.
     command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
-    expected: The full tier exits 0 and the validation result attests the current HEAD's tree. A timeout or a failure of rec-5497's golden-gates node is BLOCKED (handoff_policy timeout_disposition blocked); the build waits for rec-5497's fix, rebases and reruns; never waived here.
+    expected: The full tier exits 0 and the validation result attests the current HEAD's tree. A timeout or a failure of rec-5497's golden-gates node is BLOCKED (handoff_policy timeout_disposition blocked); the build waits for rec-5497's fix, rebases and reruns; never waived here. A full tier that passes is not held for rec-5497.
     fix_if: Any failure; fix and rerun the full tier from the start.
     hermetic: false
     graduation: not-applicable
@@ -137,7 +138,9 @@ verification_plan:
     expected: >-
       Prints True and exits 0 after the deploy-ducklake-lambdas run for a main commit containing the merge has deployed the
       telemetry reader; the marker file holds the first time the new SQL was seen live (VP 7 and VP 8 read from it).
-    fix_if: False means the deploy has not run or skipped the reader; read that run's job conclusions and deployed commit.
+    fix_if: >-
+      False means the deploy has not run or skipped the reader; read that run's job conclusions and deployed commit. Run this
+      from a checkout of the deployed commit (git worktree), since a later merge to the shared SQL file moves main's stamp.
     hermetic: false
   - step: 6
     phase: post-deploy
@@ -163,20 +166,22 @@ verification_plan:
       select(.status == "completed") | .id'); do line=$(gh run view $id -R otl-labs/ontheloop --log 2>/dev/null | grep -o -E
       'ARRIVAL status=[a-z]+|ARRIVAL_UNREADABLE cause=[A-Za-z]+' | tail -1); echo "$id ${line:-no-arrival-line}"; done | tee
       /tmp/reader-conflict-memory-arrival.txt && grep -c 'ARRIVAL status=' /tmp/reader-conflict-memory-arrival.txt && ! grep -q
-      'unreadable\|ARRIVAL_UNREADABLE' /tmp/reader-conflict-memory-arrival.txt
+      'unreadable\|ARRIVAL_UNREADABLE' /tmp/reader-conflict-memory-arrival.txt && test "$(grep -c 'ARRIVAL status=' /tmp/reader-conflict-memory-arrival.txt)" -ge 12
     expected: >-
-      At least one completed run with an ARRIVAL status line, none unreadable, exit 0. Run at least 6 hours after VP 5 so the
-      schedule has run; green and red (missing keys) are both acceptable here.
+      At least 12 completed runs with an ARRIVAL status line, none unreadable, exit 0. Before the fix about 2 of 11 runs in 48 h
+      were unreadable (critique round 3, measured with this loop), so 12 clean runs leave about a 9 percent chance of a false
+      pass. That takes about two to three days of schedule after VP 5, so the build reports this step pending and the
+      coordinator runs it with VP 8's 48 h re-read; green and red (missing keys) both count as readable here.
     fix_if: An unreadable status now names its HTTP status and error_type; follow that cause.
     hermetic: false
   - step: 8
     phase: post-deploy
     action: No reader out-of-memory errors since the deploy
     command: >-
-      aws logs filter-log-events --profile agent_platform --region "$(cat config/aws-region)" --log-group-name
+      set -o pipefail; aws logs filter-log-events --profile agent_platform --region "$(cat config/aws-region)" --log-group-name
       /aws/lambda/agent-platform-ducklake-telemetry-reader --start-time "$(cat /tmp/reader-conflict-memory-live-ms)" --filter-pattern
-      '"OutOfMemoryException"' --query 'length(events)' --output text | awk '{s+=$1} END {print s+0}'
-    expected: One number, 0, at handoff (the awk sums the per-page counts); the coordinator re-reads it 48 hours after the deploy before the red is reported closed.
+      '"OutOfMemoryException"' --query 'length(events)' --output text | awk '{s+=$1} END {print s+0; exit (s>0)}'
+    expected: One number, 0, at handoff (the awk sums the per-page counts) and exit 0; a failed aws call or any event exits non-zero; the coordinator re-reads it 48 hours after the deploy before the red is reported closed.
     fix_if: Any event means another verb still runs out of memory; file a rec naming its request id and time, never the account id.
     hermetic: false
   - step: 9
@@ -208,9 +213,9 @@ verification_plan:
       OTL_OPS_VERBS_TRANSPORT=execute_api bin/venv-python -c "import datetime as d; from scripts.telemetry_capture.read_route import
       content_reader, make_routed_reader; from src.common import ducklake_content_read_verbs as cv; c=content_reader('agent_platform');
       live=c.describe()['session_transcript_masked']['read_version']; want=cv.content_read_version(cv.CONTENT_READS['session_transcript_masked']);
-      t=d.datetime.now(d.UTC).date(); sid=make_routed_reader(profile='agent_platform').named('telemetry_root_sessions',
-      day_from=(t-d.timedelta(days=1)).isoformat(), day_to=t.isoformat())[-1]['session_id'];
-      env=c.named('session_transcript_masked', session_id=sid, offset=0, max_rows=5)[0]; print(live == want, len(env['rows']));
+      t=d.datetime.now(d.UTC).date(); roots=make_routed_reader(profile='agent_platform').named('telemetry_root_sessions',
+      day_from=(t-d.timedelta(days=1)).isoformat(), day_to=t.isoformat()); assert roots, 'no root session in 2 days';
+      sid=roots[-1]['session_id']; env=c.named('session_transcript_masked', session_id=sid, offset=0, max_rows=5)[0]; print(live == want, len(env['rows']));
       raise SystemExit(0 if live == want else 1)"
     expected: Prints True and a row count (0 to 5), exit 0. Measured at plan time on the current deploy (True, 5).
     fix_if: False means the approved deploy predates the build (VP 9); an exception from the masked read is the content channel's own recovery.
@@ -218,7 +223,9 @@ verification_plan:
   - step: 11
     phase: post-deploy
     action: rec-5491 closed by the merge's Resolves trailer
-    command: OTL_OPS_VERBS_TRANSPORT=execute_api bin/venv-python -c "from scripts.ops_data_portal import _fetch_rec_from_reader as f; print(f('rec-5491', profile='agent_platform')['status'])"
+    command: >-
+      OTL_OPS_VERBS_TRANSPORT=execute_api bin/venv-python -c "from src.common.ducklake_reader_client import make_reader, fetch_recs_by_ids;
+      rows, missing = fetch_recs_by_ids(make_reader(profile='agent_platform'), ['rec-5491']); print(rows[0]['status'] if rows else missing)"
     expected: closed
     fix_if: open means the squash body lacks the Resolves trailer for rec-5491 or its acceptance failed in the closure job.
     hermetic: false
@@ -243,7 +250,7 @@ context:
   - "Decision-scout verdict NO_FLAGS (228 of 228 triaged); CITE: dec:207, dec:226, dec:249, dec:254, dec:125, dec:79, dec:236. Serves NS.6 (a measured failure fixed with red-before/green-after and live proof), within NS.3 (no spend raise)."
   - "Deploy order (Decisions 249 cl.3, 254): code deploys ship only the newest green main commit, so VP 5-11 wait until main is green again; the sibling red rec-5497 (full-tier xdist worker crash on the golden-gates tree test, cause low-confidence; another thread) must clear first or with this merge."
   - "Content reader (Decision 272): it packages this SQL file but it is outside its protective set, so its session_transcript_masked read_version differs from main until its next approved deploy; expected, not drift."
-  - "Evidence (2026-11-23): every reader OutOfMemoryException since 2026-11-21 reads 'failed to offload data block ... (286.0 MiB/286.1 MiB used)', the max_temp_directory_size cap; Lambda memory was not exhausted (REPORT max 902-970 of 1024 MB). Settings at src/common/ducklake_event_reads.py:32-34."
+  - "Evidence (2026-11-23): every reader OutOfMemoryException since 2026-11-21 reads 'failed to offload data block ... (286.0 MiB/286.1 MiB used)'; DuckDB 1.5.4 names max_temp_directory_size in that message (reproduced locally), so memory was full and spill then filled; Lambda memory was not exhausted (REPORT max 902-970 of 1024 MB). Settings at src/common/ducklake_event_reads.py:32-34."
   - "Plan-time probe (scratch, synthetic Parquet corpus, reader limits): current root-sessions SQL fails at 300,000 observations in 0.3 s; duplicate-first conflicts pass in 0.7 s and at 1.5 million rows in 4.6 s with identical rows. Production totals: 831,247 observations and 537,962 transcripts in all."
   - "Inferred, not verified: a failure clusters on one warm container (four clusters, each on one log stream), so container state decides which 7-day read tips over; the rewrite removes the heavy operator either way."
   - "rec-5490 (7-day tool_use_rollup OOM) is NOT shown fixed by this change: the same probe corpus still runs out of memory in tool_use_rollup's own body after the rewrite. It stays its own rec; VP 6 records the live result as evidence."
@@ -256,6 +263,7 @@ gate_rounds:
   - {gate: decision-scout, round: 1, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:105401a395788b9cb240d8fe6f4d7e8da1ce9c05bf5e793ebb0aec745e575d45'}
   - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 5, nits: 6}
   - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 10}
+  - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 3, nits: 9}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -263,14 +271,14 @@ pre_implementation_checklist:
   - All files in scope located and readable
   - Acceptance criteria understood and verifiable
 execution_steps:
-  - "Run bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-telemetry-reader-conflict-memory.yaml; rec-5491 must read repairs_this_red. If rec-5497 still blocks, build and verify locally but hold the full tier, push and PR until rec-5497's repair merges (context deferral)."
+  - "Run bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-telemetry-reader-conflict-memory.yaml; rec-5491 must read repairs_this_red. If rec-5497 still blocks, carry on (this plan's own deferral is in context); push and open the PR when the local full tier passes, and hold only if the full tier fails on rec-5497's node. Deploys wait for a green main regardless (Decision 249 cl.3)."
   - Write tests/common/test_ducklake_event_read_memory.py and confirm it fails on the current SQL with OutOfMemoryException.
   - "Before editing the SQL, time rec-5497's node: bin/venv-python -m pytest 'tests/ducklake_neon_smoke_test/test_lambda_telemetry_golden_gates.py::test_tree_rows_must_match_the_sent_set_with_one_root' -q --durations=3 (about 20 s locally at plan time)."
   - "Modify conflict_select in src/common/ducklake_event_read_sql.py to duplicate-first; run VP 1 and 2, then time the same node again. If it is more than 10 percent slower, stop and send a plan-defect report (the rewrite adds one semi-join per table to every compose() verb)."
   - Write tests/telemetry_verify/test_session_presence_reader_status.py, then add reader_cause to scripts/telemetry_verify/session_presence.py; run VP 3.
-  - "Graduate VP 3 into config/agent/verification_registry/entries/ as arrival-unreadable-names-reader-status."
+  - "Graduate VP 1 (telemetry-conflict-report-fits-reader-memory, guard_target src/common/ducklake_event_read_sql.py, guard_symbol conflict_select; precedent telemetry-tool-use-repeat-counts) and VP 3 (arrival-unreadable-names-reader-status) into config/agent/verification_registry/entries/."
   - "CLOSURE (implement skill Commit Flows; docs/contracts/git-ops.yaml): set implementation_declared: true; commit with the trailer 'Resolves: rec-5491'; git fetch origin main && git rebase origin/main; VP 1-3; VP 4 (full tier backgrounded from the top-level session, then --verify-head; a timeout is BLOCKED, no push); push; open the PR; subscribe; code review; merge on review PROCEED + green CI under standing authorisation with merge_pull_request carrying an explicit commit_message with the Resolves trailer and expectedHeadSha."
   - "Closure evidence, recorded as four SEPARATE facts (implement skill Commit Flows): GitHub readiness state (scripts.session.github_readiness); parent validator evidence (VP 4 plus --verify-head for the pushed HEAD); structured postflight evidence (scripts.session.postflight --evidence); the real outcome -- push, build PR, CI green by event-driven wake, merge SHA."
-  - Post-deploy VP 5-8 and VP 11 once the reader deploy lands, VP 9-10 after the operator's next approved content deploy (reported pending until then); on unrecoverable V3 failure stop and RCA (Decision 55).
-  - 'Report: what was implemented, verification results, merge SHA, each closure fact separately, VP 9-10 pending or done.'
+  - Post-deploy VP 5, 6, 8 and 11 once the reader deploy lands; VP 7 and the 48 h VP 8 re-read go to the coordinator as pending; VP 9-10 after the operator's next approved content deploy (reported pending until then); on unrecoverable V3 failure stop and RCA (Decision 55).
+  - 'Report: what was implemented, verification results, merge SHA, each closure fact separately, VP 7 and VP 9-10 pending or done.'
 rollback: Revert the squash commit; the deploy channel redeploys the previous reader SQL.
