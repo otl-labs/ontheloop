@@ -46,8 +46,10 @@ class TestDecisionEntry:
         assert "amends: [72, 73, 217]" in entry
 
     def test_amended_decisions_carry_the_annotation(self) -> None:
-        for number in (72, 73, 217):
+        for number in (72, 217):
             assert re.search(r"^> \*\*Amended by Decision 226 \(\d{4}-\d{2}-\d{2}\):\*\*", _entry(number), re.M), number
+        # Decision 73 compacted (rec-5445): its note retired with its body, and its stub names Decision 226 instead.
+        assert "Decision 226" in _entry(73)
 
     def test_slo_hours_match_the_contract(self) -> None:
         entry = _entry(226)

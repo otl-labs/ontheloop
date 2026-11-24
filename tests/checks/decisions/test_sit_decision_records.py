@@ -20,6 +20,9 @@ _SIT_HEADING = re.compile(r"^## Decision (\d+): SIT is stood up now", re.MULTILI
 _RDS_HEADING = re.compile(r"^## Decision (\d+): The DuckLake catalog moves to RDS", re.MULTILINE)
 _SIT_NOTED = (24, 73, 77, 126, 144, 202, 237, 242)
 _RDS_NOTED = (107, 214)
+# Compacted by the Decision 73 chain consolidation (rec-5445): its note retired with its body, and its stub names
+# the SIT Decision instead (docs/decision-migration/consolidations/consolidate-decision-73-chain.yaml).
+_COMPACTED = frozenset({73})
 
 
 def _decisions_text() -> str:
@@ -80,7 +83,9 @@ def test_sit_and_rds_decisions_and_notes() -> None:
         assert envelope["amends"] == amends and envelope["kind"]["value"] == kind
 
     expected = {214: f"Amended by Decision {rds} (", 107: f"Amended by Decision {rds} (", 84: f"Decision {rds} moves"}
-    expected |= dict.fromkeys(_SIT_NOTED, f"Amended by Decision {sit} (")
+    expected |= dict.fromkeys(set(_SIT_NOTED) - _COMPACTED, f"Amended by Decision {sit} (")
+    for number in _COMPACTED:
+        assert f"Decision {sit}" in decision_entry(text, number), (number, "compacted stub must name the SIT Decision")
     expected[249] = f"Decision {sit} fires"
     for number, phrase in expected.items():
         note = _noting_paragraph(decision_entry(text, number), phrase)
