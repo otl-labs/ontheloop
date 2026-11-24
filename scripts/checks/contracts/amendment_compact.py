@@ -10,6 +10,7 @@ whole file on any failure. Judging hand-made compactions against a base ref belo
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from collections import Counter
@@ -284,6 +285,7 @@ class _Result:
     failed: bool = False
     skipped: bool = False
     remaining: int = 0
+    detail: list[str] = field(default_factory=list)
 
 
 def _one(path: Path, cfg: dict[str, Any], write: bool, rows: int | None) -> _Result:
@@ -302,6 +304,9 @@ def _one(path: Path, cfg: dict[str, Any], write: bool, rows: int | None) -> _Res
     base = f"{path}: compactable={len(plan.selected)} refused={refused}"
     result = _Result(base, files=1, compactable=len(plan.selected), refused=sum(reasons.values()))
     result.remaining = len(plan.selected)
+    for i, reason in sorted(plan.refused.items()):
+        row = plan.log[i]
+        result.detail.append(f"  refused row {i} date={row.get('date') if isinstance(row, dict) else None}: {reason}")
     if not chosen:
         return result
     summaries = {i: str(derive_terse(plan.log[i], cfg)) for i in chosen}
@@ -315,7 +320,9 @@ def _one(path: Path, cfg: dict[str, Any], write: bool, rows: int | None) -> _Res
     result.bytes_freed = len(text.encode("utf-8")) - len(new.encode("utf-8"))
     result.line = f"{base} lines_freed={result.lines_freed} bytes_freed={result.bytes_freed}"
     if write:
-        path.write_bytes(new.encode("utf-8"))
+        scratch = path.with_name(path.name + ".compact.tmp")
+        scratch.write_bytes(new.encode("utf-8"))
+        os.replace(scratch, path)
         result.line += " written"
         result.remaining = len(plan.selected) - len(chosen)
     return result
@@ -331,6 +338,9 @@ def run(paths: list[Path], cfg: dict[str, Any] | None, write: bool, check: bool,
     for path in paths:
         result = _one(path, cfg, write, rows)
         print(result.line)
+        if check:
+            for detail in result.detail:
+                print(detail)
         skipped += result.skipped
         remaining += result.remaining
         for name in ("files", "compactable", "refused", "lines_freed", "bytes_freed"):

@@ -159,7 +159,9 @@ def test_check_exits_1_while_compactable_rows_remain(tmp_path: Path, capsys: pyt
     )
     capsys.readouterr()
     assert run("--check", str(only_refused)) == 0
-    assert "extra_keys=1" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "extra_keys=1" in out and "  refused row 2 date=2026-11-01: extra_keys" in out
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_unreadable_and_malformed_inputs(
