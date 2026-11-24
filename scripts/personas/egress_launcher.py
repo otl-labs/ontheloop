@@ -225,7 +225,13 @@ def port_in_use(port: int) -> bool:
 
 def name_in_use() -> bool:
     done = subprocess.run(
-        [DOCKER, "ps", "-a", "-q", "--filter", f"name=^/{CONTAINER}$"], capture_output=True, text=True, check=False, timeout=30
+        [DOCKER, "ps", "-a", "-q", "--filter", f"name=^/{CONTAINER}$"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        timeout=30,
     )
     return bool(done.stdout.strip())
 

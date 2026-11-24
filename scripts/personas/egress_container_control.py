@@ -59,7 +59,15 @@ def judge(got: dict[str, str]) -> tuple[list[str], list[str]]:
 def main(argv: Sequence[str] = ()) -> int:
     image, digest = floor.read_image_ref(ROOT)
     ref = f"{image}@{digest}"
-    pulled = subprocess.run(["docker", "pull", ref], capture_output=True, text=True, timeout=PULL_TIMEOUT, check=False)
+    pulled = subprocess.run(
+        ["docker", "pull", ref],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=PULL_TIMEOUT,
+        check=False,
+    )
     if pulled.returncode != 0:
         print("CONTAINER-CONTROL FAIL pull")
         return 1
