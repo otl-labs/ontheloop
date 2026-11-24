@@ -39,7 +39,7 @@ scope:
       identity") and says: the workflow shell, not the persona process, reads the inference keys; on a container host
       the shell pipes them to the root launcher (scripts/personas/egress_launcher.py), which hands them to its
       key-adding proxy, so the persona process gets only the proxy's address and a placeholder, and every compute host
-      must keep the key out of the persona process (open hosts: Fargate rec-5555, local_container rec-5556). SA-15 keeps its local_container flag list and adds one clause naming the floor variant's assumptions (socket drop-in, internal-bridge gateway, LiveRestore false, GHCR blob host) and that the
+      must keep the key out of the persona process (open hosts: Fargate rec-5555, local_container rec-5556). SA-15 keeps its local_container flag list and adds one clause naming the floor variant's assumptions (socket drop-in, internal-bridge gateway, the teardown unit bound to agent stop, LiveRestore observed and not gated, GHCR blob host) and that the
       launcher's run adds --pids-limit, --memory and --dns on an internal network (scripts/personas/egress_launcher.py).
       One terse amendment_log row naming this plan, PC-12 and SA-15, inserted above the 2026-11-23 local-host-root row.
       Relief (Decision 275 cl.3, never a raise), measured against main after the PLAN-persona-verdict-app-post build
@@ -75,12 +75,16 @@ scope:
       their sha256 to a root-owned manifest the launcher checks; (8) writes /etc/sudoers.d/zz-egress-floor with
       runner ALL=(ALL) !ALL first and then exactly two allow lines (runner ALL=(root) NOPASSWD:
       /usr/bin/python3 -I -S /usr/local/lib/persona-egress/egress_launcher.py probe, and the same with run), no wildcard,
-      no SETENV, env_reset kept, checked with visudo -cf; verify() reads every piece back as root (rules equal the
+      no SETENV, env_reset kept, checked with visudo -cf; (9) Amendment 2: installs and starts persona-egress-teardown.service
+      (BindsTo=agent.service, After=agent.service, RemainAfterExit) whose ExecStop, run when the filter agent stops and
+      independent of the launcher and of dockerd, inserts a mangle DROP for -i br-persona at the head of EGRESS_BRIDGE_IN
+      (severing the container's one path to the proxy), kills every process of persona-egress-proxy, and then, ignoring
+      failure, docker kills the fixed container name; verify() reads every piece back as root (rules equal the
       rendered rules, socket stat root:root 0600 for docker.sock (the drop-in sets it), /run/containerd/containerd.sock uid 0, gid 0 and no other-bits (containerd creates it 0660 itself) with no non-root member of gid 0, the drop-in, the network's internal flag, subnet, gateway, bridge name
-      and no IPv6, the pulled digest, the install hashes, the sudoers text, docker info LiveRestoreEnabled false, docker server version at
+      and no IPv6, the pulled digest, the install hashes, the sudoers text, the teardown unit (ActiveState active, BindsTo agent.service and its ExecStop text, read by systemctl show) and egress-fail-closed.service ActiveState active, docker server version at
       least 26 (CVE-2024-29018 internal-network DNS), and every ancestor of /usr/local/lib/persona-egress and of the
       resolved /usr/bin/python3, and of the -I -S sys.path directories (the stdlib and lib-dynload), root-owned with no group or other write) and
-      prints docker version and the iptables backend; EGRESS-FLOOR PASS else FAIL and exit 1. Refuses unless uid 0.
+      prints docker version, the iptables backend and docker info LiveRestoreEnabled as an observation, never a gate (Amendment 2); EGRESS-FLOOR PASS else FAIL and exit 1. Refuses unless uid 0.
       Stdlib only; rules, paths, ports, names and the subnet are module constants. Every input is read from the job's
       checkout (main's in a verdict job) before any step the runner user controls.
   - file: scripts/personas/egress_launcher.py
@@ -103,7 +107,7 @@ scope:
       the in dir with a fixed entrypoint and starts a decoy listener on 172.31.250.1:18444; run mode runs the image's
       own entrypoint with the persona contract. The container's stdout and stderr are relayed to the launcher's stderr, so the per-case lines reach the job log. Reads results with O_NOFOLLOW|O_NONBLOCK, then fstat for a regular file, size-capped; prints one
       JSON result to stdout; probe mode exits 0 only when the container exited 0 and its result carries CONTAINER-PROBE PASS, else 1 (a missing or malformed result included); on SIGTERM or SIGINT kills the container by its fixed name and the proxy, then removes its
-      directories; its own bound (600 s for run, 120 s for probe) kills the container by its fixed name and the proxy when it fires and exits 1.
+      directories; its own bound (600 s for run, 120 s for probe) kills the container by its fixed name and the proxy when it fires and exits 1. Before it returns on any path it reads back that no container of the fixed name exists and the proxy pid is gone, and exits 1 with LAUNCHER-TEARDOWN FAIL otherwise (Amendment 2).
   - file: scripts/personas/egress_proxy.py
     action: Create
     purpose: >-
@@ -215,11 +219,12 @@ scope:
       network, the user and the temporary root.
   - file: tests/personas/test_egress_floor_container.py
     action: Create
-    purpose: Rendered rules and their order (v4 and v6), drop-in text, sudoers text with -I -S and visudo call, install manifest, snapshot parity with the three YAML files, pull timeout, verify() read-backs (ancestor ownership and mode refused when group or other writable, Docker version below 26 refused, containerd.sock 0660 root:root accepted and other-bits or a non-root gid-0 member refused), refusal when not root.
+    purpose: Rendered rules and their order (v4 and v6), drop-in text, sudoers text with -I -S and visudo call, install manifest, snapshot parity with the three YAML files, pull timeout, verify() read-backs (ancestor ownership and mode refused when group or other writable, Docker version below 26 refused, containerd.sock 0660 root:root accepted and other-bits or a non-root gid-0 member refused, the teardown unit's rendered text and its ExecStop order, verify refused when the teardown or fail-closed unit is not active, LiveRestoreEnabled true or false never changing the verdict), refusal when not root.
   - file: tests/personas/test_egress_launcher.py
     action: Create
     purpose: >-
-      Hash refusal, mode refusal, each refused stdin form of the launcher row (one case each, invalid JSON, non-UTF-8 and non-string fields included), the proxy started with -I -S, probe exit 1 on a non-zero container exit, a FAIL line or a missing result, a held lock refused, events directory owner and mode, a FIFO results path refused, the 4 MiB bound, persona and provider validation, no caller-chosen value
+      Hash refusal, mode refusal, LAUNCHER-TEARDOWN FAIL and exit 1 when the container of the fixed name or the proxy pid
+      survives teardown (one case each, on the normal, signal and timeout paths, Amendment 2), each refused stdin form of the launcher row (one case each, invalid JSON, non-UTF-8 and non-string fields included), the proxy started with -I -S, probe exit 1 on a non-zero container exit, a FAIL line or a missing result, a held lock refused, events directory owner and mode, a FIFO results path refused, the 4 MiB bound, persona and provider validation, no caller-chosen value
       reaching argv, key only on the proxy's stdin, O_NOFOLLOW results read, signal cleanup, argv parity with run_argv's
       hardening flags, its mount paths and its run-mode entrypoint tail (--contract /app/docs/contracts/personas/<p>.yaml
       --input /run/persona/in/input.json --events /run/persona/events/events.json).
@@ -437,12 +442,12 @@ test_obligations:
     test_selector: tests/checks/contracts/test_ports_verdict_chain_records.py
     red_green_expectation: red before (new tokens absent), green after
   - source: scripts/personas/egress_floor_container.py
-    behavior: rendered rules and order, drop-in, sudoers text, install manifest, root-side verify, refusal when not root
+    behavior: rendered rules and order, drop-in, sudoers text, install manifest, teardown unit text and ExecStop order, root-side verify (refused when the teardown or fail-closed unit is inactive; LiveRestore never changes the verdict), refusal when not root
     verification_step: 1
     test_selector: tests/personas/test_egress_floor_container.py
     red_green_expectation: red before (module absent), green after
   - source: scripts/personas/egress_launcher.py
-    behavior: no caller-chosen value reaches argv, hash and mode refusal, key only on the proxy's stdin, safe results read, cleanup
+    behavior: no caller-chosen value reaches argv, hash and mode refusal, key only on the proxy's stdin, safe results read, cleanup with LAUNCHER-TEARDOWN FAIL when the container or proxy survives
     verification_step: 1
     test_selector: tests/personas/test_egress_launcher.py
     red_green_expectation: red before (module absent), green after
@@ -524,7 +529,7 @@ context:
   - "Order: the build starts after the PLAN-persona-verdict-app-post build (rec-5486) merges; both edit config/persona_verdict_egress.yaml, the egress checks and ports.yaml. rec-5550 waits for this plan's VP 8 run on main."
   - "Vendor facts (PLAN-persona-verdict-egress-floor context): the filter's and the floor's rules are OUTPUT; bridge traffic is FORWARD; the agent's revert flushes filter OUTPUT and DOCKER-USER, restores its daemon.json backup and restarts Docker, and touches no mangle rule; hence the socket lock is a unit drop-in and the bridge chains are mangle."
   - "Twin facts [verified 2026-11-23, CC-web Docker 29.9.3]: a container on an --internal network named br-persona (172.31.250.0/24) reached a host listener on 172.31.250.1:18080 with a mangle INPUT allow, a second port 18081 was refused by the mangle DROP, a raw IP was refused, and no name resolved. The runner's Docker version is UNPROVEN until VP 7."
-  - "UNPROVEN until VP 7: GHCR's blob host is pkg-containers.githubusercontent.com; the runner user is in the docker group (moot for the filtered job under the drop-in; egress-container-control relies on it); the proxy's replies need the floor's one RETURN; the hosted image's Docker gives an internal bridge a gateway address; docker info LiveRestoreEnabled is false; /usr/local/lib and its ancestors are root-owned with no group or other write; containerd's socket is 0660 root:root."
+  - "UNPROVEN until VP 7: GHCR's blob host is pkg-containers.githubusercontent.com; the runner user is in the docker group (moot for the filtered job under the drop-in; egress-container-control relies on it); the proxy's replies need the floor's one RETURN; the hosted image's Docker gives an internal bridge a gateway address; /usr/local/lib and its ancestors are root-owned with no group or other write; containerd's socket is 0660 root:root."
   - "Twin limit: CC-web egress goes through its own proxy, so the twin proves the launcher and the isolation, not the provider reach; the provider reach is proven on Actions (VP 7, VP 8)."
   - "Key path for rec-5550 (not built here): the shell pipes the key into the launcher's run mode on stdin; the launcher hands it to the proxy's stdin; the container gets a placeholder (Decision 263 Update). Residuals outside c7 for rec-5550: mask the key at read, treat container output as untrusted, a spend-capped key (ADVICE.md A1)."
   - "Weakening: the container class is new rules beside unchanged ones; no existing assertion is expected to change. If the weakening detector flags one, that is a STOP to the plan owner for an amendment, never an inline disposition."
@@ -534,6 +539,8 @@ context:
   - "red_overlap 2026-11-24: rec-5554 now reads superseded. Earlier, 2026-11-23 23:0x UTC: blocked by rec-5554 (product_regression, age 0.1 h; shared files are transitive test-selection overlap only). Deferral: rec-5554 is a re-diagnosis of rec-5491 (fixed on main by #2388), which the operator handed to Feedback Loop (2026-11-23, coordinator log); this plan touches none of its files (src/common/ducklake_event_read_sql.py)."
   - "Build notes (critique r2): N2 the request verb's literal deepseek/ is today's routed tier, and the class row rule ties the row to the routed tier, so a provider swap fails the static check until the verb changes; N10 closes_criteria [] stays as the declared partial slice; N11 code and test fixtures never hold the literal image reference (validate_persona_image_digest), reading image and digest as separate lines; N14 T4.32 decomposition_hints is left to rec-5550's plan, which the c7 amendment names; r3 N7 validate passes the derived routed-host set into _persona_verdict_container rather than re-deriving it, where the import rule allows; r3 N10 the config/persona_image.yaml header reader list is a follow-up (no check enforces it); r4 N3 VP 3 reads the ports.yaml byte budget from its roster entry at build time if the app-post build moved it; r4 N7 the events directory is a size-limited tmpfs mount where docker allows it, else the size-capped read stands; r4 N9 the c7 block's 'no answer for any name' excludes Docker's embedded answers for the container's own name (wording left, re-approval not sought); r4 N10 rec-5549's closing note says the adapter proxy variable moved to rec-5556; r5 N4 rec-5550's amendment of the class admission refuses any uses: step after the floor; r5 N5 closes_criteria [] stays the declared partial slice; r5 N7 rec-5550's residuals name that any runner-user process reaches the proxy on the host address over lo; r6 N2 ports.yaml rung 1 is measured a no-op (all amendment_log rows terse), so relief is rung 2; r6 N3 the build report names the governed data-pipeline deploy run; r6 N5 VP 4 checks the literal 1 passed; r6 N6 the probe writes its result to events/events.json, which the launcher reads; r6 N8 test__persona_verdict_container.py also selects for validate's wiring; r6 N9 the two jobs' step ids and permissions {contents: read} are named in PROBE_STEPS at build."
   - "Amendment 1 (2026-11-24, reported by the build session): validate_scope_boundary refused config/composite_action_body_baseline.yaml, which execution step 3 always needed but no scope row named; the row is ratchet data at 1 line per body with no marker, no check loosened (scout r6 FLAGS_FOUND, notes only: Decision 162 R3 joins cites; 263, 173, 205 and 143 held). The build leaves the existing probe bodies and their rows untouched (Decision 162 touch-it-fix-it). Critique r7 notes: the five step ids are the same in the workflow, PROBE_STEPS and the baseline keys; the obligation command is red before the rows and green after."
+  - "Amendment 2 (2026-11-24, build VP 7 STOP): docker info LiveRestoreEnabled is true on the hosted runner (Docker 29.4.2, diag run 45479009600, measured), so the floor's LiveRestore false assertion could never pass. Operator ruling 2026-11-24 20:33 UTC after a blind consult (advisor-brief/ADVICE-live-restore.md): accept live-restore on and assert containment instead. The plan adds the four advisor conditions: (1) persona-egress-teardown.service, bound to agent stop and independent of the launcher and dockerd, severs the bridge to proxy INPUT exception, kills the proxy and then the container; (2) the launcher reads back that the container and proxy are gone (LAUNCHER-TEARDOWN FAIL otherwise); (3) the floor verify asserts egress-fail-closed.service and the teardown unit are active; (4) LiveRestoreEnabled is printed as an observation, never a gate. No check is loosened without the operator: the dropped assertion is the operator's ruling, and three read-backs replace it. Overriding the vendor daemon config was declined (it depends on the hosted image's ExecStart line and adds a Docker restart)."
+  - "Inferred, not measured (Amendment 2): the agent's revert flushes its filter rules before its service stops, so between the flush and the stop a surviving container's only reach is the proxy, whose egress the mangle floor still bounds; the teardown and fail-closed units then fire on the stop. The hosted VM is discarded after the job, which ends any residue."
   - "Budget: selection_budget breadth_waived (274 tests, 249-950 s of 950 s) on the draft scope."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:772b51cfff8f547781914f2651e5c740db5c9047fd7151df4c55d5c42b4d949b"}
