@@ -119,7 +119,13 @@ RED = [
     _red("local-uses", "not pinned", lambda d: _jobs(d)["prepare"]["steps"][0].update({"uses": "./.github/actions/x"})),
     _red("checks-write-on-run", "holds checks: write", lambda d: _jobs(d)["run"]["permissions"].update({"checks": "write"})),
     _red("id-token", "id-token: write", lambda d: _jobs(d)["prepare"]["permissions"].update({"id-token": "write"})),
-    _red("environment-on-post", "names an Environment", lambda d: _jobs(d)["post"].update({"environment": "persona-verdict"})),
+    _red("environment-on-run", "names an Environment", lambda d: _jobs(d)["run"].update({"environment": "persona-verdict"})),
+    _red(
+        "environment-on-wake",
+        "names an Environment",
+        lambda d: _jobs(d)["wake"].update({"environment": "persona-verdict-app"}),
+    ),
+    _red("checks-write-on-post", "holds checks: write", lambda d: _jobs(d)["post"]["permissions"].update({"checks": "write"})),
     _red(
         "prepare-permissions", "permissions differ", lambda d: _jobs(d)["prepare"]["permissions"].update({"contents": "write"})
     ),
@@ -430,7 +436,7 @@ RED = [
         "keyprep-id-token", "holds id-token: write", lambda d: _jobs(d)["keyprep"]["permissions"].update({"id-token": "write"})
     ),
     _red(
-        "third-id-token-job", "holds id-token: write", lambda d: _jobs(d)["post"]["permissions"].update({"id-token": "write"})
+        "third-id-token-job", "holds id-token: write", lambda d: _jobs(d)["run"]["permissions"].update({"id-token": "write"})
     ),
     _red(
         "refusal-environment", "names an Environment", lambda d: _jobs(d)["refusal"].update({"environment": "persona-verdict"})

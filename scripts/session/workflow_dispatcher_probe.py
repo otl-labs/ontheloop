@@ -1,4 +1,9 @@
-"""Approval-bypass probe for the workflow dispatcher App (PLAN-scheduled-workflow-dispatch VP 21, operator step M3).
+"""Approval-bypass probe for the workflow dispatcher App and the verdict App (operator CloudShell steps).
+
+--app dispatcher (the default) is PLAN-scheduled-workflow-dispatch VP 21, operator step M3 (Decision 267 cl.5). --app
+verdict is PLAN-persona-verdict-app-post VP 6 (Decision 248 cl.8, Decision 273 cl.5): the key parameter is fixed to
+app_token.KEY_PARAMETER, the issuer is the gates.verdict_app.app_id row of the checkout, and the token asks for the post
+job's permissions. The shared rules below hold for both.
 
 Run by the operator in AWS CloudShell in the production account (Decision 248 cl.8 precedent): the session's GitHub
 proxy refuses the App and installation-token paths. It mints an installation token with the register's two
@@ -24,6 +29,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from scripts.personas import app_token, override
 from src.data.handlers import github_app_token
 from src.data.handlers.workflow_dispatcher_handler import TOKEN_PERMISSIONS, load_register
 
@@ -47,11 +53,13 @@ def _read_pem(parameter: str, profile: str | None) -> str:
     return done.stdout.strip()
 
 
-def _run_child(repository: str, run_id: int, token: str) -> tuple[int, str]:
+def _run_child(repository: str, run_id: int, token: str, environment_id: int | None = None) -> tuple[int, str]:
     env = dict(os.environ)
     env["GH_TOKEN"] = token
     cmd = [sys.executable, "-m", "scripts.session.deployment_approval_probe", "--leg", "env:GH_TOKEN"]
     cmd += ["--repo", repository, "--run-id", str(run_id), "--wait-pending", "180"]
+    if environment_id is not None:
+        cmd += ["--environment-id", str(environment_id)]
     done = subprocess.run(
         cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, cwd=_REPO_ROOT, check=False
     )
@@ -72,6 +80,8 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--run-id", type=int, required=True)
     p.add_argument("--key-parameter", required=True)
     p.add_argument("--profile")
+    p.add_argument("--app", choices=("dispatcher", "verdict"), default="dispatcher")
+    p.add_argument("--environment-id", type=int)
     return p
 
 
@@ -82,15 +92,24 @@ def main(argv: list[str] | None = None, version: tuple[int, int] | None = None) 
         return 2
     args = _parser().parse_args(argv)
     register = load_register()
-    if args.key_parameter != register["key_parameter"]:
-        print("--key-parameter must equal the register's key_parameter", file=sys.stderr)
+    if args.app == "verdict":
+        expected_key, permissions = app_token.KEY_PARAMETER, dict(app_token.PERMISSIONS)
+        try:
+            issuer = str(override.app_id())
+        except override.Refused:
+            print("the checkout holds no gates.verdict_app.app_id row", file=sys.stderr)
+            return 2
+    else:
+        expected_key, permissions, issuer = register["key_parameter"], dict(TOKEN_PERMISSIONS), register["app"]["client_id"]
+    if args.key_parameter != expected_key:
+        print("--key-parameter must equal the app's key parameter", file=sys.stderr)
         return 2
     pem = _read_pem(args.key_parameter, args.profile)
     api = github_app_token.GitHubApi()
-    app_token = github_app_token.app_jwt(register["app"]["client_id"], pem, int(time.time()))
-    token = github_app_token.installation_token(api, app_token, register["repository"], dict(TOKEN_PERMISSIONS))
+    signed = github_app_token.app_jwt(issuer, pem, int(time.time()))
+    token = github_app_token.installation_token(api, signed, register["repository"], permissions)
     try:
-        code, line = _run_child(register["repository"], args.run_id, token)
+        code, line = _run_child(register["repository"], args.run_id, token, args.environment_id)
     except BaseException:
         try:
             github_app_token.revoke(api, token)

@@ -57,6 +57,10 @@ def _prelude(env: Mapping[str, str]) -> tuple[str, str | None, dict[str, str]]:
         print(f"OIDC-CLAIMS sub={sub} job_workflow_ref={ref}", flush=True)
         if not sub.endswith(ENV_SUFFIX) or ref != env.get("GITHUB_REPOSITORY", "") + WORKFLOW_REF:
             return role, _line(role, False, "claims"), {}
+        denied = oidc_assume.assume(oidc_assume.APP_ROLE, jwt, env)
+        oidc_assume.report(oidc_assume.APP_ROLE, "AccessDenied", denied)
+        if denied.status != 403 or denied.code != "AccessDenied":
+            return role, _line(role, False, "app_role"), {}
         outcome = oidc_assume.assume(oidc_assume.ROLE, jwt, env)
     except oidc_assume.OidcError:
         return role, _line(role, False, "oidc"), {}

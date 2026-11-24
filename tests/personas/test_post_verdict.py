@@ -2,16 +2,34 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from scripts.personas import post_verdict, resolve_pr
+from scripts.personas import app_token, override, post_verdict, resolve_pr
 
 ROOT = Path(__file__).resolve().parents[2]
 SHA = "e" * 40
+APP_ID = 424242
+CREATED = json.dumps({"id": 1, "app": {"id": APP_ID}}).encode()
+
+
+@pytest.fixture(autouse=True)
+def _app_token(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    opened: list[str] = []
+
+    @contextlib.contextmanager
+    def session(repo: str, env: Any = None) -> Iterator[str]:
+        opened.append(repo)
+        yield "app-token"
+
+    monkeypatch.setattr(app_token, "session", session)
+    monkeypatch.setattr(override, "app_id", lambda: APP_ID)
+    return opened
 
 
 def _out(verdict: str | None = None, **over: Any) -> str:
@@ -87,7 +105,7 @@ def test_one_completed_check_per_route_on_the_resolved_head(tmp_path: Path, monk
 
     def fake(method: str, url: str, token: str | None, body: Any = None, accept: str = "") -> tuple[int, bytes]:
         calls.append((method, url, body))
-        return 201, b"{}"
+        return 201, CREATED
 
     monkeypatch.setattr(resolve_pr, "request", fake)
     posted = post_verdict.post_all(ROOT, work, "o/r", "t")
@@ -103,16 +121,18 @@ def test_one_completed_check_per_route_on_the_resolved_head(tmp_path: Path, monk
 def test_not_allowlisted_posts_a_failure_per_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     work = _prepare(tmp_path, ["verdict_probe.fail"], allowlisted=False)
     bodies: list[Any] = []
-    monkeypatch.setattr(resolve_pr, "request", lambda m, u, t, b=None, accept="": bodies.append(b) or (201, b"{}"))
+    monkeypatch.setattr(resolve_pr, "request", lambda m, u, t, b=None, accept="": bodies.append(b) or (201, CREATED))
     post_verdict.post_all(ROOT, work, "o/r", "t")
     assert bodies[0]["conclusion"] == "failure" and bodies[0]["output"]["title"] == "author not on allowlist"
 
 
 def test_unresolved_posts_nothing_and_a_missing_prepared_artifact_is_a_shell_fault(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _app_token: list[str]
 ) -> None:
     monkeypatch.setattr(resolve_pr, "request", lambda *a, **k: (_ for _ in ()).throw(AssertionError("post")))
     assert post_verdict.post_all(ROOT, _prepare(tmp_path, ["x"], resolved=False), "o/r", "t") == []
+    assert post_verdict.post_all(ROOT, _prepare(tmp_path / "e", [], resolved=True), "o/r", "t") == []
+    assert _app_token == []
     with pytest.raises(RuntimeError):
         post_verdict.post_all(ROOT, tmp_path / "empty", "o/r", "t")
 
@@ -154,7 +174,7 @@ def _post_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str, std
     (work / "prepared" / "resolution.json").write_text(json.dumps(res))
     (work / "results" / f"{route}.json").write_text(json.dumps(_result(route, stdout)))
     bodies: list[Any] = []
-    monkeypatch.setattr(resolve_pr, "request", lambda m, u, t, b=None, accept="": (bodies.append((m, b)), (201, b"{}"))[1])
+    monkeypatch.setattr(resolve_pr, "request", lambda m, u, t, b=None, accept="": (bodies.append((m, b)), (201, CREATED))[1])
     monkeypatch.setenv("GITHUB_RUN_ID", "900")
     monkeypatch.setattr(post_verdict.override, "lookup", lambda *a: None)
     return work, bodies
@@ -234,7 +254,7 @@ def test_the_override_resolution_posts_one_new_success_run_and_never_patches(
     }
     monkeypatch.setattr(post_verdict.override, "origin", lambda *a: (rec, ""))
     calls: list[Any] = []
-    monkeypatch.setattr(resolve_pr, "request", lambda m, u, t, b=None, accept="": (calls.append((m, u, b)), (201, b"{}"))[1])
+    monkeypatch.setattr(resolve_pr, "request", lambda m, u, t, b=None, accept="": (calls.append((m, u, b)), (201, CREATED))[1])
     assert post_verdict.post_all(ROOT, work, "o/r", "t") == [f"persona-verdict/{BLOCK}"]
     assert [c[0] for c in calls] == ["POST"] and calls[0][1] == "/repos/o/r/check-runs"
     body = calls[0][2]
