@@ -6,6 +6,7 @@ tests/persona_contracts/ so the executor boundary row for that directory covers 
 
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 from typing import Any, Callable
@@ -66,12 +67,12 @@ _ROADMAP = {
 }
 
 
-def _contract_dict() -> dict[str, Any]:
+def _contract_dict(kind: str = "verdict") -> dict[str, Any]:
     object_schema = {"type": "object", "additionalProperties": False}
     return {
         "persona": PERSONA,
         "contract_version": 1,
-        "kind": "verdict",
+        "kind": kind,
         "input_schema": {
             **object_schema,
             "required": ["change_id", "head_sha"],
@@ -146,13 +147,13 @@ def edit_text(root: Path, rel: str, old: str, new: str) -> None:
     path.write_text(text.replace(old, new, 1), encoding="utf-8")
 
 
-def build_tree(tmp_path: Path) -> Path:
+def build_tree(tmp_path: Path, kind: str = "verdict") -> Path:
     root = tmp_path / "tree"
     for rel in _COPIED:
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(REAL / rel, root / rel)
     row = (
-        "personas:\n  - persona: fixture_verdict\n    kind: verdict\n"
+        f"personas:\n  - persona: fixture_verdict\n    kind: {kind}\n"
         f"    contract: {CONTRACT_REL}\n    rendered_prompt: {RENDERED_REL}\n"
         '    implementation: {status: pending, owning_item: "T4.10a:c5"}\n'
         "    registry_key: fixture-verdict\n"
@@ -164,12 +165,15 @@ def build_tree(tmp_path: Path) -> Path:
     index = root / INDEX_REL
     head, sep, _ = index.read_text(encoding="utf-8").rpartition("\npersonas:")
     assert sep, (INDEX_REL, "personas")
+    head = re.sub(
+        r"(fixture_kind:.*?\n  personas: )\[[^\]]*\]", rf"\g<1>{[PERSONA] if kind == 'fixture' else []}", head, flags=re.S
+    )
     index.write_text(head + "\n" + row, encoding="utf-8")
     (root / "docs/ROADMAP-PLATFORM.yaml").write_text(yaml.safe_dump(_ROADMAP), encoding="utf-8")
     skill = root / SKILL_REL
     skill.parent.mkdir(parents=True, exist_ok=True)
     skill.write_text(f"# Fixture\n\n{VERDICT_LINE}\n\n{VERDICT_RULE}\n", encoding="utf-8")
-    write_contract(root, _contract_dict())
+    write_contract(root, _contract_dict(kind))
     return root
 
 
@@ -337,6 +341,56 @@ def _rule_untethered(root: Path) -> None:
     )
 
 
+def _set_kind(root: Path, kind: str, listed: bool = True, extra: tuple[str, ...] = ()) -> None:
+    path = root / INDEX_REL
+    text = path.read_text(encoding="utf-8")
+    text = re.sub(r"(  - persona: fixture_verdict\n    kind: )\w+", rf"\g<1>{kind}", text, count=1)
+    names = ([PERSONA] if listed else []) + list(extra)
+    text = re.sub(r"(fixture_kind:.*?\n  personas: )\[[^\]]*\]", rf"\g<1>[{', '.join(names)}]", text, count=1, flags=re.S)
+    path.write_text(text, encoding="utf-8")
+    edit_contract(root, lambda c: c.__setitem__("kind", kind), rerender=True)
+
+
+def _as_fixture(change: Callable[[dict[str, Any]], None]) -> Callable[[Path], None]:
+    def mutate(root: Path) -> None:
+        _set_kind(root, "fixture")
+        edit_contract(root, change, rerender=True)
+
+    return mutate
+
+
+def _fixture_unlisted(root: Path) -> None:
+    _set_kind(root, "fixture", listed=False)
+
+
+def _fixture_listed_without_row(root: Path) -> None:
+    _set_kind(root, "fixture", extra=("ghost_persona",))
+
+
+def _listed_not_fixture(root: Path) -> None:
+    _set_kind(root, "verdict", listed=True)
+
+
+def _fixture_rekinds_verdict_persona(root: Path) -> None:
+    _set_kind(root, "fixture", listed=False, extra=("code_reviewer",))
+    path = root / INDEX_REL
+    row = (
+        "  - persona: code_reviewer\n    kind: fixture\n"
+        f"    contract: {CONTRACT_REL}\n    rendered_prompt: {RENDERED_REL}\n"
+        '    implementation: {status: pending, owning_item: "T4.10a:c5"}\n'
+        "    registry_key: fixture-verdict\n"
+    )
+    path.write_text(path.read_text(encoding="utf-8").rstrip("\n") + "\n" + row, encoding="utf-8")
+
+
+def _unknown_kind_row(root: Path) -> None:
+    edit_text(root, INDEX_REL, "persona: fixture_verdict\n    kind: ", "persona: fixture_verdict\n    kind: mystery #")
+
+
+def _unknown_kind_contract(root: Path) -> None:
+    edit_contract(root, lambda c: c.__setitem__("kind", "mystery"))
+
+
 MUTATORS: dict[str, Callable[[Path], None]] = {
     "contract_file_deleted": _contract_deleted,
     "parameter_missing_on_read_input": _set("capabilities", ["read_input"]),
@@ -389,6 +443,16 @@ MUTATORS: dict[str, Callable[[Path], None]] = {
     "verdict_rule_in_outside_enum": _rule_cond(**{"in": ["blocking", "fatal"]}),
     "verdict_rule_coverage": _rule({**RULE, "otherwise": "REVISE"}),
     "verdict_rule_untethered": _rule_untethered,
+    "fixture_repo_target": _as_fixture(lambda c: c.__setitem__("capabilities", ["read_repo"])),
+    "fixture_without_tether": _as_fixture(lambda c: c.pop("skill_tether")),
+    "fixture_without_rule": _as_fixture(lambda c: c.pop("verdict_consistency")),
+    "fixture_over_budget": _as_fixture(lambda c: c["budget"].__setitem__("max_turns", 9999)),
+    "fixture_unlisted": _fixture_unlisted,
+    "fixture_rekinds_verdict_persona": _fixture_rekinds_verdict_persona,
+    "fixture_listed_without_row": _fixture_listed_without_row,
+    "fixture_listed_not_fixture": _listed_not_fixture,
+    "unknown_kind_row": _unknown_kind_row,
+    "unknown_kind_contract": _unknown_kind_contract,
 }
 
 EXPECTED: dict[str, str] = {
@@ -443,4 +507,14 @@ EXPECTED: dict[str, str] = {
     "verdict_rule_in_outside_enum": "is outside findings[].severity's enum",
     "verdict_rule_coverage": "verdicts differ from the verdict enum",
     "verdict_rule_untethered": "absent from skill_tether.verdict_rule",
+    "fixture_repo_target": "fixture contract names repo-target",
+    "fixture_without_tether": "missing required field(s) ['skill_tether']",
+    "fixture_without_rule": "missing required field(s) ['verdict_consistency']",
+    "fixture_over_budget": "budget max_turns=9999",
+    "fixture_unlisted": "a fixture row is not named in fixture_kind.personas",
+    "fixture_rekinds_verdict_persona": "is a merge-gate persona",
+    "fixture_listed_without_row": "ghost_persona, which has no personas row",
+    "fixture_listed_not_fixture": "whose row is not kind fixture",
+    "unknown_kind_row": "unreadable or off its schema",
+    "unknown_kind_contract": "contract is off its schema",
 }
