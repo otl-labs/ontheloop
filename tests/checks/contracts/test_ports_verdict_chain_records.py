@@ -19,7 +19,8 @@ def test_sa14_records_the_verdict_chain_shell() -> None:
     row = rows[0]
     assert row["location"] == "scripts/personas/"
     assert row["owning_item"] == "T4.24:c9"
-    for token in ("persona-verdict.yml", "workflow_run", "head_sha", "Checks API", "github-actions[bot]", "docs/plans/"):
+    tokens = ("persona-verdict.yml", "workflow_run", "head_sha", "Checks API", "github-actions[bot]", "docs/plans/")
+    for token in (*tokens, "OIDC token-request", "AssumeRoleWithWebIdentity", "Credentials", "Error Code"):
         assert token in row["assumption"], token
 
 

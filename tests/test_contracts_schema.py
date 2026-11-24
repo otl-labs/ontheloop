@@ -482,3 +482,13 @@ def test_field_per_write_requires_nullable() -> None:
         with pytest.raises(ValidationError, match="per_write needs a nullable, non-derived column"):
             FieldSpec.model_validate({"type": "str", "per_write": True, **bad})
     assert FieldSpec.model_validate({"type": "str", "nullable": False, "per_write": False}).per_write is False
+
+
+def test_realization_retired_shape() -> None:
+    doc = _class_a_doc()
+    doc["realization"] = {"produced": {}, "retired": {"rec-1": ["x"]}}
+    loaded = ContractDocument.model_validate(doc)
+    assert loaded.realization is not None and loaded.realization.retired == {"rec-1": ["x"]}
+    doc["realization"] = {"produced": {}, "retired": {"rec-1": "x"}}
+    with pytest.raises(ValidationError):
+        ContractDocument.model_validate(doc)

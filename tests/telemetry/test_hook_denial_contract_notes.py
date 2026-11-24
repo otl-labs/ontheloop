@@ -1,4 +1,5 @@
-"""The parser_version 10 contract text (PLAN-telemetry-hook-denial-names): envelope line and ports SA-02 clause."""
+"""The parser_version 10 contract text (PLAN-telemetry-hook-denial-names): envelope line and ports SA-02 clause, and the
+observations metadata pointer to the key registry (PLAN-telemetry-metadata-keys)."""
 
 from __future__ import annotations
 
@@ -56,3 +57,19 @@ def test_ports_sa02_names_the_hook_denial_assumption() -> None:
 def test_contracts_stay_within_the_line_cap() -> None:
     assert _effective_lines("telemetry-event-envelope.yaml") <= 500
     assert _effective_lines("ports.yaml") <= 500
+
+
+def test_observations_contract_names_the_hook_denial_source() -> None:
+    keys = _load("telemetry-metadata-keys.yaml")["keys"]
+    for key in ("hook_event", "marker_version"):
+        row = next(
+            r for r in keys if r["producer"] == "claude_code" and r["observation_type"] == "process_event" and r["key"] == key
+        )
+        assert "src/turn_capture/hook_denials.py" in row["meaning"], key
+    semantics = _load("telemetry_observations.yaml")["fields"]["metadata"]["semantics"]
+    assert "telemetry-metadata-keys.yaml" in semantics
+    assert "STEP ->" not in semantics and "PHASE ->" not in semantics
+    if any(r["key"] == "exit_code" and r["observation_type"] == "process_event" and "until" not in r for r in keys):
+        assert "PROMOTED" in semantics
+        assert "exit_code" not in semantics.split("PROMOTED")[1].split(")")[0]
+        assert "process_event bag key exit_code" in semantics

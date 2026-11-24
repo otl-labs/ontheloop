@@ -3,8 +3,11 @@ name: persona-verdict-egress-probe
 # Keyless probe of the verdict shell's egress filter (PLAN-persona-verdict-shell-deny; T4.32 c7 shell leg). It runs the PR's own
 # definition and code, so a build proves itself before merge. No secret, id-token, Environment, container or artifact.
 # The filtered job shows a listed host reached and an unlisted name, raw IPs, outside resolvers and sudo refused; the
-# unfiltered control shows each refusal is the filter's and that the vendor's filter-supplied list is no wider than
-# config/persona_verdict_egress.yaml's snapshot.
+# unfiltered control shows each refusal is the filter's or the floor's and that the vendor's filter-supplied list is no
+# wider than config/persona_verdict_egress.yaml's snapshot. Every filtered job lays the egress floor right after its
+# checkout (PLAN-persona-verdict-egress-floor; rec-5362) and the drill jobs show a simulated mid-job revert cutting the
+# job off with the floor's exit hook and leaving it open without. The filter no longer revokes sudo in its pre: entry
+# (its switch is off), so the PR's own code runs with sudo until the floor step; every job here is keyless.
 on:
   pull_request:
     paths:
@@ -29,16 +32,25 @@ jobs:
           egress-policy: block
           allowed-endpoints: sts.amazonaws.com:443
           disable-telemetry: true
-          disable-sudo-and-containers: true
+          disable-sudo-and-containers: false
 
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
+      - name: Lay the egress floor
+        id: probe-floor
+        run: sudo python3 -I scripts/personas/run.py egress-floor
+
       - name: Probe the egress filter
         id: probe-egress
         run: python3 -I scripts/personas/run.py egress-probe
+
+      - name: Check the egress filter again
+        id: probe-final-check
+        if: always()
+        run: python3 -I scripts/personas/run.py egress-self-check
 
   egress-control:
     runs-on: ubuntu-latest
@@ -63,3 +75,97 @@ jobs:
       - name: Probe without the filter
         id: control-egress
         run: python3 -I scripts/personas/run.py egress-control
+
+  egress-fail-closed:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: block
+          allowed-endpoints: sts.amazonaws.com:443
+          disable-telemetry: true
+          disable-sudo-and-containers: false
+
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: drill-floor
+        id: drill-floor
+        run: sudo python3 -I scripts/personas/run.py egress-revert-drill
+
+      - name: drill-self-check
+        id: drill-self-check
+        run: python3 -I scripts/personas/run.py egress-self-check
+
+      - name: drill-fail-closed
+        id: drill-fail-closed
+        run: python3 -I scripts/personas/run.py egress-fail-closed
+
+      - name: drill-final-check
+        id: drill-final-check
+        if: always()
+        run: python3 -I scripts/personas/run.py egress-self-check
+
+  egress-fail-closed-control:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: block
+          allowed-endpoints: sts.amazonaws.com:443
+          disable-telemetry: true
+          disable-sudo-and-containers: false
+
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: drill-floor
+        id: drill-floor
+        run: sudo python3 -I scripts/personas/run.py egress-revert-drill-control
+
+      - name: drill-self-check
+        id: drill-self-check
+        run: python3 -I scripts/personas/run.py egress-self-check
+
+      - name: drill-fail-closed
+        id: drill-fail-closed
+        run: python3 -I scripts/personas/run.py egress-fail-closed
+
+      - name: drill-final-check
+        id: drill-final-check
+        if: always()
+        run: python3 -I scripts/personas/run.py egress-self-check
+
+  egress-fail-closed-verdict:
+    needs: [egress-fail-closed, egress-fail-closed-control]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the drill jobs
+        id: fail-closed-verdict
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I scripts/personas/run.py egress-fail-closed-verdict

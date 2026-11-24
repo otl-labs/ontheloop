@@ -31,4 +31,4 @@ def test_planning_and_critique_lock_handoff_semantics() -> None:
     assert "full_validation_required_before_commit: true" in planning
     assert "timeout_disposition: blocked" in planning
     assert "mapped coverage or readiness as authoritative" in critique
-    assert "real push/PR outcomes" in critique
+    assert "real push/PR outcomes" not in critique

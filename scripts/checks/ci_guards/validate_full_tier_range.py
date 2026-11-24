@@ -10,7 +10,7 @@ from __future__ import annotations
 import yaml
 
 from scripts.checks import _common, registry
-from scripts.ci import last_green
+from scripts.ci import last_green, trailer_range
 from scripts.ci_rca import fingerprint, vacuous_pass
 from scripts.ci_rca.evidence._bundle_core import _slugify_workflow
 
@@ -71,6 +71,13 @@ def validate_full_tier_range(failed: list[str]) -> None:
     if full_tier.get("step") != last_green.FULL_TIER_STEP:
         errors.append(f"step drift: contract declares {full_tier.get('step')!r}, live is {last_green.FULL_TIER_STEP!r}")
 
+    census = contract.get("trailer_census")
+    markers = census.get("markers") if isinstance(census, dict) else None
+    markers = markers if isinstance(markers, dict) else {}
+    for key, live in (("deferred", trailer_range.DEFERRED_MARKER), ("unreadable", trailer_range.UNREADABLE_MARKER)):
+        if markers.get(key) != live:
+            errors.append(f"trailer_census marker drift: contract declares {key}={markers.get(key)!r}, live is {live!r}")
+
     if errors:
         print("Contract/code drift:")
         for e in errors:
@@ -79,4 +86,4 @@ def validate_full_tier_range(failed: list[str]) -> None:
         return
 
     print("Contract matches live code (variables, sibling slugs, job and step names).")
-    registry.examined(len(live_vars) + len(live_slugs) + 2, unit="contract_fields")
+    registry.examined(len(live_vars) + len(live_slugs) + 4, unit="contract_fields")

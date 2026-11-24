@@ -4,7 +4,8 @@ Every distinct Claude-Session trailer on a first-parent squash commit merged to 
 resolve to a captured root session (set inclusion on harness_session_key). A merged session that never reached the
 warehouse is red; a source that cannot be read is unreadable (red, never a pass); an empty denominator is skipped, never
 green. The SLA is read from the data-modeling standard's arrival_expectations declaration, never restated here. Output
-is counts and commit shas only (Decision 101). Imports only the standard library and yaml.
+is counts, commit shas and a failed reader's HTTP status, error_type, error_class and request_id (Decision 101).
+Imports only the standard library and yaml.
 
 Author-date rule (rec-5084, Decision 235): when a pull request's creation misses every lost window, an uncaptured key
 still counts lost_window if the earliest commit that PR lists with that key's own trailer was authored inside a window
@@ -61,7 +62,7 @@ def normalise_key(value: Any) -> str | None:
 
 
 class Unreadable(Exception):
-    """A source or expectation the oracle cannot judge; the class name alone is reported."""
+    """A source or expectation the oracle cannot judge; the class name is reported, with a reader failure's safe fields."""
 
 
 @dataclass(frozen=True)
@@ -188,6 +189,29 @@ def _excused_by_window(
     return False
 
 
+_SAFE_FIELD = re.compile(r"^[A-Za-z0-9_.]{1,64}$")
+_SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def reader_cause(exc: Exception) -> str:
+    """The class name, plus a reader failure's status, error_type, error_class and request_id when each is safe to print."""
+    parts = [type(exc).__name__]
+    status = getattr(exc, "status", None)
+    if isinstance(status, int) and not isinstance(status, bool):
+        parts.append(f"status={status}")
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        for key, pattern in (
+            ("error_type", _SAFE_FIELD),
+            ("error_class", _SAFE_FIELD),
+            ("request_id", _SAFE_REQUEST_ID),
+        ):
+            value = body.get(key)
+            if isinstance(value, str) and pattern.match(value):
+                parts.append(f"{key}={value}")
+    return " ".join(parts)
+
+
 def _walk(
     roots_for: Callable[[str, str], list[Mapping[str, Any]]],
     remaining: set[str],
@@ -202,9 +226,9 @@ def _walk(
             try:
                 rows = roots_for(day_from.isoformat(), day_to.isoformat())
                 break
-            except Exception as exc:  # noqa: BLE001 -- the class alone is reported
+            except Exception as exc:  # noqa: BLE001 -- the class and safe reader fields are reported
                 if attempt:
-                    raise Unreadable(type(exc).__name__) from exc
+                    raise Unreadable(reader_cause(exc)) from exc
         r.windows_read += 1
         found = {normalise_key(row.get("harness_session_key")) for row in rows}
         remaining -= found

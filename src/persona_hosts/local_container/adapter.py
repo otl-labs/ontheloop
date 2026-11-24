@@ -12,11 +12,14 @@ import re
 import shutil
 import subprocess
 import tempfile
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from src.turn_capture.host_run import parse_persona_host_run
 
 _ROOT = Path(__file__).resolve().parents[3]
 _IMAGE_REF = re.compile(r"^(?:[a-z0-9][a-z0-9./_-]*@)?sha256:[0-9a-f]{64}$")
@@ -32,6 +35,7 @@ class RunImageResult:
     result: dict[str, Any] | None
     events: dict[str, Any] | None
     stderr: str
+    host_run: bytes | None = None
 
 
 def _load(relative: str) -> dict[str, Any]:
@@ -100,6 +104,29 @@ def _parse_json(text: str) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
+def _host_run_sidecar(project_ref: str | None, agent: str | None, host_run: bytes | None) -> bytes | None:
+    """The outermost host wins: a caller's own sidecar passes through; else mint a local one, else none (the run DEFERS)."""
+    if host_run is not None:
+        if project_ref is not None or agent is not None:
+            raise ValueError("host_run is the outer host's sidecar; do not also pass project_ref or agent")
+        return host_run
+    if project_ref is None and agent is None:
+        return None
+    if project_ref is None or agent is None:
+        raise ValueError("project_ref and agent go together")
+    body = {
+        "schema_version": 1,
+        "project_ref": project_ref,
+        "agent": agent,
+        "content_policy": "full",
+        "host": {"kind": "local", "runtime": "local_container", "run_id": uuid.uuid4().hex},
+    }
+    data = json.dumps(body, sort_keys=True).encode("utf-8")
+    if parse_persona_host_run(data) is None:
+        raise ValueError(f"project_ref {project_ref!r} or agent {agent!r} fails the host-run sidecar grammar")
+    return data
+
+
 def run_image(
     image_ref: str,
     persona: str,
@@ -110,7 +137,11 @@ def run_image(
     network: str = "bridge",
     timeout_s: int = 3700,
     docker: str = "docker",
+    project_ref: str | None = None,
+    agent: str | None = None,
+    host_run: bytes | None = None,
 ) -> RunImageResult:
+    sidecar = _host_run_sidecar(project_ref, agent, host_run)
     in_dir = tempfile.mkdtemp(prefix="persona-in-")
     events_dir = tempfile.mkdtemp(prefix="persona-events-")
     try:
@@ -131,7 +162,7 @@ def run_image(
             raise RuntimeError(f"docker unreachable: {proc.stderr.strip()}")
         events_file = Path(events_dir) / "events.json"
         events = _parse_json(events_file.read_text(encoding="utf-8")) if events_file.exists() else None
-        return RunImageResult(proc.returncode, _parse_json(proc.stdout), events, proc.stderr)
+        return RunImageResult(proc.returncode, _parse_json(proc.stdout), events, proc.stderr, sidecar)
     finally:
         shutil.rmtree(in_dir, ignore_errors=True)
         shutil.rmtree(events_dir, ignore_errors=True)

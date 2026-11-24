@@ -146,7 +146,8 @@ def _main(deployment: Deployment, *flags: str) -> int:
 def test_replay_registers_one_project_per_tree_and_pass() -> None:
     deployment = Deployment()
     stats, skew = gates.run(deployment.env())
-    assert skew == 0 and not stats.mismatches
+    assert skew == 0
+    assert not stats.mismatches, "a tree that stores no row answers as an absent session and is not a mismatch"
     replayed = [k for k in gates.expectation_passes() if gates.replayable(k[0])[0] is not None]
     assert stats.trees == len(replayed) == len(deployment.projects) > 0
     assert len(set(deployment.projects.values())) == len(deployment.projects)
@@ -195,7 +196,10 @@ def _dropping(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{**r, "total_rows": len(rows) - 1} for r in rows[1:]]
 
 
-def test_tree_rows_must_match_the_sent_set_with_one_root(capsys: pytest.CaptureFixture[str]) -> None:
+def test_tree_rows_must_match_the_sent_set_with_one_root(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _with_passes(monkeypatch, {})
     for label, hook in (
         ("a dropped row", lambda verb, rows: _dropping(rows) if verb == "session_tree_rows" else rows),
         ("two roots", lambda verb, rows: [{**r, "roots_in_tree": 2} for r in rows] if verb == "session_tree_rows" else rows),
@@ -204,9 +208,6 @@ def test_tree_rows_must_match_the_sent_set_with_one_root(capsys: pytest.CaptureF
         deployment.reader_hook = hook
         assert _main(deployment, "--no-alarms") == 1, label
         assert "GOLDEN_MISMATCH verb=session_tree_rows" in capsys.readouterr().out
-    clean = Deployment()
-    stats, _ = gates.run(clean.env())
-    assert not stats.mismatches, "a tree that stores no row answers as an absent session and is not a mismatch"
 
 
 def test_a_run_that_cannot_complete_files_one_error_alarm(
@@ -504,7 +505,8 @@ def test_catalog_mismatches_stop_before_any_registration(
     assert [c[1]["title"] for c in alarms] == ["telemetry verification alarm: golden_replay_error"]
 
 
-def test_deploy_records_follow_the_routed_reader() -> None:
+def test_deploy_records_follow_the_routed_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    _with_passes(monkeypatch, {})
     for catalog, function in ((SMOKE, "agent-platform-ducklake-reader"), (PROD, "agent-platform-ducklake-telemetry-reader")):
         deployment = Deployment(catalog)
         env = deployment.env()

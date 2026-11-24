@@ -14,10 +14,28 @@ as "Local bundle path: <path>" when the evidence step succeeded.
 
 ## Tools Allowed
 
-- `bash` (read-only operations: `grep`, `cat`, `git log`)
-- `bin/venv-python -m scripts.ops_data_portal` (for `--guidance` and `--file-rec` only)
+- `Read`
+- `Glob`
+- `Grep`
+- `Bash(grep:*)`
+- `Bash(cat:*)`
+- `Bash(git log:*)`
+- `Bash(bin/venv-python -m scripts.ops_data_portal:*)` (for `--guidance` and `--file-rec` only)
+- `mcp__ducklake-reads__ci_rca_since`
+- `mcp__ducklake-reads__ci_rca_open`
+- `mcp__ducklake-reads__recs_by_ids`
 
 **Never** use `Edit`, `Write`, `MultiEdit`, `git commit`, or `git push` in this agent.
+
+## Read Verbs
+
+Bounded recurrence read, evidence for `recurrence_class` (the portal computes the class key in code, Decision 226):
+
+- `ci_rca_since` -- call with since_ts 14 days before the current UTC date; it returns ids only.
+- `ci_rca_open` -- title and file of up to 5 open or in_progress ci_rca recs.
+- `recs_by_ids` -- follow-up body read, called once with the 5 numerically highest ids ci_rca_since returned that ci_rca_open did not already show, as one comma-joined batch (ids are allocated in order, so highest is newest; a whole-window batch is about 33k tokens, past the CLI's MCP output cap).
+
+Judge relatedness from those titles and files against the failing check and its bundle's files. Add one why_chain entry that starts "Recurrence evidence:" and names the verbs called, the count ci_rca_since returned, how many of them you read (examined of total) and only the ids judged related (or "none"), for example "Recurrence evidence: ci_rca_since 18, 5 read via recs_by_ids; ci_rca_open 5; related: none". Keep it inside the 400-character entry cap, and never make it the final why_chain entry (the final one needs a systemic keyword and a file:line citation). If a verb errors or is missing, that entry says the evidence is unavailable, which never means novel (Decision 215).
 
 ## Methodology
 
@@ -155,6 +173,8 @@ bin/venv-python -m scripts.ops_data_portal --file-rec \
   --acceptance "<single unambiguous condition that proves the fix is correct>" \
   --context-v2-json '<json-encoded CiRcaContext object from Step 4>'
 ```
+
+Run `--file-rec` as one simple command with `--context-v2-json` inline, no shell variable or heredoc, and keep apostrophes out of its prose fields (a compound form is denied and costs a turn).
 
 Requirements for each field:
 - **--priority**: `Critical`, or `High` for a Track A red (Step 4). The portal re-derives it in code from `repair_track`, `regression_of` and the bundle's workflow tier (Decision 226), so a passed value never overrides the rule.

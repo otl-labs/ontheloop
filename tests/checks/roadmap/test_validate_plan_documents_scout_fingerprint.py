@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 from scripts.checks import _common
+from scripts.checks.roadmap._plan_rescout_wiring import newest_schema_version
 from scripts.checks.roadmap.validate_plan_documents import validate_plan_documents
 from scripts.roadmap import plan_fingerprint as pf
 
@@ -26,7 +27,7 @@ _CRITIQUED = (
 )
 
 
-def _plan(version: int = 6, value: str | None = _STALE) -> dict[str, Any]:
+def _plan(version: int = newest_schema_version(), value: str | None = _STALE) -> dict[str, Any]:
     scout: dict[str, Any] = {"gate": "decision-scout", "round": 1, "verdict": "NO_FLAGS"}
     if value is not None:
         scout["scout_input_fingerprint"] = value
@@ -54,6 +55,13 @@ def _plan(version: int = 6, value: str | None = _STALE) -> dict[str, Any]:
         "execution_steps": ["Implement."],
         "gate_rounds": [scout, *_CRITIQUED],
     }
+    if version >= 7:
+        blocker = {"id": "B1", "severity": "blocking", "origin": "judgement", "anchor": "scope", "subject": "s"}
+        plan["gate_rounds"] = [
+            scout,
+            {**_CRITIQUED[0], "findings": [{**blocker, "disposition": "fixed"}]},
+            {**_CRITIQUED[1], "findings": []},
+        ]
     if version >= 6:
         plan["cites"] = []
     return plan

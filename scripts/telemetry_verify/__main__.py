@@ -1,10 +1,15 @@
-"""python -m scripts.telemetry_verify monitor|arrival (PLAN-telemetry-verification-monitor).
+"""python -m scripts.telemetry_verify monitor|arrival|owners (PLAN-telemetry-verification-monitor).
 
 Each command prints one line of counts, class names, verb names and join ids (Decision 101: the output lands in public Actions
 logs, so never a row value, session id, ref, branch, error body or URL host). Exit 0 when the run completed (whatever the
 findings), 1 when it did not complete or an alarm filing failed (Decision 84 I-4); with --assert-zero, 0 only after a
 completed run whose class denominator is above zero and whose class count is zero, else 2. All logging is disabled: the
 reader client's and the writer transport's warnings can carry an ARN or a Function URL host.
+
+owners reads every rec that owns an unproduced or retired telemetry column (the four telemetry contracts' realization blocks)
+and reports each one that is missing, has no status, is not open or does not name its field (rec-4606). It is an alarm, never a
+gate: red files one telemetry_verify rec; a reader error stops with exit 1, never a pass; --assert-green gives 0 only after a
+completed read with owners examined and no finding, else 2.
 """
 
 from __future__ import annotations
@@ -17,13 +22,18 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from scripts.checks.contracts import validate_telemetry_field_realization as realization
 from scripts.rec_episode import find_recs
 from scripts.telemetry_capture import read_route
-from scripts.telemetry_verify import monitor, session_presence
+from scripts.telemetry_verify import monitor, monitor_capacity, session_presence
 from scripts.telemetry_verify.alarms import ALARM_SOURCE, raise_alarms
 from scripts.telemetry_verify.silent_checks import REPORT_ONLY_CHECKS
+from src.common.ducklake_reader_client import fetch_recs_by_ids
 
 MONITOR_FILE = "scripts/telemetry_verify/monitor.py"
+OWNERS_FILE = "scripts/telemetry_verify/__main__.py"
+OWNERS_CLASS = "field_owner"
+OWNERS_ACCEPTANCE = "AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_verify owners --no-alarms --assert-green"
 _MONITOR_DEFAULTS = "AWS_PROFILE=agent_platform bin/venv-python -m scripts.telemetry_verify monitor"
 
 
@@ -63,6 +73,9 @@ def parser() -> argparse.ArgumentParser:
     arr.add_argument("--as-of", type=_instant, default=None)
     arr.add_argument("--no-lost-windows", action="store_true")
     arr.add_argument("--repo", default=None)
+    own = sub.add_parser("owners")
+    own.add_argument("--no-alarms", action="store_true")
+    own.add_argument("--assert-green", action="store_true")
     mon.add_argument("--no-alarms", action="store_true")
     mon.add_argument("--assert-zero", default=None, metavar="CLASS")
     return built
@@ -114,6 +127,12 @@ def monitor_line(report: monitor.MonitorReport, findings: Mapping[str, int]) -> 
         "elapsed_s": report.elapsed_s,
         "max_call_s": report.max_call_s,
         "max_response_bytes": report.max_response_bytes,
+        "workers": report.workers,
+        "litellm_quiet": report.litellm_quiet,
+        "litellm_read": report.litellm_read,
+        "litellm_sampled_out": report.litellm_sampled_out,
+        "calls_over_10s": report.calls_over_10s,
+        "call_p95_s": report.call_p95_s,
         "alarms": _alarms(findings),
     }
     return "MONITOR " + _fmt(pairs)
@@ -183,6 +202,7 @@ def run_monitor_command(
             as_of=now,
             budget=budget or monitor.Budget(),
             skip_trees=args.skip_trees,
+            workers=monitor_capacity.MONITOR_WORKERS,
         )
     except Exception as exc:  # noqa: BLE001 -- the class alone is printed
         print(f"MONITOR_STOP class={type(exc).__name__}")
@@ -196,6 +216,56 @@ def run_monitor_command(
         return 0
     scope = f"{report.window[0]}..{report.window[1]}"
     return 0 if _file(findings, scope=scope, now=now, portal=portal, file=MONITOR_FILE, reader=reader) else 1
+
+
+def _owner_stop(args: argparse.Namespace, exc: Exception) -> int:
+    print(f"OWNERS_STOP class={type(exc).__name__}")
+    return 2 if args.assert_green else 1
+
+
+def run_owners_command(
+    args: argparse.Namespace,
+    *,
+    reader: Any,
+    now: datetime,
+    portal: Callable[..., Any] | None = None,
+) -> int:
+    try:
+        contracts = realization.load_contracts(Path(__file__).resolve().parents[2])
+        ids = realization.owner_recs(contracts)
+        rows, missing = fetch_recs_by_ids(reader, ids)
+    except Exception as exc:  # noqa: BLE001 -- the class alone is printed
+        return _owner_stop(args, exc)
+    errors = realization.owner_errors(contracts, rows, missing) if ids else []
+    status = "skipped" if not ids else ("red" if errors else "green")
+    print(f"OWNERS status={status} examined={len(ids)} findings={len(errors)}")
+    for err in errors:
+        loc, _, rest = err.partition(": owner ")
+        print(f"OWNERS_FINDING {loc} {rest.split()[0]}")
+    if args.assert_green:
+        return 0 if status == "green" else 2
+    if status != "red":
+        return 0
+    if args.no_alarms:
+        return 1
+    try:
+        raise_alarms(
+            {OWNERS_CLASS: len(errors)},
+            scope="owners",
+            alarm_at=None,
+            now=now,
+            portal=portal,
+            file=OWNERS_FILE,
+            acceptance_for=lambda _cls: OWNERS_ACCEPTANCE,
+            declared=REPORT_ONLY_CHECKS,
+            rows=find_recs(ALARM_SOURCE, reader=reader),
+            reader=reader,
+        )
+    except Exception as exc:  # noqa: BLE001 -- never the message (a reader body or a URL host)
+        status_code = getattr(exc, "status", None)
+        print(f"ALARMS_FAILED class={type(exc).__name__} status={status_code if isinstance(status_code, int) else 'none'}")
+        return 1
+    return 0
 
 
 def run_arrival_command(args: argparse.Namespace, *, reader: Any, now: datetime) -> int:
@@ -226,6 +296,8 @@ def main(
         reader = read_route.make_routed_reader()
     if args.command == "arrival":
         return run_arrival_command(args, reader=reader, now=when)
+    if args.command == "owners":
+        return run_owners_command(args, reader=reader, now=when, portal=portal)
     return run_monitor_command(args, reader=reader, now=when, budget=budget, portal=portal)
 
 

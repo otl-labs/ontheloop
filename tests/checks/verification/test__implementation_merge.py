@@ -200,3 +200,53 @@ def test_head_plan_not_declared_true_gives_no_route(tmp_path, monkeypatch):
     repo, _ = lc.build_main(tmp_path, monkeypatch)
     lc.closure_branch(repo, plan_extra={"implementation_declared": "yes"})
     assert _route(repo) is None
+
+
+def _unbundled_closure(tmp_path, monkeypatch, **kwargs):
+    repo, x = lc.build_main(tmp_path, monkeypatch, bundled=[], impl_message="feat: impl\n", **kwargs)
+    lc.closure_branch(repo, bundled=[], doc_scope=kwargs.get("sidecar_landed", False))
+    return repo, x
+
+
+def test_unbundled_sidecar_plan_routes_to_landing_commit(tmp_path, monkeypatch):
+    repo, x = _unbundled_closure(tmp_path, monkeypatch, sidecar_landed=True)
+    route = _route(repo)
+    assert route is not None and route.sha == x and route.parent == fx.git(repo, "rev-parse", f"{x}^")
+    assert im.sidecar_landing_merge(lc.PLAN, repo, "main") == route
+
+
+def test_sidecar_landing_merge_none_without_sidecar(tmp_path, monkeypatch):
+    repo, _ = _unbundled_closure(tmp_path, monkeypatch)
+    assert im.sidecar_landing_merge(lc.PLAN, repo, "main") is None
+    assert _route(repo) is None
+
+
+def test_sidecar_landing_merge_none_for_malformed_sidecar(tmp_path, monkeypatch):
+    repo, _ = lc.build_main(tmp_path, monkeypatch, bundled=[], impl_message="feat: impl\n")
+    fx.write(repo, "docs/plans/approved/demo.yaml", "not: [valid\n")
+    lc.commit_all(repo, "bad sidecar")
+    fx.push_main(repo)
+    assert im.sidecar_landing_merge(lc.PLAN, repo, "main") is None
+
+
+def test_sidecar_landing_merge_none_when_words_never_landed(tmp_path, monkeypatch):
+    repo, _ = lc.build_main(tmp_path, monkeypatch, bundled=[], impl_message="feat: impl\n", sidecar=True)
+    assert im.sidecar_landing_merge(lc.PLAN, repo, "main") is None
+
+
+def test_sidecar_landing_merge_none_for_competing_landing_commits(tmp_path, monkeypatch):
+    repo, _ = lc.build_main(tmp_path, monkeypatch, bundled=[], impl_message="feat: impl\n", sidecar_landed=True)
+    fx.write(repo, lc.DOC, lc.DOC_BASE)
+    lc.commit_all(repo, "revert words")
+    fx.write(repo, lc.DOC, lc.DOC_APPROVED)
+    fx.write(repo, lc.SRC, "x = 2\n")
+    lc.commit_all(repo, "land again")
+    fx.push_main(repo)
+    assert im.sidecar_landing_merge(lc.PLAN, repo, "main") is None
+
+
+def test_sidecar_landing_merge_none_when_parent_lookup_fails(tmp_path, monkeypatch):
+    repo, _ = lc.build_main(tmp_path, monkeypatch, bundled=[], impl_message="feat: impl\n", sidecar_landed=True)
+    real = im._git
+    monkeypatch.setattr(im, "_git", lambda root, *a: None if a[:1] == ("rev-parse",) else real(root, *a))
+    assert im.sidecar_landing_merge(lc.PLAN, repo, "main") is None
