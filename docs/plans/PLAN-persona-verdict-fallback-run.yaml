@@ -52,9 +52,11 @@ scope:
       warm_fetched_escape_hatch), else refused. Before the fd guard it writes one stderr line PERSONA-REQUEST
       role=<role> provider=<prefix> (no key, token or ARN). record_main: the sidecar's host.job is GITHUB_JOB (one of the two).
       On run only (a slow primary that reaches the launcher's 600 s bound counts as inflight and so triggers the
-      fallback, by design), it appends primary_outage=true to GITHUB_OUTPUT when the written result is not a success-shaped
-      launcher result (a failure, a timeout or launcher_no_result) and the launcher result's upstream field has ok 0
-      and (outage >= 1 or inflight >= 1); otherwise primary_outage=false (upstream null included). It never reads
+      fallback, by design), it appends primary_outage=true to GITHUB_OUTPUT when the written result is not success-shaped
+      (success-shaped is exit_code 0 and timed_out false; run_persona exits 4 on a transport outage) and the launcher
+      result's upstream field has ok 0 and (outage >= 1 or inflight >= 1), each count a non-negative int and never a
+      JSON boolean; otherwise primary_outage=false (upstream null included, so launcher_no_result, which carries no
+      upstream, always writes false). GITHUB_JOB unset or any third job name is refused like a role mismatch. It never reads
       the persona's stdout or events for this, and writes no output on run-fallback.
   - file: scripts/personas/egress_proxy.py
     action: Modify
@@ -69,7 +71,7 @@ scope:
     action: Modify
     purpose: >-
       Run mode reads the proxy's stdout pipe (non-blocking, each line size-capped, at most 4096 lines) and keeps the
-      last line that parses as exactly {ok, outage, inflight} of non-negative ints; its stdout result gains upstream:
+      last line that parses as exactly {ok, outage, inflight} of non-negative ints (a JSON boolean is not an int); its stdout result gains upstream:
       that object, or null when none parsed. Lines are read until the proxy exits, including after the launcher's own
       bound kills it, so a hang ends as inflight >= 1. It derives the run's role from the request's provider prefix
       through the snapshot's role field and appends --role <role> after the image entrypoint's arguments (rec-5615's
@@ -80,8 +82,9 @@ scope:
     action: Modify
     purpose: >-
       The snapshot row per provider prefix gains role (deepseek/: primary, anthropic/: warm_fetched_escape_hatch),
-      read for its parity test from docs/contracts/inference-provider.yaml litellm_tier_models (tier_1 primary,
-      tier_2 warm_fetched_escape_hatch) and refused when two prefixes share a role (Decision 173 cl.2(b)).
+      read for its parity test from docs/contracts/inference-provider.yaml tier_model.tiers[].role through each
+      tier's selection_ref into litellm_tier_models (never a hard-coded tier_1/tier_2 mapping, so a renumbering cannot
+      swap roles), and refused when two prefixes share a role (Decision 173 cl.2(b)).
   - file: scripts/personas/egress_container_control.py
     action: Modify
     purpose: >-
@@ -103,10 +106,11 @@ scope:
     action: Modify
     new_imports: []
     purpose: >-
-      Call site only: it passes the container module a role-to-host map (from provider_hosts and inference-provider.yaml
-      litellm_tier_models: tier_1 primary, tier_2 warm_fetched_escape_hatch) in place of the one primary host. Growth
-      stays within the headroom plan_obligations measures at build start (429 SLOC today); past 500 the relief is a
-      facade decomposition (Decision 128), never a raise.
+      It passes the container module a role-to-host map in place of the one primary host, by reshaping
+      _provider_hosts_expected to return role to host (roles read from inference-provider.yaml tier_model.tiers[].role
+      through selection_ref, hosts from provider_hosts): near-zero growth. Headroom is measured by plan_obligations at
+      build start (429 SLOC today, before rec-5549); a crossing of 500 is a STOP to the plan owner, never a raise
+      (Decision 128).
   - file: src/persona_hosts/local_container/adapter.py
     action: Modify
     purpose: >-
@@ -139,8 +143,9 @@ scope:
       KEYED_JOBS gains run-fallback. One canonical step list parameterised by job (run, run-fallback): the filter
       row, the step id prefix, the PERSONA_ROLE literal and the upload step name and artifact differ, nothing else.
       Planned change p1: run's and run-fallback's PERSONA env is exactly PERSONA_AWS_REGION, AWS_ACCOUNT_ID,
-      PERSONA_SNAPSHOT and PERSONA_ROLE at that job's literal role. _secret_rules and the Environment rule name
-      run-fallback beside run; the run-fallback-specific rules are called from _persona_verdict_fallback.py.
+      PERSONA_SNAPSHOT and PERSONA_ROLE at that job's literal role. NEEDS, CONDITIONS and PERMISSIONS each gain a
+      run-fallback entry (NEEDS [prepare, keyprep, run]; _job_shape indexes all three). _secret_rules and the
+      Environment rule name run-fallback beside run; the run-fallback-specific rules are called from _persona_verdict_fallback.py.
   - file: scripts/checks/ci_guards/_persona_verdict_fallback.py
     action: Create
     new_imports: []
@@ -152,7 +157,10 @@ scope:
       {allowlisted: "${{ steps.resolve.outputs.allowlisted }}", fixture: "${{ steps.route.outputs.fixture }}",
       fallback_drill: "${{ steps.route.outputs.fallback_drill }}"}; no other job names primary_outage or fallback_drill;
       PERSONA_ROLE is primary in run and warm_fetched_escape_hatch in run-fallback; run-fallback's permissions and
-      Environment equal run's.
+      Environment equal run's; run-fallback's job-level key set is exact (no strategy, matrix, outputs or env), so at
+      most one fallback run is enforced statically (Decision 55). It owns the run-fallback condition built from KEYED_IF
+      and KEYPREP_OK passed in by _persona_verdict_keyed.py as parameters and never imports that module (no circular
+      import).
   - file: scripts/checks/ci_guards/validate_persona_verdict_chain.py
     action: Modify
     new_imports: []
@@ -196,9 +204,10 @@ scope:
     purpose: >-
       Rec acceptance test_request_reads_the_fallback_role_key_on_a_fallback_run (PERSONA_ROLE
       warm_fetched_escape_hatch in run-fallback reads the anthropic/ key parameter and emits provider anthropic/);
-      a role/job mismatch, an unknown role and a missing role are refused with nothing on stdout;
+      a role/job mismatch, an unknown role, a missing role, GITHUB_JOB unset and a third job name are refused with
+      nothing on stdout;
       test_primary_outage_only_from_proxy_counts_on_run: true only on run with a non-success result, ok 0 and
-      outage or inflight >= 1; false with ok >= 1, with upstream null and on success; nothing written on run-fallback;
+      outage or inflight >= 1; false with ok >= 1, with boolean counts, with upstream null and on success; nothing written on run-fallback;
       host.job follows GITHUB_JOB.
   - file: tests/personas/test_egress_proxy.py
     action: Modify
@@ -224,8 +233,9 @@ scope:
       Hermetic pre-merge proof of the signal chain: test_unreachable_primary_sets_primary_outage runs the real proxy
       against a closed local port (an own 502), feeds its stdout through the launcher's counts reader into a run-mode
       result with a failure, and record_main (GITHUB_JOB run) writes primary_outage=true; the same with an upstream
-      that answers 200 writes false. Both use rec-5549's proxy test seam (the fake connector its tests use for the
-      fixed upstream), since the proxy refuses a loopback answer and verifies TLS against the hostname.
+      that answers 200 writes false. Both use a fake connector defined in this file at rec-5549's proxy connector seam
+      (never imported from test_egress_proxy.py; validate_no_cross_test_imports), since the proxy refuses a loopback
+      answer and verifies TLS against the hostname.
   - file: tests/personas/test_post_verdict.py
     action: Modify
     purpose: >-
@@ -234,7 +244,11 @@ scope:
       is judged as today.
   - file: tests/personas/test_route.py
     action: Modify
-    purpose: "test_fallback_drill_only_on_fixture_diffs (true with the drill file in a fixture-only diff; false in a mixed diff or without it)."
+    purpose: >-
+      test_fallback_drill_only_on_fixture_diffs (true with the drill file added or modified in a fixture-only diff;
+      false in a mixed diff, on a rename or removal, or without it). The exact-output assertion (test_route.py:190,
+      "routes=1\nfixture=true\n" as rec-5550 leaves it) is extended with the fallback_drill line: an addition, not a
+      loosening, dispositioned in code review (validate_weakening_candidates).
   - file: tests/personas/test_egress_container_control.py
     action: Modify
     purpose: "test_probe_request_follows_the_job_role (run-fallback names anthropic/ and upstream report; run names deepseek/ and report; the probe workflow's job names deepseek/ with input {})."
@@ -264,8 +278,8 @@ scope:
       fixtures, each failing with its own message: run-fallback's if without either disjunct or with another,
       PERSONA_ROLE primary in run-fallback or warm_fetched_escape_hatch in run, run's outputs with a literal 'true'
       or an extra key, prepare's outputs missing fallback_drill or with a literal value, another job naming
-      primary_outage or fallback_drill, run-fallback without the Environment or with other permissions
-      (test_run_fallback_permissions_and_environment).
+      primary_outage or fallback_drill, run-fallback with a strategy or matrix key, run-fallback without the
+      Environment or with other permissions (test_run_fallback_permissions_and_environment).
   - file: tests/checks/ci_guards/test_validate_persona_verdict_chain.py
     action: Modify
     purpose: "test_the_keyed_jobs_are_part_of_the_seven_job_set asserts the eight-job set (assertion edit only; node id kept)."
@@ -294,9 +308,8 @@ verification_plan:
       tests/personas/test_post_verdict.py tests/personas/test_route.py tests/personas/test_egress_container_control.py
       tests/personas/test_egress_container_probe.py -q
     expected: All tests pass.
-    expected_literals: ["passed"]
     fix_if: A test fails; fix the code inside scope, never the assertion (Decision 235).
-    hermetic: true
+    hermetic: false
     graduation: graduate
     graduation_check_id: persona-verdict-fallback-run-units
   - step: 2
@@ -308,9 +321,8 @@ verification_plan:
       tests/checks/ci_guards/test_validate_persona_verdict_chain.py tests/checks/misc/test__persona_verdict_container.py
       tests/checks/misc/test_validate_persona_verdict_egress.py -q
     expected: All tests pass, each new red fixture failing with its own message.
-    expected_literals: ["passed"]
     fix_if: A live-tree case fails; fix the workflow or config to the scope row's shape. A red fixture passing is a guard gap; fix the check.
-    hermetic: true
+    hermetic: false
     graduation: graduate
     graduation_check_id: persona-verdict-fallback-run-guards
   - step: 3
@@ -350,7 +362,9 @@ verification_plan:
     action: >-
       Fallback drill on main: on the same fixture PR, push one head that rewrites
       tests/fixtures/persona_verdict/fixture_pr/fallback_drill.txt to 'fallback drill 1' and nothing else (full tier
-      and --verify-head first). Spends one fallback-role run of the Anthropic credit.
+      and --verify-head first), only after VP 5's run has concluded (the head_branch concurrency group cancels an
+      earlier run). Spends one fallback-role run of the Anthropic credit; the later drill-revert head runs one more
+      primary run.
     command: >-
       mcp__github__actions_list(method="list_workflow_runs", owner="otl-labs", repo="ontheloop",
       resource_id="persona-verdict.yml") for the head SHA, then mcp__github__actions_list(method="list_workflow_jobs",
@@ -399,6 +413,11 @@ test_obligations:
     verification_step: 1
     test_selector: tests/personas/test_egress_launcher.py::test_run_result_carries_upstream_and_role_flag
     red_green_expectation: red before, green after
+  - source: scripts/personas/egress_launcher.py
+    behavior: probe mode delivers the validated input file
+    verification_step: 1
+    test_selector: tests/personas/test_egress_launcher.py::test_probe_mode_writes_the_input_file
+    red_green_expectation: red before (probe mode writes no input file), green after
   - source: scripts/personas/egress_floor_container.py
     behavior: the snapshot's role per provider matches the tier models
     verification_step: 1
@@ -472,6 +491,8 @@ context:
   - "Flip plans (T4.28-T4.30, c6): a credit-spent fallback posts a plain failure here; each flip plan maps it to T4.28 c6's unavailable verdict and in-session fallback, entered visibly."
   - "Workflow size relief if execution_steps[0] measures persona-verdict.yml past 500: first YAML anchors on run's id-less shared steps (checkout, setup-python, wheels download), kept only if every persona-verdict guard and the composite-body baseline pass on the anchored file; else STOP (a reusable-workflow split changes job_workflow_ref, Decision 263 cl.2)."
   - "Accepted post-merge risk: the anthropic/ wire is first exercised live by VP 6's drill; rec-5561's c7 closure reads rec-5550's strict pre-change run, not this plan's."
+  - "Fallback trigger bounds: ok 0 is required, so an outage after a successful primary call fails the check as today (T4.28 c6's in-session fallback covers it). Residual: a blocked or misconfigured upstream yields the proxy's own 502 and spends the fallback; the static one-host row pin is the mitigation."
+  - "Critique r4 build notes: persona-verdict.yml is about 373 effective lines today and likely about 505-515 after rec-5550 and this build (hypothesis), so expect the anchors relief; re-measure at build start."
   - "Rebase order: adapter.py with rec-5556 (local_container key-adding proxy), whoever builds second."
   - "Decision 48: the live leg is VP 6's drill (post-deploy, before rec-5559 is read closed). Decision 212: the snapshot's role field reads inference-provider.yaml, which rec-5549's snapshot already reads for the provider rows (no new coupling); run_argv takes role as an opaque token."
   - "No T4.32 criterion closes here (c7 closes via rec-5561); closes_criteria [] as in the sibling plans."
@@ -489,6 +510,7 @@ gate_rounds:
   - {gate: decision-scout, round: 3, verdict: NO_FLAGS, scout_input_fingerprint: "v1:21208b02b1c0518cb2035cd82e72f16070ae8ef4b97c2a39b44be5993fa6bfd6"}
   - {gate: plan-critique, round: 3, verdict: REVISE, blocking: 3, nits: 12, findings: [{id: FB3-B1, severity: blocking, origin: judgement, anchor: "scope[scripts/personas/egress_container_probe.py]", subject: "probe mode never delivers the input; report mode must be exact-match", disposition: fixed}, {id: FB3-B2, severity: blocking, origin: mechanical, anchor: "scope[scripts/checks/ci_guards/validate_persona_verdict_chain.py]", subject: "prepare's outputs not pinned as an exact mapping", disposition: fixed}, {id: FB3-B3, severity: blocking, origin: mechanical, anchor: "test_obligations", subject: "new refusal branches not measured by the per-file coverage check", disposition: fixed}, {id: FB3-N1, severity: nit, origin: judgement, anchor: "context", subject: "anchor on rec-5615's build squash-merge and --role at source_commit", disposition: applied-wording}, {id: FB3-N2, severity: nit, origin: judgement, anchor: "intent", subject: "fixture runs only until KEYED_IF widens", disposition: applied-wording}, {id: FB3-N3, severity: nit, origin: judgement, anchor: "scope[scripts/personas/egress_launcher.py]", subject: "drain the pipe in probe mode; stdout stays one object", disposition: applied-wording}, {id: FB3-N4, severity: nit, origin: mechanical, anchor: "scope[scripts/checks/misc/validate_persona_verdict_egress.py]", subject: "headroom figure stale; facade relief", disposition: applied-wording}, {id: FB3-N5, severity: nit, origin: judgement, anchor: "scope[scripts/checks/misc/_persona_verdict_container.py]", subject: "role from job name cross-checked with PERSONA_ROLE", disposition: applied-wording}, {id: FB3-N6, severity: nit, origin: judgement, anchor: "scope[scripts/personas/keyed_run.py]", subject: "slow primary at the bound triggers fallback", disposition: applied-wording}, {id: FB3-N7, severity: nit, origin: judgement, anchor: "scope[scripts/personas/post_verdict.py]", subject: "plan_override record has no marker", disposition: applied-wording}, {id: FB3-N8, severity: nit, origin: judgement, anchor: "verification_plan[6]", subject: "revert the drill file after the reads", disposition: applied-wording}, {id: FB3-N9, severity: nit, origin: judgement, anchor: "context", subject: "accepted post-merge risk on the anthropic/ wire", disposition: applied-wording}, {id: FB3-N10, severity: nit, origin: mechanical, anchor: "test_obligations", subject: "re-point keyed and chain selectors", disposition: applied-wording}, {id: FB3-N11, severity: nit, origin: judgement, anchor: "context", subject: "rec-5561 c7 closure reads rec-5550's strict run", disposition: applied-wording}, {id: FB3-N12, severity: nit, origin: mechanical, anchor: "scope[scripts/checks/ci_guards/_persona_verdict_keyed.py]", subject: "new_imports names the fallback module", disposition: applied-wording}]}
   - {gate: decision-scout, round: 4, verdict: NO_FLAGS, scout_input_fingerprint: "v1:6dd901f0ef62ee963db3985513b54dde60a8903bf2de4eff2bc1662fa41f100e"}
+  - {gate: plan-critique, round: 4, verdict: PROCEED, blocking: 0, nits: 15, findings: [{id: FB4-N1, severity: nit, origin: mechanical, anchor: "scope[scripts/checks/ci_guards/_persona_verdict_keyed.py]", subject: "NEEDS, CONDITIONS and PERMISSIONS need run-fallback entries", disposition: applied-wording}, {id: FB4-N2, severity: nit, origin: judgement, anchor: "scope[scripts/checks/ci_guards/_persona_verdict_fallback.py]", subject: "pin run-fallback's job-level key set (no strategy or matrix)", disposition: applied-wording}, {id: FB4-N3, severity: nit, origin: judgement, anchor: "scope[scripts/checks/ci_guards/_persona_verdict_fallback.py]", subject: "condition constants passed in; no circular import", disposition: applied-wording}, {id: FB4-N4, severity: nit, origin: judgement, anchor: "scope[scripts/personas/keyed_run.py]", subject: "define success-shaped; launcher_no_result writes false; exclude booleans", disposition: applied-wording}, {id: FB4-N5, severity: nit, origin: judgement, anchor: "intent", subject: "ok 0 means an outage after a success never triggers fallback", disposition: applied-wording}, {id: FB4-N6, severity: nit, origin: mechanical, anchor: "scope[scripts/checks/misc/validate_persona_verdict_egress.py]", subject: "reshape _provider_hosts_expected; crossing is a STOP", disposition: applied-wording}, {id: FB4-N7, severity: nit, origin: mechanical, anchor: "execution_steps", subject: "workflow likely past 500; anchors relief expected", disposition: build-note}, {id: FB4-N8, severity: nit, origin: mechanical, anchor: "scope[tests/personas/test_route.py]", subject: "exact-output assertion extension named", disposition: applied-wording}, {id: FB4-N9, severity: nit, origin: mechanical, anchor: "scope[tests/personas/test_fallback_chain.py]", subject: "local fake connector, no cross-test import", disposition: applied-wording}, {id: FB4-N10, severity: nit, origin: mechanical, anchor: "verification_plan[1]", subject: "whole-file re-runs are hermetic false (rule v)", disposition: applied-wording}, {id: FB4-N11, severity: nit, origin: mechanical, anchor: "closes_criteria", subject: "declared partial slice", disposition: build-note}, {id: FB4-N12, severity: nit, origin: judgement, anchor: "scope[scripts/personas/egress_floor_container.py]", subject: "read roles through tier_model selection_ref", disposition: applied-wording}, {id: FB4-N13, severity: nit, origin: judgement, anchor: "verification_plan[6]", subject: "read VP5 before the drill push; revert spends a primary run", disposition: applied-wording}, {id: FB4-N14, severity: nit, origin: judgement, anchor: "scope[scripts/personas/egress_proxy.py]", subject: "misconfigured upstream spends the fallback; residual", disposition: applied-wording}, {id: FB4-N15, severity: nit, origin: mechanical, anchor: "test_obligations", subject: "GITHUB_JOB refusals; probe input selector", disposition: applied-wording}]}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
