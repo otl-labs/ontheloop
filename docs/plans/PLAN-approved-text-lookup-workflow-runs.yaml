@@ -30,7 +30,8 @@ scope:
       DEADLINE_SECONDS (30) are unchanged. Every GitHubError on a page or read made before a match (a 404 for a
       missing workflow included) still reads UNVERIFIED; a page after a matching page is never read, because APPROVED
       rests on positive evidence; no match within the bound still reads MISSING. The CANDIDATE_RUNS bound counts viable
-      runs across pages (today's viable[:CANDIDATE_RUNS] semantics), never per page. The module docstring and lookup's docstring name the
+      runs across pages (today's viable[:CANDIDATE_RUNS] semantics), never per page, and once the bound is spent with no
+      match the lookup reads no further page and returns MISSING. The module docstring and lookup's docstring name the
       workflow-scoped list.
     new_imports: []
   - file: tests/test_approved_text_github.py
@@ -45,7 +46,8 @@ scope:
       Add test_lookup_stops_paging_once_a_page_holds_the_approved_run (match on page 2 of 3: exactly two run-list
       requests) and test_the_candidate_bound_spans_pages (page 1: 95 runs of another title and 5 viable runs of this
       title whose approvals name no approved-text approver; page 2: an approved run of this title; the verdict is
-      MISSING). Existing nodes (past-first-page, newer waiting or rejected reruns, not-on-main, transport failure,
+      MISSING and exactly one run-list request is made), and an http-404 id (gh.GitHubError("HTTP 404 from x")) on the
+      parametrized test_a_transport_failure_reads_unverified_never_missing. Existing nodes (past-first-page, newer waiting or rejected reruns, not-on-main, transport failure,
       expired deadline, git-cannot-place) keep their assertions.
     new_imports: []
   - file: docs/contracts/ports.yaml
@@ -64,7 +66,7 @@ scope:
       summary: "PLAN-approved-text-lookup-workflow-runs (rec-5607): SA-05 reads the workflow's own runs."}. Measured on
       main at planning the result is 50250 bytes. If another plan's ports.yaml edit lands first and the file would
       exceed its config/structural_size_budgets.yaml byte_budgets entry, shorten another row of this plan's own text by
-      citation; never a raise.
+      citation; never a raise. The margin is 1 byte, so re-measure after every rebase (VP 3).
     new_imports: []
 bundled_recommendations: [rec-5607]
 followon_recs: [rec-5616]
@@ -139,11 +141,13 @@ verification_plan:
     phase: post-deploy
     action: CI real-run proof. The first pr-validate run after the merge that performs an approval lookup (a plan or build PR whose plan carries a sidecar, for example the rec-5569 build or an open sidecar plan PR's next push) is read and its run id recorded.
     command: >-
-      mcp__github__actions_list(method=list_workflow_runs, owner=otl-labs, repo=ontheloop, resource_id=pr-validate.yml,
+      mcp__github__actions_list(method=list_workflow_runs, owner=otl-labs, repo=ontheloop, resource_id=ci.yml,
       workflow_runs_filter={event: pull_request}); take the first run created after the build's merge whose PR adds or
       changes a docs/plans/approved/*.yaml sidecar or declares a plan that has one; then
-      mcp__github__get_job_logs(owner=otl-labs, repo=ontheloop, run_id=<that run>, return_content=true, tail_lines=3000)
-      and search the text for "approval" and "deadline exceeded".
+      mcp__github__actions_list(method=list_workflow_jobs, owner=otl-labs, repo=ontheloop, resource_id=<that run id>)
+      and take the job named pr-validate (the job at .github/workflows/ci.yml, not a workflow file); then
+      mcp__github__get_job_logs(owner=otl-labs, repo=ontheloop, job_id=<that job id>, return_content=true,
+      tail_lines=3000) and search the text for "approval" and "deadline exceeded".
     expected: the run's approval lines read APPROVED or MISSING, and the text "deadline exceeded" is absent; the run id is recorded in the build's report
     fix_if: UNVERIFIED; report the run id and the job log lines to the plan owner
     hermetic: false
@@ -187,7 +191,7 @@ context:
   - "Probe 2026-11-24 (anonymous, session proxy): actions/workflows/approved-text-approval.yml/runs?event=workflow_dispatch&branch=main answers 200 with total_count 258, every run's path the approval workflow, newest first (45414807671 first); one page takes about 2.2s, the same as one repository-wide page, so the old lookup paid about 10 pages and the new one usually 1 page plus a jobs and an approvals read."
   - "Why the repository-wide list was chosen (PLAN-approved-text-operator-approval context, 2026-11-04): the per-workflow endpoint answered 404 while main did not yet carry the workflow. Main has carried it since that plan's build, so the reason no longer holds; a 404 now still reads UNVERIFIED."
   - "Bound semantics: SA-05's 1000-run window now counts approval-workflow runs only, so an approval falls out of the window much later; an approval past it still reads MISSING and fails closed."
-  - "Residual (critique PCX-07): a MISSING lookup still scans up to 10 pages; at about 13 approval runs a day that regrows to about 22s in roughly two months. Follow-on rec-5616 (Low, depends on rec-5607) bounds it by the sidecar's commit date."
+  - "Residual (critique PCX-07): a MISSING lookup still scans up to 10 pages; at about 13 approval runs a day that regrows to about 22s in roughly two months. Follow-on rec-5616 (Low, depends on rec-5607) bounds it by the sidecar's commit date. The 30s Deadline is one per check run, shared across every sidecar the check reads (validate_merge_step.py:178, validate_plan_documents.py:219), so one MISSING or informational scan spends a later sidecar's time: rec-5616's scope covers that too."
   - "Ownership: coordinator log #1963 names no other project on approved-text files; no open PR touches approved_text_github.py, its test or ports.yaml SA-05 (checked 2026-11-24)."
   - "Graduated shard approved-text-github-adapter (node_id the whole tests/test_approved_text_github.py) is kept: the file stays and every node in it passes."
   - "Shared file: eight unbuilt plans also scope docs/contracts/ports.yaml (plan_obligations); whichever builds second rebases. Edits here are SA-05's text and one amendment_log row."
@@ -213,6 +217,17 @@ gate_rounds:
       - {id: PCX-07, severity: nit, origin: judgement, anchor: "context[3]", subject: "MISSING-path cost regrows toward 10 pages; record residual and follow-on (rec-5616)", disposition: fixed}
       - {id: PCX-08, severity: nit, origin: judgement, anchor: "verification_plan[4]", subject: "step 5 pins run 45414807671 and runs anonymously; allow the newest approved run", disposition: fixed}
       - {id: PCX-09, severity: nit, origin: judgement, anchor: "constraints[1]", subject: "every-GitHubError-reads-UNVERIFIED overclaims after early stop; scope it to reads before a match", disposition: fixed}
+  - gate: plan-critique
+    round: 2
+    verdict: REVISE
+    blocking: 1
+    nits: 4
+    findings:
+      - {id: PCR-01, severity: blocking, origin: mechanical, anchor: "verification_plan[5].command", subject: "pr-validate is a ci.yml job, not a workflow; get_job_logs needs job_id for a passing job", disposition: fixed}
+      - {id: PCR-02, severity: nit, origin: judgement, anchor: "scope[0].purpose", subject: "stop paging once the CANDIDATE_RUNS bound is spent; assert one run-list request", disposition: fixed}
+      - {id: PCR-03, severity: nit, origin: mechanical, anchor: "constraints[1]", subject: "pin the newly reachable 404 with an http-404 transport-failure id", disposition: fixed}
+      - {id: PCR-04, severity: nit, origin: judgement, anchor: "context[4]", subject: "shared per-check Deadline across sidecars; name it in the residual for rec-5616", disposition: fixed}
+      - {id: PCR-05, severity: nit, origin: mechanical, anchor: "scope[2].purpose", subject: "1-byte ports.yaml margin; re-measure after any rebase", disposition: fixed}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
