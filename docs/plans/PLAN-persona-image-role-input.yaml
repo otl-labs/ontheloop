@@ -1,0 +1,191 @@
+schema_version: 7
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: persona-image-role-input
+intent: >-
+  Give the persona image a tier-role input: run_persona takes the role a run starts on (primary or
+  warm_fetched_escape_hatch) and, when a role is given, the litellm backend never fails over in-process, so a run
+  behind rec-5549's one-upstream key-adding proxy stays on one provider and rec-5559's run-fallback job can start a
+  run on the fallback role (rec-5615, split of rec-5559).
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-persona-image-role-input.yaml
+phase: >-
+  T4.32 c7 (container leg, part; rec-5615, tag split-of-rec-5559); closes no criterion. src/persona_backends/ and
+  scripts/run_persona.py are persona image inputs (config/persona_image.yaml build.copy), in no Lambda bundle; the
+  governed persona-image-publish channel publishes on the next green main push and the operator merges the pin PR,
+  so this plan deploys nothing itself (V2).
+closes_criteria: []
+cites: [dec:173]
+amends: []
+introduces: []
+scope:
+  - file: src/persona_backends/litellm_backend.py
+    action: Modify
+    purpose: >-
+      run_persona gains a keyword role: str | None = None. A role other than None, "primary" or
+      "warm_fetched_escape_hatch" (the module's _FALLBACK) raises RunRefused before the contract loads, naming the two
+      roles. _Run takes the role: self.role = role or "primary", and a new flag (in-process fail-over allowed) is true
+      only when role is None. step() offers fail_over only when that flag is true, so a run given a role (either
+      role) never passes fail_over=True to the transport and never switches self.role. With role None every path is
+      byte-for-byte today's (the first-call fail-over, its max_attempts split, its probe_turn rule). Probe accounting
+      for a run given a role: the transport probes the fallback's remaining allowance (Decision 173 cl.4, cold-start
+      assertion) on the first fallback call in a process and returns a fresh probe_record; that turn's probe_turn is 1
+      (on_result, on_transport_error and timed_out read the result's, the error's or the capture's probe_record) and
+      turns_used adds it, so max_turns still bounds what is billed (executor-personas.yaml budget_rules). Every other
+      turn of such a run has probe_turn 0 (an in-process cached assertion returns no probe_record; a raised probe is
+      already an attempt-0 entry). The first call of a run started on the fallback role reserves the probe's turn:
+      max_attempts = min(3, left - 1); when fewer than 2 turns are left it makes no call and returns budget_exhausted
+      ("max_turns leaves no turn for the fallback probe"). failed_over stays false on every turn of a run given a role.
+      Turn records already carry role, so the events file shape is unchanged.
+    new_imports: []
+  - file: scripts/run_persona.py
+    action: Modify
+    purpose: >-
+      Add an optional argv flag --role (no argparse choices; the backend's RunRefused is the one validator, exit 2 with
+      "refused: ..." on stderr) and pass role=args.role to run_persona; absent, role is None and the run is today's.
+      The usage line in the module docstring names --role and says a given role turns in-process fail-over off. An
+      older image refuses the unknown flag with exit 2 (argparse), so a run-fallback request reaching a pre-change
+      image fails loudly rather than running the wrong role.
+    new_imports: []
+  - file: tests/persona_backends/test_litellm_backend.py
+    action: Modify
+    purpose: >-
+      rec-5615's acceptance node test_role_input_starts_on_that_role_without_fail_over: with role
+      warm_fetched_escape_hatch every call carries role warm_fetched_escape_hatch and fail_over False and every turn
+      record role warm_fetched_escape_hatch and failed_over false; with role primary and a first-call outage the run
+      aborts on primary with no fallback call (fail_over False on the call, failed_over false on the turn); with role
+      None the first call still carries fail_over True (unchanged). The file has 39 SLOC of headroom (plan_obligations,
+      461 of 500), so only this node lands here; the other role nodes go in the new file below.
+    new_imports: []
+  - file: tests/persona_backends/test_litellm_backend_role.py
+    action: Create
+    purpose: >-
+      Role-input nodes beside the acceptance node, using tests/persona_backends/fakes.py (no import from another test
+      module): test_fallback_role_input_counts_its_probe_turn (first result carries a probe_record: probe_turn 1,
+      turns_used = attempts + 1, first call max_attempts = min(3, max_turns - 1); a second call's result with no
+      probe_record has probe_turn 0); test_fallback_role_input_probe_then_error_counts_probe (an error carrying
+      probe_record: probe_turn 1); test_fallback_role_input_with_one_turn_left_makes_no_call (a tmp_path contract copy
+      with max_turns 1: budget_exhausted, no transport call); test_unknown_role_input_is_refused (RunRefused naming both
+      roles, no call).
+    new_imports: []
+  - file: tests/test_run_persona.py
+    action: Modify
+    purpose: >-
+      test_role_flag_reaches_the_backend (main with --role warm_fetched_escape_hatch: the scripted transport's first
+      call carries role warm_fetched_escape_hatch and fail_over False; without --role the first call carries fail_over
+      True) and test_unknown_role_exits_two (main with --role other returns 2, stderr starts "refused:", no transport
+      call, stdout empty).
+    new_imports: []
+bundled_recommendations: [rec-5615]
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - "bin/venv-python -m pytest tests/persona_backends/test_litellm_backend.py::test_role_input_starts_on_that_role_without_fail_over -q passes (rec-5615's acceptance) and fails before the change."
+  - "A run given a role never passes fail_over=True and never switches role; a run with no role keeps today's first-call fail-over unchanged (every existing node in tests/persona_backends/ and tests/test_run_persona.py passes unchanged)."
+  - "A run started on warm_fetched_escape_hatch counts its fresh cold-start probe as one turn and reserves it within max_turns."
+  - "scripts/run_persona.py --role passes the role through; an unknown role exits 2 with no call."
+  - "rec-5615 is closed by the build's squash-merge Resolves trailer once its acceptance holds (Decision 201)."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: rec-5615's acceptance node passes.
+    command: bin/venv-python -m pytest tests/persona_backends/test_litellm_backend.py::test_role_input_starts_on_that_role_without_fail_over -q
+    expected: exit 0 with 1 passed; before the change run_persona has no role keyword and the node fails
+    fix_if: the node fails; a role-given run still offers fail_over or switches role
+    hermetic: true
+    expected_literals: ["1 passed"]
+    graduation: graduate
+    graduation_check_id: persona-image-role-input-no-fail-over
+  - step: 2
+    phase: pre-deploy
+    action: The new nodes pass, the existing backend and entry-point nodes pass unchanged, and no scope file crosses its SLOC cap.
+    command: >-
+      bin/venv-python -m pytest
+      tests/persona_backends/test_litellm_backend_role.py::test_fallback_role_input_counts_its_probe_turn
+      tests/persona_backends/test_litellm_backend_role.py::test_fallback_role_input_probe_then_error_counts_probe
+      tests/persona_backends/test_litellm_backend_role.py::test_fallback_role_input_with_one_turn_left_makes_no_call
+      tests/persona_backends/test_litellm_backend_role.py::test_unknown_role_input_is_refused
+      tests/test_run_persona.py::test_role_flag_reaches_the_backend tests/test_run_persona.py::test_unknown_role_exits_two
+      tests/persona_backends/ tests/test_run_persona.py -q &&
+      bin/venv-python -m scripts.roadmap.plan_obligations --plan docs/plans/PLAN-persona-image-role-input.yaml
+    expected: pytest exits 0 with no failure; plan_obligations reports no SLOC crossing for a scope file
+    fix_if: a node fails, or a scope file crosses its cap (move nodes to test_litellm_backend_role.py, never a raise, Decision 128)
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Whole-file and whole-directory re-run of in-scope suites (hermetic rule (v)); the full tier runs them and step 1 graduates the acceptance node.
+  - step: 3
+    phase: pre-deploy
+    action: Full tier, then HEAD attestation, after the build commit and rebase and before the push (handoff_policy); start it backgrounded from the top-level session with a 2 h limit.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: the full tier exits 0 and the validation result attests the current HEAD's tree
+    fix_if: any failure; fix and rerun the full tier from the start
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion).
+  - step: 4
+    phase: post-deploy
+    action: rec-5615 closed by the build's squash-merge Resolves trailer.
+    command: >-
+      bin/venv-python -c "from src.common import ducklake_reader_client as c; r,_=c.fetch_recs_by_ids(c.make_reader(),
+      ['rec-5615']); print(r[0]['id'], r[0]['status'])"
+    expected: Prints rec-5615 closed.
+    fix_if: Still open after the closure job ran; read ci.yml's closure job log and report to the plan owner.
+    hermetic: false
+  - step: 5
+    phase: post-deploy
+    action: >-
+      The pinned image carries the change: config/persona_image.yaml's source_commit on main descends from the build's
+      merge commit (the operator's pin PR; it may be the same pin PR as the rec-5549 egress build's).
+    command: >-
+      git fetch origin main --quiet && s=$(git show origin/main:config/persona_image.yaml | sed -n
+      's/^source_commit: "\([0-9a-f]*\)".*/\1/p') && git merge-base --is-ancestor "$MERGE_SHA" "$s" && echo "pin carries
+      the role input"
+    expected: Prints "pin carries the role input"; MERGE_SHA is the build's squash-merge sha.
+    fix_if: >-
+      Not yet pinned: report to the coordinator that rec-5559's build waits on the pin PR (persona_image_pin update,
+      operator merges); this step never reopens rec-5615.
+    hermetic: false
+test_obligations:
+  - source: src/persona_backends/litellm_backend.py
+    behavior: a run given a role starts on it and never fails over in-process
+    verification_step: 1
+    test_selector: tests/persona_backends/test_litellm_backend.py::test_role_input_starts_on_that_role_without_fail_over
+    red_green_expectation: red before (no role keyword), green after
+  - source: scripts/run_persona.py
+    behavior: --role reaches the backend; an unknown role exits 2
+    verification_step: 2
+    test_selector: tests/test_run_persona.py::test_role_flag_reaches_the_backend
+    red_green_expectation: red before (argparse refuses --role), green after
+constraints:
+  - "Image files only: src/persona_backends/ and scripts/run_persona.py plus their tests. No change to scripts/llm/ (the transport already probes on a role-fallback call), the local_container adapter (rec-5556), the launcher or workflows (rec-5559), or docs/contracts/executor-personas.yaml (budget_rules already says max_turns bounds what is billed)."
+  - "With no role the backend is unchanged; no existing test or assertion is loosened (Decisions 181, 235)."
+  - "No rescue agents or workaround loops (Decision 55)."
+context:
+  - "rec-5615 (split of rec-5559, operator card 2026-11-24 16:16 UTC). rec-5559 depends on rec-5550 and rec-5615; its build also needs the pin (VP 5). Blind Fable consult: /mnt/project-files/fallback-role-rerun/advisor-brief/ADVICE.md (Y: child first; fail-over off only when a role is passed)."
+  - "Fork decided with notice: argv flag over an environment variable. The rec allowed either. An env var an older image ignores would let a run-fallback request run primary with fail-over on behind a fallback-only proxy; the flag fails closed (exit 2). The parent is sequenced after this pin, so no live caller meets an old image; local_container's argv is unchanged (no flag means today's run)."
+  - "Fork decided with notice: the fallback start's fresh probe counts as probe_turn 1 and is reserved within max_turns (precedent: the fail-over path's probe turn; executor-personas.yaml budget_rules: max_turns bounds what is billed). Runs with no role keep 'probe_turn 1 exactly when failed_over' (PLAN-litellm-attempt-capture)."
+  - "Publish and pin: persona-image-publish fires on each green CI push to main that changes an image input, so this build publishes itself. The rec-5549 egress build already needs a pin PR after its publish; if this build merges before that pin PR opens, one pin (newest attested digest) carries both. The pin is the operator's merge; it is not this plan's step."
+  - "Decision-scout r1 FLAGS_FOUND. CITE 173 (cl.1 roles; cl.4 the cold-start remaining-allowance probe a fallback start keeps). SPIRIT NOTE 173 (a run given a role has no in-process escape hatch, so a caller passing --role before rec-5559's run-fallback job ships would leave a primary outage with no route to the fallback); adopted: no caller passes --role until rec-5559's build, which adds --role to the run job and the run-fallback job in one change; rec-5549's launcher passes none. RELATED 206 (an optional executor-personas.yaml governance note naming the role keyword and the fallback-start probe turn; left to rec-5559's plan, which adds the caller), 205, 212, 234, 249, 126, 229, 247, 263, 132, 244, 181, 235, 128, 201, 55, 164."
+  - "Decisions triaged: 228 of 228. Roadmap items intersected: 1; CONFLICT: 0; RELATED: 1."
+  - "Serves: NS.1 3/5 -- providers stay roles reached through LiteLLM (Decision 173) behind a one-upstream proxy, and a run can start on the fallback role."
+  - "Graduated shards kept unchanged (their nodes are not edited; nodes are only added): bridge-teardown-end-record-backend, litellm-attempt-capture-backend, run-persona-entry-point, run-persona-litellm-backend-loop."
+  - "red_overlap (2026-11-24 16:3x UTC): {\"verdict\": \"clear\", \"reds\": []}."
+  - "Overlap: rec-5549 egress build (launcher, proxy, checks), rec-5569 guidance build (scripts/personas/guidance.py, contracts) and rec-5605 (materialise.py) touch none of the scope files. Coordinator log #1963 read 2026-11-24 16:2x UTC: no other project names these files."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:643c4b76de579d69c6c5ae898678442bebcabdfef83605db8239049840933fce"}  # pragma: allowlist secret
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "tests/persona_backends/test_litellm_backend.py, tests/persona_backends/test_litellm_backend_role.py and tests/test_run_persona.py: write the nodes first; VP 1 fails (no role keyword)."
+  - "src/persona_backends/litellm_backend.py: role keyword, refusal, fail-over flag, probe accounting and reservation as scoped. VP 1 green."
+  - "scripts/run_persona.py: --role flag and docstring. VP 2 green."
+  - "Add the graduated shard config/agent/verification_registry/entries/persona-image-role-input-no-fail-over.yaml for VP 1."
+  - "CLOSURE (implement skill Commit Flows): commit with Resolves: rec-5615; rebase; VP 3; push; PR titled build(persona-image-role-input); code review in a fresh context; merge on PROCEED and green CI with Resolves: rec-5615 in the squash body; then VP 4. Tell the coordinator the merge sha so the pin PR can carry it; VP 5 after the pin."
+  - "Report: what was implemented, verification results."
+rollback: Revert the build PR; the next publish drops the role input and rec-5615 reopens. rec-5559's run-fallback job must not ship on a pin without it.
