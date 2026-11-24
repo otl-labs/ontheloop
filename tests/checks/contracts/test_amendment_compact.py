@@ -8,7 +8,6 @@ from typing import Any
 import pytest
 import yaml
 
-from scripts.checks.contracts import _amendment_splice as splice
 from scripts.checks.contracts import amendment_compact as ac
 
 CFG: dict[str, Any] = {
@@ -211,12 +210,12 @@ def test_proof_failure_refuses_the_file(
 ) -> None:
     path = make(tmp_path, [block(f"2026-11-0{n}", f"p{n}", 70 + n) for n in range(1, 6)], tail=TAIL)
     before = path.read_bytes()
-    real = splice.splice
+    real = ac.splice_rows
 
     def evil(text: str, spans: Any, summaries: Any) -> str:
         return real(text, spans, summaries).replace("other:", "othEr:")
 
-    monkeypatch.setattr(splice, "splice", evil)
+    monkeypatch.setattr(ac, "splice_rows", evil)
     assert run("--write", str(path)) == 1
     assert "proof_failed" in capsys.readouterr().out
     assert path.read_bytes() == before
@@ -270,8 +269,8 @@ def test_proof_b_failures_refuse_the_file(
 ) -> None:
     path = make(tmp_path, [block(f"2026-11-0{n}", f"p{n}", 70 + n) for n in range(1, 8)], tail=TAIL)
     before = path.read_bytes()
-    real = splice.splice
-    monkeypatch.setattr(splice, "splice", lambda text, spans, summaries: mutation(real(text, spans, summaries)))
+    real = ac.splice_rows
+    monkeypatch.setattr(ac, "splice_rows", lambda text, spans, summaries: mutation(real(text, spans, summaries)))
     assert run("--write", str(path)) == 1
     assert expect in capsys.readouterr().out
     assert path.read_bytes() == before
@@ -281,6 +280,77 @@ def test_span_failure_marks_every_row_malformed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     path = make(tmp_path, [block(f"2026-11-0{n}", f"p{n}", n) for n in range(1, 6)])
-    monkeypatch.setattr(splice, "locate_log", lambda text: None)
+    monkeypatch.setattr(ac, "locate_log", lambda text: None)
     assert run(str(path)) == 0
     assert "compactable=0 refused=3[malformed=3]" in capsys.readouterr().out
+
+
+DOC = (
+    "a: 1\n"
+    "amendment_log:\n"
+    "  - date: x\n"
+    "    semantic_break: false\n"
+    "    change_class: c\n"
+    "    items:\n"
+    "      - one\n"
+    "    summary: s\n"
+    "\n"
+    "  - {date: y, semantic_break: false,\n"
+    "     change_class: c, summary: t\n"
+    "  }\n"
+    "# trailing\n"
+    "b: 2\n"
+)
+
+
+def test_locate_log_spans_cover_content_only() -> None:
+    spans = ac.locate_log(DOC)
+    assert spans is not None
+    assert [(s.first, s.last, s.refusal) for s in spans] == [(2, 7, None), (9, 11, None)]
+    assert spans[0].texts == ("x", "false", "c") and spans[1].indent == "  "
+
+
+def test_splice_replaces_only_the_chosen_range() -> None:
+    spans = ac.locate_log(DOC)
+    assert spans is not None
+    out = ac.splice_rows(DOC, {1: spans[1]}, {1: 'say "hi" \\ ok'})
+    assert out.splitlines()[9] == '  - {date: y, semantic_break: false, change_class: c, summary: "say \\"hi\\" \\\\ ok"}'
+    assert out.endswith("# trailing\nb: 2\n")
+    assert ac.lines_match(DOC, out, [spans[1]])
+    assert not ac.lines_match(DOC, out, [spans[0]])
+    assert not ac.lines_match(DOC, out.replace("b: 2", "b: 3"), [spans[1]])
+    assert not ac.lines_match(DOC, out + "x\n", [spans[1]])
+    assert not ac.lines_match(DOC, "", [spans[1]])
+
+
+def test_locate_log_none_and_refusals() -> None:
+    assert ac.locate_log("a: [oops") is None
+    assert ac.locate_log("- a\n- b\n") is None
+    assert ac.locate_log("a: 1\n") is None
+    assert ac.locate_log("amendment_log: nope\n") is None
+    flow_seq = ac.locate_log("amendment_log: [{date: a}, {date: b}]\n")
+    assert flow_seq is not None and {s.refusal for s in flow_seq} == {"span_comment"}
+    scalar_row = ac.locate_log("amendment_log:\n  - text\n")
+    assert scalar_row is not None and scalar_row[0].refusal == "malformed"
+    comment = ac.locate_log("amendment_log:\n  - date: a\n    # c\n    summary: s\n")
+    assert comment is not None and comment[0].refusal == "span_comment"
+    shared = ac.locate_log(
+        "amendment_log:\n  - {date: a, semantic_break: false, change_class: c, summary: s}\n  - {date: b}\n"
+    )
+    assert shared is not None and shared[0].refusal is None and shared[1].refusal == "malformed"
+
+
+def test_split_lines_matches_yaml_line_breaks() -> None:
+    assert ac.split_lines("a\r\nb\rc\nd") == ["a\r\n", "b\r", "c\n", "d"]
+    assert ac.split_lines("") == []
+
+
+def test_prove_catches_content_and_untouched_row_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    text = make(tmp_path, [block(f"2026-11-0{n}", f"p{n}", 30 + n) for n in range(1, 5)], tail=TAIL).read_text(
+        encoding="utf-8"
+    )
+    plan = ac._plan(text, CFG)
+    assert plan is not None
+    monkeypatch.setattr(ac, "lines_match", lambda old, new, spans: True)
+    assert "outside the log" in str(ac._prove(text, text.replace("k: 1", "k: 2"), plan, [0], CFG, False))
+    assert "untouched row 3" in str(ac._prove(text, text.replace("Decision 34", "Decision 35"), plan, [], CFG, False))

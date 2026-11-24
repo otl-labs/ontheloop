@@ -123,3 +123,8 @@ def test_exempt_file_matches_retention_rule(tmp_path: Any) -> None:
     ):
         assert at.exempt_file(name, CFG) == ar._exempt_file(name, CFG)
     assert at.exempt_file(tmp_path / "north-star.yaml", CFG) is True
+
+
+def test_lossless_and_past_keep_reject_non_rows() -> None:
+    assert at.lossless("x", _row("PLAN-a", pad=False), CFG) == "a row is not a mapping"
+    assert at.rows_past_keep(None, CFG) == []
