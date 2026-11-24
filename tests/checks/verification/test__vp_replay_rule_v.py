@@ -278,3 +278,9 @@ def test_plan_rule_v_findings_returns_step_ids(tmp_path: Path) -> None:
 def test_segments_without_a_marker_are_excluded(tmp_path: Path) -> None:
     assert excluded("ruff --version", tmp_path) == 1
     assert excluded("env ls pytest tests/test_new.py", tmp_path) == 1
+
+
+def test_trailing_shell_comment_is_not_argv(tmp_path: Path) -> None:
+    assert not refused("pytest tests/unrelated.py::t # tests/test_new.py", tmp_path)
+    assert refused("pytest tests/test_new.py # note\ntrue", tmp_path)
+    assert not refused("pytest tests/unrelated.py --junit-xml tests/test_new.py", tmp_path)

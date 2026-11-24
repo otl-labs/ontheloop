@@ -52,6 +52,7 @@ VALUE_OPTIONS = frozenset(
         "--basetemp",
         "--confcutdir",
         "--junitxml",
+        "--junit-xml",
         "--cov-config",
         "--log-file",
         "--report-log",
@@ -148,6 +149,10 @@ def _segments(text: str) -> list[list[tuple[str, bool]]]:
             continue
         if c in " \t\r":
             flush()
+        elif c == "#" and not buf and not state["has"]:
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
         elif c in "\n;":
             end_segment()
         elif c == "|":
