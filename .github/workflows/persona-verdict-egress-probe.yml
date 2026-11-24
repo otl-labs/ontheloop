@@ -1,7 +1,9 @@
 name: persona-verdict-egress-probe
 
 # Keyless probe of the verdict shell's egress filter (PLAN-persona-verdict-shell-deny; T4.32 c7 shell leg). It runs the PR's own
-# definition and code, so a build proves itself before merge. No secret, id-token, Environment, container or artifact.
+# definition and code, so a build proves itself before merge. No secret, id-token, Environment or artifact. The
+# egress-container job runs the digest-pinned persona image through the root launcher on an internal network behind a
+# key-adding proxy (PLAN-persona-verdict-container-egress; container leg) and its control job shows each refusal is the control's.
 # The filtered job shows a listed host reached and an unlisted name, raw IPs, outside resolvers and sudo refused; the
 # unfiltered control shows each refusal is the filter's or the floor's and that the vendor's filter-supplied list is no
 # wider than config/persona_verdict_egress.yaml's snapshot. Every filtered job lays the egress floor right after its
@@ -13,6 +15,7 @@ on:
     paths:
       - tests/fixtures/persona_verdict/fixture_pr/**
       - config/persona_verdict_egress.yaml
+      - config/persona_image.yaml
       - scripts/personas/egress_*.py
       - scripts/personas/run.py
       - .github/workflows/persona-verdict-egress-probe.yml
@@ -75,6 +78,57 @@ jobs:
       - name: Probe without the filter
         id: control-egress
         run: python3 -I scripts/personas/run.py egress-control
+
+  egress-container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: block
+          allowed-endpoints: api.deepseek.com:443 pkg-containers.githubusercontent.com:443
+          disable-telemetry: true
+          disable-sudo-and-containers: false
+
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Lay the container egress floor
+        id: container-floor
+        run: sudo python3 -I scripts/personas/run.py egress-floor-container
+
+      - name: Check the egress filter
+        id: container-self-check
+        run: python3 -I scripts/personas/run.py egress-self-check
+
+      - name: Probe from the container
+        id: container-probe
+        run: python3 -I scripts/personas/run.py egress-container-request | sudo /usr/bin/python3 -I -S /usr/local/lib/persona-egress/egress_launcher.py probe
+
+      - name: Check the egress filter again
+        id: container-final-check
+        if: always()
+        run: python3 -I scripts/personas/run.py egress-self-check
+
+  egress-container-control:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Probe from the container without the filter
+        id: container-control
+        run: python3 -I scripts/personas/run.py egress-container-control
 
   egress-fail-closed:
     runs-on: ubuntu-latest
