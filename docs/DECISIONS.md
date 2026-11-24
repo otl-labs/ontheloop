@@ -6842,27 +6842,30 @@ predicate (filed follow-on).
 
 ```yaml reversal-conditions
 decision: 186
-review_by: 2026-12-07
+review_by: 2027-03-07
 on_trigger: "re-decide via /plan: re-found or retire it, narrow the sweep exemption, or move it to the writer boundary."
 conditions:
   - id: waiver-majority
     kind: repo_state
     predicate: null
     description: "(a) >50% of NON-SWEEP gated closures in a rolling quarter take the waiver."
+    note: "Gated closures: each write of a ci_rca rec into closed, declined or superseded from a status that is none of these, whose context before or after is escape-classified, read from rec_history; non-sweep excludes resolutions the inactivity sweep wrote. Measured 2026-11-20: 6 of 62 over 71 days."
   - id: sweep-launders
     kind: repo_state
     predicate: null
     description: "(b) programmatic stale_no_recurrence waivers outnumber agent-authored ones >4:1."
+    note: "The waivers among (a)'s gated closures, split by whether the inactivity sweep wrote the closing resolution. Measured 2026-11-20: 0 programmatic, 6 authored."
   - id: refused-then-swept
     kind: manual
-    description: "(c) a rec refused at rec-autoclose is later swept closed, no artifact and no human."
+    description: "(c) a rec refused at ci.yml's trailer-closure job is later swept closed, no artifact and no human."
   - id: client-side-bypass
     kind: manual
-    description: "(d) a caller closes around the client-side gate."
+    description: "(d) a caller closes around the client-side gate: one of (a)'s gated closures carries, at its closing write, neither a fix-bound closure_artifact nor a member closure_waiver_category with a reason."
   - id: artifact-did-not-discriminate
     kind: repo_state
     predicate: null
-    description: "(e) back_validation grades a prior artifact VERIFIED-PRESENT and the same fingerprint recurs."
+    description: "(e) a ci_rca rec names in regression_of a prior closed with a closure_artifact that still resolves, its failure occurred after the prior's fixed_by_sha took effect, and on reading it recurs the prior's own cause; or three regression_of pairs that meet the first two tests share one class of cause in a rolling quarter. A fingerprint match alone does not count."
+    note: "Read every regression_of pair at review, whatever the later rec's status: back_validation pairs only open recs filed in the last 14 days, by file, so it cannot see these. Where a pair's prior closed by waiver, read it against the nearest prior up its regression_of chain that closed with an artifact. Measured 2026-11-20: 9 regression_of pairs, none failing with its prior's own cause after the prior's fix took effect."
 ```
 
 **Related:** 55/72, 84, 88, 103, 124, 128, 133, 142, 150, 155, 162, 165, 167, 182, 86/127.
@@ -6882,6 +6885,19 @@ conditions:
 > **Update (2026-10-30):** PLAN-merge-step-checks (rec-4443): no job prints a close_proposed command.
 > A Decision 201 refusal takes the route in `docs/contracts/git-ops.yaml` `resolves_trailer`; a rec this
 > decision's gate refuses stays open for the operator (rec-4088). No rule of this decision changes.
+
+> **Update (2026-11-24, PLAN-decision-186-review, rec-5421):** Decision 186 review verdict: keep. Reversal review due
+> 2026-12-07, measured on 2026-11-20 over the gate's first 71 days (62 gated closures). No condition fired: (a) 6 of
+> 62 took a waiver; (b) the sweep wrote none of them and closed no escape-classified rec; (c) the trailer job left
+> 12 named recs open, and each was closed by hand with an artifact, none swept; (d) all 62 carried a fix-bound
+> artifact or a valid waiver; (e) of 9 regression_of recurrences (per-pair readings: PLAN-decision-186-review), 3
+> share only a fingerprint, 4 are sibling bugs of four classes, 1 failed before its fix took effect, and 1 (rec-5194
+> to rec-5276) shares its prior's cause, rec-5204, but its session stopped on 2026-11-15, before the prior's
+> excuse-record artifact landed and before #2074 fixed the cause. That pair is an instance of point 4's declared
+> residual, existence is not discrimination; whether an excuse record is an artifact at all is rec-5475's. The
+> stanza is re-armed: (c) names ci.yml's trailer-closure job (Decision 201), (d) and (e) gain wording a review can
+> check, and review_by moves to 2027-03-07. Two artifact tokens no longer resolve after test splits (rec-5476). No
+> rule of this decision changes.
 
 ---
 
