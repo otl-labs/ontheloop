@@ -91,7 +91,7 @@ class Api:
         raise AssertionError(f"unexpected request {url}")
 
     def run_list_calls(self) -> list[str]:
-        return [u for u, _, _ in self.calls if urlparse(u).path.endswith("/actions/runs")]
+        return [u for u, _, _ in self.calls if urlparse(u).path.endswith(f"/actions/workflows/{gh.WORKFLOW_FILE}/runs")]
 
 
 SLUG = "demo"
@@ -188,13 +188,35 @@ def test_newer_waiting_and_rejected_reruns_do_not_hide_an_older_approved_run(rep
     assert not any("/9200/" in u or "/9300/" in u for u, _, _ in double.calls)
 
 
-def test_the_run_list_is_the_repository_wide_endpoint_with_event_and_branch_filters(repo, monkeypatch):
+def test_lookup_queries_the_approval_workflow_runs_and_stops_at_the_first_match(repo, monkeypatch):
     root, main_sha, _ = repo
-    _, double = _lookup([approval_run(SLUG, DIGEST, main_sha)], root, monkeypatch=monkeypatch)
+    runs = [approval_run(SLUG, DIGEST, main_sha, 9900)]
+    runs += [approval_run(SLUG, DIGEST, main_sha, 9000 + i, conclusion="failure") for i in range(299)]
+    verdict, double = _lookup(runs, root, monkeypatch=monkeypatch)
     expected = (
-        f"{gh.API}/repos/{repo_identity.full_name()}/actions/runs?event=workflow_dispatch&branch=main&per_page=100&page=1"
+        f"{gh.API}/repos/{repo_identity.full_name()}/actions/workflows/approved-text-approval.yml/runs"
+        "?event=workflow_dispatch&branch=main&per_page=100&page=1"
     )
-    assert double.run_list_calls() == [expected] and "/workflows/" not in expected
+    assert verdict.kind == prov.APPROVED and "run 9900" in verdict.detail
+    assert double.run_list_calls() == [expected]
+
+
+def test_lookup_stops_paging_once_a_page_holds_the_approved_run(repo, monkeypatch):
+    root, main_sha, _ = repo
+    filler = [approval_run("other", DIGEST, main_sha, 5000 + i) for i in range(100)]
+    runs = [*filler, approval_run(SLUG, DIGEST, main_sha, 9100), *filler[:99], *filler]
+    verdict, double = _lookup(runs, root, monkeypatch=monkeypatch)
+    assert verdict.kind == prov.APPROVED and len(double.run_list_calls()) == 2
+
+
+def test_the_candidate_bound_spans_pages(repo, monkeypatch):
+    root, main_sha, _ = repo
+    page1 = [approval_run("other", DIGEST, main_sha, 5000 + i) for i in range(95)]
+    page1 += [approval_run(SLUG, DIGEST, main_sha, 6000 + i) for i in range(gh.CANDIDATE_RUNS)]
+    runs = [*page1, approval_run(SLUG, DIGEST, main_sha, 9100)]
+    jobs = {6000 + i: jobs_for(6000 + i, conclusion="failure") for i in range(gh.CANDIDATE_RUNS)}
+    verdict, double = _lookup(runs, root, double=Api(runs, jobs=jobs), monkeypatch=monkeypatch)
+    assert verdict.kind == prov.MISSING and len(double.run_list_calls()) == 1
 
 
 def test_a_run_past_the_first_page_is_found(repo, monkeypatch):
@@ -207,17 +229,18 @@ def test_a_run_past_the_first_page_is_found(repo, monkeypatch):
 def test_repo_argument_overrides_the_repository_identity(repo, monkeypatch):
     root, main_sha, _ = repo
     _, double = _lookup([], root, monkeypatch=monkeypatch, repo_name="other-owner/other-repo")
-    assert "/repos/other-owner/other-repo/actions/runs" in double.run_list_calls()[0]
+    assert "/repos/other-owner/other-repo/actions/workflows/" in double.run_list_calls()[0]
 
 
 @pytest.mark.parametrize(
     "failure",
     [
         gh.GitHubError("HTTP 403 from x"),
+        gh.GitHubError("HTTP 404 from x"),
         gh.GitHubError("request failed: timed out"),
         gh.GitHubError("unparsable body from x"),
     ],
-    ids=["http-error", "timeout", "unparsable"],
+    ids=["http-error", "http-404", "timeout", "unparsable"],
 )
 def test_a_transport_failure_reads_unverified_never_missing(repo, monkeypatch, failure):
     root, _, _ = repo
