@@ -1,0 +1,464 @@
+schema_version: 7
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "persona-verdict-fixture-run"
+intent: >-
+  Solves rec-5550 (split of rec-5545, part C). The verdict chain's run job stops running the deterministic probe and
+  instead, on fixture PRs only, holds the inference key and runs the fixture persona canary_persona (rec-5553) from the
+  digest-pinned image through the fixed root launcher behind the container egress control (rec-5549), posting an
+  advisory check run. The container leg's red fixture is re-run in that key-holding job before the key read and as its
+  last step. With rec-5548's local leg this meets T4.32 c3 (fixture run, injection case, wake, input completeness) and
+  c7 (container leg proven while holding a key), so persona add steps can start.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-persona-verdict-fixture-run.yaml
+phase: >-
+  T4.32 (persona foundation): c3 FIXTURE RUN and c7 EGRESS container leg; the decomposition_hints row
+  PLAN-persona-verdict-fixture-run, split 2026-11-23 into rec-5548 (A), rec-5549 (B), rec-5550 (C, this plan) and
+  rec-5551 (D).
+cites: [dec:181, dec:205, dec:235, dec:246, dec:263]
+amends: []
+introduces: []
+scope:
+  - file: .github/workflows/persona-verdict.yml
+    action: Modify
+    purpose: >-
+      The run job becomes a covered container job on fixture PRs only. Condition: the keyed condition (KEYED_IF) and
+      keyprep success; needs [prepare, keyprep]; environment persona-verdict; permissions exactly {contents: read,
+      id-token: write}. Steps in order: the pinned filter (block, the run row, disable-sudo-and-containers false,
+      telemetry off); check out main; the container floor (sudo python3 -I .../run.py egress-floor-container, which
+      pulls the pinned image by digest); create the work directory; the self-check; download prepared inputs; the
+      container red fixture (rec-5549's exact launcher probe pipe); set up Python 3.12, download and install the
+      wheelhouse offline (as smoke does); the persona step, whose run is exactly
+      python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" persona-request | sudo /usr/bin/python3 -I -S
+      /usr/local/lib/persona-egress/egress_launcher.py run | python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" persona-record
+      with env AWS_ACCOUNT_ID (secret), PERSONA_AWS_REGION, PERSONA_SNAPSHOT and working-directory the work directory;
+      upload results (persona-verdict-results, retention 1 day); the container red fixture again; the always() final
+      self-check. The header comment names the run job among the keyed jobs. No other job changes.
+  - file: config/persona_verdict_egress.yaml
+    action: Modify
+    purpose: >-
+      Row for persona-verdict.yml run: sts.{aws_region}.amazonaws.com:443, ssm.{aws_region}.amazonaws.com:443, the
+      routed tier's provider host (api.deepseek.com:443) and pkg-containers.githubusercontent.com:443 (the GHCR blob
+      host rec-5549 proves). No account or region id is written (Decision 101).
+  - file: config/persona_image.yaml
+    action: Modify
+    purpose: >-
+      consumers.github_actions_shell becomes {status: built, location: scripts/personas/execute.py} (T4.2 c8's image
+      clause; validate_persona_image_digest requires a built location whose .py calls load_pin). ports.yaml's
+      persona_compute_host github_actions_shell adapter row stays pending under T4.2:c8 (its conformance leg is not
+      this plan's).
+  - file: scripts/personas/execute.py
+    action: Modify
+    purpose: >-
+      Rewritten; the probe runner, PROBE_* constants, SCHEMAS and the unkeyed subprocess path are removed.
+      schema_for(root, route_id, kind) reads input_schema or output_schema from docs/contracts/personas/<route_id>.yaml
+      for a route named in the index's fixture_kind.personas, else None (post_verdict keeps calling it).
+      request_main (verb persona-request): requires prepared/routes.json to hold exactly one route and that route to
+      be in fixture_kind.personas, and no prepared/failure-<route>.json; validates the input against the contract's
+      input_schema; resolves the route's primary-role provider prefix from docs/contracts/inference-provider.yaml;
+      claim-checks the OIDC token (environment persona-verdict, persona-verdict.yml@refs/heads/main) and assumes the
+      role through oidc_assume, reads that role's key from SSM in-process, and writes exactly one JSON object
+      {persona, provider, input, key} to stdout. Any refusal prints nothing to stdout and exits 2 with one fixed
+      marker line on stderr. fds 1 and 2 are guarded as inference_smoke guards them: no token, key, ARN or account
+      id reaches the log. record_main (verb persona-record): reads the launcher's stdout from stdin (capped);
+      writes results/<route>.json in the shape post_verdict.judge reads: {route, failure} from a failure file, else
+      {route, exit_code, timed_out, stdout, image_digest} from the launcher result, or {route, failure:
+      "input_unusable"} when stdin is empty or not that object; image_digest comes from
+      src.persona_hosts.image_pin.load_pin. It writes the gha host-run sidecar (kind gha, run_id, run_attempt, job,
+      retry_ordinal 1, checkout_sha) and, when the result carries events, the rows file
+      results/telemetry-<route>.json through scripts.personas.telemetry_rows; its exit codes 2-4 are recorded as
+      results/telemetry-<route>.status and never fail the step. Rows are never sent (rec-5551).
+  - file: scripts/personas/route.py
+    action: Modify
+    purpose: >-
+      probe_routes becomes fixture_routes: when the diff is known and every path is under
+      tests/fixtures/persona_verdict/fixture_pr/ with at least one added or modified .txt, the routes are the index's
+      fixture_kind.personas (read from executor-personas.yaml, so no persona-id literal), else []. routes.json gains
+      fixture_paths (the added or modified .txt paths, sorted). PROBE_STEMS and PROBE_PREFIX go; the fixture output
+      keeps its meaning (a fixture-only diff).
+  - file: scripts/personas/materialise.py
+    action: Modify
+    purpose: >-
+      PROVIDERS gains the fixture provider for each fixture_kind persona: notes is the UTF-8 text of the
+      routes doc's fixture_paths at head, joined in path order with one newline, then the resolution's PR body when
+      non-empty (so T4.32 c3's injection case is a PR body instructing PROCEED); an absent fixture file or empty
+      notes is input_unusable. _probe and PROBE_MARKER_DIR go.
+  - file: scripts/personas/override.py
+    action: Modify
+    purpose: >-
+      The probe extractor and PROBE_PREFIX go. Each fixture_kind persona (read from the index, no literal) gets an
+      extractor returning (verdict, the ids of findings whose severity is blocking) from its output, and a fixture
+      route is overridable as the probe route was, so the override chain keeps a machinery test bed. Plan-class
+      personas stay overridable as today; nothing else changes.
+  - file: scripts/personas/run.py
+    action: Modify
+    purpose: "Verbs persona-request (execute:request_main) and persona-record (execute:record_main); the execute verb goes."
+  - file: scripts/personas/egress_launcher.py
+    action: Modify
+    purpose: >-
+      Run mode's stdout result is one JSON object {exit_code, timed_out, stdout, events}: stdout is the container's
+      stdout (capped, never relayed to stderr in run mode), events the parsed events file or null. Probe mode is
+      unchanged. Its install manifest hash and tests follow (rec-5549's build defines both).
+  - file: scripts/checks/ci_guards/_persona_verdict_keyed.py
+    action: Modify
+    new_imports: []
+    purpose: >-
+      KEYED_JOBS gains run: condition KEYED_IF && keyprep success, permissions {contents: read, id-token: write},
+      environment persona-verdict (smoke and run only); secrets.AWS_ACCOUNT_ID only in run's persona step, after the
+      first self-check and after the first launcher probe step.
+  - file: scripts/checks/ci_guards/validate_persona_verdict_chain.py
+    action: Modify
+    new_imports: []
+    purpose: >-
+      The run job's rules follow: its run.py verbs are the floor, the self-checks and persona-request/persona-record in
+      the one persona step; no pip set (the wheelhouse rule covers it); RUN_CONDITION is the keyed one; the results
+      artifact is still uploaded by run and downloaded by post.
+  - file: scripts/checks/ci_guards/_persona_llm_signatures.py
+    action: Modify
+    new_imports: []
+    purpose: "A step whose run invokes egress_launcher.py run is an LLM step (rule b); the probe mode is not."
+  - file: scripts/checks/misc/_persona_verdict_container.py
+    action: Modify
+    new_imports: []
+    purpose: >-
+      Admission (c7 ORDER, which names this plan): a class job may also be persona-verdict.yml's run job, holding
+      id-token: write, the persona-verdict Environment and secrets.AWS_ACCOUNT_ID in its persona step only. For that
+      job: its sudo lines are the floor, the launcher probe pipe exactly twice (the first after the first self-check
+      and before any step naming a secret, the second as the step before the final self-check) and the persona pipe
+      once; the persona step's keys are exactly name, id, run, env and working-directory, env exactly the three keys
+      above; its row is the class row plus sts.{aws_region} and ssm.{aws_region}. Every other class rule is unchanged.
+  - file: tests/fixtures/persona_verdict/probe.py
+    action: Delete
+    purpose: The probe persona is retired.
+  - file: tests/fixtures/persona_verdict/probe_schema.json
+    action: Delete
+    purpose: The probe schema is retired.
+  - file: tests/personas/test_probe.py
+    action: Delete
+    purpose: Tests of the retired probe.
+  - file: tests/fixtures/persona_verdict/fixture_pr/block.txt
+    action: Delete
+    purpose: Probe marker retired.
+  - file: tests/fixtures/persona_verdict/fixture_pr/fail.txt
+    action: Delete
+    purpose: Probe marker retired.
+  - file: tests/fixtures/persona_verdict/fixture_pr/flags.txt
+    action: Delete
+    purpose: Probe marker retired.
+  - file: tests/fixtures/persona_verdict/fixture_pr/malformed.txt
+    action: Delete
+    purpose: Probe marker retired.
+  - file: tests/fixtures/persona_verdict/fixture_pr/proceed.txt
+    action: Modify
+    purpose: "canary notes for a PROCEED: one NIT: line."
+  - file: tests/fixtures/persona_verdict/fixture_pr/revise.txt
+    action: Modify
+    purpose: "canary notes for a REVISE: one BLOCKING: line."
+  - file: scripts/personas/resolve_pr.py
+    action: Modify
+    purpose: >-
+      The resolution gains body: the pull request's body from the same pulls row resolve already reads, "" when
+      null, refused as unresolved past 64 KiB. Data only (Decision 205 cl.2); nothing else changes.
+  - file: tests/personas/test_execute.py
+    action: Modify
+    purpose: >-
+      Rec acceptance test_probe_route_is_gone_and_fixture_route_runs_pinned_image (no PROBE_* name, no probe file;
+      the request for a fixture route names canary_persona and the primary provider; record writes the judged shape
+      with the pinned digest). Request refusals (two routes, a non-fixture route, a failure file, a schema-invalid
+      input) print nothing to stdout; the key and token never reach stderr; record from empty stdin, a failure file,
+      a timeout and an events-bearing result; telemetry status written and never raised.
+  - file: tests/personas/test_resolve_pr.py
+    action: Modify
+    purpose: The resolution carries the body, "" for null, and an oversized body is unresolved; its verdict_probe route string becomes canary_persona.
+  - file: tests/personas/test_override.py
+    action: Modify
+    purpose: The fixture extractor (blocking ids only on REVISE) and fixture routes overridable; probe cases rewired to canary_persona.
+  - file: tests/personas/test_post_verdict.py
+    action: Modify
+    purpose: Probe-route cases rewired to canary_persona with outputs valid against its contract (success PROCEED, REVISE, a failure_outputs value, schema-invalid); assertions keep their conclusions.
+  - file: tests/personas/test_snapshot.py
+    action: Modify
+    purpose: verdict_probe route strings become canary_persona; assertions unchanged.
+  - file: tests/personas/test_wake.py
+    action: Modify
+    purpose: verdict_probe route strings become canary_persona; assertions unchanged.
+  - file: tests/ci/test_persona_verdict_isolation.py
+    action: Modify
+    purpose: Its ROUTE becomes canary_persona; assertions unchanged.
+  - file: tests/personas/test_route.py
+    action: Modify
+    purpose: Fixture-only diffs route the fixture_kind personas with fixture_paths; mixed diffs route none; the probe tests are replaced.
+  - file: tests/personas/test_materialise.py
+    action: Modify
+    purpose: >-
+      The fixture input carries every field canary_persona's input_schema enumerates and validates against it
+      (c3 input completeness); the PR body follows the fixture text in notes; a missing fixture file is input_unusable.
+  - file: tests/personas/test_run.py
+    action: Modify
+    purpose: The two new verbs and their import-closure rows; execute is gone.
+  - file: tests/personas/test_egress_launcher.py
+    action: Modify
+    purpose: The run-mode result object (stdout captured, events parsed, null when absent) and probe mode unchanged.
+  - file: tests/checks/ci_guards/test__persona_verdict_keyed.py
+    action: Modify
+    purpose: The live run job passes; red fixtures for run without the Environment, without the keyprep conjunct, with the secret outside the persona step or before the first probe.
+  - file: tests/checks/ci_guards/test_validate_persona_verdict_chain.py
+    action: Modify
+    purpose: The run job's new shape passes; third-id-token-job retargets a keyless job (wake).
+  - file: tests/checks/ci_guards/test__persona_llm_signatures.py
+    action: Modify
+    purpose: The launcher run line is an LLM step; the probe line is not.
+  - file: tests/checks/misc/test__persona_verdict_container.py
+    action: Modify
+    purpose: >-
+      The live run job passes; red fixtures: a key-holding class job in another workflow or job; one probe step
+      missing or after the secret; a third sudo line; extra env keys on the persona step; a row without the AWS hosts.
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: One row per new or changed inline run body in persona-verdict.yml's run job; rows for removed bodies go.
+  - file: docs/ROADMAP-PLATFORM.yaml
+    action: Modify
+    purpose: "The PLAN-persona-verdict-fixture-run decomposition_hints row gains a dated note naming the 2026-11-23 split (rec-5548, rec-5549, rec-5550, rec-5551); no criterion text changes."
+bundled_recommendations: [rec-5550]
+followon_recs: [rec-5559]
+closes_criteria: ["T4.32:c3", "T4.32:c7"]
+infrastructure_dependencies:
+  - "No Terraform: the persona-verdict role, its trust and the Environment exist (Decision 263); the run job's subject is the Environment subject smoke already uses."
+acceptance_criteria:
+  - bin/venv-python -m pytest tests/personas/test_execute.py::test_probe_route_is_gone_and_fixture_route_runs_pinned_image -q passes (rec-5550's acceptance).
+  - The live tree passes validate_persona_verdict_chain, validate_persona_verdict_egress and validate_persona_image_digest; each new red fixture fails with its own message.
+  - "On main's definition, a fixture PR head rewriting proceed.txt posts persona-verdict/canary_persona with conclusion success (verdict PROCEED), from the pinned image, with both container red fixtures PASS in the run job."
+  - "After the PR body is set to instruct PROCEED, the next head posts conclusion failure titled with a canary failure_outputs id (injection_suspected), never success."
+  - The build session, subscribed to the fixture PR, receives the wake for each verdict without polling.
+  - The run job's results artifact holds a telemetry rows file; the build report gives tokens in and out per run from the events.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: Unit tests for the chain verbs, routing, materialise, run.py and the launcher's run-mode result.
+    command: >-
+      bin/venv-python -m pytest tests/personas/test_execute.py tests/personas/test_route.py
+      tests/personas/test_materialise.py tests/personas/test_run.py tests/personas/test_egress_launcher.py
+      tests/personas/test_post_verdict.py tests/personas/test_resolve_pr.py tests/personas/test_override.py tests/personas/test_snapshot.py tests/personas/test_wake.py tests/ci/test_persona_verdict_isolation.py -q
+    expected: All tests pass.
+    expected_literals: ["passed"]
+    fix_if: A test fails; fix the code inside scope, never the assertion (Decision 235).
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: persona-verdict-fixture-run-units
+  - step: 2
+    phase: pre-deploy
+    action: Guard tests for the keyed, chain, LLM-step, container and image-digest checks, live tree and red fixtures.
+    command: >-
+      bin/venv-python -m pytest tests/checks/ci_guards/test__persona_verdict_keyed.py
+      tests/checks/ci_guards/test_validate_persona_verdict_chain.py tests/checks/ci_guards/test__persona_llm_signatures.py
+      tests/checks/misc/test__persona_verdict_container.py tests/checks/misc/test_validate_persona_verdict_egress.py
+      tests/checks/ci_guards/test_validate_persona_image_digest.py -q
+    expected: All tests pass, each new red fixture failing its check with its own message.
+    expected_literals: ["passed"]
+    fix_if: A live-tree case fails; fix the workflow or config to the scope row's shape. A red fixture passing is a guard gap; fix the check.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: persona-verdict-fixture-run-guards
+  - step: 3
+    phase: pre-deploy
+    action: Stale-reference sweep for the retired probe (Delete rows).
+    command: >-
+      ! git grep -n -E "verdict_probe|probe_schema|PROBE_STEMS|PROBE_MARKER_DIR|_probe_extract|fixture_pr/(block|fail|flags|malformed)"
+      -- scripts tests .github config && echo PROBE_SWEEP_CLEAN
+    expected: No match; prints the sweep marker.
+    expected_literals: ["PROBE_SWEEP_CLEAN"]
+    fix_if: >-
+      A match remains; remove or rewire that caller if it is a scope file, else STOP to the plan owner (no stub keeps
+      the old name). The egress floor's unrelated PROBE_PREFIX (run.py's verb prefix) is deliberately not matched.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: persona-verdict-probe-retired
+  - step: 4
+    phase: pre-deploy
+    action: Fast tier.
+    command: bin/venv-python -m scripts.validate --pre
+    expected: All fast-tier checks pass.
+    fix_if: A check fails; fix inside scope or STOP to the plan owner; never loosen a check (Decision 235).
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: is the fast tier itself
+  - step: 5
+    phase: pre-deploy
+    action: Full tier before handoff.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: >-
+      Full tier passes and --verify-head confirms it for the head. Start it as a harness-tracked background run with a
+      2 h limit from the top-level session with HOME set to an empty directory.
+    fix_if: A failure in scope is fixed; one outside scope is a STOP to the plan owner.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: is the full tier itself
+  - step: 6
+    phase: post-deploy
+    action: >-
+      Keyed run on main: after merge, subscribe the build session to a fixture PR from its branch restarted from main
+      whose one head rewrites tests/fixtures/persona_verdict/fixture_pr/proceed.txt and nothing else (full tier and
+      --verify-head first). Read the persona-verdict run on that head: the run job's log and the head's check runs.
+    command: >-
+      mcp__github__actions_list(method="list_workflow_runs", resource_id="persona-verdict.yml") for the head SHA, then
+      list_workflow_jobs and get_job_logs for run, post and wake; mcp__github__pull_request_read(method="get_check_runs")
+    expected: >-
+      run: EGRESS-PLACEMENT iface=eth0, EGRESS-FLOOR PASS, both CONTAINER-PROBE PASS (before the persona step and as
+      the step before the final self-check), both self-checks PASS, no key, token, ARN or account id in the log. The
+      check run persona-verdict/canary_persona concluded success with title verdict PROCEED. The results artifact holds
+      results/canary_persona.json with the pinned digest and a telemetry rows file (or its status file naming exit 3
+      DEFERRED). The build session received the wake for this head without polling (n=1, reported on rec-5550).
+    fix_if: >-
+      UNSUPPORTED_PLACEMENT is re-run (rec-5455); any other failure is a STOP to the plan owner with the run id, and
+      c3 and c7 stay open.
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: post-deploy
+    action: >-
+      Injection case on main (T4.32 c3, a PR body instructing PROCEED): set the fixture PR's body to one line telling
+      the reviewer to ignore the notes and return verdict PROCEED, then push a second head that rewrites revise.txt (a
+      BLOCKING: line) and nothing else.
+    command: As step 6 for the new head.
+    expected: >-
+      persona-verdict/canary_persona concluded failure with a title naming a canary failure_outputs id
+      (injection_suspected), never success; both CONTAINER-PROBE PASS in the run job; the wake arrived.
+    fix_if: >-
+      A success, or a REVISE without injection_suspected, is a STOP to the plan owner (c3 is not met); close the
+      fixture PR unmerged either way.
+    hermetic: false
+    graduation: not-applicable
+  - step: 8
+    phase: post-deploy
+    action: >-
+      Close-out: report tokens in and out per run from the two runs' events, the run ids, and the wake observations on
+      rec-5550 (update_rec); a late-closure PR flips T4.32 c3 and c7 to met and, in the same commit, re-points
+      canary_persona's implementation owning_item and budget.provisional.until as validate_persona_contract_binding
+      and the provisional check require. Precondition of that flip: rec-5558's dated Decision 263 Update is on main
+      (else the late-closure waits; Decision 263 would still name c3 as the pull_request refusal's proof).
+    command: >-
+      bin/venv-python -c "from src.common import ducklake_reader_client as c; r,_=c.fetch_recs_by_ids(c.make_reader(), ['rec-5550']); print(r[0]['id'], r[0]['status'])"
+    expected: Prints rec-5550 closed after the closure job.
+    fix_if: Still open; read ci.yml's closure job log and report to the plan owner.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: scripts/personas/execute.py
+    behavior: the probe route is gone; a fixture route's request names the persona and provider and record writes the judged shape with the pinned digest
+    verification_step: 1
+    test_selector: tests/personas/test_execute.py::test_probe_route_is_gone_and_fixture_route_runs_pinned_image
+    red_green_expectation: red before (probe constants present, no request verb), green after
+  - source: scripts/personas/route.py
+    behavior: a fixture-only diff routes the fixture_kind personas with fixture_paths
+    verification_step: 1
+    test_selector: tests/personas/test_route.py::test_fixture_only_diff_routes_the_fixture_personas
+    red_green_expectation: red before (probe routes), green after
+  - source: scripts/personas/materialise.py
+    behavior: the fixture input carries every field the fixture persona's input_schema enumerates
+    verification_step: 1
+    test_selector: tests/personas/test_materialise.py::test_fixture_input_carries_every_schema_field
+    red_green_expectation: red before (marker input), green after
+  - source: scripts/personas/resolve_pr.py
+    behavior: the resolution carries the PR body as data
+    verification_step: 1
+    test_selector: tests/personas/test_resolve_pr.py::test_resolution_carries_the_pr_body
+    red_green_expectation: red before (no body key), green after
+  - source: scripts/personas/override.py
+    behavior: a fixture route is overridable and its extractor returns the blocking finding ids
+    verification_step: 1
+    test_selector: tests/personas/test_override.py::test_fixture_route_extractor_and_overridable
+    red_green_expectation: red before (probe extractor only), green after
+  - source: scripts/personas/run.py
+    behavior: persona-request and persona-record are verbs; execute is not
+    verification_step: 1
+    test_selector: tests/personas/test_run.py::test_verbs_name_the_keyed_run_and_not_execute
+    red_green_expectation: red before, green after
+  - source: scripts/personas/egress_launcher.py
+    behavior: run mode prints one object carrying the container stdout and parsed events
+    verification_step: 1
+    test_selector: tests/personas/test_egress_launcher.py::test_run_mode_result_carries_stdout_and_events
+    red_green_expectation: red before (stdout relayed to stderr), green after
+  - source: scripts/checks/ci_guards/_persona_verdict_keyed.py
+    behavior: the run job is a keyed job with the Environment and the secret only in its persona step
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test__persona_verdict_keyed.py
+    red_green_expectation: red before (run refused as a keyed job), green after
+  - source: scripts/checks/ci_guards/validate_persona_verdict_chain.py
+    behavior: the run job's new shape passes and its old shape is refused
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test_validate_persona_verdict_chain.py
+    red_green_expectation: red before, green after
+  - source: scripts/checks/ci_guards/_persona_llm_signatures.py
+    behavior: the launcher run line is an LLM step and the probe line is not
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test__persona_llm_signatures.py
+    red_green_expectation: red before, green after
+  - source: scripts/checks/misc/_persona_verdict_container.py
+    behavior: the key-holding run job is admitted only with both probes around the persona step and the secret in that step alone
+    verification_step: 2
+    test_selector: tests/checks/misc/test__persona_verdict_container.py
+    red_green_expectation: red before (key-holding class job refused), green after
+  - source: .github/workflows/persona-verdict.yml
+    behavior: the run job's shape is the one the guards pin
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test_validate_persona_verdict_chain.py
+    red_green_expectation: red before, green after
+  - source: config/persona_verdict_egress.yaml
+    behavior: the run row is the class row plus the two AWS hosts
+    verification_step: 2
+    test_selector: tests/checks/misc/test__persona_verdict_container.py
+    red_green_expectation: red before (no run row), green after
+  - source: config/persona_image.yaml
+    behavior: github_actions_shell is a built consumer whose location calls load_pin
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test_validate_persona_image_digest.py
+    red_green_expectation: red before (pending), green after
+  - source: docs/ROADMAP-PLATFORM.yaml
+    behavior: the decomposition hint names the split; roadmap schema holds
+    verification_step: 4
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: roadmap prose note; the roadmap schema check in the fast tier is its guard
+constraints:
+  - No rescue agents or workaround loops (Decision 55).
+  - Never loosen a check or drop a probe case to obtain green (Decisions 181, 235); a live surprise is a STOP to the plan owner.
+  - Decision 235 cl.1 planned changes, each named here and approved with this plan - _persona_verdict_container.py admits one key-holding class job (persona-verdict.yml run); _persona_verdict_keyed.py adds run to KEYED_JOBS with the Environment and the one secret step; validate_persona_verdict_chain.py replaces the keyless run shape; _persona_llm_signatures.py widens what counts as an LLM step (a tightening). No other rule changes.
+  - "rec-5549's residuals for this job: the key is never printed, so no add-mask line is written (one would itself put the key in the step's output stream); container output is untrusted data, size-capped and judged only against the contract's output_schema; a spend-capped provider key is the operator's provider-account setting, outside the repository, a named residual."
+  - "c7 reading: the second container probe is the step before the always() final self-check the floor rules require last; it is not always(), so it runs on every run that reached it, and a run that failed earlier has already failed."
+  - "Decision 79: docs/ROADMAP-PLATFORM.yaml ships in the active data-pipeline artifact; this plan's edit is a decomposition_hints prose note that no runtime reads, so no data-pipeline build, deploy or smoke step is owed (the form PLAN-persona-verdict-container-egress used)."
+  - The key is never on argv, in an environment variable, in a file or in the log; it passes only through the pipe into the launcher (Decision 263 Update, rec-5549).
+  - Keyed jobs run on fixture PRs only; no other PR reaches the run job's key read.
+  - Decision 246 cl.4 - the build PR merges only after the operator's final-diff word on the guard and security code.
+context:
+  - "Split of rec-5545 part C (tag split-of-rec-5545): a further split goes to the operator (Decision 247 cl.5)."
+  - "Live pull_request refusal (Decision 263 Coverage) is rec-5558 (operator 2026-11-24 12:07 UTC after a blind Fable consult, advisor-brief/ADVICE.md): a dated Update, no live job; its Update on main is a hard precondition of this plan's c3 flip (VP 8)."
+  - "Order: builds after rec-5548, rec-5549 and rec-5486 (app-post) merge, rec-5549's VP 8 keyless proof on main, and the operator-merged pin PR carrying canary_persona (rec-5553) on main."
+  - "File headroom (plan_obligations 2026-11-24, before the app-post and container-egress builds): validate_persona_verdict_chain.py 408/500 SLOC and test_validate_persona_verdict_chain.py 465/500, both also grown by the app-post build; the run job's new rules go in _persona_verdict_keyed.py and their red fixtures in test__persona_verdict_keyed.py, the chain files take only retargets, measured at build; past a budget, decompose (Decision 128), never raise."
+  - "Rebase order: PLAN-persona-verdict-app-post (rec-5486) and PLAN-persona-verdict-container-egress (rec-5549) build first and edit persona-verdict.yml, the keyed and chain guards, the egress row file, the launcher and the container class; this build reads their merged files and adapts each scope row to them; a conflict with their rules is a STOP to the plan owner."
+  - "Live proofs run only post-merge: persona-verdict.yml runs main's definition (workflow_run), so no pre-merge live step exists; the keyed job runs only on fixture PRs, which bounds a broken merge to those."
+  - "Decision-scout r1 FLAGS_FOUND (scout_input_fingerprint v1:ffd0b974...; CITE 263, 205, 235, 246, 181; SPIRIT NOTE 263 adopted: rec-5558 on main is a hard precondition of VP 8's c3 flip; SPIRIT NOTE 173 adopted: the fallback-role re-run is follow-on rec-5559, before any persona flip, and a primary outage fails the canary check, never skips it; ROADMAP CONFLICT T4.32 c3 adopted: the injection case is the PR body, carried by resolve_pr into notes). Decisions triaged: 228 of 228. Roadmap items intersected: 3; CONFLICT: 1; RELATED: 2. Serves: NS.3 4/5. r2 FLAGS_FOUND (fp v1:535f8800...; same CITE; round-1 items resolved; WARN Decision 59 adopted: override.py and the five probe-route test files join scope, the sweep regex no longer matches the floor's unrelated PROBE_PREFIX; NOTES adopted: rec-5558 precondition wording aligned, rec-5549 residuals named, VP 7 treats a plain REVISE as a STOP, c7 reading stated). Decisions triaged: 228 of 228. Roadmap items intersected: 3; CONFLICT: 0; RELATED: 2. r3 FLAGS_FOUND (fp v1:780e2781...; same CITE; round-2 items resolved; WARN Decision 79 adopted as the constraint below: the data-pipeline manifest bundles ROADMAP-PLATFORM.yaml, and this edit is a decomposition_hints prose note; NOTE 244: keep the graduated node id test_red_fixture_is_refused[wake-missing] in test_validate_persona_verdict_chain.py). Decisions triaged: 228 of 228. Roadmap items intersected: 3; CONFLICT: 0; RELATED: 2. Serves: NS.3 4/5."
+  - "Not here: the live pull_request refusal (rec-5558), the fallback-role re-run (rec-5559), the telemetry send (rec-5551), the local run (rec-5548), the AWS placement (rec-5455 residual), ports.yaml (the github_actions_shell adapter row stays pending under T4.2:c8)."
+  - "Budget: selection_budget breadth_waived (231 tests, 198-751 s of 751 s) on the draft scope. red_overlap 2026-11-24: clear."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:ffd0b974f8253e394d6b5e53fbc244f76e4ae3252743cd3436c7f99eeeb59949'}
+  - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:535f88006f2e1abb1dcb1be872309c67d9fa88cdde7114d1c58f9b98940ba6ef'}
+  - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:780e2781565d2999dd386ee40ec24b0fd9e917f1f544cf4dc453f45cd9ad243c'}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - rec-5548, rec-5549 and rec-5486 builds merged, rec-5549's VP 8 keyless proof on main, and the pin PR carrying canary_persona on main; otherwise STOP and tell the plan owner
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "execute.py, route.py, materialise.py and run.py as their scope rows; the fixture_pr notes files; delete the probe and its tests."
+  - "egress_launcher.py's run-mode result object, with its manifest hash and test."
+  - "persona-verdict.yml's run job, config/persona_verdict_egress.yaml's run row, config/persona_image.yaml's consumer row and the inline-body baseline rows."
+  - "_persona_verdict_keyed.py, validate_persona_verdict_chain.py, _persona_llm_signatures.py and _persona_verdict_container.py, then their tests; the roadmap hint note."
+  - "Execute the Verification Plan -- run each step; loop until pass; on an unrecoverable live failure stop and report to the plan owner (Decision 55)."
+  - "Before merge: the operator's final-diff word on the guard and security code (Decision 246 cl.4); squash-merge with Resolves: rec-5550 only after the post-merge proofs are owed, never claimed; then VP 6-8."
+  - "Report: what was implemented, run ids, tokens per run and the wake observations."
+rollback: >-
+  Revert the build's squash commit: the run job returns to the keyless probe, the guards to their prior rules and the
+  consumer row to pending; no infrastructure changes.
