@@ -330,3 +330,26 @@ def test_a_dangling_untracked_symlink_is_a_clone_failure(tree: Path) -> None:
     with pytest.raises(wcc.WordingCloneError, match="cannot carry untracked file"):
         with wcc.rehearsal_clone(tree, base, _SLUG, "s: 1\n", None):
             pass
+
+
+def test_a_git_that_cannot_start_is_a_clone_failure(tree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(*args: Any, **kwargs: Any) -> None:
+        raise FileNotFoundError("no git")
+
+    monkeypatch.setattr(wcc.subprocess, "run", broken)
+    with pytest.raises(wcc.WordingCloneError, match="could not start"):
+        wcc._git(tree, "status")
+
+
+def test_a_strip_that_changes_the_mapping_is_refused() -> None:
+    with pytest.raises(wcc.WordingCloneError, match="more than that key"):
+        wcc.strip_dispositions("weakening_dispositions: 1\n")
+
+
+def test_an_untracked_plan_in_the_tree_is_replaced_by_the_loaded_plan(tree: Path) -> None:
+    base = _git(tree, "rev-parse", "HEAD")
+    text = _plan_text(_ENTRY)
+    _write(tree, _PLAN_REL, text)
+    with wcc.rehearsal_clone(tree, base, _SLUG, "s: 1\n", text) as clone:
+        assert (clone / _PLAN_REL).read_text(encoding="utf-8") == text
+        assert _git(clone, "diff", "--name-status", "--no-renames", "origin/main") == f"M\t{_PLAN_REL}"
