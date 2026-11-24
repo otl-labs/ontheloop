@@ -25,7 +25,7 @@ GENERATED = ROOT / "config" / "lambda" / "ducklake" / "field_semantics.yaml"
 PERSONAS = ROOT / "docs" / "contracts" / "executor-personas.yaml"
 TENANT = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 PROJECT = "01BRZ3NDEKTSV4RRFFQ69G5FBW"
-KEYS = ["implement-agent", "planning", "code-review", "decision-scout", "plan-critique"]
+KEYS = ["implement-agent", "planning", "code-review", "decision-scout", "plan-critique", "canary-persona"]
 
 
 @pytest.fixture(scope="module")

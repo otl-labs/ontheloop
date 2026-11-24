@@ -9,7 +9,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict
@@ -83,9 +83,15 @@ class RenderedPrompt(_Strict):
     rule: str
 
 
+class FixtureKind(_Strict):
+    purpose: str
+    personas: list[str]
+    rules: list[str]
+
+
 class PersonaRow(_Strict):
     persona: str
-    kind: str
+    kind: Literal["verdict", "compute_plane", "fixture"]
     contract: str
     rendered_prompt: str
     implementation: dict[str, Any]
@@ -105,6 +111,7 @@ class PersonaIndex(_Strict):
     declared_subtree: dict[str, Any]
     implementation_binding: dict[str, Any]
     personas_row: dict[str, Any]
+    fixture_kind: FixtureKind
     personas: list[PersonaRow]
 
 
@@ -122,7 +129,7 @@ class SkillTether(_Strict):
 class PersonaContract(_Strict):
     persona: str
     contract_version: int
-    kind: str
+    kind: Literal["verdict", "compute_plane", "fixture"]
     input_schema: dict[str, Any]
     output_schema: dict[str, Any]
     capabilities: list[str]
