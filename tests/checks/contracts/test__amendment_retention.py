@@ -337,3 +337,18 @@ def test_tool_short_of_the_hold_names_the_rows_owed_by_hand() -> None:
     msg = ar.retention_violation("c.yaml", _doc(base), _doc(head, "b"), _CFG)
     assert msg is not None and "--rows 1" in msg
     assert "1 more must be compacted by hand" in msg and "candidates dated 2026-10-11" in msg
+
+
+def test_pointers_read_nested_lists_and_non_mapping_rows_are_named() -> None:
+    row = {**_plain(1), "migration_story": {"notes": ["see rec-9", {"more": "PLAN-y"}], "n": 3}}
+    assert {"rec-9", "PLAN-y", "PLAN-x-1"} <= ar.row_pointers(row)
+    found = ar.change_violation(["junk"], [], _CFG)
+    assert found == ["a row that is not a mapping: row dropped, re-dated or reclassified"]
+
+
+def test_retention_reads_the_head_text_selection() -> None:
+    base = [_plain(n, _dated(n)) for n in range(7)]
+    head = [_plain(9, "2026-11-20")] + base
+    text = _text(sorted(head, key=lambda r: r["date"], reverse=True))
+    msg = ar.retention_violation("c.yaml", _doc(base), _doc(head, "b"), _CFG, text)
+    assert msg is not None and "--rows 2" in msg

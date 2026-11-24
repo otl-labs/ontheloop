@@ -201,34 +201,45 @@ def _with_row(text: str, summary: str) -> str | None:
     return "".join(lines)
 
 
+def _held_contracts() -> list[str]:
+    cfg = _REAL_LOAD_RETENTION(_REPO)
+    if cfg is None:
+        return []
+    names: list[str] = []
+    for path in sorted((_REPO / "docs" / "contracts").glob("*.yaml")):
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            continue
+        log = data.get("amendment_log") if isinstance(data, dict) else None
+        if isinstance(log, list) and len(_amendment_retention.full_rows(log, cfg)) >= cfg["keep_full"]:
+            if not amendment_compact.exempt_file(path, cfg):
+                names.append(path.name)
+    return names
+
+
 class TestRealTree:
-    def test_real_contracts_can_meet_the_ratchet(self, monkeypatch, tmp_path) -> None:
+    @pytest.mark.parametrize("name", _held_contracts())
+    def test_real_contracts_can_meet_the_ratchet(self, name, monkeypatch, tmp_path) -> None:
         monkeypatch.setattr(_amendment_retention, "load_retention", _REAL_LOAD_RETENTION)
-        cfg = _REAL_LOAD_RETENTION(_REPO)
-        assert cfg is not None
-        for path in sorted((_REPO / "docs" / "contracts").glob("*.yaml")):
-            if amendment_compact.exempt_file(path, cfg):
-                continue
-            text = path.read_text(encoding="utf-8")
-            base_data = yaml.safe_load(text)
-            base_log = base_data.get("amendment_log") if isinstance(base_data, dict) else None
-            if not isinstance(base_log, list) or len(_amendment_retention.full_rows(base_log, cfg)) < cfg["keep_full"]:
-                continue
-            for summary in ("PLAN-ratchet-probe: probe", "PLAN-ratchet-probe: " + "long wording " * 30):
-                head = _with_row(text, summary)
-                if head is None:
-                    break
-                msgs = _amendment_retention.pass2_messages(path.name, base_data, yaml.safe_load(head), False, text, head)
-                asked = re.search(r"--rows (\d+)", " ".join(msgs))
-                if asked:
-                    scratch = tmp_path / path.name
-                    scratch.write_text(head, encoding="utf-8")
-                    code = amendment_compact.main(["--write", "--rows", asked.group(1), str(scratch)])
-                    assert code == 0, f"{path.name}: the tool failed"
-                    head = scratch.read_text(encoding="utf-8")
-                    msgs = _amendment_retention.pass2_messages(path.name, base_data, yaml.safe_load(head), False, text, head)
-                terse = summary.endswith("probe")
-                assert not msgs or (not terse and all("by hand" in m or "selects no row" in m for m in msgs)), (
-                    path.name,
-                    msgs,
-                )
+        path = _REPO / "docs" / "contracts" / name
+        text = path.read_text(encoding="utf-8")
+        base_data = yaml.safe_load(text)
+        for summary in ("PLAN-ratchet-probe: probe", "PLAN-ratchet-probe: " + "long wording " * 30):
+            head = _with_row(text, summary)
+            if head is None:
+                break
+            msgs = _amendment_retention.pass2_messages(name, base_data, yaml.safe_load(head), False, text, head)
+            asked = re.search(r"--rows (\d+)", " ".join(msgs))
+            if asked:
+                scratch = tmp_path / name
+                scratch.write_text(head, encoding="utf-8")
+                code = amendment_compact.main(["--write", "--rows", asked.group(1), str(scratch)])
+                assert code == 0, f"{name}: the tool failed"
+                head = scratch.read_text(encoding="utf-8")
+                msgs = _amendment_retention.pass2_messages(name, base_data, yaml.safe_load(head), False, text, head)
+            terse = summary.endswith("probe")
+            assert not msgs or (not terse and all("by hand" in m or "selects no row" in m for m in msgs)), (name, msgs)
+
+    def test_the_held_set_is_not_empty(self) -> None:
+        assert _held_contracts()
