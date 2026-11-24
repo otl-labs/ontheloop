@@ -118,8 +118,10 @@ def _app_row_text(local: object, cloud: object) -> str:
     return yaml.safe_dump(data)
 
 
-def test_verdict_app_row_reads_null_and_pins_persona_checks() -> None:
-    assert mc.verdict_app_id(_text(_CONFIG)) is None
+def test_verdict_app_row_reads_the_id_and_a_null_row_pins_persona_checks() -> None:
+    assert mc.verdict_app_id(_text(_CONFIG)) == 5817535
+    null_row = _app_row_text(None, None)
+    assert mc.verdict_app_id(null_row) is None
     name = mc.persona_check_name("code_reviewer")
     forged = [
         {
@@ -131,7 +133,7 @@ def test_verdict_app_row_reads_null_and_pins_persona_checks() -> None:
             "app": {"slug": "github-actions", "id": 15368},
         }
     ]
-    pins = mc.persona_pins([name], mc.verdict_app_id(_text(_CONFIG)))
+    pins = mc.persona_pins([name], mc.verdict_app_id(null_row))
     result = mc.verdict([name], forged, 1, pins=pins)
     assert result.kind == mc.REFUSE and "has no verdict App" in result.reasons[0]
     assert mc.verdict_app_id(_app_row_text(42, 42)) == 42

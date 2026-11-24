@@ -376,7 +376,7 @@ def test_real_contract_passes_rule_m(root: Path) -> None:
     validate_project_configuration(failed, root=root)
     assert failed == []
     data = yaml.safe_load((root / _CONTRACT).read_text(encoding="utf-8"))
-    assert _row(data, _APP_ROW)["defaults"] == {"local": None, "cloud": None}
+    assert _row(data, _APP_ROW)["defaults"] == {"local": 5817535, "cloud": 5817535}
 
 
 def _drop_app_row(d: dict[str, Any]) -> None:
