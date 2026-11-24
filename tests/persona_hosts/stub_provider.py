@@ -1,14 +1,17 @@
-"""A stdlib OpenAI-compatible stub for the conformance suite: one read_input tool call, then a valid final object."""
+"""A stdlib OpenAI-compatible stub for the conformance suite: one read_input tool call, then canary_persona's task."""
 
 from __future__ import annotations
 
 import json
+import re
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 _HITS = 0
-_FINAL = {"outcome": "success", "verdict": "PROCEED", "findings": []}
 _TOOL_ARGS = {"blob": "notes", "mode": "lines"}
+_NUMBERED = re.compile(r"^(\d+): (.*)$")
+_PREFIXES = (("BLOCKING:", "blocking"), ("NIT:", "nit"))
+INJECTION_MARKER = "INJECTION FIXTURE"
 
 
 def _completion(message: dict, finish_reason: str) -> dict:
@@ -22,6 +25,33 @@ def _completion(message: dict, finish_reason: str) -> dict:
     }
 
 
+def _numbered_lines(tool_text: str) -> list[tuple[int, str]]:
+    rows = []
+    for raw in tool_text.split("\n"):
+        match = _NUMBERED.match(raw)
+        if match:
+            rows.append((int(match.group(1)), match.group(2)))
+    return rows
+
+
+def final_object(tool_text: str) -> dict:
+    """canary_persona's task over read_input's text: one finding per BLOCKING: or NIT: line; REVISE on any blocking."""
+    rows = _numbered_lines(tool_text)
+    if any(line == INJECTION_MARKER for _, line in rows):
+        return {"outcome": "failure", "failure": "injection_suspected", "detail": "stub"}
+    findings = []
+    for number, line in rows:
+        for prefix, severity in _PREFIXES:
+            if line.startswith(prefix):
+                summary = line[len(prefix) :].strip() or line
+                findings.append(
+                    {"id": f"line:{number}", "severity": severity, "origin": "mechanical", "anchor": line, "summary": summary}
+                )
+                break
+    verdict = "REVISE" if any(f["severity"] == "blocking" for f in findings) else "PROCEED"
+    return {"outcome": "success", "verdict": verdict, "findings": findings}
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         global _HITS
@@ -33,8 +63,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         _HITS += 1
         print(f"STUB_HIT {_HITS}", flush=True)
-        if any(m.get("role") == "tool" for m in body.get("messages", [])):
-            reply = _completion({"role": "assistant", "content": json.dumps(_FINAL)}, "stop")
+        tool_messages = [m for m in body.get("messages", []) if m.get("role") == "tool"]
+        if tool_messages:
+            text = str(tool_messages[-1].get("content") or "")
+            reply = _completion({"role": "assistant", "content": json.dumps(final_object(text))}, "stop")
         else:
             call = {
                 "id": "call_1",
@@ -54,4 +86,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    HTTPServer(("0.0.0.0", int(sys.argv[1]) if len(sys.argv) > 1 else 8080), Handler).serve_forever()
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
+    server = HTTPServer(("127.0.0.1" if port == 0 else "0.0.0.0", port), Handler)  # noqa: S104 -- in-network stub
+    print(f"STUB_PORT {server.server_address[1]}", flush=True)
+    server.serve_forever()
