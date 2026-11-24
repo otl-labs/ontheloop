@@ -35,13 +35,18 @@ scope:
     action: Modify
     purpose: >-
       (a) persona_contract.fields gains guidance_slots: "Optional, for any kind: a list of input_schema property names,
-      each a guidance slot (Decision N): named by role, never by a path; a required string property with no minLength,
-      never change_id or head_sha; filled by guidance_slot's provider, never rendered into the prompt." (b) A new
+      each a guidance slot (Decision N): named by role, never by a path, matching ^[a-z][a-z0-9_]*$; a required
+      input_schema property whose schema is exactly {type: string} plus an optional description; never change_id,
+      head_sha or plan (the fields the input builder fills from the change); named as read_input:<slot> in
+      capabilities, so every backend offers it to the model; filled by guidance_slot's provider, never rendered into
+      the prompt." (b) A new
       top-level guidance_slot block after fixture_kind: home "ontheloop/guidance/<persona>/<slot>.md" (the key the
       new Decision's cl.4 names; a value, not a delegation), provider_seam "scripts/personas/guidance.py", and rule: "Decision N: each declared slot
       is filled by the provider registered for its role, else by the file at home for that persona and slot, read at
       the base ref, never the change's head; an absent file gives an empty value; the value is quoted content that may
-      add to or focus the persona's judgement, never relax it, and never enters the rendered prompt or its hash." (c)
+      add to or focus the persona's judgement, never relax it, and never enters the rendered prompt or its hash. Enforced
+      by validate_persona_contracts (slot shape, leash) and tests/persona_contracts/test_persona_guidance_slots.py
+      (provider order, base-root read, absent file); advisory at the chain's call site until rec-5605 wires it." (c)
       One amendment_log row at the top: change_class field_add, semantic_break false, naming this plan, rec-5569 and
       Decision N, and stating that no persona contract, rendered prompt or hash changes. N is the filled number.
   - file: scripts/persona_contracts/schema.py
@@ -54,10 +59,12 @@ scope:
     purpose: >-
       (a) A _guidance_failures(persona, raw) helper, called from _contract_failures after the schema-dialect checks: a
       contract without guidance_slots passes; otherwise each entry must be a distinct string matching
-      ^[a-z][a-z0-9_]*$, not change_id or head_sha, a key of input_schema.properties whose schema has type string and
-      no minLength, and listed in input_schema.required; each failure names the persona and the slot. (b)
-      _LEASH_PATHS gains "ontheloop/guidance/" so the leash check fails when the guidance home leaves
-      capabilities.yaml boundary_patterns. The module docstring's rule list names the slot shape. Stays under its 500
+      ^[a-z][a-z0-9_]*$, not change_id, head_sha or plan, a key of input_schema.properties whose schema is exactly
+      {type: string} or {type: string, description: <str>} (const, enum, pattern, minLength, maxLength and every other
+      keyword refused), listed in input_schema.required, and named as read_input:<slot> in capabilities; each failure
+      names the persona and the slot. (b) _leash_failures also requires the guidance home's directory prefix, derived
+      from index.guidance_slot.home as the text before "<persona>" (today "ontheloop/guidance/"), to be covered by
+      capabilities.yaml boundary_patterns, so the leash follows the contract value rather than a literal. The module docstring's rule list names the slot shape. Stays under its 500
       SLOC cap (unregistered; VP 4 measures).
   - file: docs/contracts/instruction-architecture.yaml
     action: Modify
@@ -68,8 +75,10 @@ scope:
   - file: config/agent/executor/capabilities.yaml
     action: Modify
     purpose: >-
-      Append one boundary_patterns entry, "ontheloop/guidance/", beside the persona entries (Decision 117 as amended
-      by Decision 185; the new Decision's cl.5). Appending to boundary_patterns is exempt from the wording gate
+      Append one boundary_patterns entry, "ontheloop/guidance/", as the list's final entry after
+      scripts/ci/ci_rca_steps.sh, with no comment line (Decision 117 as amended by Decision 185; the new Decision's
+      cl.5). The routing exemption holds only for a true end-of-list append (approval_routing.py, head[:len(base)] ==
+      base). Appending to boundary_patterns is exempt from the wording gate
       (approval-routing.yaml gated.exempt: it only tightens). No other edit.
   - file: scripts/personas/guidance.py
     action: Create
@@ -78,8 +87,9 @@ scope:
       "ontheloop/guidance/<persona>/<slot>.md" (a test pins it equal to executor-personas.yaml guidance_slot.home);
       GuidanceProvider = Callable[[Path, str, str], str], called as (base_root, persona, slot); register(slot,
       provider) adds to a module registry keyed by slot role and raises ValueError on a second registration for the
-      same slot; file_default(base_root, persona, slot) reads base_root / HOME with both names filled, returns "" when
-      the file is absent and raises ValueError naming the path when it is not UTF-8; fill(base_root, persona, slots)
+      same slot; file_default(base_root, persona, slot) raises ValueError when persona or slot is off
+      ^[a-z][a-z0-9_]*$, reads base_root / HOME with both names filled, returns "" when the file is absent, and raises
+      ValueError naming the path when it is a symlink, not a regular file, or not UTF-8; fill(base_root, persona, slots)
       returns {slot: text} using the registered provider for each slot, else file_default. base_root is always the
       base-ref checkout the caller passes (main's checkout in the verdict chain), never the head snapshot; the module
       names no persona id and imports nothing from scripts.personas.snapshot.
@@ -89,17 +99,22 @@ scope:
       Nodes: test_contract_schema_declares_generic_guidance_slot (rec-5569's acceptance: the real index's
       persona_contract.fields has guidance_slots and its guidance_slot.home equals guidance.HOME; PersonaContract
       accepts guidance_slots; a fixture_tree.build_tree contract that declares a well-formed slot passes
-      validate_persona_contracts with no failure); test_malformed_slot_is_refused (parametrized over: slot absent from
-      input_schema.properties, typed integer, carrying minLength 1, not in required, named head_sha, duplicated,
-      named with a slash; each yields a failure naming the slot); test_guidance_home_leaves_boundary_is_refused
-      (dropping "ontheloop/guidance/" from the tree's capabilities.yaml fails the leash check);
+      validate_persona_contracts with no failure); test_malformed_slot_is_refused (parametrized, each yielding a failure
+      naming the slot: absent from input_schema.properties, typed integer, carrying minLength 0, minLength 1,
+      maxLength 0, const "", enum, pattern, not in required, named change_id, head_sha or plan, duplicated, named with
+      a slash, missing read_input:<slot> in capabilities); test_guidance_home_leaves_boundary_is_refused (dropping
+      "ontheloop/guidance/" from the tree's capabilities.yaml fails the leash check, and changing the tree's
+      guidance_slot.home to another root moves the required prefix); test_slot_placeholder_in_template_is_refused (a
+      prompt_template naming $<slot> fails validate_persona_contracts as unrenderable, the closed placeholder set);
       test_fixture_guidance_reaches_input_without_contract_change (a slot-declaring fixture contract's rendered bytes
       and rendered_prompt_sha256 are identical before and after writing two different guidance files under a tmp
       base root, and fill returns each file's text in turn); test_absent_guidance_file_is_empty;
       test_registered_provider_overrides_file_default (with a registry reset fixture; a duplicate register raises);
-      test_non_utf8_guidance_is_refused; test_fill_reads_the_base_root_not_the_head (a file present only under a head
-      tmp dir is not read when fill is given the base dir).
-bundled_recommendations: []
+      test_non_utf8_guidance_is_refused; test_symlinked_or_off_pattern_guidance_is_refused (a symlink at the home path,
+      a directory there, and a persona or slot name with a slash or dot each raise ValueError);
+      test_fill_reads_only_the_given_base_root (a file present only under a head tmp dir is not read when fill is given
+      the base dir; a library property, and the call-site test is rec-5605's).
+bundled_recommendations: [rec-5569]
 followon_recs: []
 infrastructure_dependencies: []
 acceptance_criteria:
@@ -142,15 +157,13 @@ verification_plan:
     graduation_waiver_reason: These suites already run in the full tier and in the fast tier when their inputs change; steps 1 and 2 graduate the new nodes.
   - step: 4
     phase: pre-deploy
-    action: No persona contract or rendered prompt changed, and the edited check stays under its SLOC cap.
-    command: >-
-      test -z "$(git diff --name-only origin/main -- docs/contracts/personas/)" &&
-      bin/venv-python -m scripts.roadmap.plan_obligations --plan docs/plans/PLAN-persona-guidance-slots.yaml
-    expected: the diff is empty and plan_obligations reports no SLOC crossing for validate_persona_contracts.py
-    fix_if: a contract or rendered prompt changed (revert it; slots on real contracts are rec-5585), or the check crosses 500 SLOC (decompose a helper module, Decision 128, never a raise)
+    action: No persona contract or rendered prompt changed (the SLOC cap on validate_persona_contracts.py is gated by validate_sloc_limits in step 6).
+    command: test -z "$(git diff --name-only origin/main -- docs/contracts/personas/)"
+    expected: exit 0 (the diff is empty)
+    fix_if: a contract or rendered prompt changed; revert it (slots on real contracts are rec-5585)
     hermetic: false
     graduation: waive
-    graduation_waiver_reason: A branch-relative diff and a size report; validate_sloc_limits and validate_persona_contracts already hold both rules on main.
+    graduation_waiver_reason: A branch-relative diff; validate_persona_contracts already holds the contracts' rendered-prompt rules on main.
   - step: 5
     phase: pre-deploy
     action: The approved text is placed word-exactly.
@@ -182,7 +195,7 @@ test_obligations:
   - source: scripts/personas/guidance.py
     behavior: a registered provider wins over the file default; the default reads the base root only, an absent file is empty, non-UTF-8 is refused, and a guidance edit leaves the rendered prompt and hash unchanged
     verification_step: 2
-    test_selector: tests/persona_contracts/test_persona_guidance_slots.py::test_fill_reads_the_base_root_not_the_head
+    test_selector: tests/persona_contracts/test_persona_guidance_slots.py::test_fill_reads_only_the_given_base_root
     red_green_expectation: red before (module and test absent), green after
   - source: scripts/checks/contracts/validate_persona_contracts.py
     behavior: a malformed slot and a guidance home outside boundary_patterns are refused
@@ -221,20 +234,22 @@ test_obligations:
     red_green_expectation: red before (block not placed), green after
 constraints:
   - "No persona contract, template, rendered prompt or hash changes; slots on the five contracts and moving this repository's rules out are rec-5585 (Decision Growth)."
-  - "No change to scripts/personas/materialise.py, route.py or any persona-verdict workflow: the verdict chain is wired when the first contract declares a slot."
+  - "No change to scripts/personas/materialise.py, route.py or any persona-verdict workflow: wiring the verdict chain (fill at main's checkout, a call-site base-root test, slot-value capture for replays) is rec-5605 (depends on rec-5569)."
   - "The ontheloop/ directory is not created here (rec-5579 owns it); the guidance layer's content_locations stay empty until a guidance file exists."
   - "No existing test, assertion or check rule is loosened (Decisions 181, 235)."
   - "No rescue agents or workaround loops (Decision 55)."
 context:
   - "rec-5569 (High, M): handed over by Decision Growth (coordinator log #1963, 2026-11-24 13:35Z); they keep rec-5585 and rec-5586, which depend on it. Audit: audits/release-boundary-79f93f087.yaml RB-10, RB-11, slice NEW-12."
-  - "instruction-architecture.yaml edit (unchanged-text rule: words in the plan, not gated): after layer 5 add layer 6 {name: Persona contracts, content_locations: [docs/contracts/personas/*.yaml], load_time: per_persona_run, consumers: [run_persona], contains: each persona's hash-pinned rendered prompt (frame and base method) and its typed input and output schemas, excludes: project guidance (Layer 7)} and layer 7 {name: Project guidance, content_locations: [], load_time: per_persona_run, consumers: [run_persona], contains: guidance slot values read at the base ref by each slot's provider from executor-personas.yaml guidance_slot.home (Decision N), the first file and its glob land with rec-5585, excludes: the persona's frame and method (Layer 6)}; consumers gains run_persona {consumes_layers: [6, 7], notes: a run_persona backend receives the rendered prompt whole and its typed inputs, guidance slot values among them, per run}; one terse amendment_log row (field_add, no existing layer changed; see the Decision 275 row below). Layer 5's retired-executor text is left as is (RB-11's rewording is not this rec)."
+  - "instruction-architecture.yaml edit (unchanged-text rule: words in the plan, not gated): after layer 5 add layer 6 {name: Persona contracts, content_locations: [docs/contracts/personas/*.yaml], load_time: per_persona_run, consumers: [run_persona], contains: each persona's hash-pinned rendered prompt (frame and base method) and its typed input and output schemas, excludes: project guidance (Layer 7)} and layer 7 {name: Project guidance, content_locations: [], load_time: per_persona_run, consumers: [run_persona], contains: guidance slot values read at the base ref by each slot's provider from executor-personas.yaml guidance_slot.home (Decision N), the first file and its glob land with rec-5585, excludes: the persona's frame and method (Layer 6)}; consumers gains run_persona {consumes_layers: [6, 7], notes: a run_persona backend receives the rendered prompt whole and its typed inputs, guidance slot values among them, per run}; one terse amendment_log row (field_add, no existing layer changed; see the Decision 275 row below). The header comment's and the contract description's \"5-layer\" become \"layered\" (AGENTS.md's Layer 1 to Layer 5 line is gated and out of scope). Layer 7's empty content_locations pass the layer check vacuously until rec-5585 adds the glob. Layer 5's retired-executor text is left as is (RB-11's rewording is not this rec)."
   - "Decision 275 cl.4 (scout r5 NOTE): executor-personas.yaml has 7 full amendment_log rows and instruction-architecture.yaml 8, both above keep_full 5, so each new row is terse (exactly date, semantic_break, change_class and a summary of 160 characters or fewer) or the oldest full row is compacted to terse in the same change; validate_contract_drift (pre) refuses a ninth or tenth full row."
   - "Overlap: no open plan edits executor-personas.yaml, schema.py, validate_persona_contracts.py or instruction-architecture.yaml (the canary-register build that did merged as a275bd95). PLAN-persona-fixture-local-run (rec-5548) touches none of the scope. PLAN-persona-verdict-container-egress (rec-5549) and PLAN-consolidate-decision-73-chain (rec-5445) edit docs/DECISIONS.md elsewhere; whichever builds later rebases and renumbers per number_assignment. Decision Growth's rec-5570 plans to widen capabilities.yaml boundary_patterns: an append-only line, no ordering edge."
-  - "Fork decided with notice: no real contract declares a slot here and materialise is not wired (rec-5585 adds slots one contract_version raise each; the first slot-declaring contract wires the chain). The default home sits under ontheloop/ (Decision 211 cl.5's tracked root, created by rec-5579, on which rec-5585 already depends) and is a contract value the Decision names but does not delegate."
+  - "Fork decided with notice: no real contract declares a slot here and materialise is not wired (rec-5585 adds slots one contract_version raise each; rec-5605 wires the chain; the sidecar Coverage names rec-5585 for the chain because no slot exists before it). The default home sits under ontheloop/ (Decision 211 cl.5's tracked root, created by rec-5579, on which rec-5585 already depends) and is a contract value the Decision names but does not delegate."
   - "Decision-scout r1 FLAGS_FOUND (fingerprint v1:7026ac02cfd63f810b8b63c63729d8f084a878c98744d71bd859c887d58083bd). Operator dispositions 2026-11-24 13:53 UTC ('write the plan' on the presented handling): WARN 117/185 adopted (home in boundary_patterns plus leash path); NOTE 235 and CITE-206 framing adopted as the Decision's cl.3; WARN 212 deferred with note (the Decision says the seam is an in-process step, not a port; SA-11 is owned by T4.24:c9 and names no guidance home yet, a Coverage residual). CITE 205, 206, 211, 246, 276, 279. RELATED 187, 224, 231, 229, 127, 168, 196, 167, 150, 240, 234, 128, 66. r2 FLAGS_FOUND on the written plan: round-1 117/185 and 235 resolved; WARN 276 (cl.4 read as a delegation with no delegates envelope) fixed by dropping the change-rule words, since a delegates key cannot resolve before the build (plan_obligations FAIL); WARN 59 (instruction-architecture.yaml missing from scope) fixed with a scope row; NOTE 212 (rejection cited cl.7) fixed by dropping the clause citation. CITE adds 117, 185, 235. r3 FLAGS_FOUND: r2 flags resolved; NOTE 181 cl.2 (cl.3 residual had no owner) fixed by filing rec-5603 (eval-lane case, depends on rec-5569 and rec-5585) and naming it in Coverage. r4 FLAGS_FOUND: r3 resolved; NOTE 181 cl.2 (cl.1 had no Coverage row while code_reviewer still carries this repository's rules) fixed by naming cl.1 in the rec-5585 residual. r5 FLAGS_FOUND: r4 resolved, every clause has a check or an owned residual; NOTE 275 cl.4 (amendment_log full-row retention) adopted as a context row."
   - "Decisions triaged: 228 of 228. Roadmap items intersected: 11; CONFLICT: 0; RELATED: 10."
   - "Serves: NS.7 3/5 -- Adopter guidance reaching personas without editing contracts or hashes supports 'attach, do not restructure'. The change is enabling plumbing, not the producers themselves."
   - "Notes for rec-5585 and later (not this build): Decision 231 cl.3 replays must snapshot slot values, since they sit outside the hash; Decision 127 needs the guidance glob in file-router.yaml prose_allowlist; claude_cli (T4.27) must receive the same slot values; Decision 224 needs a project-configuration row only if adopters can relocate the home."
+  - "closes_criteria is [] by design: the plan contributes to T4.32 c1's persona-machinery leg without closing it, and the T4.28 c4, T4.29 c3 and T4.30 c3 gate is recorded only in rec-5569's text and rec-5605's dependency, not as a roadmap edge."
+  - "For rec-5585 and rec-5603 (critique PGS-10): the quoted-content clause calls every blob data, so a template that declares a slot must say guidance slots are project method to apply, still under the clause; rec-5603's eval checks both that guidance focuses judgement and that it cannot relax it."
   - "Selection budget (scripts.checks.deps.selection_budget over the scope): breadth_waived, 314 selected, predicted CI test half 288.7-1102.0 s of a 1102 s allowance; declared, no split."
   - "Plan owner: this planning session (thread 'Plan persona guidance slots rec-5569'); amendments and scope gaps come back here."
 gate_rounds:
@@ -244,6 +259,28 @@ gate_rounds:
   - {gate: decision-scout, round: 4, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:b0f067f2ac44c2d862c8026fcef993f931bf6fa99632fadb30b3a759eebce270"}  # pragma: allowlist secret
   - {gate: decision-scout, round: 5, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:bdc26bcf182b1679ddbec515ecf2b50010be473806c86d2c13c6a0cc107084bb"}  # pragma: allowlist secret
   - {gate: wording-check, round: 1, verdict: PASS, digest: deaecbb6f44bd663d8586bbc5b428da37941590a2cbc7d941b3525e38278a78e, base: a0207e161c4b850541b28804b0f48388556c5c17, selection: complete}  # pragma: allowlist secret
+  - gate: plan-critique
+    round: 1
+    verdict: REVISE
+    blocking: 3
+    nits: 13
+    findings:
+      - {id: PGS-01, severity: blocking, origin: mechanical, anchor: "bundled_recommendations", subject: "bundled list empty while the build writes Resolves: rec-5569; premerge trailer mismatch", disposition: fixed}
+      - {id: PGS-02, severity: blocking, origin: judgement, anchor: "scope[4].purpose", subject: "slot rule left const/enum/pattern/maxLength and head-filled names (plan) unexamined", disposition: fixed}
+      - {id: PGS-03, severity: blocking, origin: judgement, anchor: "scope[4].purpose", subject: "a slot without read_input:<slot> is never offered to the model by the litellm backend", disposition: fixed}
+      - {id: PGS-04, severity: nit, origin: mechanical, anchor: "closes_criteria", subject: "phase names in_progress T4.32 with closes_criteria []; say why", disposition: fixed}
+      - {id: PGS-05, severity: nit, origin: mechanical, anchor: "scope[6].purpose", subject: "boundary_patterns entry must be a true end-of-list append for the routing exemption", disposition: fixed}
+      - {id: PGS-06, severity: nit, origin: judgement, anchor: "scope[4].purpose", subject: "derive the leash prefix from guidance_slot.home rather than a literal", disposition: fixed}
+      - {id: PGS-07, severity: nit, origin: judgement, anchor: "scope[2].purpose", subject: "guidance_slot.rule should name its enforcers", disposition: fixed}
+      - {id: PGS-08, severity: nit, origin: judgement, anchor: "scope[8].purpose", subject: "two seam tests pass by construction; add a closed-placeholder refusal case", disposition: fixed}
+      - {id: PGS-09, severity: nit, origin: judgement, anchor: "scope[7].purpose", subject: "file_default should refuse off-pattern names, symlinks and non-regular files", disposition: fixed}
+      - {id: PGS-10, severity: nit, origin: judgement, anchor: "decision-new", subject: "under the quoted-content clause a model may ignore guidance; templates and rec-5603 must cover it", disposition: fixed}
+      - {id: PGS-11, severity: nit, origin: judgement, anchor: "constraints[1]", subject: "chain wiring has no owner; filed rec-5605", disposition: fixed}
+      - {id: PGS-12, severity: nit, origin: mechanical, anchor: "phase", subject: "the producer gate lives only in rec text, no roadmap edge", disposition: fixed}
+      - {id: PGS-13, severity: nit, origin: mechanical, anchor: "context scout row", subject: "ports.yaml SA-11 lacks the guidance home; operator-deferred to T4.24:c9", disposition: build-note}
+      - {id: PGS-14, severity: nit, origin: mechanical, anchor: "context instruction-architecture row", subject: "header and description still say 5-layer", disposition: fixed}
+      - {id: PGS-15, severity: nit, origin: mechanical, anchor: "context instruction-architecture row", subject: "layer 7 passes the layer check vacuously until a glob exists", disposition: fixed}
+      - {id: PGS-16, severity: nit, origin: mechanical, anchor: "verification_plan[3]", subject: "plan_obligations exit status does not encode the SLOC claim", disposition: fixed}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
