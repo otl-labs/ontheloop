@@ -130,6 +130,21 @@ RED = [
         lambda d: _post(d)["steps"].append({"id": "c", "uses": "aws-actions/configure-aws-credentials@" + "a" * 40}),
     ),
     (
+        "a-local-action",
+        "uses the local action",
+        lambda d: _post(d)["steps"].append({"uses": "./.github/actions/x"}),
+    ),
+    (
+        "a-run-step-without-an-id",
+        "run: step without an id",
+        lambda d: _post(d)["steps"].append({"run": "echo hi"}),
+    ),
+    (
+        "a-docker-command",
+        "runs a docker command",
+        lambda d: _post(d)["steps"].append({"id": "dk", "run": "docker run x"}),
+    ),
+    (
         "another-run-py-verb",
         "run.py verbs are not exactly",
         lambda d: _named(d, "Post the check runs").update({"run": k.RUN_PREFIX + "key-refusal"}),
