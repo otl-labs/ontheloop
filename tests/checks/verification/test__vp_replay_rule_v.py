@@ -244,3 +244,37 @@ def test_load_error_skips(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
     rv.rule_v_pre_pass(["docs/plans/PLAN-missing.yaml"], tmp_path, {"docs/plans/PLAN-missing.yaml"}, set(), failed)
     assert failed == []
     assert "SKIP:" in capsys.readouterr().out
+
+
+def test_quoting_escapes_continuations_and_separators(tmp_path: Path) -> None:
+    assert refused('pytest "a\\"b" tests/test_new.py', tmp_path)
+    assert refused("pytest tests/te\\st_new.py", tmp_path)
+    assert refused("pytest \\\n tests/test_new.py", tmp_path)
+    assert refused("true && pytest tests/test_new.py", tmp_path)
+    assert refused("false || pytest tests/test_new.py", tmp_path)
+    assert refused("pytest tests/test_new.py &", tmp_path)
+    assert refused("pytest tests/test_new.py > out.txt", tmp_path)
+    assert refused("pytest tests/test_new.py >out.txt 2>&1", tmp_path)
+    assert refused("pytest tests/test_new.py &> out.txt", tmp_path)
+
+
+def test_unrecognised_prefixes_and_options_are_excluded(tmp_path: Path) -> None:
+    assert refused("env -i pytest tests/test_new.py", tmp_path)
+    assert excluded("env -x pytest tests/test_new.py", tmp_path) == 1
+    assert excluded("env PYTEST_ADDOPTS=-x pytest tests/test_new.py", tmp_path) == 1
+    assert excluded("timeout pytest tests/test_new.py", tmp_path) == 1
+    assert excluded("echo pytest tests/test_new.py", tmp_path) == 1
+    assert excluded("grep -n pytest README.md", tmp_path) == 1
+    assert excluded("pytest tests/test_new.py < input.txt", tmp_path) == 1
+
+
+def test_plan_rule_v_findings_returns_step_ids(tmp_path: Path) -> None:
+    from scripts.roadmap.plan_document import load
+
+    plan_rel = _write(tmp_path, [_step(1, "pytest tests/test_new.py"), _step(2, "pytest tests/test_new.py::t")])
+    assert [step for step, _ in rv.plan_rule_v_findings(load(tmp_path / plan_rel), tmp_path)] == [1]
+
+
+def test_segments_without_a_marker_are_excluded(tmp_path: Path) -> None:
+    assert excluded("ruff --version", tmp_path) == 1
+    assert excluded("env ls pytest tests/test_new.py", tmp_path) == 1
