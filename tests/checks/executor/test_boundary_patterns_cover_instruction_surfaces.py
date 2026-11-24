@@ -31,18 +31,23 @@ PRELUDE = (
     'locate_checkout.bash" </dev/null)" || ! cd "$CLAUDE_PROJECT_DIR" || ! export CLAUDE_PROJECT_DIR || '
 )
 NOTICE_COMMANDS = (
-    '[ -n "${ONTHELOOP_PROJECT_SETTINGS:-}" ] || bash "${CLAUDE_PLUGIN_ROOT}/hooks/locate_checkout.bash" '
-    "--notice SessionStart </dev/null || :",
-    '[ -n "${ONTHELOOP_PROJECT_SETTINGS:-}" ] || bash "${CLAUDE_PLUGIN_ROOT}/hooks/locate_checkout.bash" '
-    "--notice UserPromptSubmit </dev/null || printf '%s\\n' '{\"hookSpecificOutput\": {\"hookEventName\": "
-    '"UserPromptSubmit", "additionalContext": "[plugin_hooks] repo hooks not loaded: the synced ontheloop locator '
-    "is missing or does not run, so the ontheloop plugin ran no hook (no guards, no capture). Follow the AGENTS.md "
-    "hook canary rule.\"}}'",
+    (
+        '[ -n "${ONTHELOOP_PROJECT_SETTINGS:-}" ] || bash "${CLAUDE_PLUGIN_ROOT}/hooks/locate_checkout.bash" '
+        "--notice SessionStart </dev/null || :"
+    ),
+    (
+        '[ -n "${ONTHELOOP_PROJECT_SETTINGS:-}" ] || bash "${CLAUDE_PLUGIN_ROOT}/hooks/locate_checkout.bash" '
+        '--notice UserPromptSubmit </dev/null || printf \'%s\\n\' \'{"hookSpecificOutput": {"hookEventName": '
+        '"UserPromptSubmit", "additionalContext": "[plugin_hooks] repo hooks not loaded: the synced ontheloop locator '
+        "is missing or does not run, so the ontheloop plugin ran no hook (no guards, no capture). Follow the AGENTS.md "
+        "hook canary rule.\"}}'"
+    ),
 )
 
 _NAME = r"[A-Za-z0-9_][A-Za-z0-9_.-]*[.](?:sh|py)"
 _INTERP = r'(?:bash|bin/venv-python|"\$CLAUDE_PROJECT_DIR/bin/venv-python")'
-_TARGET = rf'(?:\.claude/hooks/{_NAME}|\.claude/statusline[.]py|"\$CLAUDE_PROJECT_DIR/\.claude/(?:hooks/{_NAME}|statusline[.]py)")'
+_REL = rf"\.claude/(?:hooks/{_NAME}|statusline[.]py)"
+_TARGET = rf'(?:{_REL}|"\$CLAUDE_PROJECT_DIR/{_REL}")'
 COMMAND_RE = re.compile(rf"{_INTERP} {_TARGET}(?: [A-Za-z0-9=_-]+)*")
 MCP_ARGS_RE = re.compile(r"[a-z_][a-z0-9_]*")
 
