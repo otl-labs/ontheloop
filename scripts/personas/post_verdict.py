@@ -247,5 +247,8 @@ def main(argv: list[str]) -> int:
         posted = post_all(execute.ROOT, Path.cwd(), os.environ["GITHUB_REPOSITORY"], os.environ.get("GH_TOKEN"))
     except app_token.AppTokenError:
         return 1
+    except Exception as exc:  # noqa: BLE001 - reported by class only
+        print(f"PERSONA-VERDICT FAIL {type(exc).__name__}", flush=True)
+        return 1
     print(f"PERSONA-VERDICT posted={len(posted)}")
     return 0

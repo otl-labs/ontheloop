@@ -223,3 +223,14 @@ def test_a_sigterm_after_the_mint_revokes_once() -> None:
     script = SIGTERM_CHILD.format(root=str(ROOT), sub=SUB, ref=REF, repo=REPO)
     done = subprocess.run([sys.executable, "-I", "-c", script], capture_output=True, text=True, timeout=60, check=False)
     assert done.stdout.splitlines()[-1] == "interrupted revoked=1", done.stdout + done.stderr[-400:]
+
+
+def test_a_foreign_app_failure_prints_one_fixed_line_and_exits_one(
+    wired: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    wired["app"] = 15368
+    work = _prepare(tmp_path, {BLOCK: BLOCK_OUT})
+    monkeypatch.chdir(work)
+    monkeypatch.setenv("GH_TOKEN", GH_TOKEN)
+    assert post_verdict.main([]) == 1
+    assert "PERSONA-VERDICT FAIL RuntimeError" in capsys.readouterr().out

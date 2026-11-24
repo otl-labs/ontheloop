@@ -68,8 +68,6 @@ class _State:
 
 
 def _mint(repo: str, env: Mapping[str, str], app: int, state: _State) -> None:
-    import boto3
-
     try:
         jwt = oidc_assume.token(env)
         data = oidc_assume.claims(jwt)
@@ -88,6 +86,8 @@ def _mint(repo: str, env: Mapping[str, str], app: int, state: _State) -> None:
         raise _fail("assume", outcome.code)
     creds = outcome.credentials
     try:
+        import boto3
+
         boto = boto3.Session(
             aws_access_key_id=creds["AccessKeyId"],
             aws_secret_access_key=creds["SecretAccessKey"],
@@ -100,12 +100,13 @@ def _mint(repo: str, env: Mapping[str, str], app: int, state: _State) -> None:
     del creds, outcome, boto, jwt
     try:
         app_jwt = github_app_token.app_jwt(str(app), pem, int(time.time()))
-        del pem
         state.api = github_app_token.GitHubApi()
         state.token = github_app_token.installation_token(state.api, app_jwt, repo, dict(PERMISSIONS))
         del app_jwt
     except Exception as exc:  # noqa: BLE001 - reported by class only
         raise _fail("mint", _class(exc)) from None
+    finally:
+        pem = ""
 
 
 @contextmanager
