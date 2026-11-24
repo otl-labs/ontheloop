@@ -362,7 +362,8 @@ def validate_contract_drift(
                     continue
                 rel_path = f"{_DOCS_CONTRACTS_PREFIX}{name}"
                 try:
-                    head_data = parse_yaml(p.read_text(encoding="utf-8"))
+                    head_text = p.read_text(encoding="utf-8")
+                    head_data = parse_yaml(head_text)
                 except (OSError, UnicodeDecodeError, _yaml.YAMLError):
                     continue
                 if not isinstance(head_data, dict):
@@ -399,7 +400,12 @@ def validate_contract_drift(
 
                 failed.extend(
                     _amendment_retention.pass2_messages(
-                        name, base_data, head_data, head_shape == "class_d" and base_shape == "class_d"
+                        name,
+                        base_data,
+                        head_data,
+                        head_shape == "class_d" and base_shape == "class_d",
+                        base_text,
+                        head_text,
                     )
                 )
         else:
