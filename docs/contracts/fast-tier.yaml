@@ -1,0 +1,94 @@
+# Class D mechanism contract for the fast tier's test selection and its forced-scope budget path (Decision 280
+# cl.2-3). The budgets themselves are Decisions 182 and 208's, in scripts/checks/deps/selection_budget.py; rationale
+# lives in the Decisions (Decision 86). The selection keys hold Decision 135's mechanism text, moved word for word when
+# Decision 280 superseded it (Decision 278 cl.6); a sentence after the moved text records where it has since moved.
+# The forced_scope keys restate Decision 153's path as it runs today. The tier's definition and its gate stay in
+# docs/contracts/git-ops.yaml two_tier_presubmit_model; this contract holds only selection and the forced-scope path.
+contract:
+  id: fast-tier
+  class: D
+  contract_version: 1
+  status: draft
+  description: >-
+    The fast tier's live affected-set selection (channels, cap and defer, fallback, graph soundness, the diff it
+    reads, batched collection, the selection manifest) and the forced-scope waiver and ceiling of its budget assertion.
+  subject: fast-tier-selection
+  evaluator:
+    check: validate_fast_tier
+
+amendment_log:
+  - {date: "2026-11-24", semantic_break: false, change_class: field_add, summary: "PLAN-consolidate-decision-73-chain (Decision 280, rec-5445): first authoring; selection mechanism moved from Decision 135, the forced-scope path restated from Decision 153."}
+
+selection:
+  channels: >-
+    Four-channel live affected-set derivation (`scripts/checks/deps/affected_tests.py`), unioned
+    over the edited-set STRICTLY ADDITIVELY (selection can only grow): (a) import-closure
+    reverse-deps, computed via `nx.ancestors` over `scripts/dependency_graph.py`'s live import
+    graph; (b) a PRECISE data-edge channel (path or quoted-token match, never a bare substring) over
+    non-.py data artifacts changed in the diff plus deleted-.py-bytes (Incident B) -- generalizes and
+    retires the `select_roadmap_guard_tests` special case; (c)
+    `scripts.test_coverage_checker.map_source_to_test()`'s mirror map (read-only use); (d) a
+    conftest-subtree rule. A ~35-module cap protects against the import-closure channel's
+    combinatorial blow-up: the edited-set, DIRECT reverse-deps, and data-edge hits are never
+    deferred; only the transitive residue (plus the bounded mirror-map/conftest-subtree
+    contributions) is capped, and any overflow defers LOUDLY -- the full post-merge tier still
+    covers it. On an internal derivation exception, the selector falls back to the edited-set with a
+    loud warning (Decision 55), never silently shrinking below it.
+    The protected set has since grown: mirror-map, conftest-subtree, data-edge-mention and directory-reference
+    hits are never deferred either, so only the transitive import-closure residue is capped
+    (scripts/checks/deps/affected_tests.py _PROTECTED_CHANNELS).
+  cap_modules: 35
+  full_suite_forced: >-
+    A diff that adds or modifies the root tests/conftest.py forces full-suite scope and sets the manifest's
+    full_suite_forced; a sub-conftest uncaps only its own subtree and leaves the flag false.
+  graph_soundness: >-
+    Two dependency-graph soundness patches (`scripts/dependency_graph.py`): (i) `__init__.py`
+    package facades (Decision 124) are now graph nodes, so an importer of the PACKAGE (not a
+    specific submodule) keeps its edge instead of silently dropping it; (ii) an AST pass unions
+    string-constant module edges (e.g. `mock.patch("scripts.x.y")` targets), resolved to the longest
+    existing graph-node module prefix.
+  status_aware_diff: >-
+    A new status-aware diff primitive (`scripts/checks/_common.py`'s `get_status_aware_diff()`),
+    added ALONGSIDE `get_changed_files()` (whose own contract for its existing callers is
+    unchanged): `git diff --name-status` against the origin/main merge-base (deletions carry `D`
+    status) plus `git ls-files --others --exclude-standard` (untracked new files) -- co-resolves
+    rec-2638. In push context the base is now push_context_base() instead, through scripts/checks/_common.py
+    status_diff_base(): GITHUB_EVENT_BEFORE, else HEAD~1 (Decision 159 cl.1). Main-validate anchors it on the
+    batch's prev only once it passes FULL_TIER_PREV (Decision 254 cl.4), a leg dormant until rec-5107
+    (docs/contracts/full-tier-range.yaml dormant_until_rec_5107).
+  collection: >-
+    Batched collect-only partitioning (`scripts/checks/_scaffolding.py`): the per-file serial
+    `--collect-only` loop is replaced by ONE batched invocation over every affected test file, with
+    collection-ERROR blocks and `-rs` SKIPPED lines attributed back to their own file (never a
+    whole-batch mis-defer on one bad file) -- nets ~30x fewer collect-only subprocess spawns, funding
+    the derivation's added cost inside the 5-minute fast-tier budget. The partitioning now lives in
+    scripts/checks/_pytest_diff.py, and the budget it funds is Decisions 182 and 208's.
+
+selection_manifest: >-
+  A per-run `selection-manifest.json` (sha, status-aware diff, per-test provenance/channel,
+  selected/capped/deferred, timings) is printed to the CI log, uploaded as a GitHub Actions
+  artifact (`pr-validate`, `if: always()`), and best-effort-uploaded to S3
+  (`ci/selection/<sha>/`, lazy-imports boto3, LOUD-skips when creds/boto3 are absent -- the
+  no-creds fast tier). The manifest is an APPEND-ONLY OBSERVABILITY ARTIFACT consumed only by
+  future CI-RCA escape-attribution -- it is NEVER read back as a selection input (structurally
+  proven: the derivation never reads a prior manifest). DuckLake table / named-verb registration
+  for the manifest is DEFERRED to T2.36, triggered by "first written cross-run query" -- this
+  Decision does not build that registration.
+  T2.36 has since completed without it, so the registration now waits on a rec filed with that first query.
+  Since Decision 153 the budget assertion also reads the current run's full_suite_forced flag
+  (forced_scope.waiver); a prior run's manifest is still never read.
+
+forced_scope:
+  waiver: >-
+    When the manifest's full_suite_forced is true and the run's elapsed time is at or under the ceiling, the budget
+    verdict is forced_waived, test-half breach or not (scripts/checks/deps/selection_budget.py): a distinct "budget
+    waived: full-suite scope forced by root-conftest change" notice, mirrored to the CI step summary, no breach rec and
+    exit 0. The flag is read fail-closed (an empty or fallback manifest sets it false), so a derivation fallback never
+    waives. A non-test-half breach outranks the waiver (Decision 182 cl.4).
+  ceiling_seconds: 1500
+  ceiling: >-
+    Above ceiling_seconds even a forced run fails, with a distinct ceiling-breach notice and no rec. The ceiling is
+    derived, never set on its own: pr-validate's job timeout-minutes minus the timeout-minutes of every other bounded
+    step in the job (today persona image conformance and pin verification) minus a ~5-minute diagnostic margin
+    (.github/workflows/ci.yml; 50 - 15 - 5 - 5 = 25 min = 1500 s), expressed on validate's own elapsed clock so the
+    same bound holds locally. Re-derive it in the same change as any of those timeouts.

@@ -2,6 +2,117 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 280: Two-tier CI in one entry -- PR CI gates on a diff-aware fast tier whose selection only grows and whose budget fails the run, the full tier runs after merge, and a red on main is fixed forward (supersedes Decisions 73, 135 and 153) (Decided)
+
+```yaml
+number: 280
+status: Decided
+decided_date: "2026-11-24"
+kind:
+  value: direction
+  justification: >-
+    Clauses 3 and 4 keep commitments: a fast-tier breach fails the run with no escape in CI, and automated revert stays
+    excluded.
+supersedes: [73, 135, 153]
+significance:
+  value: numbered_decision
+  justification: >-
+    It restates the current rule of Decision 73 and its two whole amenders as one entry so the three can compact
+    (Decisions 149 and 278); dated notes (considered) cannot retire a chain, and docs/contracts/fast-tier.yaml
+    (considered) holds the selection mechanism, not the commitments behind the gate.
+delegates:
+  - key: docs/contracts/fast-tier.yaml#selection
+    change_rule: contract_amendment
+    bounds: {text: "Selection only grows over the edited set; a derivation failure falls back to the edited set loudly; only the transitive residue is capped, and its overflow defers loudly to the full tier."}
+  - key: docs/contracts/fast-tier.yaml#selection_manifest
+    change_rule: contract_amendment
+    bounds: {text: "Append-only observability for escape attribution; never read back as a selection input."}
+  - key: docs/contracts/fast-tier.yaml#forced_scope
+    change_rule: contract_amendment
+    bounds: {text: "Only a run whose full-suite scope the selector forced may pass a test-half breach, and only under the ceiling, which is derived from the pr-validate job timeout and never set on its own."}
+```
+
+**Status:** Decided
+**Date:** 2026-11-24
+**Warehouse ID:** dec-280 (per Decision 84 backfill)
+
+**Problem:** A reader needs twelve entries to learn how CI validates a change: Decision 73, the two that rewrote its
+fast tier (135, 153), the budget entry that amends 153 (182) and the one that re-derives it (208), and seven that
+amend 73 in part (205, 217, 226, 247, 249, 252, 254). Much of 73 no longer holds as written (rec-5445).
+
+**Intent:** One entry states the standing rules of the two-tier model and its fast-tier gate and delegates the
+selection mechanism, so Decisions 73, 135 and 153 compact to stubs; rules that moved wholly to an amender stay there.
+
+**Decision:**
+1. **Two tiers.** Decision 60's two named tiers stand; these clauses and Decisions 182 and 208 set their contents and
+   budgets. The fast tier (`--pre`) is diff-aware and is the merge gate when PR
+   CI runs it; outside CI it is advisory. The full tier runs every check end to end: after merge on batches of main
+   (Decision 254 cl.1), in Main Canary and before hand-off (Decision 163 pt.3, until Decision 254 cl.7's per-PR run
+   replaces it). A batch whose range touches only docs/plans/ runs the fast tier instead (Decisions 205 cl.5 and 254
+   cl.1).
+2. **Selection only grows.** The fast tier's tests are derived live on every run, with no selection or coverage cache:
+   the edited set plus what reaches it through imports, data references, the mirror map and conftest subtrees. It
+   never shrinks below the edited set: a derivation failure falls back to it loudly, and only the transitive residue
+   is capped, its overflow deferred loudly to the full tier. A change to the root tests/conftest.py forces the full
+   suite. The selection manifest each run uploads is observability, never a selection input.
+3. **The budget fails the run.** The fast tier asserts its budget and fails non-zero on a breach; CI refuses the
+   local --ignore-budget escape. The budgets and their derivation are Decisions 182 and 208's. A run whose full-suite
+   scope the selector forced passes a test-half breach with a distinct notice and no rec, up to a ceiling derived from
+   the pr-validate job timeout on the fast tier's own clock; above it, or on any other breach, it fails. The ceiling
+   is a guardrail inside the tier, not a budget of its own or a third tier.
+4. **Fixed forward.** A full-tier red on main files a ci_rca rec and is repaired forward, by a fix or by a manual
+   revert PR, which appends to main like one (Decision 226 cl.4). Automated revert stays excluded, because it moves
+   main under active worktrees; a revert PR that CI opens and never merges is not automated revert (Decision 254
+   cl.3). Priority, tracks, the overlap block and the SLO are Decision 226's, and a red never blocks a merge (Decision
+   254 cl.6).
+5. **Carried forward.** These keep their amends and the parts they changed: Decision 205 (plans-only pushes),
+   Decision 217 and Decision 226 (the overlap block and red recovery), Decision 247 (the executor and STRATEGIC
+   retirements), Decision 249 (code deploys of the newest full-tier-green commit), Decision 252 (promotion to SIT and
+   PROD), Decision 254 (the batched full tier) and Decision 182 (the budget split, re-derived by Decision 208).
+   Non-automatable rec counts stay informational and are never reviewed one by one (Decision 247 cl.6), and the
+   automatable field keeps the meaning Decision 117 carries from Decision 44, never extended to a merge mode. A value
+   change goes to the delegated keys; a ruling change is a new entry superseding this one.
+
+**Options considered:** a dated note on each (rejected: notes cannot retire a chain); restating every partial
+amender's part (rejected: two authorities for one rule, and this entry becomes the next amend target); taking 182 as
+a fourth victim (rejected: it strands 208, and taking 208 too makes five).
+
+**Coverage (Decision 181 cl.2):** cl.1 -- validate_git_ops_contract and tests/validate/test_tiers.py; cl.2 --
+tests/checks/deps/affected_tests/ and validate_fast_tier; cl.3 -- tests/validate/test_budget_split.py and
+tests/checks/deps/test_selection_budget.py; cl.4 -- tests/ci_rca/test_recovery_policy_surfaces.py; cl.5's
+non-automatable counts -- tests/session/preflight/test_main_report.py; the accounting -- validate_delegated_key_changes
+over the consolidation manifest.
+
+```yaml reversal-conditions
+decision: 280
+review_by: 2027-05-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: cap-defers-escapes
+    kind: manual
+    description: "The cap defers often enough that the full tier routinely catches what the fast tier should: tighten the channel order or track the deferred count as a tier_item (from Decision 135 (a))."
+  - id: cache-revisit
+    kind: manual
+    description: "KG.13's revisit trigger fires (concurrency above 1 and a KG.13 item filed or a recurring budget breach), or the forced full suite exceeds the ceiling: re-examine whether a selection or coverage cache is warranted (from Decisions 135 (b) and 153 (b))."
+  - id: manifest-query-need
+    kind: manual
+    description: "A written cross-run query of the selection manifest is needed: register its warehouse table and named verb then, through a rec, not before (from Decision 135 (c))."
+  - id: waivers-mask-drift
+    kind: manual
+    description: "Forced-scope waivers become frequent enough to mask fast-tier drift landing beside conftest edits: also require no non-conftest slow-check growth (from Decision 153 (a))."
+  - id: sub-conftest-breaches
+    kind: manual
+    description: "A sub-conftest subtree's forced selection starts failing real PRs on the budget: extend the forced flag or add a bounded per-subtree allowance (from Decision 153 (c) and its known residual)."
+  - id: ceiling-decoupled
+    kind: manual
+    description: "The ceiling is proposed for change apart from the pr-validate job timeout, or the reverse: it has become a budget of its own, so re-decide against clause 3 first (from Decision 153 (d))."
+```
+
+**Related:** Decisions 73, 135 and 153 (superseded), 182, 205, 208, 217, 226, 247, 249, 252 and 254 (carried
+forward), 44, 55, 60, 72, 80, 117, 149, 159, 163, 177, 276, 278; rec-5445.
+
+---
+
 ## Decision 279: Wording approval follows a declared gated set -- north stars, direction Decisions, every Intent line and the text that defines a gate keep the operator's per-change approval, and other wording is settled with notice on a ladder lane (amends Decisions 83, 165, 187, 243 and 246) (Decided)
 
 ```yaml
@@ -8969,36 +9080,14 @@ Two structural facts justify the narrowing, independent of Decision 55's recover
 
 ## Decision 153: Fast-tier budget assertion waives a full-suite-forced --pre run (warn, not hard-fail) bounded by a forced-run ceiling derived from the pr-validate job timeout (amends Decision 73 enforcement + Decision 135) (Decided)
 
-**Status:** Decided
+**Status:** Superseded
 **Date:** 2026-07-24
-**Warehouse ID:** dec-153 (keyed on the decision number; synced to ops_decisions via `ops_data_portal --backfill-decisions-md` post-merge, per Decision 84)
 
-**Problem:**
-Decision 135's affected-set selector (as hardened by audit finding VTS-03) forces FULL-suite scope on the --pre fast tier whenever a PR changes the root `tests/conftest.py`, emitting a `full_suite_forced` flag into the selection manifest. That signal was wired to nothing: Decision 73's fast-tier BUDGET assertion (`scripts/validate.py::_scaffold_budget_assertion`) hard-fails the build (exit 1) whenever elapsed exceeds the 5-minute (300s) budget, with no knowledge of the forced-scope flag. A root-conftest edit deterministically runs the full ~6930-test suite (~19.8 min, already at `-n auto`), so the budget assertion hard-blocks ANY conftest-editing PR from merging via normal CI -- it blocked Slice B's PR #727. Slice A's plan (`PLAN-affected-set-recall-hardening`) called the budget assertion a "sanctioned backstop" and cited Decision 135 reversal-condition (b)/KG.13 as the relief valve, but that relief valve is structurally dead at this repo's concurrency: the KG.13 build-orchestrator revisit trigger (Decision 80 point 4, line 3768; Decision 135's KG.13 boundary note, line 911) is an AND-gate requiring `executor concurrency > 1 AND (KG.13 filed OR a fast-tier-budget breach recurs)`, and this is a sole-developer repo at concurrency 1 ("At T4.1 concurrency = 1", Decision 80). The AND-gate can never fire, so a breach never arms any relief -- the "backstop" was in practice an unbypassable blocker.
+**Decision:** Superseded by Decision 280, which restates its rulings with Decision 73 and Decision 135 and names Decision 182, which keeps its amends and the budget split; the forced-scope mechanism lives in docs/contracts/fast-tier.yaml forced_scope. Point map: pt1 -> cl.3 and forced_scope; pt2 -> cl.3 and forced_scope; pt3 -> cl.3 and forced_scope; pt4 -> cl.3 and Decision 182. Compacted in place (Decision 149), not archived, because code and contracts still cite "Decision 153" by name.
 
-**Intent:**
-Teach the fast-tier budget gate about its own `full_suite_forced` signal so a deterministic, already-diagnosed full-suite run (a root-conftest PR) warns-and-passes instead of hard-failing, while keeping the gate's anti-drift teeth for every ordinary breach and bounding the forced path with a guardrail derived from the pr-validate job timeout.
+**Superseded by: Decision 280**
 
-**Decision:**
-This decision preserves Decision 60/73's two-tier model unchanged: exactly two named validate surfaces (--pre and default) and exactly two CI gating roles (pre-merge PR gate; post-merge full tier). It adds no invocation flag, no workflow job or trigger, no registered check or scaffold step (registry.py and FROZEN_PRE_SCAFFOLDS untouched), and no selection behaviour -- the forced-scope selection it responds to was ratified by Decision 135/VTS-03. A forced run remains a fast-tier run by every tier-defining property: it executes the fast tier's own check sequence (registry.pre_sequence()), in the same pr-validate job, with no AWS credentials and none of the full tier's exclusive checks; only its pytest selection breadth differs, which Decision 135 already governs.
-
-1. **Forced-scope waiver (amends Decision 73 enforcement).** In `scripts/validate.py::_scaffold_budget_assertion`, when the selection manifest's `full_suite_forced` is true AND elapsed exceeds the 5-minute (300s) budget but is at or under a 25-minute (1500s) forced-run ceiling, the assertion emits a DISTINCT "budget waived: full-suite scope forced by root-conftest change" notice (mirrored to the CI step summary), skips the already-diagnosed `_file_budget_breach_rec` stream, and does NOT exit non-zero. This narrows Decision 73's "the fast tier asserts wall-clock budget and fails non-zero on breach" (point 1 / the "Enforced budgets" rationale) for exactly one deterministic, self-identified case.
-2. **Hard-fail preserved for every non-forced breach.** When `full_suite_forced` is falsy, behaviour is EXACTLY as before: `_file_budget_breach_rec` + the existing ERROR diagnostic + exit 1. The gate's anti-drift purpose is intact; this is not a general weakening. The read is fail-closed -- `_empty_manifest` sets `full_suite_forced=False` and the code reads it with `.get(..., False)`, so a Decision-55 derivation-failure fallback hard-fails rather than accidentally waiving.
-3. **Forced-run ceiling (a derived guardrail, not a second budget).** Even when `full_suite_forced`, elapsed above the 1500s ceiling hard-fails (exit 1) with a distinct ceiling-breach notice; this path is INTENTIONALLY rec-free (it does not file `_file_budget_breach_rec` -- the ceiling notice mirrors to the CI step summary instead). The fast tier retains exactly ONE design budget: 300s. 1500s is not a second budget; it is derived -- the pr-validate job's 30-minute infrastructure timeout (`.github/workflows/ci.yml`) minus a ~5-minute diagnostic margin, expressed on validate.py's own elapsed clock so the identical bound holds locally, where `timeout-minutes` does not exist. The bound lives in validate.py rather than being delegated to the job timeout because validate.py is the single source of truth for validation logic (AGENTS.md merge protocol) and because a timeout kill is an opaque infra cancellation with no elapsed/dominant-phase diagnostic. If pr-validate's `timeout-minutes` changes, the ceiling is re-derived from it; it is never renegotiated independently.
-4. **Not a new tier (the ceiling is a guardrail).** A tier in this repo is a chooseable validation surface -- an invocation flag plus check sequence, selection scope, trigger/role, and budget contract selected ex ante (Decision 60's "which flag should I use"; Decision 73 points 1-2). The forced-run ceiling has none of these properties: it cannot be invoked, requested, or routed to; it selects and schedules nothing; it fires ex post inside the existing budget_assertion step and only maps an already-elapsed run to pass/warn/fail. It is a bounded guardrail WITHIN the fast tier, in the same ratified class as the budget-vs-timeout distinction the full tier already exhibits (honest 15-30-min budget, no assertion, 60-minute job timeout) -- an outer runaway bound, not a second budget regime and not a third tier.
-
-**Amends Decision 135:** the `full_suite_forced` manifest flag (Decision 135 point 5 surface, populated by VTS-03) becomes a load-bearing gate input, not merely an observability field. Decision 135 carries an internal inconsistency on the KG.13 trigger: its KG.13 boundary note (line 911) states `concurrency > 1 AND (KG.13 filed OR budget breach)` while reversal-condition (b) (line 942) parenthetically reads `concurrency > 1 OR a genuine fast-tier-budget breach`. The AUTHORITATIVE form is the AND-gate boundary note (concordant with Decision 80 point 4); reversal-condition (b) is a design-REVISIT SIGNAL (it invites re-examining whether a selection/coverage cache is warranted), NOT a runtime waiver -- a breach never lets the stranded PR pass. That is precisely why an in-band budget-gate waiver, not the KG.13 relief valve, is the correct forward-fix.
-
-**Rationale:**
-The budget assertion exists to catch fast-tier DRIFT -- a check silently growing past its contract (Decision 73 "Enforced budgets"). A root-conftest change is not drift: it is a rare, deterministic, self-identified event whose full-suite cost is understood and expected (Slice A consciously routed it to full scope). Blocking it teaches nothing and merely strands the PR, because the only sanctioned escape (`--ignore-budget`) is forbidden in CI (the `validate.py` CI guard) and the KG.13 relief valve cannot arm at concurrency 1. Warning-and-passing the forced case while preserving the hard-fail for every ordinary breach keeps the anti-drift signal exactly where it is meaningful, and the derived forced-run ceiling (the pr-validate job timeout surfaced ~5 minutes early on validate.py's own clock) preserves an enforced upper bound so the forced path cannot itself become an unbounded escape.
-
-**Known residual (deliberately not engineered):** `full_suite_forced` is set only for the ROOT `tests/conftest.py` (`scripts/checks/deps/affected_tests.py`). An autouse-fixture-bearing SUB-conftest uncaps its own subtree (VTS-03 `conftest_subtree_forced` provenance) but sets `full_suite_forced=False`, so a large forced subtree could still hard-fail the 5-minute gate. This is left as-is: sub-conftest subtrees are bounded and the case is rare; widening the waiver to a per-subtree budget is out of scope and would dilute the signal. If it manifests, the remedy is to extend the flag (or add a bounded per-subtree allowance), tracked then, not now.
-
-**Reversal conditions:** Revisit if (a) forced-scope waivers become frequent enough that they mask genuine fast-tier drift landing in the same PRs as conftest edits (tighten to require the manifest also show no non-conftest slow-check growth); (b) the 25-minute ceiling is hit in practice (the forced full suite genuinely exceeds it -- then the suite itself, not the gate, is the problem, and this arms the Decision 80 point 4 / KG.13 revisit on its own terms if concurrency has by then risen above 1); (c) the known-residual sub-conftest case starts hard-failing real PRs (extend the flag); (d) if the ceiling's value is ever proposed for change independently of the pr-validate job timeout (or vice versa), it has drifted into being a de-facto second budget -- re-adjudicate against the two-tier commitment stated here before amending. Full reversal (drop the waiver, restore the unconditional hard-fail) is a one-function revert with no data or schema migration.
-
-**Significance:** clears the Decision 150 significance bar -- a durable architectural commitment (amends a ratified CI enforcement invariant), with reversal-relevant consequences and explicit reversal conditions; not a CD state-flip, operational fact, or field-semantics change.
-
-**Related:** Decision 73 (fast-tier budget enforcement this narrows -- amended in Decision 153's body per the Decision 134/145 amend-only convention; Decision 73's own body is not edited), Decision 135 (the `full_suite_forced` signal source and the KG.13 boundary this reconciles), Decision 80 point 4 (the concurrency>1 AND-gate KG.13 revisit trigger that is the dead relief valve at concurrency 1), Decision 60 (the tier-definition authority -- the named-surface test this decision's not-a-tier adjudication applies -- and originating two-tier / 5-minute-budget ratification), Decision 150 (significance bar this entry is checked against), Decision 55 (fail-loud fallback -- the waiver reads fail-closed), Decision 48 (V2 verification tier), Decision 131 (test-colocation mirror -- the new tests live beside the budget-assertion tests), Decision 84 (warehouse SoT + decision-numbering authority). Roadmap refs (not DECISIONS.md entries): KG.13 / T3.11 c5 (the deferred TIA/cache work, still undisturbed), the validate-test-suite audit (VTS-03, which introduced `full_suite_forced`), Slice B PR #727 (the PR this unblocks).
+---
 
 ## Decision 152: Decision-scout SPIRIT axis -- a quotability-gated intent-alignment triage lane distinct from literal contradiction (audit finding DCG-07, Q3c adopt-scoped) (Decided)
 
@@ -10032,106 +10121,12 @@ rec-4070.]
 
 ## Decision 135: Live, cacheless, strictly-additive affected-set selection replaces the --pre edited-set tier gate (amends Decision 73, 2nd amendment; builds on 80/104/124/131) (Decided)
 
-**Status:** Decided
+**Status:** Superseded
 **Date:** 2026-07-17
-**Warehouse ID:** dec-135 (keyed on the decision number; synced to ops_decisions via `ops_data_portal --backfill-decisions-md` post-merge, per Decision 84)
 
-**Problem:**
-The --pre fast tier's pytest selection (Decision 73, amended by the PR #334 explicit-paths fix)
-only ever ran tests that were THEMSELVES literally present in the diff (the "edited-set"). A
-source-only PR that broke a test it did not itself touch, or broke a downstream consumer of a
-changed data file / roadmap YAML, passed the fast gate clean and only reddened post-merge on the
-full tier (or the Main Canary) -- surfaced via rec-2638 (validate --pre under-checks untracked new
-files) and repeated CI-RCA incidents where a data-shape change (Incident A: a YAML entry-count
-edit) or a deleted file's dependents (Incident B) escaped the fast gate. Decision 73's own Known
-Gap flagged this directly ("pytest --picked may be upgraded if false-negatives accumulate").
+**Decision:** Superseded by Decision 280, which restates its rulings with Decision 73 and Decision 153; the mechanism lives in docs/contracts/fast-tier.yaml selection and selection_manifest. Point map: pt1 -> cl.2 and channels; pt2 -> graph_soundness; pt3 -> status_aware_diff; pt4 -> collection; pt5 -> cl.2 and selection_manifest; pt6 -> retired; pt7 -> retired. Compacted in place (Decision 149), not archived, because code and contracts still cite "Decision 135" by name.
 
-**Decision:**
-1. **Four-channel live affected-set derivation** (`scripts/checks/deps/affected_tests.py`), unioned
-   over the edited-set STRICTLY ADDITIVELY (selection can only grow): (a) import-closure
-   reverse-deps, computed via `nx.ancestors` over `scripts/dependency_graph.py`'s live import
-   graph; (b) a PRECISE data-edge channel (path or quoted-token match, never a bare substring) over
-   non-.py data artifacts changed in the diff plus deleted-.py-bytes (Incident B) -- generalizes and
-   retires the `select_roadmap_guard_tests` special case; (c)
-   `scripts.test_coverage_checker.map_source_to_test()`'s mirror map (read-only use); (d) a
-   conftest-subtree rule. A ~35-module cap protects against the import-closure channel's
-   combinatorial blow-up: the edited-set, DIRECT reverse-deps, and data-edge hits are never
-   deferred; only the transitive residue (plus the bounded mirror-map/conftest-subtree
-   contributions) is capped, and any overflow defers LOUDLY -- the full post-merge tier still
-   covers it. On an internal derivation exception, the selector falls back to the edited-set with a
-   loud warning (Decision 55), never silently shrinking below it.
-2. **Two dependency-graph soundness patches** (`scripts/dependency_graph.py`): (i) `__init__.py`
-   package facades (Decision 124) are now graph nodes, so an importer of the PACKAGE (not a
-   specific submodule) keeps its edge instead of silently dropping it; (ii) an AST pass unions
-   string-constant module edges (e.g. `mock.patch("scripts.x.y")` targets), resolved to the longest
-   existing graph-node module prefix.
-3. **A new status-aware diff primitive** (`scripts/checks/_common.py`'s `get_status_aware_diff()`),
-   added ALONGSIDE `get_changed_files()` (whose own contract for its existing callers is
-   unchanged): `git diff --name-status` against the origin/main merge-base (deletions carry `D`
-   status) plus `git ls-files --others --exclude-standard` (untracked new files) -- co-resolves
-   rec-2638.
-4. **Batched collect-only partitioning** (`scripts/checks/_scaffolding.py`): the per-file serial
-   `--collect-only` loop is replaced by ONE batched invocation over every affected test file, with
-   collection-ERROR blocks and `-rs` SKIPPED lines attributed back to their own file (never a
-   whole-batch mis-defer on one bad file) -- nets ~30x fewer collect-only subprocess spawns, funding
-   the derivation's added cost inside the 5-minute fast-tier budget.
-5. **A per-run `selection-manifest.json`** (sha, status-aware diff, per-test provenance/channel,
-   selected/capped/deferred, timings) is printed to the CI log, uploaded as a GitHub Actions
-   artifact (`pr-validate`, `if: always()`), and best-effort-uploaded to S3
-   (`ci/selection/<sha>/`, lazy-imports boto3, LOUD-skips when creds/boto3 are absent -- the
-   no-creds fast tier). The manifest is an APPEND-ONLY OBSERVABILITY ARTIFACT consumed only by
-   future CI-RCA escape-attribution -- it is NEVER read back as a selection input (structurally
-   proven: the derivation never reads a prior manifest). DuckLake table / named-verb registration
-   for the manifest is DEFERRED to T2.36, triggered by "first written cross-run query" -- this
-   Decision does not build that registration.
-6. **`select_roadmap_guard_tests` retired** (function + call site removed from
-   `scripts/validate.py`); its behavior is subsumed by the general data-edge channel (proven by
-   `TestRoadmapGuardSubsumption`).
-7. **Inline implementation path taken.** The derivation feeds the EXISTING `pytest_diff` scaffold
-   in `scripts/validate.py`'s `--pre` block; `scripts/checks/registry.py` and the
-   `tests/test_checks_registry.py` frozen-baseline (`FROZEN_PRE_SCAFFOLDS`) are UNTOUCHED -- no new
-   registered check or scaffold step was introduced.
-
-**KG.13 boundary (explicitly NOT engaged):** KG.13 is the deferred Bazel/Pants-style
-Test-Impact-Analysis + selection/coverage-CACHE work (`ROADMAP-PLATFORM.yaml` T3.11 c5), gated by a
-revisit trigger (concurrency > 1 AND (KG.13 filed OR a fast-tier-budget breach)). This Decision's
-derivation is LIVE, CACHELESS, and tool-free (ast/networkx only) -- explicitly NOT a selection cache
-and NOT a coverage cache -- so it lands in Decision 80 point 3's sanctioned "live derivation"
-bucket, not point 4's deferred-orchestrator bucket. This Decision files NO KG.13 tier_item and ARMS
-NO revisit trigger; KG.13 stays deferred and undisturbed.
-
-**Rationale:**
-The prior edited-set selection was structurally blind to exactly the failure shape it exists to
-catch (a change whose blast radius extends beyond the files it touches). A live, additive
-derivation over the real import graph and data-references closes that gap without trading away
-Decision 73's non-wedging fast-tier design: the additive-only invariant guarantees the new
-selection is never a strict subset of the old one (no regression risk from the upgrade itself), the
-cap+defer keeps worst-case cost bounded, and the manifest gives CI-RCA a forward-looking
-escape-attribution surface without becoming a second source of truth (it is never read back).
-
-**Reversal conditions:** Revisit this design if (a) the ~35-module cap's transitive-residue defer
-rate proves high enough in practice that the full tier is routinely catching what should have been
-fast-tier-caught (tighten the cap's channel-priority ordering, or promote the manifest's
-deferred-count telemetry into a tier_item); (b) T3.11 c5's KG.13 revisit trigger fires for an
-unrelated reason (concurrency > 1 or a genuine fast-tier-budget breach) -- re-examine whether this
-design's live per-run cost still nets out, or whether a genuine selection/coverage cache (KG.13) is
-now warranted; (c) the manifest's first written cross-run query need materializes -- action the
-deferred T2.36 DuckLake/named-verb registration then, not preemptively.
-
-**Related:** Decision 73 (fast-tier selection mechanism this amends, 2nd amendment after the PR
-#334 explicit-paths fix), Decision 80 (import-graph oracle; the sanctioned-live-derivation vs
-deferred-cache boundary this Decision sits inside), Decision 104 (checks registry / `_common.py`
-sole-home discipline; the inline path this Decision took leaves both untouched), Decision 124
-(facade re-export pattern the `__init__.py` soundness patch preserves), Decision 131 (mirror-map /
-conftest hierarchy / per-package `__init__.py` -- channel 3's read-only dependency and channel 4's
-rule), Decision 84 (warehouse SoT + numbering; DuckLake/named-verb registration deferred to T2.36
-under this same authority), Decision 86 (agent-first; the manifest and this Decision's rationale
-route here, not a new prose doc), Decision 128 / Decision 130 (SLOC decompose-by-default discipline
-every touched/new file stays under), Decision 55 (fail-loud fallback on derivation exception; no
-rescue loops), Decision 132 (verification graduation obligation this plan's VP dispositions
-satisfy). Roadmap refs (not DECISIONS.md entries): rec-2638 (co-resolved: untracked new files now
-visible to `--pre` selection), T2.36 (deferred DuckLake/named-verb registration for the manifest),
-KG.13 / T3.11 c5 (deliberately undisturbed, see boundary note above).
+**Superseded by: Decision 280**
 
 ---
 
@@ -13475,77 +13470,12 @@ Two changes to restore and harden the harness:
 
 ## Decision 73: Two-Tier Diff-Aware CI with Forward-Fix and Scheduled Promotion Train (Decided)
 
-**Status:** Decided
+**Status:** Superseded
 **Date:** 2026-05-13
 
-**Problem:**
-Decision 60 (2026-05-05) specified a two-tier validation model with a 5-minute fast-tier budget. The budget was unattainable at ratification: V3 verifiers (PR #274, 2026-05-01) and the DQ runner integration (PR #289, same day as Decision 60) placed ~10 minutes of legacy query-engine round-trips in the default presubmit tier on day zero. Twelve subsequent commits to `validate.py` between 2026-05-06 and 2026-05-12 compounded the drift. Measured runtimes show median 18 min, max 50 min -- a 3-10x violation of the documented budget. The structural causes are: (1) the budget had no enforcement mechanism, (2) the tier was defined by exclusion of a barely-used pytest marker (`@pytest.mark.integration` is set on exactly 1 of ~30 AWS-touching test files), and (3) post-merge CI ran on push-to-main duplicating PR CI on the same content. Additionally, with GitHub branch protection permanently unavailable (Decision 89), Decision 89 made remote CI the only merge gate -- yet the gate runs the same slow tier that should be reserved for comprehensive validation. The merge model conflates pre-merge gating with comprehensive validation, and the planning queue currently treats 178 accumulated non-automatable recommendations as mandatory discussion items, which is operational noise while the executor is offline pending Decision 67 reversal.
+**Decision:** Superseded by Decision 280, which restates its standing rules with Decision 135 and Decision 153 and names the amenders that keep their parts: Decision 205, Decision 217, Decision 226, Decision 247, Decision 249, Decision 252 and Decision 254; the selection mechanism lives in docs/contracts/fast-tier.yaml. Point map: pt1 -> cl.1 and cl.2 and cl.3 and Decision 182; pt2 -> cl.1 and Decision 254; pt3 -> cl.4 and Decision 226; pt4 -> cl.4 and cl.5 and Decision 226; pt5 -> cl.5 and Decision 249; pt6 -> cl.5. Compacted in place (Decision 149), not archived, because code and contracts still cite "Decision 73" by name.
 
-**Decision:**
-Adopt a ten-layer CI/CD architecture (L1-L10) as specified in `docs/INTENT-ci-cd-architecture.md`. The model preserves Decision 60's two-tier abstraction while redefining tier semantics and adding forward-fix merge gating and scheduled promotion design.
-
-Key elements:
-
-1. **Two tiers with new semantics.** Fast tier (`--pre`) becomes diff-aware (ruff/mypy on changed files only, `pytest --picked` for test selection, hard 5-min budget assertion). Full tier (default) runs everything end-to-end with an honest 15-30 min budget. The fast tier asserts wall-clock budget and fails non-zero on breach.
-
-2. **PR gating uses fast tier.** PR CI runs `--pre`. Full tier runs on push to `main` and on hourly scheduled cron (L8 drift canary). The post-merge full tier replaces the previously-duplicate PR-then-main runs.
-
-3. **Forward-fix merge gate, not auto-revert.** Auto-revert is excluded because it moves `main` underneath active worktrees -- structurally hostile to multi-worktree parallel development and to the future autonomous executor (Wave 4). On full-tier failure on `main`, `ci-rca` files a `priority="critical"`, `source="ci_rca"` rec; the rec hard-blocks the planning queue (L5) and pauses PR auto-merge (L6) until a forward-fix lands.
-
-4. **Planning queue governance.** While an open ci-rca rec exists, `/plan` cannot scope unrelated work; `session_preflight.py` surfaces the block at the top of its report. Separately, the existing rule that treats `non_automatable_recommendations > 0` as MANDATORY discussion is suspended until Decision 67 reverses and the executor is back in service. Counts remain informational in the preflight report.
-
-5. **Sandbox tolerates red `main`; SIT and PROD do not.** Sandbox is the only environment agents touch. Forward-fix recovers sandbox via the standard rec → plan → implement cycle, typically within hours. SIT and PROD inherit only sandbox commits that have been green continuously ≥24h (sandbox→SIT) or ≥7d (SIT→PROD); the green-streak resets on any ci-rca rec opening. SIT and PROD environments are months-away future work, deferred to Phase Infra-Env.
-
-6. **Merge-mode is derived from the diff, not stored.** A path-prefix table (specified in INTENT Section 7) computes sync vs async gating from `git diff --name-only`. The `automatable` field on `ops_recommendations` retains Decision 44 semantics (executor self-modification boundary) and is not extended into merge-mode territory. Conflation was considered and rejected: actual file overlap between the two lists is near-zero, and unifying would either expand the executor boundary into non-self-modification files or over-gate executor-machinery PRs that are well-tested.
-
-**Rationale:**
-
-- *Agent-first throughput.* Sync pre-merge gating on a 30-minute full tier stalls the recursive self-improvement loop. Async with forward-fix unblocks agents after a 5-minute fast tier while preserving recovery via the existing rec/plan/implement infrastructure.
-- *Worktree-safe.* Forward-fix touches `main` only via append; auto-revert moves `main` underneath worktrees, which is hostile to the parallel-execution pattern this repo already uses and will use more heavily in Wave 4.
-- *Industry-aligned.* Optimistic merge with post-merge comprehensive validation and queued remediation is the canonical pattern at Google (TAP), Meta (Sapling/TAP), and AWS internal pipelines. The agent-first variant replaces "human notification" with "rec in priority queue"; the shape is identical.
-- *Enforced budgets.* Decision 60's 5-minute fast-tier target becomes a runtime assertion. The decision becomes real when violation produces a visible failure, not when documentation says it should hold.
-- *Time + green-streak promotion.* Bake time is the strongest test available against real-world conditions you cannot anticipate. Time alone is not enough -- a recently-broken commit promoted exactly 24h after merge would inherit a known-broken state. The green-streak window ensures only stable commits cross promotion gates.
-
-**Supersedes / Amends:**
-- Implementation mechanism of Decision 60 (tier definitions and enforcement). The two-tier abstraction and 5-minute fast-tier target survive; the exclusion-by-marker mechanism is replaced by diff-aware selection with an enforced budget assertion.
-- Implicit "remote CI on every PR push and every main push" pattern in `.github/workflows/ci.yml`. The push-to-main trigger now runs the full tier (not duplicating the PR run); the PR trigger runs the fast tier.
-
-**Acknowledges:**
-- Decision 44 (Executor Self-Modification Boundary): preserved unchanged.
-- Decision 55 (RCA-First Executor): the forward-fix model is RCA-first applied to the CI merge gate.
-- Decision 67 (Lambda + STRATEGIC plans deferred): the non-automatable rec surfacing change reverts when Decision 67 reverses.
-- Decision 68 (Self-Hosted Runner): compounds. Free CI minutes are what make the hourly L8 drift canary affordable.
-- Decision 71 (cc-scheduled-agents): compounds. The scheduled-cron infrastructure pattern is reused for L8.
-- Decision 72 (RCA-as-Plan-Source for CI): extended. ci-rca recs gain hard-block (L5) and merge-pause (L6) semantics.
-- Decision 89 (Branch Protection Unavailable): the forward-fix model is designed around branch protection being permanently unavailable. *(Premise reversed by Decision 83, 2026-06-08; design consequences preserved.)*
-
-**Consequences:**
-- Three follow-on IMPLEMENTATION plans are required to land the architecture: `validate-fast-tier-reshape`, `ci-workflow-restructure`, `planning-queue-governance`. Each is independently scoped and lands in its own PR.
-- L9-L10 (sandbox/SIT/PROD promotion train) are designed in `docs/INTENT-ci-cd-architecture.md` but deferred to Phase Infra-Env activation. SIT and PROD environments do not exist today; building them is months-away work.
-- The 178 non-automatable recommendations currently accumulating will not be surfaced for mandatory discussion until Decision 67 reverses and the executor returns to service. They remain queryable from `ops_recommendations`; only the planning-skill behaviour changes.
-- Auto-merge pause (L6) and planning hard-block (L5) require enforcement code in `scripts/session_preflight.py`, the planning skill, and the workflow YAML. These changes land in the `planning-queue-governance` and `ci-workflow-restructure` plans respectively.
-- Decision 60 remains in DECISIONS.md as the originating ratification; this decision amends rather than retires it. The 5-minute fast-tier budget and the two-tier abstraction are preserved; only the implementation mechanism is replaced.
-
-**Known Gaps (mirrored from INTENT Section 9):**
-- L9-L10 promotion train: months away minimum; depends on Phase Infra-Env, SIT/PROD accounts, and trading-go-live readiness.
-- Executor priority-queue rule for ci-rca recs: depends on Wave 4 + Decision 67 reversal.
-- `pytest --picked` may be upgraded to `pytest-testmon` later if false-negatives accumulate.
-
-**Related:** Decision 44, Decision 55, Decision 60, Decision 67, Decision 68, Decision 71, Decision 72 (RCA-as-Plan-Source), Decision 89 (branch protection), `docs/INTENT-ci-cd-architecture.md`, `docs/ROADMAP-PRODUCT.md` (Phase Infra-Env).
-
-> **Amended by Decision 205 (2026-09-28):** Once rec-4114's path filter lands, clause 2's full tier on push to main stops covering a merge touching only docs/plans/**: Decision 205 clause 5 runs the fast tier for it -- the plan checks already run in --pre on the same diff, and every full-only check that reads plan content re-asserts an invariant they gate -- with Main Canary's 3-hourly full tier as the backstop; every other push to main keeps the full tier.
-
-> **Amended by Decision 217 (2026-10-14):** Above executor concurrency 1, clause 4's plan-time block on an open ci-rca rec becomes an affected-set overlap block, and a red whose file set cannot be determined still blocks (Decision 217 clause 1); until then clause 4 stands unchanged. Textual conflicts route per Decision 217 clause 2.
-
-> **Amended by Decision 226 (2026-10-18):** Clause 3's fixed priority="critical" becomes track-derived (High for a tests-only repair on a CI-tier workflow), and a manual revert PR is a permitted Track B corrective outside terraform/** and governed deploy paths (automated revert stays excluded). Clause 3's L6 pause and clause 4's plan-time block become the red_overlap overlap block; clause 4 as written now applies only to a red past its repair SLO. Clause 5's rec -> plan -> implement recovery stands for Track B, with Track A on the fast lane (Decision 226 cl.1-4). This supersedes the Decision 217 line above for clause 4.
-
-> **Amended by Decision 249 (2026-11-07):** Clause 5's "Sandbox tolerates red `main`" no longer holds for code deploys: the sandbox tier serves production, and each governed code-deploy channel deploys only the newest main commit whose full tier passed, so a red pauses code deploys (Decision 249 cl.1-3). Merging stays optimistic, Terraform apply stays on push, and the SIT/PROD green-streak train stays future state.
-
-> **Amended by Decision 247 (2026-11-02):** Clause 4's suspension of mandatory discussion when `non_automatable_recommendations > 0` is permanent: Decision 67 never reverses and the executor it waited on is retired. Counts stay informational.
-
-> **Amended by Decision 254 (2026-11-12):** Clause 2's full tier on every push to main becomes one batched run covering prev..head, and Main Canary skips a head checked within 3 h (Decision 254 cl.1). Clauses 3-4: a red never blocks a merge, and past Decision 226's SLO an alarm replaces the block on all new plans (cl.6). Automated revert stays excluded; a revert PR that CI opens and never itself merges is not one (cl.3).
-
-> **Amended by Decision 252 (2026-11-10):** Clause 5's green-streak train (sandbox to SIT after 24 h green, SIT to PROD after 7 d) is replaced: merges deploy to SIT, and PROD receives only the identical artifact, promoted behind one operator approval (Decision 252 cl.6).
+**Superseded by: Decision 280**
 
 ---
 
