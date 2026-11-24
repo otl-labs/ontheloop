@@ -46,6 +46,8 @@ EVENTS_MOUNT = "/run/persona/events"
 MAX_REQUEST = 4 * 1024 * 1024
 MAX_RESULT = 4 * 1024 * 1024
 BOUNDS = {"probe": 120, "run": 600}
+GONE_SECONDS = 30.0
+GONE_STEP = 0.5
 KEYS = {"persona", "provider", "input", "key"}
 PERSONA = re.compile(r"^[a-z][a-z0-9_]*$")
 EXIT_REFUSED = 2
@@ -182,14 +184,58 @@ def kill_container() -> None:
         pass
 
 
+def container_listed() -> bool:
+    try:
+        done = subprocess.run(
+            [DOCKER, "ps", "-a", "-q", "--filter", f"name=^/{CONTAINER}$"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return done.returncode != 0 or bool(done.stdout.strip())
+
+
+def proxy_survivors() -> list[int]:
+    try:
+        uid = pwd.getpwnam(PROXY_USER).pw_uid
+    except KeyError:
+        return []
+    found = []
+    for entry in os.listdir("/proc"):
+        if entry.isdigit():
+            try:
+                if os.stat(f"/proc/{entry}").st_uid == uid:
+                    found.append(int(entry))
+            except OSError:
+                continue
+    return found
+
+
+def wait_until(gone: Any) -> bool:
+    waited = 0.0
+    while True:
+        if gone():
+            return True
+        if waited >= GONE_SECONDS:
+            return False
+        threading.Event().wait(GONE_STEP)
+        waited += GONE_STEP
+
+
 class Session:
     def __init__(self) -> None:
         self.proxy: subprocess.Popen[bytes] | None = None
         self.dirs: list[str] = []
         self.lock_fd: int | None = None
         self.decoy: socket.socket | None = None
+        self.started = False
 
-    def cleanup(self) -> None:
+    def cleanup(self) -> bool:
         kill_container()
         if self.proxy is not None and self.proxy.poll() is None:
             self.proxy.kill()
@@ -201,6 +247,11 @@ class Session:
         if self.lock_fd is not None:
             os.close(self.lock_fd)
         self.proxy, self.dirs, self.lock_fd, self.decoy = None, [], None, None
+        if not self.started:
+            return True
+        proxies_gone = wait_until(lambda: not proxy_survivors())
+        container_gone = wait_until(lambda: not container_listed())
+        return proxies_gone and container_gone
 
 
 def take_lock(session: Session) -> None:
@@ -256,6 +307,7 @@ def make_dirs(session: Session, mode: str, persona_input: dict[str, Any], direct
 
 def start_proxy(session: Session, provider: dict[str, Any], key: str | None, directory: Path) -> None:
     entry = pwd.getpwnam(PROXY_USER)
+    session.started = True
     session.proxy = subprocess.Popen(
         proxy_argv(provider, directory), stdin=subprocess.PIPE, user=entry.pw_uid, group=entry.pw_gid, extra_groups=[]
     )
@@ -302,6 +354,33 @@ def run_container(mode: str, argv: list[str]) -> int | None:
     return proc.returncode
 
 
+def serve(mode: str, session: Session) -> int:
+    snapshot = check_install(INSTALL_DIR, Path(__file__).resolve())
+    request = parse_request(sys.stdin.buffer.read(MAX_REQUEST + 1), mode, snapshot["providers"])
+    provider = snapshot["providers"][request["provider"]]
+    take_lock(session)
+    if port_in_use(PROXY_PORT) or port_in_use(DECOY_PORT) or name_in_use():
+        raise Refused("the proxy port or the container name is in use")
+    in_dir, events_dir = make_dirs(session, mode, request["input"], INSTALL_DIR)
+    start_proxy(session, provider, request.get("key"), INSTALL_DIR)
+    if mode == "probe":
+        start_decoy(session)
+    session.started = True
+    code = run_container(mode, container_argv(mode, snapshot["image"], request["persona"], provider, in_dir, events_dir))
+    events = read_events(events_dir)
+    print(json.dumps({"exit_code": code, "events": events}))
+    if code is None:
+        return 1
+    if mode == "probe":
+        passed = code == 0 and isinstance(events, dict) and events.get("result") == "CONTAINER-PROBE PASS"
+        return 0 if passed else 1
+    return code
+
+
+def teardown_failed() -> None:
+    print("LAUNCHER-TEARDOWN FAIL the container or a proxy process survived", file=sys.stderr)
+
+
 def main(argv: Sequence[str]) -> int:
     mode = argv[0] if len(argv) == 1 else ""
     if mode not in BOUNDS:
@@ -312,36 +391,24 @@ def main(argv: Sequence[str]) -> int:
     session = Session()
 
     def stop(signum: int, frame: Any) -> NoReturn:
-        session.cleanup()
+        if not session.cleanup():
+            teardown_failed()
         raise SystemExit(1)
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
+    code = 1
     try:
-        snapshot = check_install(INSTALL_DIR, Path(__file__).resolve())
-        request = parse_request(sys.stdin.buffer.read(MAX_REQUEST + 1), mode, snapshot["providers"])
-        provider = snapshot["providers"][request["provider"]]
-        take_lock(session)
-        if port_in_use(PROXY_PORT) or port_in_use(DECOY_PORT) or name_in_use():
-            raise Refused("the proxy port or the container name is in use")
-        in_dir, events_dir = make_dirs(session, mode, request["input"], INSTALL_DIR)
-        start_proxy(session, provider, request.get("key"), INSTALL_DIR)
-        if mode == "probe":
-            start_decoy(session)
-        code = run_container(mode, container_argv(mode, snapshot["image"], request["persona"], provider, in_dir, events_dir))
-        events = read_events(events_dir)
-        print(json.dumps({"exit_code": code, "events": events}))
-        if code is None:
-            return 1
-        if mode == "probe":
-            passed = code == 0 and isinstance(events, dict) and events.get("result") == "CONTAINER-PROBE PASS"
-            return 0 if passed else 1
-        return code
+        code = serve(mode, session)
     except Refused as exc:
         print(f"LAUNCHER-REFUSED {exc}", file=sys.stderr)
-        return EXIT_REFUSED
+        code = EXIT_REFUSED
     finally:
-        session.cleanup()
+        gone = session.cleanup()
+    if not gone:
+        teardown_failed()
+        return 1
+    return code
 
 
 if __name__ == "__main__":

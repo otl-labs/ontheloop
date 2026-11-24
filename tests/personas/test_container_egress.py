@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import shutil
 import socket
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -86,6 +88,34 @@ def _sh(*argv: str) -> None:
     subprocess.run(list(argv), capture_output=True, check=False, timeout=300)
 
 
+def _teardown_commands_remove_container_and_proxy(docker: str, image: str, digest: str) -> None:
+    entry = pwd.getpwnam(floor.PROXY_USER)
+    started = subprocess.run(
+        [docker, "run", "-d", "--rm", "--name", floor.CONTAINER, "--network", floor.NETWORK, "--entrypoint", "sleep"]
+        + [f"{image}@{digest}", "300"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    assert started.returncode == 0, started.stderr[-300:]
+    proxy = subprocess.Popen(["sleep", "300"], user=entry.pw_uid, group=entry.pw_gid, extra_groups=[])
+    for argv in floor.teardown_stops():
+        subprocess.run(argv, capture_output=True, check=False, timeout=60)
+    proxy.wait(timeout=10)
+    listed = subprocess.run(
+        [docker, "ps", "-a", "-q", "--filter", f"name=^/{floor.CONTAINER}$"], capture_output=True, text=True, check=False
+    )
+    deadline = time.monotonic() + 30
+    while listed.stdout.strip() and time.monotonic() < deadline:
+        threading.Event().wait(0.5)
+        listed = subprocess.run(
+            [docker, "ps", "-a", "-q", "--filter", f"name=^/{floor.CONTAINER}$"], capture_output=True, text=True, check=False
+        )
+    assert listed.stdout.strip() == "" and proxy.returncode is not None
+    assert L.proxy_survivors() == []
+
+
 @pytest.mark.integration
 def test_local_twin_red_fixture(monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]) -> None:
     reason = _twin_ready()
@@ -156,6 +186,7 @@ def test_local_twin_red_fixture(monkeypatch: pytest.MonkeyPatch, capfd: pytest.C
         assert {c: lines.get(c) for c in refused} == dict.fromkeys(refused, "refused"), err
         for case in ("proxy_upstream", "proxy_fixed_upstream"):
             assert lines.get(case) in ("reached", "upstream-unreachable"), err
+        _teardown_commands_remove_container_and_proxy(docker, image, digest)
         print(f"TWIN upstream result: {lines.get('proxy_upstream')} (exit {code})")
     finally:
         for tool in ("iptables", "ip6tables"):

@@ -181,7 +181,14 @@ def test_a_held_lock_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 
 
 def _drive(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: str, code: int | None, events: dict[str, Any] | None, stdin: bytes
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mode: str,
+    code: int | None,
+    events: dict[str, Any] | None,
+    stdin: bytes,
+    listed: Any = False,
+    survivors: list[int] | None = None,
 ) -> tuple[int, list[str]]:
     install = _install(_sub(tmp_path, "i"))
     monkeypatch.setattr(L, "INSTALL_DIR", install)
@@ -197,6 +204,9 @@ def _drive(
     monkeypatch.setattr(L, "run_container", lambda m, argv: (seen.extend(argv), code)[1])
     monkeypatch.setattr(L, "read_events", lambda d: events)
     monkeypatch.setattr(L, "kill_container", lambda: seen.append("killed"))
+    monkeypatch.setattr(L, "container_listed", lambda: listed() if callable(listed) else listed)
+    monkeypatch.setattr(L, "proxy_survivors", lambda: survivors or [])
+    monkeypatch.setattr(L, "GONE_SECONDS", 0.0)
     monkeypatch.setattr(L.signal, "signal", lambda num, handler: HANDLERS.update({num: handler}))
     monkeypatch.setattr(L.sys, "stdin", type("I", (), {"buffer": type("B", (), {"read": staticmethod(lambda n: stdin)})()})())
     return L.main([mode]), seen
@@ -288,3 +298,69 @@ def test_sigterm_and_sigint_kill_the_container_and_proxy_then_exit_one(
         HANDLERS[L.signal.SIGTERM](15, None)
     assert exc.value.code == 1 and seen == ["killed"]
     assert L.BOUNDS == {"probe": 120, "run": 600}
+
+
+def test_a_surviving_container_or_proxy_is_a_teardown_failure_on_the_normal_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ok = {"result": "CONTAINER-PROBE PASS"}
+    assert _drive(monkeypatch, tmp_path / "a", "probe", 0, ok, _req(key=None))[0] == 0
+    code, _ = _drive(monkeypatch, tmp_path / "b", "probe", 0, ok, _req(key=None), listed=True)
+    assert code == 1 and "LAUNCHER-TEARDOWN FAIL" in capsys.readouterr().err
+    code, _ = _drive(monkeypatch, tmp_path / "c", "probe", 0, ok, _req(key=None), survivors=[4242])
+    assert code == 1 and "LAUNCHER-TEARDOWN FAIL" in capsys.readouterr().err
+
+
+def test_a_surviving_container_is_a_teardown_failure_on_the_timeout_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _ = _drive(monkeypatch, tmp_path, "run", None, None, _req(), listed=True)
+    assert code == 1 and "LAUNCHER-TEARDOWN FAIL" in capsys.readouterr().err
+
+
+def test_a_surviving_container_is_a_teardown_failure_on_the_signal_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _drive(monkeypatch, tmp_path, "run", 0, None, _req(), listed=True)
+    capsys.readouterr()
+    with pytest.raises(SystemExit) as exc:
+        HANDLERS[L.signal.SIGTERM](15, None)
+    assert exc.value.code == 1 and "LAUNCHER-TEARDOWN FAIL" in capsys.readouterr().err
+
+
+def test_a_refusal_before_anything_started_reads_nothing_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def boom() -> bool:
+        raise AssertionError("read back after a refusal")
+
+    code, _ = _drive(monkeypatch, tmp_path, "run", 0, None, b"[]", listed=boom)
+    err = capsys.readouterr().err
+    assert code == 2 and "LAUNCHER-REFUSED" in err and "LAUNCHER-TEARDOWN" not in err
+
+
+def test_a_failing_docker_query_counts_as_the_container_surviving(monkeypatch: pytest.MonkeyPatch) -> None:
+    def done(rc: int, out: str) -> Any:
+        return lambda *a, **k: type("D", (), {"returncode": rc, "stdout": out})()
+
+    monkeypatch.setattr(L.subprocess, "run", done(0, ""))
+    assert L.container_listed() is False
+    monkeypatch.setattr(L.subprocess, "run", done(0, "abc123\n"))
+    assert L.container_listed() is True
+    monkeypatch.setattr(L.subprocess, "run", done(1, ""))
+    assert L.container_listed() is True
+
+    def timeout(*a: Any, **k: Any) -> Any:
+        raise subprocess.TimeoutExpired("docker", 30)
+
+    monkeypatch.setattr(L.subprocess, "run", timeout)
+    assert L.container_listed() is True
+
+
+def test_wait_until_polls_then_gives_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(L, "GONE_SECONDS", 0.0)
+    assert L.wait_until(lambda: True) is True and L.wait_until(lambda: False) is False
+    calls = iter([False, True])
+    monkeypatch.setattr(L, "GONE_SECONDS", 1.0)
+    monkeypatch.setattr(L, "GONE_STEP", 0.0)
+    assert L.wait_until(lambda: next(calls)) is True

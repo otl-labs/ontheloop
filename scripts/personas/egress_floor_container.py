@@ -48,6 +48,10 @@ SUDOERS_LINES = (
     f"runner ALL=(root) NOPASSWD: {PYTHON} -I -S {LAUNCHER} probe\n"
     f"runner ALL=(root) NOPASSWD: {PYTHON} -I -S {LAUNCHER} run\n"
 )
+CONTAINER = "persona-egress-run"
+TEARDOWN_UNIT = "persona-egress-teardown.service"
+TEARDOWN_PATH = Path("/etc/systemd/system/persona-egress-teardown.service")
+KILL_BOUND = 30
 PULL_TIMEOUT = 300
 MIN_DOCKER_MAJOR = 26
 IMAGE_FILE = "config/persona_image.yaml"
@@ -77,6 +81,40 @@ def sh(argv: Sequence[str], timeout: int = base.TIMEOUT) -> tuple[int, str]:
     except (OSError, subprocess.SubprocessError) as exc:
         return 127, type(exc).__name__
     return done.returncode, done.stdout
+
+
+def teardown_stops() -> list[list[str]]:
+    mangle = [base.binary("iptables"), "-w", "-t", "mangle"]
+    return [
+        [*mangle, "-I", BRIDGE_IN, "1", "-i", BRIDGE, "-j", "DROP"],
+        [base.binary("pkill"), "-KILL", "-u", PROXY_USER],
+        [base.binary("timeout"), str(KILL_BOUND), base.binary("docker"), "kill", CONTAINER],
+    ]
+
+
+def teardown_text() -> str:
+    stops = "".join(f"ExecStop=-{' '.join(argv)}\n" for argv in teardown_stops())
+    return (
+        "[Unit]\nDescription=Sever and kill the persona container and proxy when the filter agent stops\n"
+        "BindsTo=agent.service\nAfter=agent.service\n\n"
+        f"[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n{stops}"
+    )
+
+
+def teardown_unit_ok() -> bool:
+    shown = sh(["systemctl", "show", TEARDOWN_UNIT, "-p", "ActiveState", "-p", "BindsTo", "-p", "ExecStop"])[1]
+    lines = shown.splitlines()
+    entries = [line for line in lines if line.startswith("ExecStop=")]
+    want = teardown_stops()
+    if "ActiveState=active" not in lines or "BindsTo=agent.service" not in lines or len(entries) != len(want):
+        return False
+    return all(f"argv[]={' '.join(argv)} ;" in entry and "ignore_errors=yes" in entry for entry, argv in zip(entries, want))
+
+
+def live_restore_observation() -> str:
+    code, out = sh([base.binary("docker"), "info", "--format", "{{json .LiveRestoreEnabled}}"])
+    value = out.strip()
+    return value if code == 0 and value in ("true", "false") else "unknown"
 
 
 def proxy_uid() -> int | None:
@@ -212,6 +250,9 @@ def apply() -> bool:
     base.UNIT_PATH.write_text(base.unit_text(), encoding="utf-8")
     ok = sh(["systemctl", "daemon-reload"])[0] == 0 and ok
     ok = sh(["systemctl", "start", base.UNIT])[0] == 0 and ok
+    TEARDOWN_PATH.write_text(teardown_text(), encoding="utf-8")
+    ok = sh(["systemctl", "daemon-reload"])[0] == 0 and ok
+    ok = sh(["systemctl", "start", TEARDOWN_UNIT])[0] == 0 and ok
     ok = docker_restart() and ok
     image, digest = read_image_ref()
     docker = base.binary("docker")
@@ -347,7 +388,7 @@ def verify() -> list[tuple[str, bool]]:
         ("image_digest", _image_ok()),
         ("install_hashes", _install_ok()),
         ("sudoers", _text_is(base.SUDOERS, SUDOERS_LINES)),
-        ("live_restore_off", sh([base.binary("docker"), "info", "--format", "{{.LiveRestoreEnabled}}"])[1].strip() == "false"),
+        ("teardown_unit", teardown_unit_ok()),
         (
             "docker_version",
             docker_major(sh([base.binary("docker"), "version", "--format", "{{.Server.Version}}"])[1]) >= MIN_DOCKER_MAJOR,
@@ -356,11 +397,6 @@ def verify() -> list[tuple[str, bool]]:
         ("python_ancestors", ancestors_ok(PYTHON) and all(ancestors_ok(p) for p in _sys_path_dirs())),
     ]
     return checks
-
-
-def live_restore_diag() -> str:
-    code, out = sh([base.binary("docker"), "info", "--format", "{{json .LiveRestoreEnabled}}"])
-    return f"EGRESS-FLOOR diag live_restore_json={out.strip()!r} exit={code}"
 
 
 def banner() -> None:
@@ -375,7 +411,7 @@ def main(argv: Sequence[str]) -> int:
     applied = apply()
     checks = [("apply", applied), *verify()]
     banner()
-    print(live_restore_diag())
+    print("EGRESS-FLOOR docker-live-restore " + live_restore_observation())
     return 0 if base.report(checks) else 1
 
 

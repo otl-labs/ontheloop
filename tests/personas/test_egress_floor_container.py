@@ -126,6 +126,7 @@ def test_pull_has_its_own_timeout_and_the_pinned_digest(monkeypatch: pytest.Monk
     monkeypatch.setattr(base, "_run", lambda argv: (0, ""))
     monkeypatch.setattr(base, "UNIT_PATH", Path("/tmp/x-unit"))
     monkeypatch.setattr(F, "DROPIN", Path("/tmp/x-dropin/zz.conf"))
+    monkeypatch.setattr(F, "TEARDOWN_PATH", Path("/tmp/x-teardown.service"))
     monkeypatch.setattr(F, "install_files", lambda s: True)
     monkeypatch.setattr(F, "write_sudoers", lambda: True)
     assert F.apply() is True
@@ -137,6 +138,8 @@ def test_pull_has_its_own_timeout_and_the_pinned_digest(monkeypatch: pytest.Monk
     stops = [c[0] for c in calls if c[0][:2] == ["systemctl", "stop"]]
     assert stops == [["systemctl", "stop", "docker.service", "docker.socket"]]
     assert not any("mask" in c[0] for c in calls)
+    assert ["systemctl", "start", F.TEARDOWN_UNIT] in [c[0] for c in calls]
+    assert Path("/tmp/x-teardown.service").read_text(encoding="utf-8") == F.teardown_text()
 
 
 def test_main_refuses_when_not_root(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -185,12 +188,12 @@ def test_ancestor_ownership_and_mode_are_refused_when_group_or_other_writable(
     assert not F.ancestors_ok(str(tmp_path))
 
 
-def _fake_sh(monkeypatch: pytest.MonkeyPatch, version: str, live: str = "false") -> None:
+def _fake_sh(monkeypatch: pytest.MonkeyPatch, version: str, live: str = "false", live_code: int = 0) -> None:
     def sh(argv: list[str], timeout: int = 30) -> tuple[int, str]:
         if "{{.Server.Version}}" in argv:
             return 0, version
-        if "{{.LiveRestoreEnabled}}" in argv:
-            return 0, live
+        if "{{json .LiveRestoreEnabled}}" in argv:
+            return live_code, live
         return 0, ""
 
     monkeypatch.setattr(F, "sh", sh)
@@ -198,14 +201,82 @@ def _fake_sh(monkeypatch: pytest.MonkeyPatch, version: str, live: str = "false")
     monkeypatch.setattr(F, "proxy_uid", lambda: None)
 
 
-def test_verify_reports_docker_below_26_and_live_restore_as_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_verify_reports_docker_below_26_and_never_gates_on_live_restore(monkeypatch: pytest.MonkeyPatch) -> None:
     _fake_sh(monkeypatch, "25.0.0")
     got = dict(F.verify())
-    assert got["docker_version"] is False and got["live_restore_off"] is True and got["proxy_user"] is False
+    assert got["docker_version"] is False and got["proxy_user"] is False and "live_restore_off" not in got
+    for live in ("true", "false"):
+        _fake_sh(monkeypatch, "29.9.3", live=live)
+        got = dict(F.verify())
+        assert got["docker_version"] is True and not any("live" in name for name in got)
+    assert {
+        "install_hashes",
+        "sudoers",
+        "socket_dropin",
+        "network",
+        "image_digest",
+        "install_ancestors",
+        "teardown_unit",
+    } <= set(got)
+
+
+def test_live_restore_is_observed_as_true_false_or_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_sh(monkeypatch, "29.9.3", live="true\n")
+    assert F.live_restore_observation() == "true"
+    _fake_sh(monkeypatch, "29.9.3", live="false")
+    assert F.live_restore_observation() == "false"
+    _fake_sh(monkeypatch, "29.9.3", live="garbage")
+    assert F.live_restore_observation() == "unknown"
+    _fake_sh(monkeypatch, "29.9.3", live="true", live_code=1)
+    assert F.live_restore_observation() == "unknown"
+
+
+def test_banner_prints_the_observation(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     _fake_sh(monkeypatch, "29.9.3", live="true")
-    got = dict(F.verify())
-    assert got["docker_version"] is True and got["live_restore_off"] is False
-    assert {"install_hashes", "sudoers", "socket_dropin", "network", "image_digest", "install_ancestors"} <= set(got)
+    monkeypatch.setattr(F.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(F, "apply", lambda: True)
+    F.main([])
+    assert "EGRESS-FLOOR docker-live-restore true" in capsys.readouterr().out
+
+
+def test_teardown_unit_text_has_three_dash_prefixed_stops_in_order_and_binds_to_the_agent() -> None:
+    text = F.teardown_text()
+    lines = text.splitlines()
+    assert "BindsTo=agent.service" in lines and "After=agent.service" in lines
+    assert "Type=oneshot" in lines and "RemainAfterExit=yes" in lines and "ExecStart=/bin/true" in lines
+    stops = [line for line in lines if line.startswith("ExecStop")]
+    assert len(stops) == 3 and all(line.startswith("ExecStop=-/") for line in stops)
+    assert "-w -t mangle -I EGRESS_BRIDGE_IN 1 -i br-persona -j DROP" in stops[0]
+    assert "pkill -KILL -u persona-egress-proxy" in stops[1]
+    assert "timeout 30 " in stops[2] and stops[2].endswith(f"docker kill {F.CONTAINER}")
+
+
+def _shown(stops: list[list[str]], active: str = "active", binds: str = "agent.service", ignore: str = "yes") -> str:
+    rows = [f"ExecStop={{ path={a[0]} ; argv[]={' '.join(a)} ; ignore_errors={ignore} ; start_time=[n/a] }}" for a in stops]
+    return "\n".join([f"ActiveState={active}", f"BindsTo={binds}", *rows])
+
+
+def test_teardown_unit_read_back_refuses_inactive_unbound_or_unignored_stops(monkeypatch: pytest.MonkeyPatch) -> None:
+    good = F.teardown_stops()
+    monkeypatch.setattr(F, "sh", lambda argv, timeout=30: (0, _shown(good)))
+    assert F.teardown_unit_ok()
+    for bad in (
+        _shown(good, active="inactive"),
+        _shown(good, binds=""),
+        _shown(good, ignore="no"),
+        _shown(good[:2]),
+        _shown(good[::-1]),
+        "",
+    ):
+        monkeypatch.setattr(F, "sh", lambda argv, timeout=30, bad=bad: (0, bad))
+        assert not F.teardown_unit_ok()
+
+
+def test_teardown_stops_use_absolute_binaries_and_the_launchers_container_name() -> None:
+    from scripts.personas import egress_launcher as launcher
+
+    assert F.CONTAINER == launcher.CONTAINER and F.PROXY_USER == launcher.PROXY_USER
+    assert all(argv[0].startswith("/") for argv in F.teardown_stops())
 
 
 def test_verify_reads_back_the_texts_as_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -255,8 +326,3 @@ def test_jump_replaces_an_existing_rule_and_inserts_at_one(monkeypatch: pytest.M
     monkeypatch.setattr(F, "sh", lambda argv, timeout=30: (seen.append(list(argv)), (0, ""))[1])
     assert F._jump_at("iptables", F.bridge_jumps()[0])
     assert any("-D" in c for c in seen) and seen[-1][-6:] == ["INPUT", "1", "-i", "br-persona", "-j", "EGRESS_BRIDGE_IN"]
-
-
-def test_live_restore_diag_carries_raw_value_and_exit(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(F, "sh", lambda argv, timeout=0: (0, "true\n"))
-    assert F.live_restore_diag() == "EGRESS-FLOOR diag live_restore_json='true' exit=0"

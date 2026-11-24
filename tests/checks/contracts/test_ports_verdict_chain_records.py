@@ -62,5 +62,11 @@ def test_sa11_and_sa13_keep_their_pinned_phrases_and_cite_their_plans() -> None:
 
 def test_sa15_names_the_container_floor_variant_assumptions() -> None:
     (row,) = [r for r in _ports()["structural_assumptions"] if r["id"] == "SA-15"]
-    for token in ("egress_floor_container.py", "LiveRestore false", "GHCR's blob host", "--pids-limit", "--dns"):
+    for token in (
+        "egress_floor_container.py",
+        "LiveRestore observed and not gated",
+        "GHCR's blob host",
+        "--pids-limit",
+        "--dns",
+    ):
         assert token in row["assumption"], token
