@@ -9,7 +9,6 @@ intent: >-
   governed agent loads is no longer treated as an ordinary edit. A strict append to boundary_patterns plus a test that
   each surface is covered.
 plan_type: IMPLEMENTATION
-implementation_declared: true
 verification_tier: V2
 plan_path: docs/plans/PLAN-instruction-surface-boundary.yaml
 phase: >-
@@ -38,20 +37,27 @@ scope:
       .claude/settings.json, .claude/.claude-plugin/plugin.json, .claude-plugin/marketplace.json and every file under
       .claude/hooks/ are covered, and every repo path named in a command registered in .claude/settings.json (hooks and
       statusLine) or .claude/hooks/hooks.json is covered, so a hook later registered from outside .claude/hooks/ fails
-      the node. Extraction rule, one helper the node and its self-check share: walk every "command" string value in
-      both files; replace ${CLAUDE_PLUGIN_ROOT}/ with .claude/ and delete ${CLAUDE_PROJECT_DIR}/ and
-      $CLAUDE_PROJECT_DIR/; map each "-m a.b.c" to the first tracked file of a/b/c.py, a/b/c/__main__.py,
-      a/b/c/__init__.py; then take every maximal run of [A-Za-z0-9_./-] characters that equals a git-tracked path (a
-      regex scan over the whole string, so quoting, bash -c bodies and $(...) substitutions are scanned alike). A
-      registered command that yields no tracked path fails the node (fail closed). The same node runs the helper on
-      two synthetic registrations, bin/venv-python scripts/aws_identity.py and bin/venv-python -m scripts.aws_identity,
-      and asserts each yields scripts/aws_identity.py reported uncovered (a negative self-check that the scan finds
-      out-of-boundary paths in both forms). Measured on 2b3f37ec with the appended list: all 48 registered commands
-      yield at least one tracked path and every path is covered. test_skills_and_commands_are_boundary_paths: every file
+      the node. Extraction rule, one helper scan(command, patterns, tracked) returning (tracked paths, unresolved tokens,
+      uncovered paths), shared by the node and its self-check: walk every "command" string value in both files; replace
+      ${CLAUDE_PLUGIN_ROOT}/ with .claude/, then delete every shell parameter expansion (${...} and $NAME); map each
+      -m (optional whitespace) module a.b.c to the first tracked file of a/b/c.py, a/b/c/__main__.py,
+      a/b/c/__init__.py, an unresolved module being an unresolved token; then regex-scan the whole string for runs of
+      [A-Za-z0-9_./-] characters (so quoting, bash -c bodies and $(...) substitutions are scanned alike), keep each run
+      that contains / or ends in .py, .sh or .bash, strip leading ./ and /, and record it as a tracked path or, unless
+      it is /dev/null (the one non-repo allowlist entry), as an unresolved token. The node fails on any unresolved
+      token, any uncovered path, or a command whose tracked paths are only the interpreter bin/venv-python (fail
+      closed per token and per command). Its self-check runs scan with a fixture pattern list [.claude/hooks/,
+      bin/venv-python], so it never depends on the live list, on bin/venv-python ./scripts/aws_identity.py,
+      bin/venv-python "$CLAUDE_PROJECT_DIR"/scripts/aws_identity.py, bin/venv-python -mscripts.aws_identity and
+      bin/venv-python -m scripts.aws_identity (each: scripts/aws_identity.py uncovered), bin/venv-python -m
+      scripts.no_such_module and bash "$CLAUDE_PROJECT_DIR/.claude/hooks/no_such_hook.sh" (each: an unresolved token).
+      Measured on 625651dd with the appended list: all 48 registered commands resolve with no unresolved token, no
+      uncovered path and a non-interpreter tracked path, and every self-check form is reported as stated (simulation:
+      /mnt/project-files/instruction-surface-boundary/extraction_sim.py). test_skills_and_commands_are_boundary_paths: every file
       under .claude/skills/ and .claude/commands/ is covered. test_compute_automatable_refuses_instruction_surfaces:
       with risk_scoring._compute_risk_score monkeypatched to return 0.0 (so only the boundary leg decides, and no radon
-      subprocess runs) and risk_scoring._capabilities_cache reset to None before and after (monkeypatch.setattr, as
-      tests/persona_contracts/test_leash_boundary.py does, so the node does not depend on test order), compute_automatable returns False for AGENTS.md, .claude/settings.json,
+      subprocess runs) and risk_scoring._capabilities_cache reset to None before and after (monkeypatch.setattr; tests/persona_contracts/test_leash_boundary.py
+      resets the same cache by direct assignment; either keeps the node independent of test order), compute_automatable returns False for AGENTS.md, .claude/settings.json,
       .claude/hooks/never_on_main.py and .claude/skills/code-review/SKILL.md (the derivation a rec filed against them goes
       through; on main an XS rec on AGENTS.md derives True).
     new_imports: [scripts.ops_portal.risk_scoring]
@@ -129,12 +135,12 @@ verification_plan:
     command: >-
       AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids,
       make_reader; rows, _ = fetch_recs_by_ids(make_reader(), ['rec-5570', 'rec-4476']); print([(r['id'], r['status']) for r in rows])"
-    expected: rec-5570 closed and rec-4476 open, after the closure job runs on the merge commit; then, after the update_rec note, rec-4476's context contains test_skills_and_commands_are_boundary_paths (re-read with the same verb)
+    expected: rec-5570 closed and rec-4476 open, after the closure job runs on the merge commit; then, after the update_rec note, rec-4476's context and acceptance both contain test_skills_and_commands_are_boundary_paths (re-read with the same verb)
     fix_if: rec-5570 still open; read the closure job log for the refusal marker and fix its cause, never a direct status write
     hermetic: false
 test_obligations:
   - source: config/agent/executor/capabilities.yaml
-    behavior: AGENTS.md, the hook registration files and every hook path they register (by the stated extraction rule, failing closed on a command with no path) are boundary paths, and the scan reports a synthetic out-of-boundary registration in path and -m form
+    behavior: AGENTS.md, the hook registration files and every hook path they register (by the stated extraction rule, failing closed on any unresolved token or an interpreter-only command) are boundary paths, and the scan reports synthetic out-of-boundary registrations in ./, quoted-variable, path and -m forms
     verification_step: 1
     test_selector: tests/checks/executor/test_boundary_patterns_cover_instruction_surfaces.py::test_agents_md_and_hook_registration_are_boundary_paths
     red_green_expectation: red before (AGENTS.md and .claude/hooks/ unmatched), green after
@@ -156,9 +162,10 @@ constraints:
 context:
   - "Consumers (all substring or list-membership reads, measured 2026-11-24 on 7cf377e2): scripts/ops_portal/risk_scoring.py:107 compute_automatable; scripts/checks/executor/validate_executor_boundary.py:63 (skips today, recs cache retired, rec-4236); scripts/roadmap/approval_routing.py:234 exempt (append-only); scripts/checks/contracts/validate_tier_a_amendment_guard.py:367-375 and scripts/checks/misc/sensitive_value_detectors.py:157 (no-narrowing ratchets); validate_persona_contracts.py:408 and validate_north_star.py:112 (coverage of their own paths). No PR-path gate routes on the list today (implement-scope-boundary.yaml earned_autonomy is design_only)."
   - "Round-1 risk check (trial append on 7cf377e2): the new entries newly match 42 tracked files (43 on 2b3f37ec, critique r1 re-measure), all under .claude/, .claude-plugin/ or AGENTS.md; no persona-path file (scripts/personas/, src/persona_*, docker/persona/, .github/workflows/persona-*) changes classification. Consumer tests: 527 passed, 1 failed (the ci_rca_steps.sh last-entry pin, handled in scope). approval_routing.exempt returned True."
-  - "rec-4476 is not in bundled_recommendations and stays open: Decision 229's Coverage line names it as the Decision 181 cl.2 residual for the interactive self-review gap, which closes at the T4.28 c6, T4.30 c5 and T4.29 c5 flips, not at a boundary-list edit. The build's closing step adds a dated note to rec-4476's context (boundary half delivered here, node test_skills_and_commands_are_boundary_paths) and leaves its acceptance to the flip plan. T4.28 c6 and its PLAN-code-reviewer-flip scope note will find the entries already present."
+  - "rec-4476 is not in bundled_recommendations and stays open: Decision 229's Coverage line names it as the Decision 181 cl.2 residual for the interactive self-review gap, which closes at the T4.28 c6, T4.30 c5 and T4.29 c5 flips, not at a boundary-list edit. The build's closing step adds a dated note to rec-4476's context (boundary half delivered here, node test_skills_and_commands_are_boundary_paths) and re-points its acceptance to this plan's test_skills_and_commands_are_boundary_paths node (critique r2 R2-N2); the flip plan that closes the interactive half closes it. T4.28 c6 and its PLAN-code-reviewer-flip scope note will find the entries already present."
   - "Declared residual (scout SPIRIT NOTE, Decision 185 cl.3): modules the hooks import or run outside .claude/hooks/ (scripts/session/*, scripts/telemetry_capture/*, scripts/convergence_health/record.py and others) are only partly boundary paths; rec-5604 (filed 2026-11-24, depends on rec-5570) owns the import-closure widening."
   - "Approval: Benjamin wrote write-the-plan in this plan's thread at 2026-11-24T14:18Z, after a presentation naming the Decision 235 floor change to test_ci_rca_steps_script_is_in_the_executor_boundary. No always-ask wording and no new Decision, so no approved-text sidecar (boundary_patterns append is exempt)."
+  - "Declared residual (critique r2 R2-N4): .mcp.json registers bin/venv-python -m scripts.agent_sdk.mcp_server, whose tools the agent loads; neither is a boundary path. rec-5604's context is extended at plan write to own it with the hook import closure."
   - "Declared residual (critique r1 N4): recs already open against the new surfaces keep automatable true, because derivation runs only at file_rec (scripts/ops_data_portal.py:379) and validate_executor_boundary skips (rec-4236). Latent: nothing consumes automatable today (local executor retired, loop host not built)."
   - "Coordinator log #1963 comment 7133660790 announced the append; rec-5572 (Decision Growth) rebases. Unbuilt docs/plans/PLAN-telemetry-content-edit-hook.yaml also edits boundary_patterns (two protected_path_guard lines under the Decision 239 cl.5 block); whichever builds second rebases, and .claude/hooks/ already covers its two files. rec-5569's planner (persona-guidance-slots) may also append ontheloop/guidance/; same rule."
   - "Decision-scout verdict FLAGS_FOUND (round 1). CITE: 117, 229, 235, 279. CONTRADICT: none. SPIRIT: 185 NOTE (hook import closure; resolved by rec-5604 in followon_recs). RELATED: 185, 187, 181, 203, 76, 139, 132, 176, 244, 189, 201, 55. Decisions triaged: 228 of 228. Roadmap items intersected: 4; CONFLICT: 0; RELATED: 3. ROADMAP CITE: T4.28 c6 (this plan lands its boundary-list leg early). Serves: NS.8 4/5."
@@ -179,6 +186,19 @@ gate_rounds:
       - {id: N6, severity: nit, origin: judgement, anchor: "phase", subject: "T4.28 c6 amendment text describes a done act after merge", disposition: build-note}
       - {id: N7, severity: nit, origin: judgement, anchor: "constraints[1]", subject: "record the Decision 235 cl.5 floor expansion in the build report", disposition: fixed}
       - {id: N8, severity: nit, origin: mechanical, anchor: "scripts/ops_portal/risk_scoring.py:107", subject: "backslash paths miss every entry; pre-existing, out of scope", disposition: build-note}
+  - gate: plan-critique
+    round: 2
+    verdict: REVISE
+    blocking: 1
+    nits: 6
+    findings:
+      - {id: R2-B1, severity: blocking, origin: judgement, anchor: "scope[1].purpose; test_obligations[0]", subject: "fail-closed satisfied by bin/venv-python; ./, quoted-variable, substitution-rooted and -mX forms passed unexamined", disposition: fixed}
+      - {id: R2-N1, severity: nit, origin: judgement, anchor: "scope[1].purpose", subject: "self-check bound to the live list and to a path rec-5604 will add; run it on a fixture list", disposition: fixed}
+      - {id: R2-N2, severity: nit, origin: judgement, anchor: "context[2]; execution_steps; verification_plan[4]", subject: "re-point rec-4476's acceptance to the new node", disposition: fixed}
+      - {id: R2-N3, severity: nit, origin: judgement, anchor: "bundled_recommendations; context[2]", subject: "rec-4476 named but not bundled, rationale declared; accepted", disposition: fixed}
+      - {id: R2-N4, severity: nit, origin: judgement, anchor: "scope[0].purpose; context[3]", subject: ".mcp.json and scripts/agent_sdk/ not boundary paths; added to rec-5604 and declared residual", disposition: fixed}
+      - {id: R2-N5, severity: nit, origin: mechanical, anchor: "scope[1].purpose", subject: "test_leash_boundary.py resets the cache by assignment, not monkeypatch", disposition: fixed}
+      - {id: R2-N6, severity: nit, origin: mechanical, anchor: "execution_steps[3]", subject: "shard test_selector takes one node_id; name the file-level node", disposition: fixed}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -186,11 +206,12 @@ pre_implementation_checklist:
   - All files in scope located and readable
   - Acceptance criteria understood and verifiable
 execution_steps:
+  - "Set implementation_declared: true in this plan file in the build commit."
   - "Create tests/checks/executor/test_boundary_patterns_cover_instruction_surfaces.py. Pre-change VP 1: all three nodes fail."
   - "Append the block to boundary_patterns in config/agent/executor/capabilities.yaml after scripts/ci/ci_rca_steps.sh. Post: VP 1 green."
   - "Change the last-entry assertion in tests/ci_rca/test_rca_agent_entrypoint.py to the exact-position assertion. Post: VP 2 and VP 3."
-  - "Add the graduated shard config/agent/verification_registry/entries/instruction-surface-boundary.yaml for VP 1, pinning its three nodes."
-  - "CLOSURE (implement skill Commit Flows): commit with Resolves: rec-5570; rebase; VP 4; push; PR titled build(instruction-surface-boundary); code review in a fresh context (record the weakening-candidate disposition for the position pin); merge on PROCEED and green CI with Resolves: rec-5570 in the squash body; then VP 5 and the rec-4476 context note through update_rec."
+  - "Add the graduated shard config/agent/verification_registry/entries/instruction-surface-boundary.yaml for VP 1, with test_selector the file-level node id tests/checks/executor/test_boundary_patterns_cover_instruction_surfaces.py (the slot takes one node_id; the file holds VP 1's three nodes)."
+  - "CLOSURE (implement skill Commit Flows): commit with Resolves: rec-5570; rebase; VP 4; push; PR titled build(instruction-surface-boundary); code review in a fresh context (record the weakening-candidate disposition for the position pin); merge on PROCEED and green CI with Resolves: rec-5570 in the squash body; then VP 5 and the rec-4476 update through update_rec: a dated context note (boundary half delivered here) and its acceptance re-pointed to bin/venv-python -m pytest tests/checks/executor/test_boundary_patterns_cover_instruction_surfaces.py::test_skills_and_commands_are_boundary_paths -q, so the flip plan that closes it runs an existing node and no duplicate test file appears; rec-4476 stays open."
   - "Report: what was implemented, verification results, run ids; state that under Decision 235 cl.5 every check guarding AGENTS.md, .claude/hooks/, .claude/skills/ and .claude/commands/ is now irreducible floor."
   - "Build notes from critique r1 (not plan edits): T4.28 c6's amendment text will describe an act already done; leave it to the flip plan (context). risk_scoring's substring match does not normalise backslash separators (pre-existing, every entry; out of scope)."
 rollback: Revert the build PR; the list returns to its previous entries. A revert narrows the list, so the base-ref ratchets flag it and it needs its own reviewed plan.
