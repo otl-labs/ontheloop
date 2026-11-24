@@ -68,7 +68,7 @@ from pathlib import Path
 import yaml
 
 from scripts.checks import _common, registry
-from scripts.checks.verification import _vp_replay_budget
+from scripts.checks.verification import _vp_replay_budget, _vp_replay_rule_v
 from scripts.checks.verification._vp_replay_classify import (  # noqa: F401  (re-exported: external callers and tests import these from here)
     _CREDENTIAL_UNAVAILABLE_MESSAGE_RE,
     _PYTEST_COLLECTION_ERROR_EXIT_CODES,
@@ -447,8 +447,7 @@ def _rg_portability_pre_pass(plan_files: list[str], root: Path, in_population: s
         print(f"  EXCLUDED: {unparseable} unparseable command segment(s) -- rg-portability lint failed open on them.")
 
 
-def _compute_eligible_plans(plan_files: list[str], root: Path, resolved: set[str]) -> set[str]:
-    added = _added_plan_paths(root)
+def _compute_eligible_plans(plan_files: list[str], root: Path, resolved: set[str], added: set[str]) -> set[str]:
     return {plan_rel for plan_rel in plan_files if plan_rel not in resolved and _is_red_before_eligible(plan_rel, root, added)}
 
 
@@ -583,9 +582,11 @@ def validate_vp_replay(failed: list[str], changed_files: list[str] | None = None
     base = _common.push_context_base(root) or "origin/main"
     resolved = _common.resolve_declared_plans(changed, root, base)
     resolved_set = set(resolved)
-    eligible = _compute_eligible_plans(plan_files, root, resolved_set)
+    added = _added_plan_paths(root)
+    eligible = _compute_eligible_plans(plan_files, root, resolved_set, added)
 
     _rg_portability_pre_pass(plan_files, root, resolved_set | eligible, failed)
+    _vp_replay_rule_v.rule_v_pre_pass(plan_files, root, added, resolved_set, failed)
 
     budget = _ReplayBudget()
     _implement_pr_leg(root, resolved, failed, budget)
