@@ -57,6 +57,19 @@ def rule_contract(tmp_path: Path, rule: Any, output_schema: dict[str, Any] | Non
     return contract
 
 
+def budget_contract(tmp_path: Path, max_turns: int) -> Path:
+    import yaml
+
+    root = tmp_path / "budget"
+    (root / "rendered").mkdir(parents=True, exist_ok=True)
+    data = yaml.safe_load(FIXTURE.read_text(encoding="utf-8"))
+    data["budget"]["max_turns"] = max_turns
+    contract = root / "fixture_persona.yaml"
+    contract.write_text(yaml.safe_dump(data), encoding="utf-8")
+    shutil.copy(PROMPT, root / "rendered" / "fixture_persona.txt")
+    return contract
+
+
 def good_input(notes: str = "line one\nline two\nline three") -> dict[str, Any]:
     return {"change_id": "c1", "head_sha": SHA, "notes": notes}
 
