@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from scripts.checks.misc._persona_verdict_container import CONTAINER_VERB, is_container_job, is_launcher_line
+
 PROBE = ".github/workflows/persona-verdict-egress-probe.yml"
 RUN_PREFIX = 'python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" '
 PROBE_PREFIX = "python3 -I scripts/personas/run.py "
@@ -22,9 +24,10 @@ STEP_KEYS_BARE = {"name", "id", "run"}
 FINAL_KEYS = {"name", "id", "if", "run"}
 
 
-def floor_run(rel: str, name: str) -> str:
+def floor_run(rel: str, name: str, job: dict[str, Any] | None = None) -> str:
     prefix = PROBE_PREFIX if rel == PROBE else RUN_PREFIX
-    return "sudo " + prefix + DRILL_VERBS.get((rel, name), FLOOR_VERB)
+    verb = CONTAINER_VERB if job is not None and is_container_job(job) else DRILL_VERBS.get((rel, name), FLOOR_VERB)
+    return "sudo " + prefix + verb
 
 
 def is_floor_line(run: str) -> bool:
@@ -33,7 +36,7 @@ def is_floor_line(run: str) -> bool:
         return False
     rest = text[len("sudo ") :]
     return any(
-        rest.startswith(prefix) and rest[len(prefix) :] in {FLOOR_VERB, *DRILL_VERBS.values()}
+        rest.startswith(prefix) and rest[len(prefix) :] in {FLOOR_VERB, CONTAINER_VERB, *DRILL_VERBS.values()}
         for prefix in (RUN_PREFIX, PROBE_PREFIX)
     )
 
@@ -66,12 +69,13 @@ def floor_problems(rel: str, name: str, job: dict[str, Any]) -> list[str]:
     if any(_is_checkout(s) for s in steps[index + 1 :]):
         out.append(f"{where}: a checkout comes after the egress floor step")
     floor = steps[index]
-    if str(floor.get("run", "")).strip() != floor_run(rel, name):
-        out.append(f"{where}: the egress floor step must run exactly {floor_run(rel, name)}")
+    if str(floor.get("run", "")).strip() != floor_run(rel, name, job):
+        out.append(f"{where}: the egress floor step must run exactly {floor_run(rel, name, job)}")
     if set(floor) - STEP_KEYS_BARE:
         out.append(f"{where}: the egress floor step has keys beyond name, id and run")
     for i, step in enumerate(steps):
-        if i != index and "sudo" in str(step.get("run", "")).split():
+        run = str(step.get("run", ""))
+        if i != index and "sudo" in run.split() and not (is_container_job(job) and is_launcher_line(run)):
             out.append(f"{where}: a step other than the egress floor runs sudo")
     return out + _final_problems(where, rel, name, steps)
 

@@ -85,6 +85,7 @@ class TestPromotedGateClosures:
             "scripts/checks/ci_guards/validate_project_region.py",
             "docs/contracts/inference-provider.yaml",
             "scripts/checks/misc/validate_persona_verdict_egress.py",
+            "scripts/checks/misc/_persona_verdict_container.py",
             "scripts/checks/misc/_persona_verdict_floor.py",
             "scripts/checks/_common.py",
             "scripts/checks/registry.py",

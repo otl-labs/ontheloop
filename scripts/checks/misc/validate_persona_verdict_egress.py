@@ -25,6 +25,7 @@ import yaml
 
 from scripts.checks import _common, registry
 from scripts.checks.ci_guards.validate_project_region import job_outputs_aws_region_via_action
+from scripts.checks.misc._persona_verdict_container import LAUNCHER, class_problems, is_container_job, primary_host
 from scripts.checks.misc._persona_verdict_floor import PROBE_PREFIX, floor_problems, is_floor_line
 
 LIST_FILE = "config/persona_verdict_egress.yaml"
@@ -54,6 +55,7 @@ PROBE_TRIGGER = {
         "paths": [
             "tests/fixtures/persona_verdict/fixture_pr/**",
             "config/persona_verdict_egress.yaml",
+            "config/persona_image.yaml",
             "scripts/personas/egress_*.py",
             "scripts/personas/run.py",
             ".github/workflows/persona-verdict-egress-probe.yml",
@@ -82,6 +84,13 @@ PROBE_STEPS = {
         ("control-install", "pip install pyyaml -c requirements.txt"),
         ("control-egress", PROBE_PREFIX + "egress-control"),
     ],
+    "egress-container": [
+        ("container-floor", "sudo " + PROBE_PREFIX + "egress-floor-container"),
+        ("container-self-check", SELF),
+        ("container-probe", PROBE_PREFIX + "egress-container-request | sudo " + LAUNCHER),
+        ("container-final-check", SELF),
+    ],
+    "egress-container-control": [("container-control", PROBE_PREFIX + "egress-container-control")],
     "egress-fail-closed": _drill("egress-revert-drill"),
     "egress-fail-closed-control": _drill("egress-revert-drill-control"),
     "egress-fail-closed-verdict": [("fail-closed-verdict", PROBE_PREFIX + "egress-fail-closed-verdict")],
@@ -91,6 +100,8 @@ VERDICT_JOB = "egress-fail-closed-verdict"
 TIMEOUTS = {
     "egress-probe": 5,
     "egress-control": 5,
+    "egress-container": 15,
+    "egress-container-control": 15,
     "egress-fail-closed": 10,
     "egress-fail-closed-control": 10,
     VERDICT_JOB: 30,
@@ -379,7 +390,12 @@ def _job_problems(rel: str, name: str, workflow: dict[str, Any], data: dict[str,
     if not steps or not isinstance(steps[0], dict):
         return [*out, f"{where}: no steps"]
     out.extend(_step0_problems(where, steps[0], data["filter"], row, text, workflow, job))
-    out.extend(_row_host_problems(where, root, data, row, steps))
+    if is_container_job(job):
+        primary, found = primary_host(root, data)
+        out.extend(found)
+        out.extend(class_problems(where, rel, workflow, job, row, primary))
+    else:
+        out.extend(_row_host_problems(where, root, data, row, steps))
     out.extend(_order_problems(where, steps, probe))
     out.extend(floor_problems(rel, name, job))
     uses_artifact = any(
@@ -412,8 +428,10 @@ def _probe_job_problems(name: str, want: list[tuple[str, str]], job: dict[str, A
         out.append(f"{PROBE}: job {name} drill step names must equal their ids")
     if name == VERDICT_JOB and [s.get("env") for s in steps if s.get("run")] != [{"GH_TOKEN": "${{ github.token }}"}]:
         out.append(f"{PROBE}: job {name} env must be exactly GH_TOKEN: github.token")
-    if name == "egress-control" and any("harden-runner" in str(s.get("uses", "")) for s in steps):
-        out.append(f"{PROBE}: egress-control must run without the filter")
+    if name in ("egress-control", "egress-container-control") and any(
+        "harden-runner" in str(s.get("uses", "")) for s in steps
+    ):
+        out.append(f"{PROBE}: {name} must run without the filter")
     return out
 
 
