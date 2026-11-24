@@ -112,3 +112,43 @@ def test_is_floor_line_matches_only_sudo_with_a_known_prefix_and_verb() -> None:
 
 def test_a_job_with_no_steps_has_nothing_to_check() -> None:
     assert f.floor_problems(REL, NAME, {}) == []
+
+
+def _container_job() -> dict[str, Any]:
+    job = _job()
+    job["steps"][2]["run"] = "sudo " + f.PROBE_PREFIX + "egress-floor-container"
+    job["steps"][3]["run"] = f.PROBE_PREFIX + "egress-self-check"
+    job["steps"][5]["run"] = f.PROBE_PREFIX + "egress-self-check"
+    job["steps"][4] = {
+        "name": "l",
+        "id": "l",
+        "run": "x | sudo " + "/usr/bin/python3 -I -S /usr/local/lib/persona-egress/egress_launcher.py probe",
+    }
+    return job
+
+
+def test_the_container_floor_verb_and_launcher_line_are_accepted_in_the_class() -> None:
+    job = _container_job()
+    job["steps"][4]["run"] = (
+        f.PROBE_PREFIX
+        + "egress-container-request | sudo "
+        + ("/usr/bin/python3 -I -S /usr/local/lib/persona-egress/egress_launcher.py probe")
+    )
+    assert f.floor_problems(f.PROBE, "egress-container", job) == []
+    assert f.floor_run(f.PROBE, "egress-container", job) == "sudo " + f.PROBE_PREFIX + "egress-floor-container"
+
+
+def test_the_launcher_line_is_refused_outside_the_class() -> None:
+    job = _job()
+    job["steps"][4]["run"] = (
+        f.PROBE_PREFIX
+        + "egress-container-request | sudo "
+        + ("/usr/bin/python3 -I -S /usr/local/lib/persona-egress/egress_launcher.py probe")
+    )
+    assert any("runs sudo" in p for p in f.floor_problems(REL, NAME, job))
+
+
+def test_the_plain_floor_verb_is_refused_in_a_class_job() -> None:
+    job = _container_job()
+    job["steps"][2]["run"] = FLOOR
+    assert any("must run exactly" in p or "runs sudo" in p for p in f.floor_problems(f.PROBE, "egress-container", job))
