@@ -1,0 +1,191 @@
+schema_version: 7
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: amendment-log-compaction-tool
+intent: >-
+  Give contracts a deterministic, lossless way to turn old full amendment_log rows into terse rows (Decision 275 cl.4),
+  so the contract budget's first relief valve is one reviewed command instead of hand or model rewrites that can
+  silently drop a plan, rec or Decision pointer (rec-5452). It edits no contract; rec-5453 (decaying ratchet) and
+  rec-5454 (near-cap compaction) use it.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-amendment-log-compaction-tool.yaml
+phase: >-
+  ad_hoc_rec (soft-warn exception category; no tier_item claimed, so the Tier Item Freshness Gate is skipped):
+  rec-5452 (Medium, M), a follow-on of the contract-first retrospective (CFR-05) and the standards-cleanup census row
+  S8. Closes no roadmap criterion.
+closes_criteria: []
+cites: [dec:275]
+amends: []
+introduces: []
+scope:
+  - file: scripts/checks/contracts/_amendment_terse.py
+    action: Create
+    purpose: >-
+      Pure helpers, never raising (Decision 55), imported by the tool now and by the retention check under rec-5453.
+      (1) pointer_tokens(text) -> the normalised set of pointer tokens: PLAN-<slug>, rec-N, Decision N (each number of
+      "Decisions N, M and K", "Decision N cl.M" -> Decision N, dec-N -> Decision N), tier ids (T4.32, T-1.24, T2.25a)
+      and CD.N. PR numbers, SHAs, run ids and contract_version notes are not pointers (git blame on the row recovers
+      them). (2) derive_terse(row, cfg) -> the terse summary or a Refusal(reason): the row's leading label (the text
+      before the first ": " when it holds a pointer token, whitespace collapsed), then "; " and every pointer token of
+      the full summary the label lacks, in first-seen order, comma separated; no prose tail. Refusal reasons, closed
+      set: extra_keys (any key outside the terse key set, e.g. migration_story), no_pointer (the summary holds no
+      anchor token: PLAN-<slug>, rec-N or Decision N, the three Decision 275 cl.4 says a terse row names; tier ids and
+      CD.N travel in the terse row and count in lossless but never anchor it alone), overflow (the result exceeds terse_row.summary_max_chars), not_full (already terse or
+      semantic_break true). (3) lossless(old_row, new_row, cfg) -> None or the reason a compaction lost something:
+      new is terse by _amendment_retention.is_terse; date, semantic_break and change_class equal; pointer_tokens(new)
+      is a superset of pointer_tokens(old). It judges any terse rewrite, tool-made or hand-made. (4) compactable(row,
+      cfg) -> derive_terse returns a summary. (5) compaction_order(log, cfg) -> indexes of compactable full rows past
+      the newest keep_full full rows, oldest first: full rows are ranked by date (string form), ties by file position
+      (earlier first), and the keep_full rows with the latest dates are kept; logs are not date-ordered in either
+      direction (24 files descend, 9 ascend, 34 mix), so position alone never defines "newest".
+    new_imports: [scripts.checks.contracts._amendment_retention]
+  - file: scripts/checks/contracts/amendment_compact.py
+    action: Create
+    purpose: >-
+      The tool, run as bin/venv-python -m scripts.checks.contracts.amendment_compact [FILES...] (default: every
+      docs/contracts/*.yaml; exempt_files and files with no top-level amendment_log are skipped and counted). It is
+      not a registered check (precedent scripts/checks/decisions/standards_census.py). It finds each top-level
+      amendment_log item's text span with yaml.compose node marks (PyYAML only, no new dependency) and splices only
+      the spans of rows compaction_order selects, replacing each with one flow-mapping line at the item's indent:
+      - {date: <original date scalar text>, semantic_break: <original>, change_class: <original>, summary: "<terse>"}
+      (summary double-quoted with \ and " escaped). A row whose span holds a comment line or shares a line with
+      another item is refused (reason span_comment). Before writing it proves, per file, and refuses the whole file
+      on any failure: (a) bytes outside the replaced spans equal the input's; (b) safe_load of the output minus
+      amendment_log equals the input's, the row count is equal, untouched rows are equal, and every replaced row
+      passes lossless; (c) a second run over the output selects nothing. Modes: default dry run prints one line per
+      file (rows compactable, rows refused by reason, effective lines and bytes freed, using
+      scripts.checks.structural._classify.effective_lines) and exits 0; --write applies; --rows N compacts at most the
+      N oldest selected rows per file (the one-row decay rec-5453 needs); --check exits 1 while any named file still
+      has a compactable row past keep_full, and lists refused rows without failing on them; --verify --base REF exits
+      1 when, against the file at REF (git show), non-log content differs or a row that was full at REF and is terse
+      now fails lossless (judges hand-made compactions and rebases). Output order and wording are deterministic
+      (same input, same bytes), so two PRs compacting the same rows produce identical hunks. Under 500 SLOC (Decision
+      128); split the span/splice half into _amendment_splice.py if it crosses.
+    new_imports: [scripts.checks.contracts._amendment_terse, scripts.checks.contracts._amendment_retention, scripts.checks.structural._classify]
+  - file: tests/checks/contracts/test_amendment_compact.py
+    action: Create
+    purpose: >-
+      rec-5452's acceptance file. Nodes over tmp_path contract files:
+      test_block_and_flow_rows_compact_to_one_line (a block row with a folded summary and a long flow row become one
+      terse line; is_terse holds; date, semantic_break and change_class bytes unchanged);
+      test_non_log_bytes_and_row_count_unchanged (comments and hand layout outside the log survive byte for byte);
+      test_newest_keep_full_kept_by_date_not_position (a mixed-order log keeps the five latest dates);
+      test_refusals_are_listed_not_applied (extra_keys, no_pointer, overflow, span_comment rows untouched and listed;
+      semantic_break rows and exempt_files untouched); test_second_run_is_a_no_op; test_rows_caps_compactions;
+      test_check_exits_1_while_compactable_rows_remain (and 0 when only refused rows remain past keep_full);
+      test_verify_flags_lost_pointer_and_non_log_change (a hand-written terse row missing a rec token, and a non-log
+      edit, each exit 1 against a git base built in tmp_path); test_proof_failure_refuses_the_file (a monkeypatched
+      splice that alters a neighbour byte leaves the file unwritten); test_dry_run_reports_lines_and_bytes_freed.
+    new_imports: [scripts.checks.contracts.amendment_compact]
+  - file: tests/checks/contracts/test__amendment_terse.py
+    action: Create
+    purpose: >-
+      Coverage mirror for the helper module. Nodes: test_pointer_tokens_normalise (Decisions list, cl. suffix, dec-N,
+      tier ids, CD.N; PR numbers and SHAs ignored); test_derive_terse_label_plus_missing_tokens;
+      test_derive_terse_refusal_reasons (each closed reason, incl. a row whose only pointer is a tier id or CD.N); test_lossless_judges_any_rewrite (superset passes, a
+      dropped token, a changed date or change_class, and a non-terse result fail); test_compaction_order_mixed_dates;
+      test_malformed_input_never_raises.
+    new_imports: [scripts.checks.contracts._amendment_terse]
+bundled_recommendations: [rec-5452]
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - "bin/venv-python -m pytest tests/checks/contracts/test_amendment_compact.py::test_non_log_bytes_and_row_count_unchanged -q passes (rec-5452's acceptance, updated 2026-11-24 to this node) and fails before the change (file absent); every other node of the file passes."
+  - "Run over a scratch copy of every docs/contracts file, the tool compacts every row it selects with all three proofs passing, a second run selects nothing, --check then exits 0, and the real docs/contracts tree is unchanged (VP 3)."
+  - "No contract file, Decision or governing contract text changes in this plan."
+  - "rec-5452 is closed by the build's squash-merge Resolves trailer once its acceptance holds (Decision 201)."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: rec-5452's acceptance nodes pass.
+    command: >-
+      bin/venv-python -m pytest tests/checks/contracts/test_amendment_compact.py::test_block_and_flow_rows_compact_to_one_line
+      tests/checks/contracts/test_amendment_compact.py::test_non_log_bytes_and_row_count_unchanged
+      tests/checks/contracts/test_amendment_compact.py::test_refusals_are_listed_not_applied
+      tests/checks/contracts/test_amendment_compact.py::test_verify_flags_lost_pointer_and_non_log_change
+      tests/checks/contracts/test__amendment_terse.py::test_lossless_judges_any_rewrite -q
+    expected: exit 0 with 5 passed; before the change the file does not exist and pytest exits non-zero
+    fix_if: a node fails; the splice touched a non-log byte, a pointer was lost, or a refused row was applied
+    hermetic: true
+    expected_literals: ["5 passed"]
+    graduation: graduate
+    graduation_check_id: amendment-log-compaction-lossless
+  - step: 2
+    phase: pre-deploy
+    action: Every new node passes and the new modules stay under their SLOC caps.
+    command: >-
+      bin/venv-python -m pytest tests/checks/contracts/test_amendment_compact.py tests/checks/contracts/test__amendment_terse.py
+      tests/checks/contracts/test__amendment_retention.py -q &&
+      bin/venv-python -m scripts.roadmap.plan_obligations --plan docs/plans/PLAN-amendment-log-compaction-tool.yaml
+    expected: pytest exits 0 with no failure; plan_obligations reports no SLOC crossing for a scope file
+    fix_if: a node fails, or a scope file crosses 500 SLOC (decompose, never a raise, Decision 128)
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Whole-file re-run of in-scope suites (hermetic authoring rule (v)); the full tier runs them and step 1 graduates the acceptance nodes.
+  - step: 3
+    phase: pre-deploy
+    action: End to end on the real contracts, in a scratch copy, leaving the tree untouched.
+    command: >-
+      d=$(mktemp -d) && cp docs/contracts/*.yaml "$d"/ &&
+      bin/venv-python -m scripts.checks.contracts.amendment_compact --write "$d"/*.yaml &&
+      bin/venv-python -m scripts.checks.contracts.amendment_compact --check "$d"/*.yaml &&
+      bin/venv-python -m scripts.checks.contracts.amendment_compact "$d"/*.yaml | tail -1 &&
+      git diff --quiet -- docs/contracts && echo "real tree unchanged"
+    expected: >-
+      --write exits 0 having compacted rows in every file over keep_full with a compactable row; --check exits 0; the
+      dry-run summary line reports 0 rows compactable; prints real tree unchanged
+    fix_if: a proof refuses a file, --check exits 1, the dry run still finds rows, or docs/contracts changed
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Reads the live contracts tree, whose row counts move with every merge; step 1 graduates the behaviour on fixed fixtures.
+  - step: 4
+    phase: pre-deploy
+    action: Readers that pin amendment_log rows still pass on a compacted tree (evidence for rec-5453 and rec-5454; report-only).
+    command: >-
+      w=$(mktemp -d) && git worktree add --detach "$w" HEAD >/dev/null && (cd "$w" &&
+      bin/venv-python -m scripts.checks.contracts.amendment_compact --write &&
+      bin/venv-python -m pytest tests/telemetry tests/contracts_enforcement tests/checks/contracts -q -x -p no:cacheprovider;
+      echo "exit=$?"); git worktree remove --force "$w"
+    expected: >-
+      exit=0; any failing node names a row a test pins by wording, which the build lists in its PR body and adds to
+      rec-5454's context (the compaction plans then refuse or re-point that row); the tool is not changed to pass it
+    fix_if: the worktree cannot be created, or the tool itself errors
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A one-off survey of whole suites on a scratch tree, not a regression guard; step 1 graduates the tool's behaviour.
+test_obligations:
+  - source: scripts/checks/contracts/_amendment_terse.py
+    behavior: pointer tokens survive every terse rewrite or the row is refused; newest is ranked by date
+    verification_step: 1
+    test_selector: tests/checks/contracts/test__amendment_terse.py::test_lossless_judges_any_rewrite
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/checks/contracts/amendment_compact.py
+    behavior: only selected log rows change, non-log bytes and row count hold, refusals are listed not applied
+    verification_step: 1
+    test_selector: tests/checks/contracts/test_amendment_compact.py::test_non_log_bytes_and_row_count_unchanged
+    red_green_expectation: red before (module absent), green after
+constraints:
+  - Edits no file under docs/contracts and no Decision text; the retention rule and its count stay as Decision 275 cl.4 has them.
+  - Never raise in import; no eval or exec; PyYAML only.
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - "Decision-scout round 1 (draft, 2026-11-24): FLAGS_FOUND. Decisions triaged: 228 of 228. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2. Serves: NS.4 4/5. CITE: dec:275. WARN Decision 275 cl.4 (a terse row names the plan, rec or Decision): pivoted -- a row anchored only by a tier id or CD.N is refused no_pointer (5 such rows today); tier ids and CD.N still travel and count in lossless. RELATED 240, 128, 166, 168, 278, 279, 189/244, 86/127."
+  - "Plan boundary (advisor 2026-11-24, /mnt/project-files/decision-growth/amendment-log/advisor-brief/ADVICE.md): three plans. This one (tool, mechanical); rec-5453 (decaying ratchet: new Decision amending Decision 275 cl.4, operator wording approval; it imports compactable and compaction_order, counts only compactable rows in the decay term, and may make the retention check call lossless on hand compactions); rec-5454 (the eight near-cap files, one plan and PR per owning project). Both depend only on this build."
+  - "Measured on main 936bc4cf (prototype of this rule): 27 contracts over keep_full, 151 excess full rows: 108 compactable, 35 extra_keys (all migration_story, which _rule_ratchet.py:85-97 reads), 6 overflow, 2 no_pointer. One-line flow rows free bytes, not lines (exit-criteria-ledger frees 0 lines)."
+  - "Advisor adoption: adopted extractive rule with refusal, tokens incl. tier ids, span splice with three proofs, date ranking, per-change ratchet left to rec-5453, no CI autofix. Deferred to rec-5453: --check against a base ref for rebases, and ratifying the date ordering in Decision text."
+  - "Cross-project: edits only new files under scripts/checks/contracts and tests/checks/contracts. #1963 claim posted 2026-11-24 (comment 7137117073)."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:0e8003fec11ca108cfee3493cfccb91808e16580c3b8fc8ad4a10ed320cd5886"}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - Decision 275 read (clauses 3-5)
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - Create scripts/checks/contracts/_amendment_terse.py with the five helpers and its mirror test.
+  - Create scripts/checks/contracts/amendment_compact.py (span location, splice, proofs, modes) and its acceptance test.
+  - Execute the Verification Plan; loop until each step passes; on an unrecoverable failure stop and RCA (Decision 55).
+  - 'Report: what was implemented, verification results, VP 3 and VP 4 summaries (per-file rows compacted and refused, any pinned rows).'
