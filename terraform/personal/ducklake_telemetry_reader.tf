@@ -1,7 +1,7 @@
 # DuckLake telemetry reader Lambda (slice 2c; Decision 236 cl.2-3, Decision 213 cl.2, Decision 230).
 #
 # Production telemetry is read only through this function: the event verbs minus transcript_content, no caller SQL,
-# no ops verb, a SELECT-only catalog login attached READ_ONLY (aws_secretsmanager_secret.ducklake_telemetry_reader_dsn),
+# no ops verb, a SELECT-only catalog login attached READ_ONLY (the /secret/ telemetry reader DSN parameter),
 # S3 read on the production telemetry data prefix only and nothing on the blob root. It is pinned to production from
 # birth and reads the empty production catalog until the flip.
 #
@@ -41,13 +41,6 @@ resource "aws_iam_role_policy" "ducklake_telemetry_reader" {
         Resource = ["${aws_cloudwatch_log_group.ducklake_telemetry_reader.arn}:*"]
       },
       {
-        Sid      = "TelemetryReaderDsnRead"
-        Effect   = "Allow"
-        Action   = ["secretsmanager:GetSecretValue"]
-        Resource = [aws_secretsmanager_secret.ducklake_telemetry_reader_dsn.arn]
-      },
-      {
-        # Decision 237: SSM twin of the Secrets Manager read above; secrets-to-ssm-retire removes the old one.
         Sid      = "TelemetryReaderDsnParameterRead"
         Effect   = "Allow"
         Action   = ["ssm:GetParameter"]
@@ -103,7 +96,6 @@ resource "aws_lambda_function" "ducklake_telemetry_reader" {
       TELEMETRY_DATA_PATH           = local.ducklake_telemetry_data_path
       DUCKLAKE_EXTENSION_DIRECTORY  = local.ducklake_extension_dir
       DUCKLAKE_FIELD_SEMANTICS_PATH = "/var/task/config/lambda/ducklake/field_semantics.yaml"
-      TELEMETRY_DSN_SECRET_ID       = aws_secretsmanager_secret.ducklake_telemetry_reader_dsn.name
       TELEMETRY_DSN_PARAMETER       = local.secret_parameter_names.telemetry_reader_dsn
     }
   }

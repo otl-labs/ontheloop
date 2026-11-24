@@ -558,5 +558,5 @@ bin/venv-python -m scripts.ducklake_neon_smoke_test --catalog-restore-drill
 
 Every ops read transits `ducklake_reader`; every write transits `ducklake_writer`. There is no second
 read or write path -- `ops_data_portal` has no fallback transport. The only break-glass is the audited
-PlatformAdmin principal reading the Neon catalog credential (Secrets Manager) + S3, plus the
+PlatformAdmin principal reading the Neon catalog credential (the `/secret/ducklake-neon-catalog-dsn` SSM parameter, `SecretParameterAdmin`) + S3, plus the
 catalog-DR PITR export -- see Section 1.

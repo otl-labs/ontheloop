@@ -1,7 +1,7 @@
 # DuckLake telemetry writer smoke twin (slice 2c; Decision 236 cl.1, Decision 143 cl.3, Decision 213).
 #
 # The twin runs the telemetry writer's code (the same zip) on the disposable smoke catalog with its own role and
-# the smoke scoped login (aws_secretsmanager_secret.ducklake_telemetry_writer_dsn). It is deployed first and carries
+# the smoke scoped login (the /secret/ smoke writer DSN parameter). It is deployed first and carries
 # the disposable deploy proofs (fault, near-cap and row-cap vectors, first-sight auto-registration), so the
 # production telemetry deploy waits on its gates. It is pinned to the fixed smoke locals, never to the flipping
 # ducklake_telemetry_meta_schema, and holds no production prefix, no production secret and no Delete.
@@ -42,14 +42,6 @@ resource "aws_iam_role_policy" "ducklake_telemetry_writer_smoke" {
         Resource = ["${aws_cloudwatch_log_group.ducklake_telemetry_writer_smoke.arn}:*"]
       },
       {
-        # The smoke scoped catalog login only; never the production writer or reader login.
-        Sid      = "TelemetryDsnRead"
-        Effect   = "Allow"
-        Action   = ["secretsmanager:GetSecretValue"]
-        Resource = [aws_secretsmanager_secret.ducklake_telemetry_writer_dsn.arn]
-      },
-      {
-        # Decision 237: SSM twin of the Secrets Manager read above; secrets-to-ssm-retire removes the old one.
         Sid      = "TelemetryDsnParameterRead"
         Effect   = "Allow"
         Action   = ["ssm:GetParameter"]
@@ -135,7 +127,6 @@ resource "aws_lambda_function" "ducklake_telemetry_writer_smoke" {
       TELEMETRY_BLOB_ROOT           = local.ducklake_telemetry_smoke_blob_root
       DUCKLAKE_EXTENSION_DIRECTORY  = local.ducklake_extension_dir
       DUCKLAKE_FIELD_SEMANTICS_PATH = "/var/task/config/lambda/ducklake/field_semantics.yaml"
-      TELEMETRY_DSN_SECRET_ID       = aws_secretsmanager_secret.ducklake_telemetry_writer_dsn.name
       TELEMETRY_DSN_PARAMETER       = local.secret_parameter_names.telemetry_writer_dsn
     }
   }

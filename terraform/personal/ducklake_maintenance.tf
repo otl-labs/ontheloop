@@ -93,21 +93,6 @@ resource "aws_iam_role_policy" "ducklake_maintenance" {
         Resource = ["${aws_cloudwatch_log_group.ducklake_maintenance.arn}:*"]
       },
       {
-        # Decision 213: the scoped telemetry login's secret is read here too, so provision_telemetry_login
-        # can set the role's password from it. GetSecretValue only; the function holds no write on it.
-        Sid    = "NeonDsnRead"
-        Effect = "Allow"
-        Action = ["secretsmanager:GetSecretValue"]
-        Resource = [
-          aws_secretsmanager_secret.ducklake_neon_catalog_dsn.arn,
-          aws_secretsmanager_secret.ducklake_telemetry_writer_dsn.arn,
-          aws_secretsmanager_secret.ducklake_telemetry_writer_prod_dsn.arn,
-          aws_secretsmanager_secret.ducklake_telemetry_reader_dsn.arn,
-          aws_secretsmanager_secret.ducklake_smoke_maintainer_dsn.arn,
-        ]
-      },
-      {
-        # Decision 237: SSM twin of the Secrets Manager read above; secrets-to-ssm-retire removes the old one.
         Sid    = "NeonDsnParameterRead"
         Effect = "Allow"
         Action = ["ssm:GetParameter"]

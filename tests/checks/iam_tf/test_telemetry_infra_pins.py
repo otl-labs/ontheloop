@@ -32,8 +32,10 @@ _ARN = f"arn:aws:s3:::{_BUCKET}"
 _PROBE_KEYS = (f"{_ARN}/telemetry-blobs/ducklake_smoke/probe-key", f"{_ARN}/telemetry-blobs/ducklake_telemetry/probe-key")
 _PROD_KEY = f"{_ARN}/ducklake/probe-key"
 _PROD_LIST_PROBE = "ducklake/probe-key"
-_SCOPED_SECRET = "aws_secretsmanager_secret.ducklake_telemetry_writer_dsn"  # pragma: allowlist secret
-_PROD_SECRET = "aws_secretsmanager_secret.ducklake_telemetry_writer_prod_dsn"  # pragma: allowlist secret
+_SSM = "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/"
+_PARAMS = "local.secret_parameter_names."
+_SCOPED_SECRET = f"{_SSM}agent-platform-ducklake-telemetry-writer-dsn"  # pragma: allowlist secret
+_PROD_SECRET = f"{_SSM}agent-platform-ducklake-telemetry-writer-prod-dsn"  # pragma: allowlist secret
 _DELETE_ACTIONS = ("s3:deleteobject", "s3:deleteobjectversion")
 _OPS_FUNCTIONS = ("ducklake_writer", "ducklake_reader")
 _TELEMETRY = "ducklake_telemetry_writer"
@@ -140,7 +142,7 @@ def assert_pin_targets_production(text: str) -> None:
         "TELEMETRY_META_SCHEMA": "local.ducklake_telemetry_meta_schema",
         "TELEMETRY_DATA_PATH": "local.ducklake_telemetry_data_path",
         "TELEMETRY_BLOB_ROOT": "local.ducklake_telemetry_blob_root",
-        "TELEMETRY_DSN_SECRET_ID": f"{_PROD_SECRET}.name",
+        "TELEMETRY_DSN_PARAMETER": f"{_PARAMS}telemetry_writer_prod_dsn",
     }
     for key, value in want.items():
         assert env.get(key) == value, f"{_TELEMETRY} {key} is {env.get(key)!r}, want {value}: {_PIN_MOVE_HINT}"
@@ -209,23 +211,23 @@ def assert_blob_lifecycle_rule(main_text: str, lambdas_text: str) -> None:
 
 
 def _covers_secrets(s: dict) -> bool:
-    return s["not_action"] or any(a == "*" or a.lower().startswith("secretsmanager:") for a in s["actions"])
+    return s["not_action"] or any(a == "*" or a.lower().startswith(("secretsmanager:", "ssm:")) for a in s["actions"])
 
 
 def assert_telemetry_writer_reads_only_its_scoped_login(text: str) -> None:
     st = _role_statements(text, _TELEMETRY)
     granting = {sid: s for sid, s in st.items() if s["effect"] == "Allow" and _covers_secrets(s)}
-    assert list(granting) == ["TelemetryDsnRead"], (
-        f"secretsmanager grants must be TelemetryDsnRead only, got {sorted(granting)}"
+    assert list(granting) == ["TelemetryDsnParameterRead"], (
+        f"secret grants must be TelemetryDsnParameterRead only, got {sorted(granting)}"
     )
-    dsn = granting["TelemetryDsnRead"]
-    assert not dsn["not_action"] and dsn["actions"] == ["secretsmanager:GetSecretValue"], f"DSN actions {dsn['actions']}"
-    assert dsn["resources"] == [f"{_PROD_SECRET}.arn"], (
+    dsn = granting["TelemetryDsnParameterRead"]
+    assert not dsn["not_action"] and dsn["actions"] == ["ssm:GetParameter"], f"DSN actions {dsn['actions']}"
+    assert dsn["resources"] == [_PROD_SECRET], (
         f"DSN resources {dsn['resources']} must be the production scoped login secret only: {_PROD_ONLY}"
     )
     env = _env(text, _TELEMETRY)
-    assert env.get("TELEMETRY_DSN_SECRET_ID") == f"{_PROD_SECRET}.name", (
-        "TELEMETRY_DSN_SECRET_ID must name the production scoped login"
+    assert env.get("TELEMETRY_DSN_PARAMETER") == f"{_PARAMS}telemetry_writer_prod_dsn", (
+        "TELEMETRY_DSN_PARAMETER must name the production scoped login"
     )
     assert "ducklake_neon_catalog_dsn" not in find_resource_block(text, "aws_iam_role_policy", _TELEMETRY), (
         "the telemetry writer must never reference the shared catalog DSN"
@@ -286,9 +288,9 @@ _LIST = {
     "prefix": _FENCES,
 }
 _DSN = {
-    "Sid": "TelemetryDsnRead",
-    "Action": ["secretsmanager:GetSecretValue"],
-    "Resource": [f"{_PROD_SECRET}.arn"],
+    "Sid": "TelemetryDsnParameterRead",
+    "Action": ["ssm:GetParameter"],
+    "Resource": [_PROD_SECRET],
 }
 _CATALOG_LIST = {
     "Sid": "TelemetryCatalogDataList",
@@ -344,7 +346,7 @@ def _doc(
         "TELEMETRY_META_SCHEMA": "local.ducklake_telemetry_meta_schema",
         "TELEMETRY_DATA_PATH": "local.ducklake_telemetry_data_path",
         "TELEMETRY_BLOB_ROOT": "local.ducklake_telemetry_blob_root",
-        "TELEMETRY_DSN_SECRET_ID": f"{_PROD_SECRET}.name",
+        "TELEMETRY_DSN_PARAMETER": f"{_PARAMS}telemetry_writer_prod_dsn",
         "DUCKLAKE_EXTENSION_DIRECTORY": "local.ducklake_extension_dir",
         "DUCKLAKE_FIELD_SEMANTICS_PATH": _FIELD_SEMANTICS,
     }
@@ -430,7 +432,7 @@ def test_pin_guard_rejects_a_moved_pin() -> None:
         _doc(telemetry_env={"TELEMETRY_META_SCHEMA": "local.ducklake_smoke_meta_schema"}),
         _doc(telemetry_env={"TELEMETRY_DATA_PATH": "local.ducklake_smoke_data_path"}),
         _doc(telemetry_env={"TELEMETRY_BLOB_ROOT": "local.ducklake_telemetry_smoke_blob_root"}),
-        _doc(telemetry_env={"TELEMETRY_DSN_SECRET_ID": f"{_SCOPED_SECRET}.name"}),
+        _doc(telemetry_env={"TELEMETRY_DSN_PARAMETER": f"{_PARAMS}telemetry_writer_dsn"}),
     ]
     for doc in moved:
         with pytest.raises(AssertionError, match="Decision"):
@@ -521,20 +523,20 @@ def test_ops_env_guard_rejects_a_moved_ops_catalog() -> None:
 
 def test_scoped_login_guard_rejects_the_shared_login() -> None:
     assert_telemetry_writer_reads_only_its_scoped_login(_doc())
-    shared = "aws_secretsmanager_secret.ducklake_neon_catalog_dsn"
+    shared = f"{_SSM}ducklake-neon-catalog-dsn"
     rest = _TELEMETRY_STMTS[1:]
     bad = [
-        _doc(telemetry_stmts=[*_TELEMETRY_STMTS, {**_DSN, "Sid": "SharedDsn", "Resource": [f"{shared}.arn"]}]),
-        _doc(telemetry_stmts=[{**_DSN, "Resource": [f"{shared}.arn"]}, *rest]),
-        _doc(telemetry_stmts=[{**_DSN, "Action": ["secretsmanager:*"]}, *rest]),
-        _doc(telemetry_stmts=[{**_DSN, "Resource": [*_DSN["Resource"], f"{shared}.arn"]}, *rest]),
-        _doc(telemetry_stmts=[{**_DSN, "Resource": [f"{_SCOPED_SECRET}.arn"]}, *rest]),
-        _doc(telemetry_stmts=[{**_DSN, "Resource": [f"{_SCOPED_SECRET}.arn", f"{_PROD_SECRET}.arn"]}, *rest]),
-        _doc(telemetry_stmts=[{**_DSN, "Resource": [f"{_PROD_SECRET}.arn", f"{_SCOPED_SECRET}.arn"]}, *rest]),
+        _doc(telemetry_stmts=[*_TELEMETRY_STMTS, {**_DSN, "Sid": "SharedDsn", "Resource": [f"{shared}"]}]),
+        _doc(telemetry_stmts=[{**_DSN, "Resource": [f"{shared}"]}, *rest]),
+        _doc(telemetry_stmts=[{**_DSN, "Action": ["ssm:*"]}, *rest]),
+        _doc(telemetry_stmts=[{**_DSN, "Resource": [*_DSN["Resource"], f"{shared}"]}, *rest]),
+        _doc(telemetry_stmts=[{**_DSN, "Resource": [f"{_SCOPED_SECRET}"]}, *rest]),
+        _doc(telemetry_stmts=[{**_DSN, "Resource": [f"{_SCOPED_SECRET}", f"{_PROD_SECRET}"]}, *rest]),
+        _doc(telemetry_stmts=[{**_DSN, "Resource": [f"{_PROD_SECRET}", f"{_SCOPED_SECRET}"]}, *rest]),
         _doc(telemetry_stmts=[*_TELEMETRY_STMTS, {"Sid": "Any", "NotAction": ["s3:GetObject"], "Resource": ["*"]}]),
         _doc(telemetry_stmts=rest),
-        _doc(telemetry_env={"TELEMETRY_DSN_SECRET_ID": f"{shared}.name"}),
-        _doc(telemetry_env={"TELEMETRY_DSN_SECRET_ID": f"{_SCOPED_SECRET}.name"}),
+        _doc(telemetry_env={"TELEMETRY_DSN_PARAMETER": f"{_PARAMS}ducklake_neon_catalog_dsn"}),
+        _doc(telemetry_env={"TELEMETRY_DSN_PARAMETER": f"{_PARAMS}telemetry_writer_dsn"}),
     ]
     for doc in bad:
         with pytest.raises(AssertionError):
