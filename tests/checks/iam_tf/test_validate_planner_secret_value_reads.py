@@ -12,7 +12,11 @@ from unittest.mock import patch
 import pytest
 
 from scripts.checks import registry
-from scripts.checks.iam_tf.validate_planner_secret_value_reads import _logical_commands, validate_planner_secret_value_reads
+from scripts.checks.iam_tf.validate_planner_secret_value_reads import (
+    _logical_commands,
+    _unparsed_documents,
+    validate_planner_secret_value_reads,
+)
 
 REPO = Path(__file__).resolve().parents[3]
 _FILES = [
@@ -426,3 +430,12 @@ def test_ssm_conditioned_drift_read_and_tfvars_read_pass(tree: Path) -> None:
         ),
     )
     assert _run(tree) == []
+
+
+def test_unparsed_documents_stops_on_cycles_and_unknown_sources() -> None:
+    docs = {
+        "a": {"sources": ["b", "missing"], "unparsed": False},
+        "b": {"sources": ["a"], "unparsed": True},
+    }
+    assert _unparsed_documents("a", docs) == ["b"]
+    assert _unparsed_documents("missing", docs) == []
