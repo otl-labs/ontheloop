@@ -29,8 +29,12 @@ scope:
       round 2), stated as a CLOSED definition: a segment is examined only when it is PLAIN; every segment whose raw
       text contains "pytest" or "ruff" and is not PLAIN is counted EXCLUDED as "not plain" (one counted line,
       sub-reasons optional), never silently passed and never refused.
-      (1) Splitting. step_rule_v_scan(command, scope_files, root) splits the command on &&, ||, ;, | and newline with
-      a local regex (the shared _vp_replay_classify._SHELL_SEGMENT_SPLIT_RE is not changed). Heredocs: a segment
+      (1) Splitting. step_rule_v_scan(command, scope_files, root) splits the command into segments with a
+      QUOTE-AWARE tokenizer (for example shlex.shlex(posix=True, punctuation_chars=True) with newline kept as a
+      token): &&, ||, ;, | and newline separate segments only outside quotes, so the inside of a quoted string is
+      never a segment (the shared _vp_replay_classify._SHELL_SEGMENT_SPLIT_RE is not changed). A quoted token that
+      contains the word pytest or ruff (regex \bpytest\b or \bruff\b) is code, not argv: its segment is counted
+      EXCLUDED (sh -c, bash -c, python -c and pytest.main all land here, whatever separators they hold inside). Heredocs: a segment
       holding a heredoc operator (<<WORD, <<-WORD, <<'WORD', <<"WORD", << WORD) is scanned up to the operator, and the
       following lines up to the line equal to WORD are a heredoc body, never scanned; <<< is a here-string, not a
       heredoc; a heredoc with no terminating line counts the rest of the command EXCLUDED "unterminated heredoc".
@@ -41,8 +45,9 @@ scope:
       and with assignments, a python, python3 or venv-python interpreter path with flags such as -I, -X VALUE, -W
       VALUE, -u, -B, -O, -E, -s, then "-m", and "timeout" with its options and duration); no token holds any of $ `
       ( ) { } < >, except a recognised redirection (>, >>, 2>, &>, 2>&1, alone or with its target joined), which is
-      removed with its target before target collection; and no earlier segment of the same step has argv head cd or
-      pushd. So $( ), backticks, subshells, xargs pytest, env -C, python -c "...pytest.main(...)" and sh -c all fall
+      removed with its target before target collection; no token is --pyargs, starts with @ (an argument file) or is a
+      PYTEST_ADDOPTS= assignment; and no earlier segment of the same step holds a cd or pushd token or a { or (
+      grouping token anywhere in it (unknown cwd). So $( ), backticks, subshells, xargs pytest, env -C, python -c "...pytest.main(...)" and sh -c all fall
       in the counted complement. For a ruff phase only the marker, the prefix and the cwd conditions apply: rule (v)
       refuses a ruff check/format phase whatever its targets, so $ or parentheses among ruff's arguments do not
       make it not-plain.
@@ -59,7 +64,11 @@ scope:
       no-target or "." run) of such a file that is a test file (basename test_*.py, *_test.py or conftest.py), since
       rule (v) names test files; a directory holding only non-test in-scope files is not a finding. A target is a
       DIRECTORY target when (root / target).is_dir(). A -k expression never exempts a whole-file or
-      whole-directory target (only node and class selectors are rule (v)'s carve-out).
+      whole-directory target (only node and class selectors are rule (v)'s carve-out). The equality branch
+      deliberately covers ANY in-scope file, test or not (a whole-file run of an in-scope source, e.g. with
+      --doctest-modules, is the same replay cost); only the directory-prefix branch filters for test files. A
+      --collect-only whole-file run is refused like any other: it still spends the non-test half, and node selectors
+      are the fix.
       (4) plan_rule_v_findings(doc, root) returns (step id, reason) for each phase pre-deploy, hermetic: true step
       with an in-scope target on a PLAIN pytest segment or a PLAIN ruff phase; a pytest segment whose every target
       carries "::" is never a finding on the pytest arm.
@@ -93,8 +102,9 @@ scope:
     action: Modify
     purpose: >-
       Add key rule_v_lint (population, detection, carve-outs, advisory and fail-open lines, residuals: merely MODIFIED
-      plans and already-merged unbuilt plans are not refused; the closed PLAIN definition, whose complement (every
-      segment naming pytest or ruff that is not PLAIN) is counted EXCLUDED, never examined; a ruff phase is refused
+      plans and already-merged unbuilt plans are not refused; the closed PLAIN definition over a quote-aware split,
+      whose complement (every segment naming pytest or ruff that is not PLAIN, and every quoted string naming either)
+      is counted EXCLUDED, never examined; the equality branch covers any in-scope file; --collect-only is refused; a ruff phase is refused
       whatever its targets; execution_steps prose is not parsed, the scope
       table is the declared set; a -k filter does not exempt a whole target), name the sibling carve-out (iii) enforcer
       validate_hermetic_fast_tier_collectability beside it, point hermetic_authoring (v) at it in one clause, append an amendment_log entry, and bump
@@ -125,8 +135,10 @@ scope:
       later line names an in-scope file is not refused; a pytest on line 2 over an in-scope whole file is refused; a
       heredoc body naming pytest and an in-scope file is never scanned); test_not_plain_forms_are_counted_excluded
       (one case per family: $( )-wrapped pytest, a backtick target, a subshell "(cd tests && pytest test_x.py)",
-      env -C, xargs pytest, --pyargs, python -c "...pytest.main(...)", sh -c, a cd before pytest, an unterminated
-      heredoc; none refused, each counted on the EXCLUDED line); test_ruff_phase_with_substituted_args_is_refused;
+      env -C, xargs pytest, --pyargs, an @argsfile, PYTEST_ADDOPTS= with a node target, python -c
+      "...pytest.main(...)", sh -c, bash -c 'x; bin/venv-python -m pytest <in-scope file>' (inner separator), a brace
+      group "{ cd tests; pytest test_x.py; }", a cd before pytest, an unterminated heredoc; none refused, each counted
+      on the EXCLUDED line); test_ruff_phase_with_substituted_args_is_refused;
       test_no_target_and_dot_target_are_the_root; test_glob_matches_a_create_row_absent_on_disk;
       test_pytest_dash_c_value_is_not_code (pytest -c pytest.ini over an in-scope file is refused, not excluded);
       test_here_string_is_not_a_heredoc; test_directory_with_only_non_test_in_scope_members_passes; test_glob_dotdot_and_absolute_targets_resolve (a glob
@@ -289,6 +301,16 @@ gate_rounds:
       - {id: C3-N5, severity: nit, origin: judgement, anchor: "scope[0].purpose", subject: "pytest's own -c value must not read as code; covered by the prefix rule", disposition: fixed}
       - {id: C3-N6, severity: nit, origin: judgement, anchor: "scope[0].purpose", subject: "node-selector exemption applies to the pytest arm only", disposition: fixed}
       - {id: C3-N7, severity: nit, origin: judgement, anchor: "scope[0].purpose", subject: "heredoc variants, here-string and unterminated heredoc", disposition: fixed}
+  - gate: plan-critique
+    round: 4
+    verdict: REVISE
+    blocking: 1
+    nits: 3
+    findings:
+      - {id: C4-B1, severity: blocking, origin: judgement, anchor: "scope[0].purpose", subject: "split ignores quotes and groups, so sh -c interiors and brace-group cd yield PLAIN segments; make the split quote-aware and grouping an unknown cwd", disposition: fixed}
+      - {id: C4-N1, severity: nit, origin: mechanical, anchor: "scope[0].purpose", subject: "--pyargs (and @argsfile, PYTEST_ADDOPTS) must be PLAIN conditions, not only test cases", disposition: fixed}
+      - {id: C4-N2, severity: nit, origin: judgement, anchor: "scope[0].purpose", subject: "state that the equality branch covers any in-scope file, test or not", disposition: fixed}
+      - {id: C4-N3, severity: nit, origin: judgement, anchor: "scope[2]", subject: "say whether a --collect-only whole-file run is refused", disposition: fixed}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
