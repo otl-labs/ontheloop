@@ -174,13 +174,6 @@ resource "aws_iam_role_policy" "ducklake_writer" {
         Resource = ["${aws_cloudwatch_log_group.ducklake_writer.arn}:*"]
       },
       {
-        Sid      = "NeonDsnRead"
-        Effect   = "Allow"
-        Action   = ["secretsmanager:GetSecretValue"]
-        Resource = [aws_secretsmanager_secret.ducklake_neon_catalog_dsn.arn]
-      },
-      {
-        # Decision 237: SSM twin of the Secrets Manager read above; secrets-to-ssm-retire removes the old one.
         Sid      = "NeonDsnParameterRead"
         Effect   = "Allow"
         Action   = ["ssm:GetParameter"]
@@ -251,13 +244,6 @@ resource "aws_iam_role_policy" "ducklake_reader" {
         Resource = ["${aws_cloudwatch_log_group.ducklake_reader.arn}:*"]
       },
       {
-        Sid      = "NeonDsnRead"
-        Effect   = "Allow"
-        Action   = ["secretsmanager:GetSecretValue"]
-        Resource = [aws_secretsmanager_secret.ducklake_neon_catalog_dsn.arn]
-      },
-      {
-        # Decision 237: SSM twin of the Secrets Manager read above; secrets-to-ssm-retire removes the old one.
         Sid      = "NeonDsnParameterRead"
         Effect   = "Allow"
         Action   = ["ssm:GetParameter"]

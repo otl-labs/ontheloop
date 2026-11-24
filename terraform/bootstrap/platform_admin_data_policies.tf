@@ -172,12 +172,6 @@ locals {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid      = "NeonCatalogDsnRead"
-        Effect   = "Allow"
-        Action   = ["secretsmanager:GetSecretValue"]
-        Resource = [data.aws_secretsmanager_secret.ducklake_neon_catalog_dsn.arn]
-      },
-      {
         Sid      = "DuckLakeDataRead"
         Effect   = "Allow"
         Action   = ["s3:GetObject"]
@@ -196,10 +190,6 @@ locals {
       },
     ]
   })
-}
-
-data "aws_secretsmanager_secret" "ducklake_neon_catalog_dsn" {
-  name = "ducklake-neon-catalog-dsn"
 }
 
 import {

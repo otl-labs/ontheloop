@@ -5,9 +5,12 @@ terraform/personal's aws_iam_policy_document blocks -- resolving source_policy_d
 refresh-read coverage checks do -- plus the personal-root workflows and the terraform-init-retry composite,
 and asserts the Neon key never reaches a PR-triggered plan:
 
-  (1) every Allow statement in the planner's resolved policy whose actions can return a Secrets Manager value
-      carries the reserved-session aws:userid condition, or covers only ALLOWED_UNCONDITIONED resources. A
-      NotAction Allow fails closed.
+  (1) no Allow statement in the planner's resolved policy can return a Secrets Manager value (GetSecretValue,
+      BatchGetSecretValue or a covering wildcard), conditioned or not (Decision 237: the nine secrets are retired).
+      A NotAction Allow fails closed, and so does an Allow whose actions are not a list of string literals. A
+      policy document resolved for the planner that uses override_policy_documents, source_json, override_json or
+      a source_policy_documents element that is not a data.aws_iam_policy_document.<name>.json reference, and an
+      inline_policy or managed_policy_arns on aws_iam_role.github_ci_planner, fail closed.
   (2) exactly one aws_iam_role_policy and zero aws_iam_role_policy_attachment resources target the planner role.
   (3) the reserved session name is a role-session-name value in terraform-drift.yml only.
   (4) -refresh=false appears on no personal-root terraform plan, and every personal-root terraform plan or apply
@@ -15,9 +18,9 @@ and asserts the Neon key never reaches a PR-triggered plan:
   (5) no aws_secretsmanager_secret_version data source exists under terraform/personal.
   (6) every job that runs `neon_api_key.sh run --` also uses the terraform-init-retry composite, which carries
       the neon_api_key_check.sh delegate step, and the delegate execs `neon_api_key.sh check`.
-  (7) exactly one planner Allow grants GetSecretValue on both the Neon key and the catalog DSN, under the
-      reserved-session condition (the secret-version type is TRANSITIVE in _read_coverage.py, so
-      validate_ci_refresh_read_coverage cannot see this gap).
+  (7) exactly one planner Allow covers ssm:GetParameter (literal, ssm:GetParameter*, ssm:Get*, ssm:* or *), lists
+      both the Neon key and the catalog DSN /secret/ parameter ARNs as string literals, under the reserved-session
+      condition (the drift run fails only after deploy without it).
 
 Credential-free: pure text and YAML parsing, no boto3 or terraform invocation.
 """
@@ -34,17 +37,15 @@ from scripts.checks import _common, registry
 from scripts.checks.iam_tf import validate_invoke_implies_resolve as _vir
 from scripts.checks.iam_tf import validate_secret_parameter_grants as _spg
 
-# Only Benjamin can add to this list (plan neon-key-out-of-pr-plans). The tfvars secret stays unconditioned
-# until plan C.
+# Only Benjamin can add to this list (plan neon-key-out-of-pr-plans).
 ALLOWED_UNCONDITIONED = frozenset(
     {
-        "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:agent-platform-terraform-personal-tfvars-*",
         # Decision 237 cl.2: the terraform-personal tfvars parameter every plan reads.
         "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-terraform-personal-tfvars",
     }
 )
-_NEON_KEY_ARN = "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:neon-api-key-*"
-_DSN_ARN = "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:ducklake-neon-catalog-dsn-*"
+_NEON_KEY_ARN = "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/neon-api-key"
+_DSN_ARN = "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/ducklake-neon-catalog-dsn"
 _VALUE_ACTIONS = ("secretsmanager:getsecretvalue", "secretsmanager:batchgetsecretvalue")
 _RESERVED_LOCAL_MARKER = "local.convergence_writer_session_name"
 _SESSION_LOCAL_RE = re.compile(r'convergence_writer_session_name\s*=\s*"([^"]+)"')
@@ -73,6 +74,10 @@ _VALUES_RE = re.compile(r"\bvalues\s*=\s*\[(?P<body>.*?)\]", re.DOTALL)
 _ROLE_POLICY_RES_RE = re.compile(r'resource\s+"aws_iam_role_policy"\s+"(?P<name>\w+)"\s*\{')
 _ATTACHMENT_RES_RE = re.compile(r'resource\s+"aws_iam_role_policy_attachment"\s+"(?P<name>\w+)"\s*\{')
 _ROLE_REF_RE = re.compile(r"\brole\s*=\s*aws_iam_role\.(\w+)\b")
+_UNPARSED_DOC_RE = re.compile(r"\b(?:override_policy_documents|source_json|override_json)\s*=")
+_SOURCE_ASSIGN_RE = re.compile(r"\bsource_policy_documents\s*=")
+_PLANNER_ROLE_RE = re.compile(r'resource\s+"aws_iam_role"\s+"github_ci_planner"\s*\{')
+_ROLE_INLINE_RE = re.compile(r"\b(?:inline_policy|managed_policy_arns)\b")
 _SECRET_VERSION_DATA_RE = re.compile(r'^\s*data\s+"aws_secretsmanager_secret_version"', re.MULTILINE)
 
 
@@ -102,6 +107,7 @@ def _find_statements(body: str) -> list[dict]:
                 "sid": sid_m.group(1) if sid_m else None,
                 "effect": effect_m.group(1) if effect_m else "Allow",
                 "actions": _vir._QUOTED_RE.findall(actions_m.group("body")) if actions_m else [],
+                "actions_kind": _spg.read_field(stmt_body, "actions")[0],
                 "has_not_actions": bool(_NOT_ACTIONS_RE.search(stmt_body)),
                 "has_not_resources": bool(_NOT_RESOURCES_RE.search(stmt_body)),
                 "resources_raw": resources_m.group("body") if resources_m else None,
@@ -118,7 +124,11 @@ def _parse_documents(text: str) -> dict[str, dict]:
         body = _vir._extract_block(text, m.end() - 1)
         source_m = _vir._SOURCE_DOCS_RE.search(body)
         sources = _vir._SOURCE_DOC_REF_RE.findall(source_m.group("body")) if source_m else []
-        docs[m.group("name")] = {"sources": sources, "statements": _find_statements(body)}
+        unparsed = bool(_UNPARSED_DOC_RE.search(body))
+        if _SOURCE_ASSIGN_RE.search(body):
+            leftover = _vir._SOURCE_DOC_REF_RE.sub("", source_m.group("body")) if source_m else None
+            unparsed = unparsed or leftover is None or bool(re.sub(r"#[^\n]*", "", leftover).strip(" \t\r\n,"))
+        docs[m.group("name")] = {"sources": sources, "statements": _find_statements(body), "unparsed": unparsed}
     return docs
 
 
@@ -156,6 +166,21 @@ def _ssm_unconditioned_reads(allows: list[dict]) -> list[str]:
     return bad
 
 
+def _unparsed_documents(doc_name: str, docs: dict[str, dict], seen: set[str] | None = None) -> list[str]:
+    seen = set() if seen is None else seen
+    if doc_name in seen or doc_name not in docs:
+        return []
+    seen.add(doc_name)
+    found = [doc_name] if docs[doc_name]["unparsed"] else []
+    for source in docs[doc_name]["sources"]:
+        found.extend(_unparsed_documents(source, docs, seen))
+    return found
+
+
+def _covers_get_parameter(stmt: dict) -> bool:
+    return any(fnmatch.fnmatchcase("ssm:getparameter", a.lower()) for a in stmt["actions"])
+
+
 def _sids(statements: list[dict]) -> str:
     return ", ".join(s["sid"] or "<no-sid>" for s in statements)
 
@@ -177,18 +202,32 @@ def _check_policy(text: str, key: str, failed: list[str]) -> None:
         return
     allows = [s for s in statements if s["effect"] == "Allow"]
 
-    bad = [
-        s
-        for s in allows
-        if _can_return_value(s)
-        and not _has_reserved_condition(s)
-        and not (s["resources"] and set(s["resources"]) <= ALLOWED_UNCONDITIONED)
-    ]
+    unparsed = sorted(set(_unparsed_documents(doc_name, docs)))
+    if unparsed:
+        failed.append(
+            f"{key} {_PLANNER} resolves policy document(s) {unparsed!r} using override_policy_documents, source_json, "
+            "override_json or a source_policy_documents element that is not a data.aws_iam_policy_document.<name>.json "
+            "reference -- the check cannot parse them, so it fails closed"
+        )
+    role_m = _PLANNER_ROLE_RE.search(text)
+    if role_m and _ROLE_INLINE_RE.search(_vir._extract_block(text, role_m.end() - 1)):
+        failed.append(
+            f"{key} aws_iam_role.{_PLANNER} sets inline_policy or managed_policy_arns -- a second grant path the "
+            "check cannot see; fail closed"
+        )
+
+    indirect = [s for s in allows if s["actions_kind"] == "nonliteral"]
+    if indirect:
+        failed.append(
+            f"{key} {_PLANNER} Allow statement(s) whose actions are not a list of string literals (sid(s): "
+            f"{_sids(indirect)}) -- an indirect action list cannot be examined; fail closed"
+        )
+
+    bad = [s for s in allows if _can_return_value(s)]
     if bad:
         failed.append(
-            f"{key} {_PLANNER} has unconditioned Secrets Manager value read(s) outside the tfvars secret "
-            f"(sid(s): {_sids(bad)}) -- PR sessions must not read the Neon key, DSN, PAT or inference keys; "
-            "condition them on the reserved drift session (never widen ALLOWED_UNCONDITIONED)"
+            f"{key} {_PLANNER} has Secrets Manager value read(s) (sid(s): {_sids(bad)}) -- no Allow on the planner may "
+            "grant a Secrets Manager value verb, conditioned or not (Decision 237: read the SSM parameter instead)"
         )
 
     ssm_bad = _ssm_unconditioned_reads(allows)
@@ -203,14 +242,16 @@ def _check_policy(text: str, key: str, failed: list[str]) -> None:
         s
         for s in allows
         if _has_reserved_condition(s)
-        and _can_return_value(s)
+        and not s["has_not_actions"]
+        and _covers_get_parameter(s)
         and {_NEON_KEY_ARN, _DSN_ARN} <= set(s["resources"])
-        and any(a.lower() == "secretsmanager:getsecretvalue" for a in s["actions"])
+        and s["resources_raw"] is not None
+        and _spg.string_list(s["resources_raw"]) is not None
     ]
     if len(drift_reads) != 1:
         failed.append(
-            f"{key} expected exactly one {_PLANNER} Allow granting secretsmanager:GetSecretValue on both the "
-            f"Neon key and the catalog DSN under the reserved-session aws:userid condition, found {len(drift_reads)} "
+            f"{key} expected exactly one {_PLANNER} Allow granting ssm:GetParameter on both the Neon key and the "
+            f"catalog DSN parameters under the reserved-session aws:userid condition, found {len(drift_reads)} "
             "(without it the hourly drift run fails only after deploy)"
         )
 

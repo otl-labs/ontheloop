@@ -3,7 +3,7 @@
 # Telemetry write verbs get their own function, execution role and AWS_IAM Function URL so telemetry
 # identities never reach ops_* verbs and the shared catalog login. The function binds the production
 # telemetry catalog (ducklake_telemetry, Decision 230) and connects as the production scoped login
-# (aws_secretsmanager_secret.ducklake_telemetry_writer_prod_dsn); the smoke binding belongs to the twin
+# (the /secret/ production writer DSN parameter); the smoke binding belongs to the twin
 # (ducklake_telemetry_writer_smoke.tf, Decision 236), so this role holds the production binding's grants only and a
 # pin-back to smoke first reverts PLAN-telemetry-production-flip's narrow PR (else every append is AccessDenied).
 # Mirrors ducklake_maintenance_smoke.tf (the Decision 143 split precedent).
@@ -52,14 +52,6 @@ resource "aws_iam_role_policy" "ducklake_telemetry_writer" {
         Resource = ["${aws_cloudwatch_log_group.ducklake_telemetry_writer.arn}:*"]
       },
       {
-        # The production scoped catalog login only; never the shared ducklake-neon-catalog-dsn or the twin's smoke login.
-        Sid      = "TelemetryDsnRead"
-        Effect   = "Allow"
-        Action   = ["secretsmanager:GetSecretValue"]
-        Resource = [aws_secretsmanager_secret.ducklake_telemetry_writer_prod_dsn.arn]
-      },
-      {
-        # Decision 237: SSM twin of the Secrets Manager read above; secrets-to-ssm-retire removes the old one.
         Sid      = "TelemetryDsnParameterRead"
         Effect   = "Allow"
         Action   = ["ssm:GetParameter"]
@@ -147,7 +139,6 @@ resource "aws_lambda_function" "ducklake_telemetry_writer" {
       TELEMETRY_BLOB_ROOT           = local.ducklake_telemetry_blob_root
       DUCKLAKE_EXTENSION_DIRECTORY  = local.ducklake_extension_dir
       DUCKLAKE_FIELD_SEMANTICS_PATH = "/var/task/config/lambda/ducklake/field_semantics.yaml"
-      TELEMETRY_DSN_SECRET_ID       = aws_secretsmanager_secret.ducklake_telemetry_writer_prod_dsn.name
       TELEMETRY_DSN_PARAMETER       = local.secret_parameter_names.telemetry_writer_prod_dsn
     }
   }

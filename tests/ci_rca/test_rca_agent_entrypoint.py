@@ -67,7 +67,7 @@ def test_ci_rca_steps_script_is_in_the_executor_boundary() -> None:
     caps = yaml.safe_load((ROOT / "config/agent/executor/capabilities.yaml").read_text(encoding="utf-8"))
     patterns = caps["boundary_patterns"]
     assert "scripts/ci/ci_rca_steps.sh" in patterns
-    assert patterns[-1] == "scripts/ci/ci_rca_steps.sh"
+    assert patterns.index("scripts/ci/ci_rca_steps.sh") == patterns.index("persona_verdict") + 1
 
 
 def test_unknown_subcommand_exits_2(tmp_path: Path) -> None:
