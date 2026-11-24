@@ -1,0 +1,195 @@
+schema_version: 7
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: approved-text-lookup-workflow-runs
+intent: >-
+  Make the approved-text approval lookup read only the approval workflow's own runs, newest first, and stop at the first
+  approved match, so pr-validate stops failing sidecar plans with "approval UNVERIFIED (deadline exceeded)" while the
+  30s deadline and the fail-closed verdicts stay as they are (rec-5607).
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-approved-text-lookup-workflow-runs.yaml
+phase: >-
+  ad_hoc_rec (soft-warn exception category: rec-5607, High, a pr-validate flake on every sidecar plan). No tier_item is
+  claimed, so the Tier Item Freshness Gate is skipped; closes_criteria is empty.
+closes_criteria: []
+cites: [dec:246]
+amends: []
+introduces: []
+scope:
+  - file: scripts/roadmap/approved_text_github.py
+    action: Modify
+    purpose: >-
+      _list_runs reads {API}/repos/{repo}/actions/workflows/{WORKFLOW_FILE}/runs?event=workflow_dispatch&branch=main
+      &per_page=100&page=N (WORKFLOW_FILE is already defined and unused) and yields one page at a time instead of
+      returning every page. lookup() applies the existing filters (path, display_title, head_branch main,
+      _cannot_hold_approval, head_sha an ancestor of origin/main) page by page, checks at most CANDIDATE_RUNS viable runs
+      in total, and returns APPROVED at the first run whose approve job succeeded and whose approvals name an approver
+      for approved-text, without reading further pages. RUN_PAGES (10), CANDIDATE_RUNS (5), REQUEST_TIMEOUT (10) and
+      DEADLINE_SECONDS (30) are unchanged. Every GitHubError (a 404 for a missing workflow included) still reads
+      UNVERIFIED; no match within the bound still reads MISSING. The module docstring and lookup's docstring name the
+      workflow-scoped list.
+    new_imports: []
+  - file: tests/test_approved_text_github.py
+    action: Modify
+    purpose: >-
+      Replace test_the_run_list_is_the_repository_wide_endpoint_with_event_and_branch_filters with rec-5607's acceptance
+      node test_lookup_queries_the_approval_workflow_runs_and_stops_at_the_first_match: 300 approval-workflow runs whose
+      newest is the approved match; the verdict is APPROVED, exactly one run-list request is made, and it equals
+      {API}/repos/<repo>/actions/workflows/approved-text-approval.yml/runs?event=workflow_dispatch&branch=main&per_page=100&page=1.
+      Update the Api double's run_list_calls helper to match the workflow-scoped path, and
+      test_repo_argument_overrides_the_repository_identity to assert /repos/other-owner/other-repo/actions/workflows/.
+      Add test_lookup_stops_paging_once_a_page_holds_the_approved_run (match on page 2 of 3: exactly two run-list
+      requests). Existing nodes (past-first-page, newer waiting or rejected reruns, not-on-main, transport failure,
+      expired deadline, git-cannot-place) keep their assertions.
+    new_imports: []
+  - file: docs/contracts/ports.yaml
+    action: Modify
+    purpose: >-
+      Decision 275 byte budget: ports.yaml held 50238 of its 50251-byte budget at planning, and every amendment_log row
+      is already terse, so the edit is byte-neutral by citation (Decision 275 cl.3 second relief). Replace SA-05's
+      assumption text with exactly: "The approved-text approval's GitHub adapter assumes the approval workflow's own
+      runs list, newest first, scanned to its 1000 newest workflow_dispatch runs on main so an older approval reads
+      MISSING and fails closed; the run-jobs and run-approvals APIs; the repository from scripts.repo_identity or
+      --repo; can_admins_bypass false standing in for a reviewer read; a successful approve job as the decision's
+      \"successful run\" (wake job: PLAN-approved-text-wake-requires-approver); the run-name grammar; origin/main; and
+      approved-text-approval.yml." (folded >- at the file's width, 5 lines; the wake-job detail moves to its plan by
+      citation). Prepend one amendment_log row: {date: "2026-11-24", semantic_break: false, change_class: correction,
+      summary: "PLAN-approved-text-lookup-workflow-runs (rec-5607): SA-05 reads the workflow's own runs."}. Measured on
+      main at planning the result is 50250 bytes. If another plan's ports.yaml edit lands first and the file would
+      exceed its config/structural_size_budgets.yaml byte_budgets entry, shorten another row of this plan's own text by
+      citation; never a raise.
+    new_imports: []
+bundled_recommendations: [rec-5607]
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - "bin/venv-python -m pytest tests/test_approved_text_github.py::test_lookup_queries_the_approval_workflow_runs_and_stops_at_the_first_match -q passes (rec-5607's acceptance) and fails before the change."
+  - "Every node in tests/test_approved_text_github.py passes; no existing assertion is loosened."
+  - "A live session lookup of the approved sidecar persona-guidance-slots reads APPROVED in under 10s (it took 23.4s before the change)."
+  - "The first pr-validate run after the merge that performs an approval lookup reads APPROVED or MISSING, never UNVERIFIED (deadline exceeded); its run id is recorded."
+  - "rec-5607 is closed by the build's squash-merge Resolves trailer once its acceptance holds (Decision 201)."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: rec-5607's acceptance node passes.
+    command: bin/venv-python -m pytest tests/test_approved_text_github.py::test_lookup_queries_the_approval_workflow_runs_and_stops_at_the_first_match -q
+    expected: exit 0 with 1 passed; before the change the node does not exist and pytest exits non-zero
+    fix_if: the node fails; the lookup still reads the repository-wide list or reads past the first matching page
+    hermetic: true
+    expected_literals: ["1 passed"]
+    graduation: graduate
+    graduation_check_id: approved-text-lookup-workflow-runs-first-match
+  - step: 2
+    phase: pre-deploy
+    action: The other changed and standing nodes pass.
+    command: >-
+      bin/venv-python -m pytest
+      tests/test_approved_text_github.py::test_lookup_stops_paging_once_a_page_holds_the_approved_run
+      tests/test_approved_text_github.py::test_repo_argument_overrides_the_repository_identity
+      tests/test_approved_text_github.py::test_a_run_past_the_first_page_is_found
+      tests/test_approved_text_github.py::test_newer_waiting_and_rejected_reruns_do_not_hide_an_older_approved_run
+      tests/test_approved_text_github.py::test_an_expired_deadline_reads_unverified -q
+    expected: exit 0, no failures
+    fix_if: a node fails; paging, the candidate bound or the fail-closed verdicts regressed
+    hermetic: true
+    expected_literals: ["5 passed"]
+    graduation: waive
+    graduation_waiver_reason: Step 1 graduates the acceptance node; these nodes already run in the fast tier's own test selection.
+  - step: 3
+    phase: pre-deploy
+    action: SA-05 and its amendment_log entry name the workflow-scoped list and this plan, and ports.yaml stays within its Decision 275 byte budget.
+    command: >-
+      grep -q "approval workflow's own runs list, newest first" docs/contracts/ports.yaml &&
+      grep -q "PLAN-approved-text-lookup-workflow-runs (rec-5607)" docs/contracts/ports.yaml &&
+      test "$(wc -c < docs/contracts/ports.yaml)" -le "$(grep -E '^ +ports.yaml: [0-9]+' config/structural_size_budgets.yaml | head -1 | sed -E 's/^ +ports.yaml: ([0-9]+).*/\1/')" &&
+      echo ports-ok
+    expected: both greps succeed and ports.yaml is at or below its byte budget; prints ports-ok
+    fix_if: a grep fails (SA-05 or the entry not written) or ports.yaml exceeds its byte budget (apply the scope row's relief)
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Prose presence in a registry plus a size report; nothing executes SA-05's text.
+  - step: 4
+    phase: pre-deploy
+    action: Full tier, then HEAD attestation, after the build commit and rebase and before the push (handoff_policy); start it backgrounded from the top-level session with a 2 h limit.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: the full tier exits 0 and the validation result attests the current HEAD's tree
+    fix_if: any failure; fix and rerun the full tier from the start
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion).
+  - step: 5
+    phase: post-deploy
+    action: Live session lookup on main after the merge, against the real GitHub API, timed.
+    command: >-
+      git fetch origin main --quiet && start=$(date +%s) &&
+      bin/venv-python -m scripts.roadmap.approved_text_github check --slug persona-guidance-slots --repo otl-labs/ontheloop;
+      rc=$?; echo "elapsed=$(( $(date +%s) - start ))s rc=$rc"
+    expected: the lookup line reads APPROVED naming run 45414807671, rc=0, and elapsed is under 10s
+    fix_if: UNVERIFIED, MISSING, or elapsed 10s or more; report to the plan owner with the printed lines
+    hermetic: false
+  - step: 6
+    phase: post-deploy
+    action: CI real-run proof. The first pr-validate run after the merge that performs an approval lookup (a plan or build PR whose plan carries a sidecar, for example the rec-5569 build or an open sidecar plan PR's next push) is read and its run id recorded.
+    command: >-
+      Read that run's validate_plan_documents or validate_merge_step section with mcp__github__get_job_logs and record the
+      run id in the build's report.
+    expected: the approval line reads APPROVED or MISSING, never "UNVERIFIED (deadline exceeded)"
+    fix_if: UNVERIFIED; report the run id and the job log lines to the plan owner
+    hermetic: false
+  - step: 7
+    phase: post-deploy
+    action: rec-5607 closed by the build's squash-merge Resolves trailer once its acceptance holds.
+    command: >-
+      bin/venv-python -c "from src.common import ducklake_reader_client as rc; rows,_=rc.fetch_recs_by_ids(rc.make_reader(),['rec-5607']); print(rows[0]['id'], rows[0]['status'])"
+    expected: Prints rec-5607 closed.
+    fix_if: Still open after the closure job ran; read ci.yml's closure job log and report to the plan owner.
+    hermetic: false
+test_obligations:
+  - source: scripts/roadmap/approved_text_github.py
+    behavior: the lookup reads the approval workflow's own runs and stops at the first approved match
+    verification_step: 1
+    test_selector: tests/test_approved_text_github.py::test_lookup_queries_the_approval_workflow_runs_and_stops_at_the_first_match
+    red_green_expectation: red before (node absent; the lookup reads the repository-wide list), green after
+  - source: docs/contracts/ports.yaml
+    behavior: SA-05 records the workflow-scoped list and the new amendment_log entry names this plan
+    verification_step: 3
+    command: >-
+      grep -q "approval workflow's own runs list, newest first" docs/contracts/ports.yaml &&
+      grep -q "PLAN-approved-text-lookup-workflow-runs (rec-5607)" docs/contracts/ports.yaml
+    red_green_expectation: red before (SA-05 names the repository-wide list; no such entry), green after
+constraints:
+  - "The 30s DEADLINE_SECONDS, the 10s REQUEST_TIMEOUT, RUN_PAGES and CANDIDATE_RUNS are not raised; the fix removes requests, it does not grant more time."
+  - "Fail-closed verdicts are unchanged: any transport, HTTP (404 included), deadline or git failure reads UNVERIFIED; MISSING only when no approved run is found within the bound."
+  - "No caller (validate_plan_documents, validate_merge_step, _plan_sidecar_approval, the wake and approvals subcommands) changes; lookup's signature is unchanged."
+  - "No existing test assertion is loosened (Decisions 181, 235); the replaced node asserted the endpoint this plan retires."
+  - "No rescue agents or workaround loops (Decision 55)."
+context:
+  - "rec-5607 (High, S): pr-validate on PR #2430 (job 138527746052) failed with approval UNVERIFIED (deadline exceeded); a re-run passed. Main had 910 workflow_dispatch runs; a local lookup took 23.4s."
+  - "Probe 2026-11-24 (anonymous, session proxy): actions/workflows/approved-text-approval.yml/runs?event=workflow_dispatch&branch=main answers 200 with total_count 258, every run's path the approval workflow, newest first (45414807671 first); one page takes about 2.2s, the same as one repository-wide page, so the old lookup paid about 10 pages and the new one usually 1 page plus a jobs and an approvals read."
+  - "Why the repository-wide list was chosen (PLAN-approved-text-operator-approval context, 2026-11-04): the per-workflow endpoint answered 404 while main did not yet carry the workflow. Main has carried it since that plan's build, so the reason no longer holds; a 404 now still reads UNVERIFIED."
+  - "Bound semantics: SA-05's 1000-run window now counts approval-workflow runs only, so an approval falls out of the window much later; an approval past it still reads MISSING and fails closed."
+  - "Ownership: coordinator log #1963 names no other project on approved-text files; no open PR touches approved_text_github.py, its test or ports.yaml SA-05 (checked 2026-11-24)."
+  - "Graduated shard approved-text-github-adapter (node_id the whole tests/test_approved_text_github.py) is kept: the file stays and every node in it passes."
+  - "Shared file: eight unbuilt plans also scope docs/contracts/ports.yaml (plan_obligations); whichever builds second rebases. Edits here are SA-05's text and one amendment_log row."
+  - "Decision 246 reversal condition wedge (an approved sidecar PR stays red because the lookup misreads GitHub's record: fix the adapter) is what this plan answers; cl.3's an-unreadable-record-fails holds (every failure, a 404 included, reads UNVERIFIED)."
+  - "Decision-scout r1 FLAGS_FOUND, CITE dec:246. WARN 275 (ports.yaml byte budget; terse-row relief unavailable): adopted, the SA-05 edit is byte-neutral by citation (scope row 3). RELATED: 212, 211, 100, 279 (no sidecar: ports.yaml is notice class), 181/235, 233, 132/244, 55, 201."
+  - "Decisions triaged: 228 of 228. Roadmap items intersected: 4; CONFLICT: 0; RELATED: 4."
+  - "red_overlap (2026-11-24 16:16Z): {\"verdict\": \"clear\", \"reds\": []}."
+  - "Serves: NS.9 3/5 -- keeps the GitHub-held human approval gate reliable without widening or narrowing it."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:8474159388863c2b70624dca8c73576ad4a1e214be9161b430b5aa2e1b80f010"}  # pragma: allowlist secret
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "scripts/roadmap/approved_text_github.py -- workflow-scoped, page-at-a-time _list_runs; lookup stops at the first approved match (scope row 1)."
+  - "tests/test_approved_text_github.py -- the acceptance node, the paging node, helper and repo-override updates (scope row 2)."
+  - "docs/contracts/ports.yaml -- SA-05 text and change-log row (scope row 3)."
+  - "Execute Verification Plan steps 1-4; loop until pass; on unrecoverable failure stop and RCA (Decision 55)."
+  - "Merge with Resolves: rec-5607 in the squash body; then steps 5-7 and report their results with the run ids."
+  - "Report: what was implemented, verification results"
