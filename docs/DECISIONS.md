@@ -2,6 +2,87 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 282: An amendment_log over its full-row limit shrinks when a row is added -- the change also compacts one more row the compaction tool can select, and an old row changes only by a lossless compaction (amends Decision 275) (Decided)
+
+```yaml
+number: 282
+status: Decided
+decided_date: "2026-11-24"
+kind:
+  value: direction
+  justification: >-
+    It amends direction Decision 275 (Decision 279 cl.2), and clause 1 sets a human gate: keeping more than five full
+    rows, or any other decay step, needs a new Decision.
+amends: [275]
+significance:
+  value: numbered_decision
+  justification: >-
+    It re-measures Decision 275 cl.4's ratified hold and adds a rule for changing old rows; a dated note on Decision
+    275 (considered) cannot re-measure a ratified clause (Decision 276), and contract-population.yaml (considered)
+    holds the values, not the authority to tighten the gate.
+delegates:
+  - key: docs/contracts/contract-population.yaml#amendment_log_retention.keep_full
+    change_rule: contract_amendment
+    bounds: {min: 3, max: 5}
+```
+
+**Status:** Decided
+**Date:** 2026-11-24
+**Warehouse ID:** dec-282 (per Decision 84 backfill)
+
+**Problem:** Decision 275 cl.4 holds a log at its base count of full rows when a row is added, so the 27 contracts
+over five full rows do not shrink unless someone compacts them: 151 rows sit past the newest five, 107 of them compactable by the tool (main
+30a7a678). Old rows reworded by hand can drop the plan, rec or Decision a terse row exists to keep, and no check sees it.
+
+**Intent:** A contract's amendment_log returns to its newest N full rows one change at a time, and every compacted row
+keeps its pointers.
+
+**Decision:**
+1. **Decay.** A change that adds a top-level amendment_log row leaves at most N full rows, or one fewer than the base
+   had if that is more. N is docs/contracts/contract-population.yaml amendment_log_retention keep_full (today 5); a
+   value outside 3 to 5 is a new Decision amending this one. The decay binds only while the compaction tool
+   (scripts.checks.contracts.amendment_compact) selects a row on the file as changed; where it selects none, Decision 275
+   cl.4's hold still binds. One decay per change, however many rows it adds. The failure names the tool command; CI
+   never rewrites a contract.
+2. **Newest.** Full rows rank by date; on equal dates the later row in the file is the older. The tool compacts the
+   oldest first and never the newest N.
+3. **Lossless.** In any change, an existing full row stays as it was, compactable if it was, or becomes a terse row
+   with the same date, semantic_break and change_class that keeps every pointer any of its text named, as the tool
+   reads pointers. Terse rows and rows marking a semantic break do not change.
+4. **New rows.** A new top-level row not marking a semantic break is terse or a full row the tool can compact later,
+   so it carries only the terse row's keys and names its plan, rec or Decision; other detail goes there.
+5. **Amends Decision 275 cl.4.** Its hold stands where the tool selects nothing; this Decision adds clauses 1-4. Its
+   exemptions stand: rows marking a semantic break, field-level logs and north-star.yaml.
+
+**Options considered:** one decay per added row -- rejected: a change adding several rows would compact many; decay
+on any edit -- rejected: it would tax edits that add no row and log-only compactions; counting every compactable row
+-- rejected: rows inside the newest N cannot be compacted, so the rule could demand the impossible; counting the
+base's selectable rows -- rejected: a new row changes which rows sit past the newest N; a delegated decay step -- rejected: the step is the ruling the operator chose; a warning period -- rejected:
+the remedy is one printed command; a CI autofix -- rejected: it writes to other projects' branches; a dated note on
+Decision 275 -- rejected: a note cannot re-measure a ratified clause.
+
+**Coverage (Decision 181 cl.2):** cl.1-4 -- validate_contract_drift (Pass 2); cl.5 -- the dated note on Decision 275.
+Residual: rows the tool refuses (44 past the newest five today) stay full until compacted by hand under clause 3;
+standards census row S8 tracks the files over the limit; whether a row marks a semantic break is judgement, owned by
+rec-5298.
+
+```yaml reversal-conditions
+decision: 282
+review_by: 2027-02-24
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: decay-too-slow
+    kind: manual
+    description: "60 days after install, changes that add a row have compacted under a third of the full rows past the newest N at install (rec-5454's sweep not counted): re-decide the decay step."
+  - id: refused-grows
+    kind: manual
+    description: "More than five full top-level rows not marking a semantic break and added after install are rows the tool refuses: clauses 3-4 are not holding; re-decide them."
+```
+
+**Related:** Decision 275 (amended: cl.4), 240 cl.4, 276, 278, 166; rec-5452, rec-5453, rec-5454.
+
+---
+
 ## Decision 281: Two-tier CI in one entry -- PR CI gates on a diff-aware fast tier whose selection only grows and whose budget fails the run, the full tier runs after merge, and a red on main is fixed forward (supersedes Decisions 73, 135 and 153) (Decided)
 
 ```yaml
@@ -704,6 +785,8 @@ conditions:
 ```
 
 **Related:** Decisions 166 and 240 (amended), 86, 128, 165, 168, 179, 181 cl.2; rec-5262, rec-4119.
+
+> **Amended by Decision 282 (2026-11-24):** clause 4's hold now binds only where the compaction tool selects no row; otherwise a change that adds a row also compacts one more, and an old row changes only by a lossless compaction (Decision 282 cl.1-4).
 
 ---
 
