@@ -626,3 +626,41 @@ def test_bridge_teardown_cancellation_after_end_propagates(tmp_path, monkeypatch
     with pytest.raises(asyncio.CancelledError):
         _warehouse(tmp_path, [final()], on_event=seen.append)
     assert fired and len([e for e in seen if "turns_used" in e]) == 1
+
+
+def test_role_input_starts_on_that_role_without_fail_over():
+    for role in (FB, "primary"):
+        t = T([final(attempts=(attempt(role),))])
+        _, events = drive(t, role=role)
+        turn = [e for e in events if "turn" in e][0]
+        assert (t.calls[0]["role"], t.calls[0]["fail_over"]) == (role, False)
+        assert (turn["role"], turn["failed_over"]) == (role, False)
+    t = T([error("outage", (attempt(outcome="outage"),) * 3)])
+    with pytest.raises(RunAborted):
+        drive(t, role="primary")
+    assert len(t.calls) == 1 and t.calls[0]["fail_over"] is False and t.calls[0]["role"] == "primary"
+    t = T([final()])
+    drive(t)
+    assert t.calls[0]["fail_over"] is True
+
+
+def test_role_input_refusal_reservation_and_probe_turn(tmp_path, monkeypatch):
+    for bad in ("other", ""):
+        t = T([])
+        with pytest.raises(RunRefused, match="primary.*warm_fetched_escape_hatch"):
+            drive(t, role=bad)
+        assert not t.calls
+    t = T([])
+    result, _ = drive(t, contract=fakes.budget_contract(tmp_path, 1), role=FB)
+    assert result["failure"] == "budget_exhausted" and "fallback probe" in result["detail"] and not t.calls
+    probe = fakes.record(FB)
+    t = T([error("empty_output", (attempt(FB, "empty_output"),), probe), final(attempts=(attempt(FB),), probe_record=probe)])
+    result, events = drive(t, contract=fakes.budget_contract(tmp_path, 5), role=FB)
+    turns = [e for e in events if "turn" in e]
+    assert t.calls[0]["max_attempts"] == min(3, 5 - 1) == 3 and t.calls[1]["max_attempts"] == 3
+    assert [(x["probe_turn"], x["failed_over"]) for x in turns] == [(1, False), (1, False)]
+    assert events[-1]["turns_used"] == 4
+    _fill_cut(monkeypatch)
+    cut = fakes.Fill((attempt(FB, "outage"),), None, None, probe)
+    _, events = drive(fakes.CapturingTransport([cut]), role=FB, clock=fakes.FakeClock())
+    assert [e["probe_turn"] for e in events if "turn" in e] == [1]

@@ -1,8 +1,8 @@
 """GitHub change-surface adapter for the approved-text approval (rec-4769; ports.yaml SA-05).
 
 The operator approves a sidecar on the `approved-text` Environment gate of an approved-text-approval.yml run
-dispatched from main; this adapter reads GitHub's record of that approval. Imports only the standard library,
-approved_words, approved_text_provenance and scripts.repo_identity.
+dispatched from main; this adapter reads GitHub's record of that approval from the approval workflow's own runs list.
+Imports only the standard library, approved_words, approved_text_provenance and scripts.repo_identity.
 
 CLI (each subcommand takes --repo OWNER/NAME; omitted, it defaults to repo_identity.full_name(): GITHUB_REPOSITORY in
 CI, the repository fallback elsewhere):
@@ -20,6 +20,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -112,17 +113,17 @@ def _is_ancestor(root: Path, sha: str) -> bool:
     raise GitHubError(f"git cannot place {sha[:12]} against origin/main: {result.stderr.strip()[:120]}")
 
 
-def _list_runs(repo: str, deadline: prov.Deadline) -> list[dict[str, Any]]:
-    runs: list[dict[str, Any]] = []
+def _list_runs(repo: str, deadline: prov.Deadline) -> Iterator[list[dict[str, Any]]]:
     for page in range(1, RUN_PAGES + 1):
-        body = _get(f"{API}/repos/{repo}/actions/runs?event=workflow_dispatch&branch=main&per_page=100&page={page}", deadline)
+        query = f"event=workflow_dispatch&branch=main&per_page=100&page={page}"
+        url = f"{API}/repos/{repo}/actions/workflows/{WORKFLOW_FILE}/runs?{query}"
+        body = _get(url, deadline)
         batch = body.get("workflow_runs") if isinstance(body, dict) else None
         if not isinstance(batch, list):
             raise GitHubError("runs list has no workflow_runs array")
-        runs += [r for r in batch if isinstance(r, dict)]
+        yield [r for r in batch if isinstance(r, dict)]
         if len(batch) < 100:
-            break
-    return runs
+            return
 
 
 def _cannot_hold_approval(run: dict[str, Any]) -> bool:
@@ -155,27 +156,34 @@ def _approver(entries: list[dict[str, Any]]) -> str | None:
 
 
 def lookup(slug: str, approved: str, root: Path, deadline: prov.Deadline, repo: str | None = None) -> Verdict:
-    """APPROVED only for a main-dispatched run of the approval workflow with this title, a successful approve job and
-    an approved entry for approved-text; UNVERIFIED on any transport, deadline or git failure; else MISSING."""
+    """APPROVED only for a main-dispatched run in the approval workflow's own runs list (newest first, read a page at a
+    time) with this title, a successful approve job and an approved entry for approved-text; the first such run ends
+    the lookup. At most CANDIDATE_RUNS viable runs are checked across pages; once spent no further page is read and
+    no further git placement is made. UNVERIFIED on any transport, deadline or git failure before a match; else
+    MISSING."""
     repo = repo or repo_identity.full_name()
     title = run_title(slug, approved)
+    checked = 0
     try:
-        candidates = [
-            r
-            for r in _list_runs(repo, deadline)
-            if r.get("path") == WORKFLOW_PATH
-            and r.get("display_title") == title
-            and r.get("head_branch") == "main"
-            and not _cannot_hold_approval(r)
-        ]
-        viable = [r for r in candidates if isinstance(r.get("head_sha"), str) and _is_ancestor(root, r["head_sha"])]
-        for run in viable[:CANDIDATE_RUNS]:
-            run_id = run.get("id")
-            if not isinstance(run_id, int) or not _approve_job_succeeded(repo, run_id, deadline):
-                continue
-            approver = _approver(approvals(repo, run_id, deadline))
-            if approver:
-                return Verdict(prov.APPROVED, f"run {run_id} approver {approver}")
+        for batch in _list_runs(repo, deadline):
+            for run in batch:
+                if not (
+                    run.get("path") == WORKFLOW_PATH
+                    and run.get("display_title") == title
+                    and run.get("head_branch") == "main"
+                    and not _cannot_hold_approval(run)
+                    and isinstance(run.get("head_sha"), str)
+                    and _is_ancestor(root, run["head_sha"])
+                ):
+                    continue
+                checked += 1
+                run_id = run.get("id")
+                if isinstance(run_id, int) and _approve_job_succeeded(repo, run_id, deadline):
+                    approver = _approver(approvals(repo, run_id, deadline))
+                    if approver:
+                        return Verdict(prov.APPROVED, f"run {run_id} approver {approver}")
+                if checked >= CANDIDATE_RUNS:
+                    return Verdict(prov.MISSING, f"no approved run titled `{title}` on main")
     except GitHubError as exc:
         return Verdict(prov.UNVERIFIED, str(exc))
     return Verdict(prov.MISSING, f"no approved run titled `{title}` on main")

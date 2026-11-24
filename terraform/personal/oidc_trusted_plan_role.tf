@@ -74,21 +74,9 @@ data "aws_iam_policy_document" "github_ci_trusted_plan" {
   }
 
   statement {
-    # The Neon provider key and catalog DSN for the plan's refresh. No condition: the role has one
-    # trusted subject.
-    sid     = "PlanSecretValueRead"
-    effect  = "Allow"
-    actions = ["secretsmanager:GetSecretValue"]
-    resources = [
-      "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:neon-api-key-*",
-      "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:ducklake-neon-catalog-dsn-*",
-    ]
-  }
-
-  statement {
-    # Decision 237 (trailer 2026-10-29): the SSM twin of PlanSecretValueRead, for the same single trusted subject.
-    # secrets-to-ssm-retire deletes PlanSecretValueRead. Needed once a full refresh decrypts the DSN parameter and
-    # once scripts/ci/neon_api_key.sh reads SSM.
+    # Decision 237: the Neon provider key and catalog DSN for the plan's refresh, the role's only value read. No
+    # condition: the role has one trusted subject. Needed once a full refresh decrypts the DSN parameter and once
+    # scripts/ci/neon_api_key.sh reads SSM.
     sid     = "PlanSecretParameterRead"
     effect  = "Allow"
     actions = ["ssm:GetParameter"]

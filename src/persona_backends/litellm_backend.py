@@ -76,6 +76,7 @@ class _Run:
         wall: Callable[[], float],
         head: dict[str, Any],
         tools: list[dict[str, Any]],
+        role: str | None = None,
     ) -> None:
         self.loaded = loaded
         self.blobs = {name: materialised_input[name] for name in loaded.blob_names if name in materialised_input}
@@ -89,7 +90,8 @@ class _Run:
         self.events: list[dict[str, Any]] = []
         self.turns_used = 0
         self.revisions = 0
-        self.role = "primary"
+        self.role = role or "primary"
+        self.pinned = role is not None
         self.first = True
         self.messages: list[dict[str, Any]] = [
             {"role": "system", "content": loaded.prompt},
@@ -181,8 +183,11 @@ class _Run:
 
     async def step(self, remaining: float) -> dict[str, Any] | None:
         left = self.loaded.max_turns - self.turns_used
-        fail_over = self.first and self.role == "primary" and left >= 3
-        allowed = min(3, (left - 1) // 2) if fail_over else min(3, left)
+        fail_over = not self.pinned and self.first and self.role == "primary" and left >= 3
+        reserve = 1 if self.pinned and self.first and self.role == _FALLBACK else 0
+        if left <= reserve:
+            return self.budget_failure("max_turns leaves no turn for the fallback probe")
+        allowed = min(3, (left - 1) // 2) if fail_over else min(3, left - reserve)
         started = self.now_ms()
         upper = allowed + 1 + allowed if fail_over else allowed
         capture = ev.Capture()
@@ -231,10 +236,10 @@ class _Run:
             and (a["attempt"] if isinstance(a, dict) else a.attempt) >= 1
             for a in entries
         )
-        failed_over = self.role == "primary" and sent
+        failed_over = not self.pinned and self.role == "primary" and sent
         if failed_over:
             self.role = _FALLBACK
-        probe = 1 if failed_over else 0
+        probe = int(capture.probe_record is not None) if self.pinned else int(failed_over)
         self.turns_used += len(entries) + probe
         record = None if capture.record is None else dataclasses.asdict(capture.record)
         self.transport_turn(entries, True, probe, started, "transport_error", capture, record=record, failed_over=failed_over)
@@ -274,10 +279,12 @@ class _Run:
         self.first = False
         known = bool(attempts)
         primary_outages = sum(1 for a in attempts if a.role == "primary" and a.outcome == "outage")
-        failed_over = any(a.role == _FALLBACK for a in attempts) or (fail_over and primary_outages == allowed and known)
+        failed_over = not self.pinned and (
+            any(a.role == _FALLBACK for a in attempts) or (fail_over and primary_outages == allowed and known)
+        )
         if kind == "fallback_unavailable":
             failed_over = False
-        probe = 1 if failed_over else 0
+        probe = int(getattr(exc, "probe_record", None) is not None) if self.pinned else int(failed_over)
         self.turns_used += len(attempts) + probe if known else upper
         if failed_over:
             self.role = _FALLBACK
@@ -298,7 +305,7 @@ class _Run:
 
     async def on_result(self, result: Any, started: int) -> dict[str, Any] | None:
         returned = self.now_ms()
-        probe = 1 if result.failed_over else 0
+        probe = int(result.probe_record is not None) if self.pinned else int(bool(result.failed_over))
         self.turns_used += len(result.attempts) + probe
         if result.failed_over:
             self.role = _FALLBACK
@@ -376,11 +383,18 @@ async def run_persona(
     wall: Callable[[], float] = time.time,
     mcp_server: Callable[[], StdioServerParameters] | None = None,
     mcp_errlog: TextIO | None = None,
+    role: str | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Run a persona; a given role pins the run to it (no in-process fail-over).
+
+    A run started on the fallback role reserves one turn for the cold-start probe, so max_turns 1 is refused by design.
+    """
     if backend != "litellm":
         raise RunRefused(f"backend {backend} is not built by this backend (claude_cli is T4.27's, codex_cli is reserved)")
     if workspace is not None:
         raise RunRefused("no workspace capability is built (T4.15:c3)")
+    if role is not None and role not in ("primary", _FALLBACK):
+        raise RunRefused(f"role {role!r} is not one of primary, {_FALLBACK}")
     loaded = load(Path(contract_path))
     tools = [read_input.tool_spec(loaded.blob_names)] if loaded.blob_names else []
     head = ev.header(
@@ -392,7 +406,7 @@ async def run_persona(
         int(wall() * 1000),
         ev.tools_sha256(tools),
     )
-    run = _Run(loaded, materialised_input, transport, on_event, max_tokens, clock, wall, head, tools)
+    run = _Run(loaded, materialised_input, transport, on_event, max_tokens, clock, wall, head, tools, role)
     refusal = _input_check(loaded, materialised_input)
     if refusal is not None:
         return run.end(refusal), run.events
