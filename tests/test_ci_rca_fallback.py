@@ -411,8 +411,10 @@ def test_workflow_wiring() -> None:
     assert fb["run"].strip().splitlines()[-1].endswith('>> "$GITHUB_OUTPUT"') and "|" not in fb["run"]
     mark = steps["mark_rca"]
     assert "steps.fallback.outputs.marked == 'true'" in mark["if"] and "!cancelled()" in mark["if"]
-    assert "scripts.ci_rca.fallback pairs" in mark["run"] and "scripts.ci_rca.filing --all" in mark["run"]
-    assert "\n  " not in "".join(ln for ln in mark["run"].splitlines() if "fallback pairs" in ln)
+    script = (ROOT / "scripts/ci/ci_rca_steps.sh").read_text(encoding="utf-8")
+    mark_fn = script[script.index("mark() {") : script.index("case ")]
+    assert "scripts.ci_rca.fallback pairs" in mark_fn and "scripts.ci_rca.filing --all" in mark_fn
+    assert "\n  " not in "".join(ln for ln in mark_fn.splitlines() if "fallback pairs" in ln)
 
 
 def test_contract_names_the_module_and_projection() -> None:

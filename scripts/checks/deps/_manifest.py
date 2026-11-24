@@ -121,4 +121,20 @@ ENTRIES: tuple[Entry, ...] = (
         ),
         full_segment="full_after_lint",
     ),
+    Entry(
+        name="validate_fast_tier",
+        module="scripts.checks.deps.validate_fast_tier",
+        attr="validate_fast_tier",
+        pre=True,
+        pre_globs=(
+            "docs/contracts/fast-tier.yaml",
+            ".github/workflows/ci.yml",
+            "scripts/checks/deps/affected_tests.py",
+            "scripts/checks/deps/selection_budget.py",
+            "scripts/checks/deps/validate_fast_tier.py",
+            "scripts/checks/_common.py",
+            "scripts/checks/registry.py",
+        ),
+        full_segment="full_after_lint",
+    ),
 )

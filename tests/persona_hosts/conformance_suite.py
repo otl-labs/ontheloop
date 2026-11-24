@@ -10,9 +10,8 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import subprocess
-import tempfile
+import sys
 import time
 import uuid
 from collections.abc import Callable, Iterator
@@ -24,15 +23,32 @@ import yaml
 
 from src.persona_hosts.image_pin import load_pin
 from src.persona_hosts.local_container import build_image, run_argv, run_image
-from src.turn_capture.host_run import LOCAL_RUNTIMES, LocalRun, parse_persona_host_run
+from src.turn_capture.host_run import LOCAL_RUNTIMES, LocalRun, parse_persona_host_run, render_host_run_ref
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 ADAPTERS: dict[str, Callable[..., Any]] = {"local_container": run_image}
 ARGV_BUILDERS: dict[str, Callable[..., list[str]]] = {"local_container": run_argv}
+
+
+def _local_container_cli(
+    image: str, persona: str, input_path: Path, out: Path, env: dict[str, str], network: str
+) -> list[str]:
+    return [
+        sys.executable, "-m", "src.persona_hosts.local_container.cli", "--image", image, "--persona", persona,
+        "--input", str(input_path), "--out", str(out), "--project-ref", PROJECT_REF, "--agent", AGENT,
+        "--key-variable", env["key"], "--base-url-variable", env["base"], "--network", network, "--timeout", "300",
+    ]  # fmt: skip
+
+
+# One entry per adapter, never a skip: the CLI leg stays part of the port's one suite (Decision 212 cl.1). A local twin's
+# CLI is a measured caller, not a ports.yaml required verb.
+CLI_BUILDERS: dict[str, Callable[..., list[str]]] = {"local_container": _local_container_cli}
 DUMMY_KEY = "dummy-conformance-key-0000"
 STUB_PORT = 8080
-FIXTURE = "fixture_persona"
+FIXTURE = "canary_persona"
+AGENT = "canary-persona"
+PROJECT_REF = "synthetic:conformance"
 
 
 def _docker(*args: str, check: bool = True, timeout: int = 600) -> subprocess.CompletedProcess[str]:
@@ -68,13 +84,6 @@ def _base_image() -> str:
     return match.group(1)
 
 
-def _provider_with_fixture() -> str:
-    data = _config("docs/contracts/inference-provider.yaml")
-    personas = data["model_id_formats"]["litellm_persona_selection"]["personas"]
-    personas[FIXTURE] = json.loads(json.dumps(personas["plan_critic"]))
-    return yaml.safe_dump(data, sort_keys=False)
-
-
 @pytest.fixture(scope="module")
 def daemon() -> None:
     proc = _docker("info", check=False, timeout=60)
@@ -82,49 +91,32 @@ def daemon() -> None:
         pytest.fail(f"docker unreachable: {proc.stderr.strip()[-300:]}")
 
 
+def _teardown_images(image_id: str, prebuilt: bool) -> list[str]:
+    """A prebuilt image is an input the suite never removes; a tree-built one is removed so no run leaves it dangling."""
+    return [] if prebuilt else [image_id]
+
+
+def test_teardown_keeps_a_prebuilt_image() -> None:
+    assert _teardown_images("sha256:" + "a" * 64, prebuilt=True) == []
+    assert _teardown_images("sha256:" + "a" * 64, prebuilt=False) == ["sha256:" + "a" * 64]
+
+
 @pytest.fixture(scope="module")
-def image_id(daemon: None) -> str:
+def image_id(daemon: None) -> Iterator[str]:
     prebuilt = os.environ.get("PERSONA_IMAGE_UNDER_TEST")
     if prebuilt is None:
-        return build_image(ROOT)
-    if not re.fullmatch(r"sha256:[0-9a-f]{64}", prebuilt):
-        pytest.fail(f"PERSONA_IMAGE_UNDER_TEST is not sha256:<64 hex>: {prebuilt!r}")
-    if _docker("image", "inspect", prebuilt, check=False).returncode != 0:
-        pytest.fail(f"PERSONA_IMAGE_UNDER_TEST names no local image: {prebuilt}")
-    return prebuilt
-
-
-def _teardown_tags(tag: str, base_tag: str, prebuilt: bool) -> list[str]:
-    """A prebuilt image is an input: its base tag may be the only ref keeping it, so the suite never untags it."""
-    return [tag] if prebuilt else [tag, base_tag]
-
-
-def test_a_prebuilt_image_keeps_its_base_tag() -> None:
-    assert _teardown_tags("child:1", "base:1", prebuilt=True) == ["child:1"]
-    assert _teardown_tags("child:1", "base:1", prebuilt=False) == ["child:1", "base:1"]
-
-
-@pytest.fixture(scope="module")
-def fixture_image(image_id: str) -> Iterator[str]:
-    base_tag = f"persona-image-under-test:{image_id.split(':')[-1][:12]}"
-    tag = f"persona-fixture-image:{uuid.uuid4().hex[:12]}"
-    _docker("tag", image_id, base_tag)
-    context = Path(tempfile.mkdtemp(prefix="persona-fixture-ctx-"))
+        image = build_image(ROOT)
+    else:
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", prebuilt):
+            pytest.fail(f"PERSONA_IMAGE_UNDER_TEST is not sha256:<64 hex>: {prebuilt!r}")
+        if _docker("image", "inspect", prebuilt, check=False).returncode != 0:
+            pytest.fail(f"PERSONA_IMAGE_UNDER_TEST names no local image: {prebuilt}")
+        image = prebuilt
     try:
-        (context / "rendered").mkdir()
-        fixtures = ROOT / "tests/fixtures/persona_backends"
-        shutil.copy(fixtures / "fixture_persona.yaml", context / "fixture_persona.yaml")
-        shutil.copy(fixtures / "rendered/fixture_persona.txt", context / "rendered/fixture_persona.txt")
-        shutil.copy(HERE / "fixture_image/Dockerfile", context / "Dockerfile")
-        (context / "inference-provider.yaml").write_text(_provider_with_fixture(), encoding="utf-8")
-        _docker("build", "--build-arg", f"BASE={base_tag}", "-t", tag, str(context))
-        image = _docker("image", "inspect", "--format", "{{.Id}}", tag).stdout.strip()
         yield image
     finally:
-        shutil.rmtree(context, ignore_errors=True)
-        _docker(
-            "rmi", "-f", *_teardown_tags(tag, base_tag, os.environ.get("PERSONA_IMAGE_UNDER_TEST") is not None), check=False
-        )
+        for ref in _teardown_images(image, prebuilt is not None):
+            _docker("rmi", ref, check=False)
 
 
 @pytest.fixture(scope="module")
@@ -193,10 +185,10 @@ def _run(adapter: str, image: str, persona: str, payload: dict[str, Any], env: d
 
 
 def test_complete_input_returns_a_valid_success(
-    adapter: str, fixture_image: str, env: dict[str, str], network: str, stub: str
+    adapter: str, image_id: str, env: dict[str, str], network: str, stub: str
 ) -> None:
     before = _hits(stub)
-    result = _run(adapter, fixture_image, FIXTURE, _input("input_complete.json"), env, network)
+    result = _run(adapter, image_id, FIXTURE, _input("input_complete.json"), env, network)
     assert result.exit_code == 0, result.stderr
     assert result.result is not None and result.result["outcome"] == "success"
     assert result.result["verdict"] in {"PROCEED", "REVISE"}
@@ -207,38 +199,38 @@ def test_complete_input_returns_a_valid_success(
 
 
 def test_run_returns_a_host_run_sidecar_the_producer_roots(
-    adapter: str, fixture_image: str, env: dict[str, str], network: str
+    adapter: str, image_id: str, env: dict[str, str], network: str
 ) -> None:
     result = ADAPTERS[adapter](
-        fixture_image,
+        image_id,
         FIXTURE,
         _input("input_complete.json"),
         key_variable=env["key"],
         base_url_variable=env["base"],
         network=network,
         timeout_s=300,
-        project_ref="example/project",
-        agent="plan-critique",
+        project_ref=PROJECT_REF,
+        agent=AGENT,
     )
     host = parse_persona_host_run(result.host_run)
     assert host is not None, result.host_run
     if adapter in LOCAL_RUNTIMES:
         assert isinstance(host, LocalRun) and host.runtime == adapter
-    assert (host.project_ref, host.agent) == ("example/project", "plan-critique")
+    assert (host.project_ref, host.agent) == (PROJECT_REF, AGENT)
 
 
 def test_incomplete_input_fails_without_a_provider_call(
-    adapter: str, fixture_image: str, env: dict[str, str], network: str, stub: str
+    adapter: str, image_id: str, env: dict[str, str], network: str, stub: str
 ) -> None:
     before = _hits(stub)
-    result = _run(adapter, fixture_image, FIXTURE, _input("input_incomplete.json"), env, network)
+    result = _run(adapter, image_id, FIXTURE, _input("input_incomplete.json"), env, network)
     assert result.exit_code == 0, result.stderr
     assert result.result is not None and result.result["failure"] == "input_incomplete"
     assert _hits(stub) == before
 
 
-def test_unknown_persona_exits_2(adapter: str, fixture_image: str, env: dict[str, str], network: str) -> None:
-    result = _run(adapter, fixture_image, "no_such_persona", _input("input_complete.json"), env, network)
+def test_unknown_persona_exits_2(adapter: str, image_id: str, env: dict[str, str], network: str) -> None:
+    result = _run(adapter, image_id, "no_such_persona", _input("input_complete.json"), env, network)
     assert result.exit_code == 2
 
 
@@ -249,25 +241,60 @@ def _probe(adapter: str, image: str, network: str, code: str) -> subprocess.Comp
     return subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
 
 
-def test_process_is_non_root_and_cannot_write_the_app_tree(adapter: str, fixture_image: str, network: str) -> None:
+def test_process_is_non_root_and_cannot_write_the_app_tree(adapter: str, image_id: str, network: str) -> None:
     code = (
         "import os\nprint(os.getuid())\ntry:\n    open('/app/probe','w')\n    print('WROTE')\n"
         "except OSError:\n    print('DENIED')"
     )
-    out = _probe(adapter, fixture_image, network, code)
+    out = _probe(adapter, image_id, network, code)
     assert out.stdout.split() == ["10001", "DENIED"], out.stderr
 
 
-def test_dummy_key_never_reaches_stdout_or_events(adapter: str, fixture_image: str, env: dict[str, str], network: str) -> None:
-    result = _run(adapter, fixture_image, FIXTURE, _input("input_complete.json"), env, network)
+def test_dummy_key_never_reaches_stdout_or_events(adapter: str, image_id: str, env: dict[str, str], network: str) -> None:
+    result = _run(adapter, image_id, FIXTURE, _input("input_complete.json"), env, network)
     assert result.exit_code == 0, result.stderr
     assert DUMMY_KEY not in json.dumps(result.result) + json.dumps(result.events) + result.stderr
 
 
-def test_egress_to_a_public_address_is_denied(adapter: str, fixture_image: str, network: str) -> None:
+def test_egress_to_a_public_address_is_denied(adapter: str, image_id: str, network: str) -> None:
     code = (
         "import socket\ntry:\n    socket.create_connection(('1.1.1.1', 443), 5)\n    print('CONNECTED')\n"
         "except OSError:\n    print('DENIED')"
     )
-    out = _probe(adapter, fixture_image, network, code)
+    out = _probe(adapter, image_id, network, code)
     assert out.stdout.split() == ["DENIED"], out.stderr
+
+
+def test_blocking_note_yields_revise_with_findings(adapter: str, image_id: str, env: dict[str, str], network: str) -> None:
+    result = _run(adapter, image_id, FIXTURE, _input("input_blocking.json"), env, network)
+    assert result.exit_code == 0, result.stderr
+    assert result.result is not None and result.result["verdict"] == "REVISE"
+    assert [(f["id"], f["severity"]) for f in result.result["findings"]] == [("line:1", "blocking"), ("line:2", "nit")]
+
+
+def test_injection_fixture_yields_a_failure_value(adapter: str, image_id: str, env: dict[str, str], network: str) -> None:
+    result = _run(adapter, image_id, FIXTURE, _input("input_injection.json"), env, network)
+    assert result.exit_code == 0, result.stderr
+    assert result.result is not None and result.result["outcome"] == "failure"
+    assert result.result["failure"] == "injection_suspected"
+
+
+def test_cli_run_is_measured(adapter: str, image_id: str, env: dict[str, str], network: str, tmp_path: Path) -> None:
+    out = tmp_path / "run"
+    argv = CLI_BUILDERS[adapter](image_id, FIXTURE, HERE / "fixtures/input_blocking.json", out, env, network)
+    proc = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=400, cwd=ROOT)
+    assert proc.returncode == 0, proc.stderr
+    assert sorted(p.name for p in out.iterdir()) == ["events.json", "host_run.json", "result.json"]
+    host = parse_persona_host_run((out / "host_run.json").read_bytes())
+    assert host is not None and (host.project_ref, host.agent) == (PROJECT_REF, AGENT)
+    rows_path = tmp_path / "rows.json"
+    rows = subprocess.run(
+        [sys.executable, "-m", "scripts.personas.telemetry_rows", "--events", str(out / "events.json"),
+         "--host-run", str(out / "host_run.json"), "--out", str(rows_path)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, cwd=ROOT,
+    )  # fmt: skip
+    assert rows.returncode == 0, rows.stderr
+    batches = json.loads(rows_path.read_text(encoding="utf-8"))["batches"]
+    agents = [r for b in batches if b["table"] == "telemetry_agents" for r in b["rows"]]
+    assert agents and {r["agent_type"] for r in agents} == {AGENT}
+    assert {r["host_run_ref"] for r in agents} == {render_host_run_ref(host)}

@@ -431,3 +431,75 @@ def test_red_header() -> None:
     base = _read(_SECRET_PARAMETERS_FILE)
     assert header_problems(base.replace(_ROLE_NAME, "some-other-role"))
     assert header_problems(base.replace("PlatformAdmin", "Someone"))
+
+
+_CLAIM_PREFIX = "token.actions.githubusercontent.com:"
+_PR_REF = "otl-labs/ontheloop/.github/workflows/persona-verdict.yml@refs/pull/1/merge"
+
+
+def _github_repos(oidc_text: str) -> list[str]:
+    m = re.search(r"github_repos\s*=\s*\[(.*?)\]", _strip_comments(oidc_text), re.S)
+    repos = re.findall(r'"([^"]+)"', m.group(1)) if m else []
+    assert repos, "local.github_repos not found or empty"
+    return repos
+
+
+def trust_conditions(role_text: str, oidc_text: str) -> dict[str, list[str]]:
+    role = _block(role_text, "resource", "aws_iam_role", "github_ci_persona_verdict")
+    statements = _jsonencode_statement_blocks(role)
+    assert len(statements) == 1, f"expected one trust statement, found {len(statements)}"
+    stmt = _strip_comments(statements[0])
+    found = re.search(r"StringEquals\s*=\s*\{", _mask(stmt))
+    assert found, "no StringEquals block"
+    se = _block_body(stmt, found.end() - 1)
+    env = re.search(r'^\s*persona_verdict_environment\s*=\s*"([^"]*)"', _strip_comments(role_text), re.M)
+    assert env, "local.persona_verdict_environment not found"
+    repos = _github_repos(oidc_text)
+    conditions: dict[str, list[str]] = {}
+    aud = re.search(rf'"{re.escape(_CLAIM_PREFIX)}aud"\s*=\s*"([^"]+)"', se)
+    assert aud, "no aud condition"
+    conditions["aud"] = [aud.group(1)]
+    ref = re.search(rf'"{re.escape(_CLAIM_PREFIX)}job_workflow_ref"\s*=\s*"([^"]+)"', se)
+    if ref:
+        conditions["job_workflow_ref"] = [ref.group(1)]
+    sub = re.search(rf'"{re.escape(_CLAIM_PREFIX)}sub"\s*=\s*flatten\(\[(.*?)\]\)\s*\n', se, re.S)
+    assert sub, "no sub list"
+    values: list[str] = []
+    for raw in re.findall(r'"([^"]+)"', sub.group(1)):
+        raw = raw.replace("${local.persona_verdict_environment}", env.group(1))
+        values += [raw.replace("${repo}", r) for r in repos] if "${repo}" in raw else [raw]
+    assert values, "empty sub list"
+    conditions["sub"] = values
+    return conditions
+
+
+def trust_admits(claims: dict[str, str], conditions: dict[str, list[str]]) -> bool:
+    return all(key in claims and claims[key] in allowed for key, allowed in conditions.items())
+
+
+def test_pull_request_claims_fail_the_trust_conditions() -> None:
+    role_text, oidc_text = _read(_ROLE_FILE), _read(_OIDC_FILE)
+    conditions = trust_conditions(role_text, oidc_text)
+    repos = [*_github_repos(oidc_text), "otl-labs/ontheloop"]
+    aud = "sts.amazonaws.com"
+    for repo in repos[:-1]:
+        control = {"aud": aud, "sub": f"repo:{repo}:environment:{_ENV}", "job_workflow_ref": _JOB_WORKFLOW_REF}
+        assert trust_admits(control, conditions), repo
+    for repo in repos:
+        env_sub, pr_sub = f"repo:{repo}:environment:{_ENV}", f"repo:{repo}:pull_request"
+        refused = (
+            {"aud": aud, "sub": pr_sub, "job_workflow_ref": _PR_REF},
+            {"aud": aud, "sub": env_sub, "job_workflow_ref": _PR_REF},
+            {"aud": aud, "sub": env_sub, "job_workflow_ref": "otl-labs/ontheloop/.github/workflows/ci.yml@refs/heads/main"},
+            {"aud": aud, "sub": pr_sub, "job_workflow_ref": _JOB_WORKFLOW_REF},
+        )
+        for claims in refused:
+            assert not trust_admits(claims, conditions), claims
+    repo = repos[0]
+    pr_claims = {"aud": aud, "sub": f"repo:{repo}:pull_request", "job_workflow_ref": _PR_REF}
+    env_claims = {"aud": aud, "sub": f"repo:{repo}:environment:{_ENV}", "job_workflow_ref": _PR_REF}
+    sub_line = '"repo:${repo}:environment:${local.persona_verdict_environment}"'
+    widened = role_text.replace(sub_line, sub_line + ',\n "repo:${repo}:pull_request"').replace(_JOB_WORKFLOW_REF, _PR_REF)
+    assert trust_admits(pr_claims, trust_conditions(widened, oidc_text))
+    no_ref = re.sub(r'^.*:job_workflow_ref".*\n', "", role_text, flags=re.M)
+    assert trust_admits(env_claims, trust_conditions(no_ref, oidc_text))

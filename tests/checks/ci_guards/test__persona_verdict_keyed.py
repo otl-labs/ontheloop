@@ -75,26 +75,25 @@ RED = [
         "names an Environment",
         lambda d: d["jobs"]["keyprep"].update({"environment": "persona-verdict"}),
     ),
-    ("third-id-token-job", "holds id-token: write", lambda d: d["jobs"]["post"]["permissions"].update({"id-token": "write"})),
+    ("third-id-token-job", "holds id-token: write", lambda d: d["jobs"]["run"]["permissions"].update({"id-token": "write"})),
     ("keyprep-id-token", "holds id-token: write", lambda d: d["jobs"]["keyprep"]["permissions"].update({"id-token": "write"})),
     ("no-keyprep-conjunct-smoke", "condition is not", _if("smoke", "${{ " + k.KEYED_IF + " }}")),
     ("no-keyprep-conjunct-refusal", "condition is not", _if("refusal", "${{ " + k.KEYED_IF + " }}")),
+    ("keyprep-with-the-keyed-condition", "condition is not", _if("keyprep", "${{ " + k.KEYED_IF + " }}")),
     (
         "no-fixture-conjunct",
         "condition is not",
-        _if(
-            "keyprep", "${{ " + _without("needs.prepare.outputs.fixture == 'true'").replace(" && " + k.KEYPREP_OK, "") + " }}"
-        ),
+        _if("smoke", "${{ " + _without("needs.prepare.outputs.fixture == 'true'") + " }}"),
     ),
     (
         "no-allowlisted-conjunct",
         "condition is not",
-        _if("keyprep", "${{ " + k.KEYED_IF.replace(" && needs.prepare.outputs.allowlisted == 'true'", "") + " }}"),
+        _if("refusal", "${{ " + _without("needs.prepare.outputs.allowlisted == 'true'") + " }}"),
     ),
     (
         "no-pull-request-conjunct",
         "condition is not",
-        _if("keyprep", "${{ " + k.KEYED_IF.replace(" && github.event.workflow_run.event == 'pull_request'", "") + " }}"),
+        _if("smoke", "${{ " + _without("github.event.workflow_run.event == 'pull_request'") + " }}"),
     ),
     (
         "another-secret",
@@ -115,6 +114,11 @@ RED = [
         "account-id-before-the-self-check",
         "secrets.AWS_ACCOUNT_ID appears outside",
         lambda d: _named(d["jobs"]["smoke"], "Create the work directory").update({"env": {"A": k.ACCOUNT_ENV}}),
+    ),
+    (
+        "account-id-before-the-post-self-check",
+        "secrets.AWS_ACCOUNT_ID appears outside",
+        lambda d: _named(d["jobs"]["post"], "Create the work directory").update({"env": {"A": k.ACCOUNT_ENV}}),
     ),
     (
         "account-id-in-the-install-step",
@@ -230,6 +234,26 @@ RED = [
 
 
 RED += [
+    (
+        "floor-missing",
+        "run.py steps are not exactly",
+        lambda d: d["jobs"]["smoke"]["steps"].remove(_named(d["jobs"]["smoke"], "Lay the egress floor")),
+    ),
+    (
+        "final-check-missing",
+        "run.py steps are not exactly",
+        lambda d: d["jobs"]["refusal"]["steps"].remove(_named(d["jobs"]["refusal"], "Check the egress filter again")),
+    ),
+    (
+        "final-check-without-always",
+        "final self-check must carry",
+        lambda d: _named(d["jobs"]["smoke"], "Check the egress filter again").pop("if"),
+    ),
+    (
+        "floor-with-env",
+        "floor or first self-check step has keys",
+        lambda d: _named(d["jobs"]["smoke"], "Lay the egress floor").update({"env": {"X": "1"}}),
+    ),
     (
         "account-id-not-the-secret",
         "AWS_ACCOUNT_ID is not exactly",

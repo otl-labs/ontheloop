@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Any
 
 ROLE = "agent-platform-github-ci-persona-verdict"
+APP_ROLE = "agent-platform-github-ci-persona-verdict-app"
 AUDIENCE = "sts.amazonaws.com"
 TOKEN_HOST = "actions.githubusercontent.com"
 TIMEOUT_SECONDS = 20

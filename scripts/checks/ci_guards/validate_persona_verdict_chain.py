@@ -19,7 +19,8 @@ from typing import Any
 import yaml
 
 from scripts.checks import _common, registry
-from scripts.checks.ci_guards._persona_verdict_keyed import KEYED_JOBS, SELF_CHECK, keyed_problems
+from scripts.checks.ci_guards._persona_verdict_keyed import FLOOR, KEYED_JOBS, SELF_CHECK, WHEELS, keyed_problems
+from scripts.checks.ci_guards._persona_verdict_post import post_problems
 from scripts.checks.ci_guards._shared import is_sha_pinned
 
 TRIGGER = ".github/workflows/persona-verdict-trigger.yml"
@@ -31,15 +32,15 @@ MKDIR = 'mkdir -p "$RUNNER_TEMP/work"'
 RUN_PREFIX = 'python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" '
 VERBS = frozenset({"resolve", "route", "fetch", "materialise", "execute", "post", "wake", "inference-smoke", "key-refusal"})
 REGION_ACTION = "./.github/actions/aws-region"
-KEYED_ENVIRONMENTS = frozenset({"smoke"})
-KEYED_ID_TOKEN = frozenset({"smoke", "refusal"})
+KEYED_ENVIRONMENTS = frozenset({"smoke", "post"})
+KEYED_ID_TOKEN = frozenset({"smoke", "refusal", "post"})
 SNAPSHOT = "${{ runner.temp }}/snapshot"
 WORKDIR = "${{ runner.temp }}/work"
-PIP_SETS = {"prepare": "pyyaml", "run": "jsonschema", "post": "pyyaml jsonschema", "wake": "pyyaml"}
+PIP_SETS = {"prepare": "pyyaml", "run": "jsonschema", "wake": "pyyaml"}
 JOB_PERMISSIONS: dict[str, dict[str, str]] = {
     "prepare": {"contents": "read", "pull-requests": "read", "actions": "read"},
     "run": {"contents": "read"},
-    "post": {"checks": "write", "contents": "read", "actions": "read"},
+    "post": {"checks": "read", "contents": "read", "actions": "read", "id-token": "write"},
     "wake": {"contents": "read", "actions": "read", "checks": "read", "pull-requests": "write"},
     "keyprep": {"contents": "read"},
     "smoke": {"contents": "read", "id-token": "write"},
@@ -189,8 +190,9 @@ def _python_steps(job: dict[str, Any]) -> list[dict[str, Any]]:
 def _python_step_problems(name: str, step: dict[str, Any]) -> list[str]:
     out: list[str] = []
     run = str(step.get("run", "")).strip()
-    if name in KEYED_JOBS and run == SELF_CHECK:
-        return out
+    if (name in KEYED_JOBS or name == "post") and run in (SELF_CHECK, FLOOR):
+        env_keys = {"env", "working-directory"} & set(step)
+        return [f"{VERDICT}: job {name} step {run!r} has {sorted(env_keys)}"] if env_keys else out
     verb = run[len(RUN_PREFIX) :] if run.startswith(RUN_PREFIX) else ""
     env = _map(step.get("env"))
     if verb not in VERBS:
@@ -220,19 +222,20 @@ def _job_problems(name: str, job: dict[str, Any]) -> list[str]:
     if job.get("permissions") != JOB_PERMISSIONS[name]:
         out.append(f"{VERDICT}: job {name} permissions differ from {JOB_PERMISSIONS[name]}")
     perms = job.get("permissions")
-    if name != "post" and isinstance(perms, dict) and perms.get("checks") == "write":
+    if isinstance(perms, dict) and perms.get("checks") == "write":
         out.append(f"{VERDICT}: job {name} holds checks: write")
     if name != "wake" and isinstance(perms, dict) and perms.get("pull-requests") == "write":
         out.append(f"{VERDICT}: job {name} holds pull-requests: write")
     for step in steps:
         run = str(step.get("run", ""))
-        if "pip install" in run and name not in KEYED_JOBS:
+        if "pip install" in run and name not in KEYED_JOBS and name != "post":
             want = f'pip install {PIP_SETS[name]} -c "$GITHUB_WORKSPACE/main/requirements.txt"'
             if run.strip() != want:
                 out.append(f"{VERDICT}: job {name} pip line is not exactly {want!r}")
     py = _python_steps(job)
     for step in py:
         out.extend(_python_step_problems(name, step))
+    py = [s for s in py if str(s.get("run", "")).strip() != FLOOR]
     if py:
         first_python = steps.index(py[0])
         if not any(str(s.get("run", "")).strip() == MKDIR for s in steps[:first_python]):
@@ -263,7 +266,7 @@ def _artifact_problems(jobs: dict[str, Any], evidence: dict[str, Any] | None) ->
             if action == "actions/download-artifact":
                 if with_.get("path") != f"{WORKDIR}/{ARTIFACT_DIRS.get(artifact, '?')}":
                     out.append(f"{VERDICT}: download {artifact} path is not its upload directory")
-                if name in ("post", "wake") and step.get("continue-on-error") is not True:
+                if name in ("post", "wake") and artifact != WHEELS and step.get("continue-on-error") is not True:
                     out.append(f"{VERDICT}: post download {artifact} lacks continue-on-error: true")
     declared = {(str(r.get("job")), str(r.get("step")), str(r.get("artifact"))) for r in rows}
     if declared != seen:
@@ -274,7 +277,9 @@ def _artifact_problems(jobs: dict[str, Any], evidence: dict[str, Any] | None) ->
     return out
 
 
-def verdict_problems(doc: dict[str, Any], evidence: dict[str, Any] | None) -> list[str]:
+def verdict_problems(
+    doc: dict[str, Any], evidence: dict[str, Any] | None, workflows: dict[str, Any] | None = None
+) -> list[str]:
     out = _common_problems(VERDICT, doc, KEYED_ENVIRONMENTS, KEYED_ID_TOKEN)
     on = _on(doc)
     if not (isinstance(on, dict) and set(on) == {"workflow_run"}):
@@ -311,6 +316,7 @@ def verdict_problems(doc: dict[str, Any], evidence: dict[str, Any] | None) -> li
         out.extend(_wake_download_problems(jobs["wake"]))
     out.extend(_prepare_problems(jobs.get("prepare")))
     out.extend(keyed_problems(doc))
+    out.extend(post_problems(doc, workflows))
     out.extend(_token_problems(doc, jobs))
     out.extend(_artifact_problems(jobs, evidence))
     return out
@@ -427,9 +433,10 @@ def check_tree(root: Path) -> tuple[list[str], int]:
     evidence, err = _load(root, EVIDENCE)
     if err:
         problems.append(err)
+    workflows = {p.name: _load(root, f".github/workflows/{p.name}")[0] for p in (root / ".github/workflows").glob("*.yml")}
     for rel, fn in (
         (TRIGGER, lambda d: trigger_problems(d)),
-        (VERDICT, lambda d: verdict_problems(d, evidence)),
+        (VERDICT, lambda d: verdict_problems(d, evidence, workflows)),
         (OVERRIDE, lambda d: override_problems(d)),
     ):
         doc, err = _load(root, rel)

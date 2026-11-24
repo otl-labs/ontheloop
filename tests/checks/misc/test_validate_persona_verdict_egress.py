@@ -23,6 +23,7 @@ STS_T = "sts.{aws_region}.amazonaws.com:443"
 SSM_T = "ssm.{aws_region}.amazonaws.com:443"
 DEEPSEEK, ANTHROPIC = "api.deepseek.com:443", "api.anthropic.com:443"
 SMOKE_RUN = v.RUN_PREFIX + "inference-smoke"
+VERDICT_JOB = "egress-fail-closed-verdict"
 
 
 def _filter_step() -> dict[str, Any]:
@@ -32,7 +33,7 @@ def _filter_step() -> dict[str, Any]:
             "egress-policy": "block",
             "allowed-endpoints": "sts.amazonaws.com:443",
             "disable-telemetry": True,
-            "disable-sudo-and-containers": True,
+            "disable-sudo-and-containers": False,
         },
     }
 
@@ -44,9 +45,11 @@ def _keyed_job(**extra: Any) -> dict[str, Any]:
         "steps": [
             _filter_step(),
             {"uses": CHECKOUT, "with": {"path": "main", "persist-credentials": False}},
+            {"run": "sudo " + v.RUN_PREFIX + "egress-floor"},
             {"run": v.MKDIR},
             {"run": SELF_CHECK},
             {"run": "echo later"},
+            {"run": SELF_CHECK, "if": "always()"},
         ],
     }
     job.update(extra)
@@ -143,11 +146,11 @@ def _plain_job(**extra: Any) -> dict[str, Any]:
 
 
 def _drop_self_check(d: Docs) -> None:
-    del _job(d)["steps"][3]
+    del _job(d)["steps"][4]
 
 
 def _prefixless(d: Docs) -> None:
-    _job(d)["steps"][3] = {"run": v.PROBE_PREFIX + "egress-self-check"}
+    _job(d)["steps"][4] = {"run": v.PROBE_PREFIX + "egress-self-check"}
 
 
 def _templated(row: list[str] | None = None, filt: str | None = None, smoke: bool = False) -> Callable[[Docs], None]:
@@ -164,7 +167,7 @@ def _templated(row: list[str] | None = None, filt: str | None = None, smoke: boo
         _step0(d)["with"]["allowed-endpoints"] = filt if filt is not None else " ".join(_expr(h) for h in want)
         d["cfg"]["jobs"][KEYED]["smoke"] = want
         if smoke:
-            _job(d)["steps"].insert(4, {"id": "s", "run": SMOKE_RUN})
+            _job(d)["steps"].insert(5, {"id": "s", "run": SMOKE_RUN})
 
     return edit
 
@@ -197,8 +200,8 @@ def _probe_job(d: Docs, name: str = "egress-probe") -> dict[str, Any]:
 
 RED = [
     _red("step0-missing", "step 0 must use exactly", lambda d: _job(d)["steps"].pop(0)),
-    _red("self-check-shell", "must be the self-check", lambda d: _job(d)["steps"][3].update({"shell": "true {0}"})),
-    _red("self-check-env", "must be the self-check", lambda d: _job(d)["steps"][3].update({"env": {"X": "1"}})),
+    _red("self-check-shell", "must be the self-check", lambda d: _job(d)["steps"][4].update({"shell": "true {0}"})),
+    _red("self-check-env", "must be the self-check", lambda d: _job(d)["steps"][4].update({"env": {"X": "1"}})),
     _red("job-defaults", "sets defaults:", lambda d: _job(d).update({"defaults": {"run": {"shell": "true {0}"}}})),
     _red("workflow-defaults", "sets defaults:", lambda d: d["keyed"].update({"defaults": {"run": {"shell": "true {0}"}}})),
     _red("no-steps", "no steps", lambda d: _job(d).update({"steps": []})),
@@ -211,7 +214,7 @@ RED = [
     _red("audit-mode", "egress-policy must be block", _set_with("egress-policy", "audit")),
     _red("telemetry-on", "disable-telemetry must be true", _set_with("disable-telemetry", False)),
     _red(
-        "sudo-and-containers-on", "disable-sudo-and-containers must be true", _set_with("disable-sudo-and-containers", False)
+        "sudo-and-containers-on", "disable-sudo-and-containers must be false", _set_with("disable-sudo-and-containers", True)
     ),
     _red("extra-host", "differ from the job's row", _set_endpoints("sts.amazonaws.com:443 example.com:443")),
     _red("missing-host", "differ from the job's row", _set_endpoints("", ["sts.amazonaws.com:443"])),
@@ -219,19 +222,45 @@ RED = [
     _red("policy-store-input", "with: keys must be exactly", _set_with("policy", "x")),
     _red("if-on-step0", "if: or continue-on-error", lambda d: _step0(d).update({"if": "always()"})),
     _red("continue-on-error-on-step0", "if: or continue-on-error", lambda d: _step0(d).update({"continue-on-error": True})),
-    _red("if-on-self-check", "must be the self-check", lambda d: _job(d)["steps"][3].update({"if": "always()"})),
+    _red("if-on-self-check", "must be the self-check", lambda d: _job(d)["steps"][4].update({"if": "always()"})),
     _red(
         "continue-on-error-on-self-check",
         "must be the self-check",
-        lambda d: _job(d)["steps"][3].update({"continue-on-error": True}),
+        lambda d: _job(d)["steps"][4].update({"continue-on-error": True}),
     ),
-    _red("self-check-absent", "no self-check step", lambda d: _job(d).update({"steps": _job(d)["steps"][:3]})),
+    _red("drill-job-key", "keys beyond", lambda d: _probe_job(d, "egress-fail-closed").update({"environment": "e"})),
+    _red("drill-timeout", "timeout-minutes 10", lambda d: _probe_job(d, "egress-fail-closed").update({"timeout-minutes": 5})),
+    _red(
+        "drill-no-continue",
+        "continue-on-error must be true",
+        lambda d: _probe_job(d, "egress-fail-closed").pop("continue-on-error"),
+    ),
+    _red("probe-continue", "continue-on-error must be true", lambda d: _probe_job(d).update({"continue-on-error": True})),
+    _red(
+        "verdict-needs", "must need both drill jobs", lambda d: _probe_job(d, VERDICT_JOB).update({"needs": ["egress-probe"]})
+    ),
+    _red(
+        "verdict-permissions",
+        "timeout-minutes 30",
+        lambda d: _probe_job(d, VERDICT_JOB).update({"permissions": {"contents": "read"}}),
+    ),
+    _red(
+        "verdict-env",
+        "env must be exactly",
+        lambda d: _probe_job(d, VERDICT_JOB)["steps"][-1].update({"env": {"GH_TOKEN": "x"}}),
+    ),
+    _red(
+        "drill-step-name",
+        "names must equal their ids",
+        lambda d: _probe_job(d, "egress-fail-closed")["steps"][2].update({"name": "x"}),
+    ),
+    _red("self-check-absent", "no self-check step", lambda d: _job(d).update({"steps": _job(d)["steps"][:4]})),
     _red("self-check-after-another-step", "must be the self-check", _insert(3, {"run": "echo early"})),
     _red("self-check-missing-between", "must be the self-check", _drop_self_check),
     _red("container", "job-level uses:, container: or services:", lambda d: _job(d).update({"container": "x"})),
     _red("services", "job-level uses:, container: or services:", lambda d: _job(d).update({"services": {"a": {}}})),
     _red("job-level-uses", "job-level uses:, container: or services:", lambda d: _job(d).update({"uses": "./x.yml"})),
-    _red("docker-command", "docker command", _insert(4, {"run": "docker run x"})),
+    _red("docker-command", "docker command", _insert(5, {"run": "docker run x"})),
     _red("runner-not-latest", "runs-on must be exactly", lambda d: _job(d).update({"runs-on": "ubuntu-22.04"})),
     _red("wildcard", "wildcard endpoint", _wildcard),
     _red("wildcard-residual-without-artifact", "moves no artifact", _wildcard),
@@ -270,7 +299,7 @@ RED = [
     _red(
         "secret-in-pre-step-env",
         "references a secret",
-        lambda d: _job(d)["steps"][2].update({"env": {"X": "${{ secrets.FOO }}"}}),
+        lambda d: _job(d)["steps"][3].update({"env": {"X": "${{ secrets.FOO }}"}}),
     ),
     _red("secret-in-pre-step-with", "references a secret", _checkout_with(**{"fetch-depth": "${{ secrets.FOO }}"})),
     _red("checkout-token", "with: inputs", _checkout_with(token="x")),
@@ -341,15 +370,15 @@ RED = [
         ),
     ),
     _red("template-anthropic-in-a-job-without-the-smoke", "outside sts and ssm", _templated([STS_T, ANTHROPIC])),
-    _red("docker-after-and", "docker command", _insert(4, {"run": "x && docker build ."})),
-    _red("docker-sudo", "docker command", _insert(4, {"run": "sudo docker ps"})),
-    _red("docker-bash-c", "docker command", _insert(4, {"run": 'bash -c "docker run x"'})),
-    _red("docker-sh-c", "docker command", _insert(4, {"run": "sh -c 'docker ps'"})),
-    _red("docker-absolute-path", "docker command", _insert(4, {"run": "/usr/bin/docker run x"})),
-    _red("docker-quoted", "docker command", _insert(4, {"run": '"docker" ps'})),
-    _red("docker-backslash", "docker command", _insert(4, {"run": "\\docker ps"})),
-    _red("docker-after-a-hash-in-quotes", "docker command", _insert(4, {"run": 'echo "#"; docker ps'})),
-    _red("docker-on-a-continued-line", "docker command", _insert(4, {"run": "echo a \\\n  && docker ps"})),
+    _red("docker-after-and", "docker command", _insert(5, {"run": "x && docker build ."})),
+    _red("docker-sudo", "docker command", _insert(5, {"run": "sudo docker ps"})),
+    _red("docker-bash-c", "docker command", _insert(5, {"run": 'bash -c "docker run x"'})),
+    _red("docker-sh-c", "docker command", _insert(5, {"run": "sh -c 'docker ps'"})),
+    _red("docker-absolute-path", "docker command", _insert(5, {"run": "/usr/bin/docker run x"})),
+    _red("docker-quoted", "docker command", _insert(5, {"run": '"docker" ps'})),
+    _red("docker-backslash", "docker command", _insert(5, {"run": "\\docker ps"})),
+    _red("docker-after-a-hash-in-quotes", "docker command", _insert(5, {"run": 'echo "#"; docker ps'})),
+    _red("docker-on-a-continued-line", "docker command", _insert(5, {"run": "echo a \\\n  && docker ps"})),
     _red("agent-value-one-entry-per-line", "folded block", _smoke_filter("\n", trail="\n")),
     _red("agent-value-joined-by-a-tab", "folded block", _smoke_filter("\t")),
     _red("agent-value-joined-by-crlf", "folded block", _smoke_filter("\r\n")),
@@ -399,8 +428,8 @@ def test_a_filter_with_value_other_than_endpoints_may_not_hold_an_expression(tmp
 
 def test_a_docker_path_segment_is_not_a_docker_command(tmp_path: Path) -> None:
     run = 'pip install -r "$GITHUB_WORKSPACE/main/docker/persona/requirements-persona.txt"'
-    assert _problems(tmp_path, _insert(4, {"run": run})) == []
-    assert _problems(tmp_path, _insert(4, {"run": "echo hi  # docker ps"})) == []
+    assert _problems(tmp_path, _insert(5, {"run": run})) == []
+    assert _problems(tmp_path, _insert(5, {"run": "echo hi  # docker ps"})) == []
 
 
 def test_the_templated_fixture_base_is_green(tmp_path: Path) -> None:
@@ -444,7 +473,7 @@ def test_a_checkout_ref_of_github_sha_is_allowed(tmp_path: Path) -> None:
 def test_a_wildcard_residual_is_allowed_in_a_job_that_moves_an_artifact(tmp_path: Path) -> None:
     def edit(d: Docs) -> None:
         _wildcard(d)
-        _job(d)["steps"].append({"uses": "actions/upload-artifact@" + "c" * 40})
+        _job(d)["steps"].insert(5, {"uses": "actions/upload-artifact@" + "c" * 40})
 
     assert _problems(tmp_path, edit) == []
 

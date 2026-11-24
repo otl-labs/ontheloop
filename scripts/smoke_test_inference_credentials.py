@@ -6,7 +6,7 @@ given (the persona-verdict CI job's assumed role, via the run.py inference-smoke
 fallback, the agent_platform profile, puts it in this process's environment under the row's variable, and runs the
 role's cold-start assertion through the transport. The model comes from the contracts alone.
 
-The InferenceCredentialsRead IAM grant is exercised on every run: a missing or misconfigured grant surfaces as
+The InferenceCredentialsParameterRead IAM grant is exercised on every run: a missing or misconfigured grant surfaces as
 AccessDenied from SSM, failing the test with a clear diagnostic. The key value is never printed.
 
 Usage:

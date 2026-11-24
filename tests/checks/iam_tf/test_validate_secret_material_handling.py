@@ -28,10 +28,12 @@ def _write_terraform(root: Path, tf_by_relpath: dict[str, str]) -> None:
 
 
 def test_real_tree_passes() -> None:
-    """The real repository's two live exceptions are both declared -- no undeclared _version resource."""
+    """The one live exception (the DSN SecureString parameter) is declared; Secrets Manager has none (Decision 237)."""
     failed: list[str] = []
     validate_secret_material_handling(failed)
     assert failed == [], failed
+    declared = yaml.safe_load((Path(__file__).resolve().parents[3] / _CONTRACT_REL).read_text(encoding="utf-8"))
+    assert [e["resource"] for e in declared["value_exceptions"]] == ["aws_ssm_parameter.ducklake_neon_catalog_dsn"]
 
 
 def test_undeclared_version_resource_fails(tmp_path: Path) -> None:

@@ -1,6 +1,7 @@
 """GateRound: one gate round as the planner records it in a plan's gate_rounds (planning SKILL.md Step 9).
 
-Counts and run facts only, never an approval input (Decision 87 as amended by Decision 205).
+Counts, run facts and a plan-critique row's recorded per-finding gate history; never an approval input (Decision 87
+as amended by Decision 205).
 """
 
 from __future__ import annotations
@@ -24,8 +25,8 @@ _FINGERPRINT_RE = re.compile(r"v[1-9][0-9]*:[0-9a-f]{64}")
 class CategoryVerdict(BaseModel):
     """Plan-critique step 12p's verdict for one drafted Decision entry.
 
-    A verdict, not a finding or a directive: findings stay with rec-4434's telemetry_persona_findings and
-    directives in check-run output (Decision 205 cl.5). The title is stored raw, as drafted_titles returns it.
+    A verdict, not a finding or a directive: critique directives stay in check-run output (Decision 205 cl.5) and
+    persona per-finding rows with rec-4434. The title is stored raw, as drafted_titles returns it.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -34,11 +35,61 @@ class CategoryVerdict(BaseModel):
     verdict: Literal["PASS", "REVISE"]
 
 
+class CritiqueFinding(BaseModel):
+    """One plan-critique finding as the planner records it: tag and disposition, never the critic's directive.
+
+    Maps to docs/contracts/personas/plan_critic.yaml's findings item: subject = title; id is the critic's short id
+    (not plan_critic.yaml's derived <check>:<anchor>); check, detail and suggestion are not carried.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    severity: Literal["blocking", "nit"]
+    origin: Literal["mechanical", "judgement"]
+    anchor: str
+    subject: str
+    disposition: Literal["fixed", "disputed", "deferred", "applied-wording", "build-note"]
+
+    @model_validator(mode="after")
+    def _shape(self) -> CritiqueFinding:
+        if not (self.id.strip() and self.anchor.strip() and self.subject.strip()):
+            raise ValueError("a finding's id, anchor and subject are non-empty after strip")
+        if len(self.subject) > 200 or "\n" in self.subject:
+            raise ValueError("a finding's subject is one line of at most 200 characters")
+        return self
+
+
+_FINDINGS_SHAPE = (
+    "findings: [{id, severity: blocking|nit, origin: mechanical|judgement, anchor, subject, "
+    "disposition: fixed|disputed|deferred|applied-wording|build-note}]"
+)
+
+
+def version_errors(schema_version: int, rows: list[GateRound]) -> list[str]:
+    """Version-gated findings rules for a plan's plan-critique rows (empty list when clean)."""
+    errors: list[str] = []
+    for row in rows:
+        if row.gate != "plan-critique":
+            continue
+        if schema_version < 7 and row.findings is not None:
+            errors.append(f"plan-critique round {row.round}: findings requires schema_version 7 or above")
+        if schema_version >= 7 and row.findings is None:
+            errors.append(f"plan-critique round {row.round}: schema_version 7 rows carry {_FINDINGS_SHAPE}")
+        if schema_version >= 7 and row.verdict == "PROCEED" and row.escalation_choice == "accept-with-deferral":
+            errors.append(
+                f"plan-critique round {row.round}: accept-with-deferral on a PROCEED is closed at schema_version 7; "
+                "record each nit's disposition (applied-wording or build-note) in findings instead"
+            )
+    return errors
+
+
 class GateRound(BaseModel):
     """One gate round as the planner reports it (planning SKILL.md Step 9 convergence rule).
 
-    Counts only: never a status or approval input, and never a per-finding record (Decision 87 as amended by
-    Decision 205; T4.29 c2 keeps per-finding rows with rec-4434). A wording-check row also records the run's
+    Counts, plus on a plan-critique row the planner's recorded per-finding gate history (findings): never a status
+    or approval input (Decision 87 as amended by Decision 205; persona per-finding rows stay with rec-4434, T4.29
+    c2). A wording-check row also records the run's
     digest, base and selection status (scripts.roadmap.plan_wording_check). A decision-scout row may record
     scout_input_fingerprint (scripts.roadmap.plan_fingerprint): a run fact, never a reason to skip a scout; every
     reader recomputes it. A kind-blind row is the verdict a fresh subagent gave, shown only
@@ -61,6 +112,7 @@ class GateRound(BaseModel):
     pending_evaluators: int | None = Field(default=None, ge=1)
     scout_input_fingerprint: str | None = None
     category_consistency: list[CategoryVerdict] | None = None
+    findings: list[CritiqueFinding] | None = None
 
     @model_validator(mode="after")
     def _verdict_matches_gate(self) -> GateRound:
@@ -73,7 +125,27 @@ class GateRound(BaseModel):
         self._check_run_facts()
         self._check_scout_fingerprint()
         self._check_category_consistency()
+        self._check_findings()
         return self
+
+    def _check_findings(self) -> None:
+        if self.findings is None:
+            return
+        if self.gate != "plan-critique":
+            raise ValueError("findings is allowed only on a plan-critique row")
+        ids = [item.id.strip() for item in self.findings]
+        if len(set(ids)) != len(ids):
+            raise ValueError("findings ids must be unique within a row")
+        blocking = [item for item in self.findings if item.severity == "blocking"]
+        if len(blocking) != self.blocking or len(self.findings) - len(blocking) != self.nits:
+            raise ValueError("findings blocking and nit entries must match the row's blocking and nits counts")
+        deferrable = {"fixed", "disputed"} | ({"deferred"} if self.escalation_choice == "accept-with-deferral" else set())
+        if any(item.disposition not in deferrable for item in blocking):
+            raise ValueError(
+                "a blocking finding's disposition is fixed or disputed (deferred only under accept-with-deferral)"
+            )
+        if any(item.disposition == "deferred" for item in self.findings if item.severity == "nit"):
+            raise ValueError("a nit finding's disposition is fixed, disputed, applied-wording or build-note")
 
     def _check_category_consistency(self) -> None:
         if self.category_consistency is None:

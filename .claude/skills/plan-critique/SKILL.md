@@ -5,7 +5,7 @@ description: "Use when: critique a plan, challenge assumptions, review docs/plan
 
 ## Intent
 
-Challenge plans independently; accept deprecated `.md` inputs.
+Challenge plans independently.
 
 This BLOCKING gate assesses strategic soundness and bounds; formatting-only review is insufficient.
 
@@ -15,9 +15,9 @@ This BLOCKING gate assesses strategic soundness and bounds; formatting-only revi
 
 ### Phase 1: Load Context (MANDATORY - Do Not Skip)
 
-Reject a plan that invents a third validation tier, treats mapped coverage or readiness as authoritative, or permits required full validation to time out, remain incomplete, or become a warning/CI-only handoff. A schema-v3 IMPLEMENTATION plan must carry the exact blocking handoff policy and its closure steps must distinguish readiness states, parent validator evidence, structured postflight evidence, and real push/PR outcomes.
+Reject a plan that invents a third validation tier, treats mapped coverage or readiness as authoritative, or permits required full validation to time out, remain incomplete, or become a warning/CI-only handoff. A schema-v3 IMPLEMENTATION plan must carry the exact blocking handoff policy.
 
-1. Read the ENTIRE plan file provided by the caller -- never default to `docs/plans/PLAN.md`. Absent a path, use the newest `PLAN-*.yaml` in `docs/plans/` (fall back to `PLAN-*.md` only if none exists, and note the deprecation).
+1. Read the ENTIRE plan file provided by the caller; absent a path, use the newest `PLAN-*.yaml` in `docs/plans/`.
 
 2. Read `docs/PROJECT_CONTEXT.md` in full (for rules); read `docs/contracts/north-star.yaml` when a Phase 2b answer turns on a north star.
 
@@ -25,13 +25,15 @@ Reject a plan that invents a third validation tier, treats mapped coverage or re
 
 4. **Targeted decision extraction + conflict-sweep, not a full-file read:** read only the decision sections named in the plan's context `Decision-scout verdict + CITE list` (locate each via `rg "^## Decision N:" docs/DECISIONS.md`), plus a conflict-sweep: `rg` 2-3 keywords drawn from the plan's approach over `^## Decision` headers in `docs/DECISIONS.md` to catch a contradiction the scout's CITE list omitted. Do not Read the full file; the decision-scout gate already paid that cost.
 
-5. **For IMPLEMENTATION plans:** Read the files listed in the plan's `scope` list (the `## Scope` table in legacy .md plans) to verify the plan's accuracy.
+5. **For IMPLEMENTATION plans:** Read the files listed in the plan's `scope` list to verify the plan's accuracy.
 
 5b. For IMPLEMENTATION plans, run `bin/venv-python -m scripts.roadmap.plan_obligations --plan <plan path>` and fold its report (companions, size headroom, unbuilt plans on the same files, undecidable acceptance) into the scope check above -- arithmetic is the tool's, adequacy is yours. With an approved-text sidecar, read the last `wording-check` gate row (never re-run it): REVISE when it is absent, not PASS, its digest differs from `approved_text record`, or its selection was degraded.
 
+5c. **Guard input check (PCL-01, from round 1):** if the plan adds or changes a hook, a `scripts/checks` check, an IAM or boundary statement, a sandbox or a governance cap, list every input form the guard decides on (unknown, malformed, substituted, grouped or indirect, a present key with a bad value) with its outcome, and for each live VP step the identity and limits it runs under. A path that passes unexamined, or a live step that cannot run as written, is blocking.
+
 ### Phase 2: Strategic Analysis
 
-6. **Check for decision conflicts:** Does the plan contradict or re-decide anything already resolved in `docs/DECISIONS.md`? Cite specific decision numbers and the conflicting plan section.
+6. **Check for decision and constraint conflicts:** Does the plan, its Constraints included, contradict or re-decide anything resolved in `docs/DECISIONS.md` or a rule in `docs/PROJECT_CONTEXT.md`? Cite the decision or rule and the conflicting plan section.
 
 7. **North Star alignment is the decision scout's (Decision 243 clause 8):** quote its Serves line from the plan's `context`; never re-score it. Absent: a nit.
 
@@ -42,9 +44,7 @@ Reject a plan that invents a third validation tier, treats mapped coverage or re
 
 10. **Assess strategic risks:** Are there risks that could invalidate the approach without execution? Examples: external dependency not yet available, contradicts a pending decision, architectural assumption that hasn't been verified.
 
-11. **Check Acceptance Criteria (IMPLEMENTATION plans only):** Are all criteria verifiable and testable? Flag any that are vague, subjective, or untestable (e.g., "improved performance" without a metric).
-
-12. **Check Constraints for contradictions:** Do the Constraints conflict with rules in `docs/PROJECT_CONTEXT.md` or prior decisions in `docs/DECISIONS.md`?
+11. **Check Acceptance Criteria:** Are all criteria verifiable and testable? Flag any that are vague, subjective, or untestable (e.g., "improved performance" without a metric).
 
 12b. **Lambda deployment completeness (IMPLEMENTATION only):** VERIFY, do not re-derive -- planning
 Step 4 ran this. Recompute `compute_affected_artifacts(<scope files>)` ONCE and diff it against the
@@ -52,14 +52,12 @@ artifacts the plan's `infrastructure_dependencies`/VP steps name; a set mismatch
 `active` per `src/lambdas/<slug>/manifest.yaml` missing a build, deploy, smoke-test or model-ID
 step => REVISE naming it. Stubs need no deploy (Decision 79).
 
-12c. **Verification Plan executable command check (IMPLEMENTATION plans only):** Every `verification_plan` entry MUST have a `command` field containing a literal executable shell command or Python one-liner (the `PlanDocument` schema rejects empty commands; your job is to judge whether the command actually exercises the feature rather than being a structural-only check). FAIL if any VP step is prose-only with no executable command. For V3 plans, every VP step's `phase` must be `pre-deploy` or `post-deploy`. If either check fails, recommend REVISE with the specific VP steps that need commands or tags added. Admin-only root in scope: REVISE unless deploy-paths.yaml admin_out_of_band.pre_merge_live_plan is met.
+12c. **Verification Plan executable command check (IMPLEMENTATION plans only):** Every `verification_plan` entry MUST have a `command` field containing a literal executable shell command or Python one-liner; judge whether it exercises the feature rather than checking structure. FAIL any prose-only step. For V3 plans, every VP step's `phase` must be `pre-deploy` or `post-deploy`. If either check fails, recommend REVISE with the specific VP steps that need commands or tags added. Admin-only root in scope: REVISE unless deploy-paths.yaml admin_out_of_band.pre_merge_live_plan is met.
 
 12c-1. **Test-obligation adequacy:** For schema-version-4 IMPLEMENTATION plans, recommend REVISE
 when a behavior-changing scope file lacks a linked obligation, its test is structural-only or
 does not assert the named behavior, its red/green expectation is absent, or its waiver is thin.
 Presence/link validators are deterministic; adequacy is this fresh-context judgement.
-
-12d. **Retired (Decision 247):** the plan schema refuses `plan_type: STRATEGIC` and non-empty `work_areas`; an oversized plan is a step 8 split finding.
 
 12k. **Closure obligation check (CONDITIONAL -- IMPLEMENTATION plans only):** VERIFY the plan's own declarations against its scope and VP; do not re-derive the obligation. Additive plans that trip neither condition are exempt.
 
@@ -78,11 +76,7 @@ Trigger condition 2 -- **Surface-retiring plan**: `scope` carries an `action: De
 
 12n. **Size headroom check (Decisions 128, 166):** For each scope row the 5b report marks over budget or NEAR_CAP, or whose planned change crosses its limit, the plan MUST include a decomposition step (facade package, Decision 80/104/124), a class relief-valve step measured at build time, or a justified raise step citing `# raise-approved: dec-NNN`. With none => REVISE: "Scope file [path] crosses or nears its size limit with no decomposition, relief or cited raise step -- decompose by default."
 
-12o. **Graduation-classification honesty (T3.21, VF-05 enforcement):** For every `phase: pre-deploy` `verification_plan` step, check the `graduation` field (see docs/contracts/vp-red-before.yaml for the three-way classification). Flag each of the following as a REVISE-worthy issue:
-   - **Missing disposition:** a pre-deploy step with no `graduation` field at all (only exempt if the plan predates T3.21 and declares zero dispositions anywhere -- a plan authored under this gate must classify every pre-deploy step).
-   - **Suspect `not-applicable`:** a step whose `command` is plainly a single command_exit_zero / grep_count / file_presence / test_selector / command_output_matches / metric_under_threshold shape (see `scripts.verification_checks.CANONICAL_SLOTS`) but is marked `not-applicable` instead of `graduate` -- the classification-gaming shape this gate catches (`not-applicable` carries no registry obligation).
-   - **Thin waiver:** a `waive` disposition whose `graduation_waiver_reason` is generic or non-substantive (e.g. "not needed", "skip", "later") rather than naming a concrete reason the check can't be graduated now.
-   If any step trips one of these, recommend REVISE citing the step number and which sub-check failed. Otherwise report "graduation dispositions complete and honest."
+12o. **Graduation-classification honesty (T3.21, VF-05):** each `phase: pre-deploy` VP step's `graduation` (three-way classification: docs/contracts/vp-red-before.yaml) is REVISE-worthy when **missing** (exempt only for a pre-T3.21 plan declaring no disposition anywhere); **suspect `not-applicable`** on a plainly single command_exit_zero / grep_count / file_presence / test_selector / command_output_matches / metric_under_threshold shape (`scripts.verification_checks.CANONICAL_SLOTS`), the gaming shape, since `not-applicable` carries no registry obligation; or a **thin waiver** whose `graduation_waiver_reason` is generic ("not needed", "skip", "later") rather than a concrete reason. Cite the step and sub-check; else report "graduation dispositions complete and honest."
 
 12p. **Category-consistency verdict (Decision 167 clause 2 -- fresh Decisions and CD ratifications alike):** No other check here asks whether a drafted numbered Decision's claimed significance row, kind and serves match its body.
    - **Trigger detection.** Fires when EITHER the plan carries a ratification block (Workflow Step 5b above) OR the plan's `scope` includes a `docs/DECISIONS.md` row AND the plan's drafted text contains a numbered `"## Decision NNN:"` heading. A row adding only a dated amendment trailer does not fire it: an amendment carries no envelope.
@@ -139,11 +133,13 @@ Ask the following five questions against the plan's chosen approach. For each, w
 
 **Strategic Risks:** [list or "none identified"]
 
-**Acceptance Criteria Issues (IMPLEMENTATION only):** [list or "none"]
+**Acceptance Criteria Issues:** [list or "none"]
 
 **Lambda Deployment Completeness:** Complete / Missing [list missing steps]
 
 **VP Executable Commands:** Complete / Missing commands for VP rows [list] / Missing pre/post-deploy tags [list]
+
+**Guard Input Check (5c):** N/A -- no guard in scope / each input form -> outcome; each live VP step -> identity, limits / REVISE -- [unexamined path or unrunnable step]
 
 **Closure Obligation (12k) / closes_criteria (12l):** each N/A / Compliant / Missing [specifics]
 
@@ -153,7 +149,7 @@ Ask the following five questions against the plan's chosen approach. For each, w
 
 **Category Consistency (12p):** one line per drafted entry, title first: N/A -- no drafted Decision / PASS -- "[verbatim body quote]" supports claimed [row, kind, NS.n] / REVISE -- claimed [row, kind, NS.n] but body reads: "[verbatim quote]" or no sentence supports it
 
-**Finding-Origin Attribution and severity:** blocking (correctness, safety, scope, a Decision conflict or failed check above; when unsure) or nit (wording, citation form, ordering; never a Frame Challenge contradiction); mechanical (a deterministic check could catch it -- name it) / critic judgement -- tag each finding, with a stable anchor (plan field path or VP step id)
+**Finding-Origin Attribution and severity:** blocking only when the finding states what reaches main if left unfixed and which control fails first, and (a) wrong behaviour, a wrong guarantee or a wrong operator-read instruction would reach main, or the first control that could catch it runs only after merge; (b) the build could not finish inside the plan's scope, approved text or VP commands without a plan amendment; or (c) it needs an operator decision. A check above that says REVISE or FAIL raises a finding this rule grades; 5c and 12p findings stay blocking. Every other finding is a nit carried to the build as a note (closure-step restatement of the build skill is never blocking); a Frame Challenge contradiction is never a nit; mechanical (a deterministic check could catch it -- name it) / critic judgement -- tag each finding, with a stable anchor (plan field path or VP step id)
 
 **Recommendation:** PROCEED (no blocking finding; list nits) / REVISE (any blocking finding) [with specific suggestions if REVISE]
 ```
@@ -165,10 +161,4 @@ Ask the following five questions against the plan's chosen approach. For each, w
 
 ## Quality Gate
 
-Before outputting your critique, verify:
-- [ ] You read EVERY file in the plan's scope (not just .md files)
-- [ ] You can cite line numbers for call sites in source files
-- [ ] You can cite line numbers for mocks in test files
-- [ ] Your "Files Read" list matches the scope entry count
-
-If any checkbox is false, go back and read the missing files before proceeding.
+Before output, confirm you read EVERY scope file (not just .md), can cite line numbers for the call sites and mocks your findings name, and your Files Read count matches the scope entry count; else read the missing files first.

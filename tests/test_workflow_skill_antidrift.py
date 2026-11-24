@@ -165,8 +165,7 @@ def test_critique_gate_convergence_is_finding_shaped() -> None:
     assert "after 3 REVISE rounds" not in planning
     assert "Every round is a full fresh read and no count caps them" in rule
     assert "REVISE means at least one blocking finding" in rule
-    assert "PROCEED listing nits -> apply them and dispatch ONE fresh confirming round, no card" in rule
-    assert "it ends the loop unless it returns a blocking finding" in rule
+    assert "The first PROCEED ends the loop, no confirming round" in rule
     assert "(oscillation interrupts, not the count)" in rule
     assert "recurring at a tag+anchor you recorded fixed" in rule
     assert "a disputed blocking finding" in rule
@@ -198,7 +197,7 @@ def test_oscillation_revisit_condition_is_countable() -> None:
     """Every revisit condition counts something the gate_rounds record holds (rec-3514)."""
     rule = _step9_convergence()
     assert "40 cap-hitting plans" not in rule
-    assert "Revisit when 20 plans carry `gate_rounds`" in rule
+    assert "Revisit when 20 plans carry findings lists" in rule
     assert "Revisit after 10 contested escalations" in rule
 
 
@@ -218,7 +217,7 @@ def test_plan_template_records_gate_rounds_not_a_gates_line() -> None:
     assert "gate_rounds: # REQUIRED on new plans; one row per gate round (+gate_run_id if dispatched)" in planning
     assert (
         "- {gate: decision-scout, round: 1, verdict: NO_FLAGS} # critique rows add blocking, nits, "
-        "category_consistency (12p per drafted entry); escalated + escalation_choice when asked"
+        "findings list, category_consistency (12p); escalated + escalation_choice when asked"
     ) in planning
     assert "**Verdict handling** (add a `gate_rounds` row per scout round):" in planning
 
@@ -233,7 +232,7 @@ def test_plan_command_and_overseer_contract_defer_to_the_skill_rule() -> None:
     """No surface restates a round cap the skill no longer has."""
     plan_cmd = " ".join(_PLAN_CMD.read_text(encoding="utf-8").split())
     assert "round 4 runs one autonomous confirming round" not in plan_cmd
-    assert "a PROCEED that lists nits gets them applied and ONE fresh confirming round, with no card" in plan_cmd
+    assert "the first PROCEED ends the loop with no confirming round, its wording nits applied" in plan_cmd
     assert "An open escalation stops the loop until the human answers" in plan_cmd
     assert "the gates line" not in plan_cmd
     assert "gate history lives in `gate_rounds`" in plan_cmd
@@ -241,8 +240,8 @@ def test_plan_command_and_overseer_contract_defer_to_the_skill_rule() -> None:
     assert "3-round" not in dispatch
     assert "per the planning skill's Decision Scout convergence rule" in dispatch
     assert "or GATE_REQUEST round=N+1 after a BLOCK pivot" in dispatch
-    assert "On a PROCEED that ends the planning skill's Step 9 loop (no nits, or the confirming round's)" in dispatch
-    assert "On REVISE, or any other PROCEED listing nits: the subagent fixes and re-requests" in dispatch
+    assert "On a PROCEED that ends the planning skill's Step 9 loop (the first PROCEED, its nits disposed)" in dispatch
+    assert "On REVISE: the subagent fixes and re-requests" in dispatch
 
 
 def test_dispatch_contract_relays_an_escalation_instead_of_a_round() -> None:
@@ -272,8 +271,8 @@ def test_critic_tags_every_finding_with_a_stable_anchor() -> None:
 def test_critic_tags_severity_and_states_figures_as_hypotheses() -> None:
     """Blocking/nit severity is the critic's call; Frame Challenge is never a nit; figures are re-measured (rec-3742)."""
     critique = _CRITIQUE_SKILL.read_text(encoding="utf-8")
-    assert "blocking (correctness, safety, scope, a Decision conflict or failed check above; when unsure)" in critique
-    assert "nit (wording, citation form, ordering; never a Frame Challenge contradiction)" in critique
+    assert "blocking only when the finding states what reaches main if left unfixed and which control fails first" in critique
+    assert "a Frame Challenge contradiction is never a nit" in critique
     assert "**Recommendation:** PROCEED (no blocking finding; list nits) / REVISE (any blocking finding)" in critique
     assert "State each measured figure as a hypothesis with the command that produced it" in critique
     assert "the reviser will re-measure it and dispute, with evidence, any it cannot reproduce" in critique

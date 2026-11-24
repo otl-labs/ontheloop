@@ -22,7 +22,8 @@ KEYED_IF = (
     "needs.prepare.outputs.allowlisted == 'true' && needs.prepare.outputs.fixture == 'true'"
 )
 KEYPREP_OK = "needs.keyprep.result == 'success'"
-CONDITIONS = {"keyprep": KEYED_IF, "smoke": f"{KEYED_IF} && {KEYPREP_OK}", "refusal": f"{KEYED_IF} && {KEYPREP_OK}"}
+KEYPREP_IF = "!cancelled() && needs.prepare.result == 'success'"
+CONDITIONS = {"keyprep": KEYPREP_IF, "smoke": f"{KEYED_IF} && {KEYPREP_OK}", "refusal": f"{KEYED_IF} && {KEYPREP_OK}"}
 NEEDS = {"keyprep": ["prepare"], "smoke": ["prepare", "keyprep"], "refusal": ["prepare", "keyprep"]}
 PERMISSIONS = {
     "keyprep": {"contents": "read"},
@@ -31,6 +32,7 @@ PERMISSIONS = {
 }
 RUN_PREFIX = 'python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" '
 SELF_CHECK = RUN_PREFIX + "egress-self-check"
+FLOOR = "sudo " + RUN_PREFIX + "egress-floor"
 PIP_DOWNLOAD = (
     "pip download --require-hashes --no-deps --only-binary :all: -r docker/persona/requirements-persona.txt "
     '-d "$RUNNER_TEMP/work/wheels"'
@@ -66,6 +68,8 @@ def _run(step: dict[str, Any]) -> str:
 
 def _verb(step: dict[str, Any]) -> str | None:
     run = _run(step)
+    if run == FLOOR:
+        return "egress-floor"
     return run[len(RUN_PREFIX) :] if run.startswith(RUN_PREFIX) else None
 
 
@@ -141,18 +145,27 @@ def _run_py_rules(name: str, job: dict[str, Any]) -> list[str]:
                 if set(with_) != {"persist-credentials"} or str(with_.get("persist-credentials")).lower() != "false":
                     out.append(f"{w} checkout is not exactly persist-credentials: false (no ref, no path)")
         return out
-    want = ["egress-self-check"] + (["inference-smoke"] * len(TIER_ROLES) if name == "smoke" else ["key-refusal"])
+    want = ["egress-floor", "egress-self-check"] + (
+        ["inference-smoke"] * len(TIER_ROLES) if name == "smoke" else ["key-refusal"]
+    )
+    want.append("egress-self-check")
     if [_verb(s) for s in run_py] != want:
         out.append(f"{w} run.py steps are not exactly {want}")
         return out
-    for step in run_py[1:]:
+    if set(run_py[0]) - {"name", "id", "run"} or set(run_py[1]) - {"name", "id", "run"}:
+        out.append(f"{w} floor or first self-check step has keys beyond name, id and run")
+    final = run_py[-1]
+    if str(final.get("if", "")).strip() != "always()" or set(final) - {"name", "id", "if", "run"}:
+        out.append(f"{w} final self-check must carry if: always() and no env, shell or working-directory")
+    keys = run_py[2:-1]
+    for step in keys:
         env = _map(step.get("env"))
         if env.get("PERSONA_AWS_REGION") != REGION_ENV:
             out.append(f"{w} PERSONA_AWS_REGION is not exactly {REGION_ENV}")
         if env.get("AWS_ACCOUNT_ID") != ACCOUNT_ENV:
             out.append(f"{w} AWS_ACCOUNT_ID is not exactly {ACCOUNT_ENV}")
     if name == "smoke":
-        roles = tuple(_map(s.get("env")).get("PERSONA_SMOKE_ROLE") for s in run_py[1:])
+        roles = tuple(_map(s.get("env")).get("PERSONA_SMOKE_ROLE") for s in keys)
         if roles != TIER_ROLES:
             out.append(f"{w} PERSONA_SMOKE_ROLE values are not exactly {TIER_ROLES}")
     return out
@@ -161,11 +174,11 @@ def _run_py_rules(name: str, job: dict[str, Any]) -> list[str]:
 def _secret_rules(jobs: dict[str, Any], doc_text: str) -> list[str]:
     """Every secrets reference in the file is AWS_ACCOUNT_ID as the env key of a key-reading step after the self-check."""
     allowed = 0
-    for name in ("smoke", "refusal"):
+    for name in ("smoke", "refusal", "post"):
         steps = _steps(_map(jobs.get(name)))
         check = next((i for i, s in enumerate(steps) if _run(s) == SELF_CHECK), None)
         for i, step in enumerate(steps):
-            if _verb(step) in ("inference-smoke", "key-refusal") and check is not None and i > check:
+            if _verb(step) in ("inference-smoke", "key-refusal", "post") and check is not None and i > check:
                 allowed += json.dumps(step, default=str).count("secrets.AWS_ACCOUNT_ID")
     total = len(re.findall(r"secrets\.AWS_ACCOUNT_ID", doc_text))
     out = (

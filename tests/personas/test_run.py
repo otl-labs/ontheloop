@@ -12,6 +12,7 @@ from scripts.personas import run
 
 ROOT = Path(__file__).resolve().parents[2]
 STDLIB = set(sys.stdlib_module_names)
+APP_TOKEN_ALLOWED = {"boto3", "botocore", "jwt", "cryptography", "yaml", "src"}
 INFERENCE_SMOKE_ALLOWED = {"boto3", "botocore", "yaml", "litellm", "src"}
 ALLOWED = {
     "resolve_pr": {"yaml"},
@@ -20,11 +21,17 @@ ALLOWED = {
     "override": {"yaml"},
     "materialise": {"yaml"},
     "execute": {"jsonschema"},
-    "post_verdict": {"yaml", "jsonschema"},
+    "post_verdict": {"yaml", "jsonschema", *APP_TOKEN_ALLOWED},
+    "app_token": APP_TOKEN_ALLOWED,
     "wake": {"yaml"},
     "egress_probe": set(),
     "egress_self_check": set(),
     "egress_control": {"yaml"},
+    "egress_floor": set(),
+    "egress_revert_drill": set(),
+    "egress_revert_drill_control": set(),
+    "egress_fail_closed": set(),
+    "egress_fail_closed_verdict": set(),
     "key_refusal": set(),
     "oidc_assume": set(),
     "inference_smoke": INFERENCE_SMOKE_ALLOWED,
@@ -113,6 +120,11 @@ def test_run_itself_is_stdlib_only_at_import() -> None:
         ("egress-probe", "egress_probe"),
         ("egress-self-check", "egress_self_check"),
         ("egress-control", "egress_control"),
+        ("egress-floor", "egress_floor"),
+        ("egress-revert-drill", "egress_revert_drill"),
+        ("egress-revert-drill-control", "egress_revert_drill_control"),
+        ("egress-fail-closed", "egress_fail_closed"),
+        ("egress-fail-closed-verdict", "egress_fail_closed_verdict"),
         ("inference-smoke", "inference_smoke"),
         ("key-refusal", "key_refusal"),
     ],

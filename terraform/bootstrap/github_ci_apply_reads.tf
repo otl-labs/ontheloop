@@ -133,7 +133,7 @@ locals {
       {
         # METADATA half of the deliberate two-Sid READ split (write-symmetry rule 2 / Decision 129
         # pt 2 as amended). SecretsManagerMetadataWrite creates secrets at secret:agent-platform-*
-        # while the value-read Sid below enumerates four ARNs, so before this Sid existed the
+        # while no Secrets Manager value read is granted, so without this Sid the
         # pipeline could CREATE a secret it could not then refresh-READ: the create succeeds and the
         # NEXT plan AccessDenies on DescribeSecret -- a stranded pipeline, not a failed apply.
         #
@@ -155,8 +155,8 @@ locals {
         #
         # Provider grounding (hashicorp/aws v5.100.0): aws_secretsmanager_secret's refresh calls
         # exactly DescribeSecret + GetResourcePolicy and NEVER GetSecretValue; value reads come only
-        # from aws_secretsmanager_secret_version (resource + data source), which is what the
-        # enumerated Sid below serves. scripts/checks/iam_tf/_read_coverage.py encodes both as
+        # from aws_secretsmanager_secret_version (resource + data source), which Terraform no longer
+        # declares (Decision 237). scripts/checks/iam_tf/_read_coverage.py encodes both as
         # exact ALL-OF refresh-read sets so a wide Describe* here can never stand in for the value
         # read a secret_version genuinely needs.
         Sid    = "SecretsManagerMetadataRead"
@@ -167,32 +167,6 @@ locals {
           "secretsmanager:GetResourcePolicy"
         ]
         Resource = ["arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:agent-platform-*"]
-      },
-      {
-        # VALUE-CAPABLE half of the READ split -- ENUMERATED, NEVER PREFIXED. secretsmanager:
-        # GetSecretValue is the only Secrets Manager read that returns secret material, so it is the
-        # read Decision 129 pt 2 (as amended) actually constrains: value-capable reads stay
-        # enumerated at exactly the four ARNs below, kept VERBATIM from the pre-split
-        # SecretsManagerReadOnly Sid this replaces. The value-free metadata classes that Sid also
-        # carried moved to the prefixed SecretsManagerMetadataRead above; the only net narrowing is
-        # on neon-api-key-* (the one non-agent-platform-* ARN here), whose sole consumer is
-        # scripts/ci/neon_api_key.sh -- a GetSecretValue call, not a metadata one.
-        # Each ARN's lifecycle is human-owned / out-of-band
-        # (docs/contracts/secret-material-handling.yaml, Decision 175 -- rehomed from the
-        # Decision 37 precedent); CI reads these, never writes them. The writable DuckLake Neon
-        # DSN secret keeps its own statement above.
-        #   neon-api-key-*                              : Neon provider API key (Phase 0 out-of-band).
-        #   agent-platform-terraform-personal-tfvars-* : tfvars sourcing at apply time.
-        #   agent-platform-deepseek/anthropic-api-key-*: inference credential envelopes (admin-applied).
-        Sid    = "SecretsManagerValueReadEnumerated"
-        Effect = "Allow"
-        Action = ["secretsmanager:GetSecretValue"]
-        Resource = [
-          "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:neon-api-key-*",
-          "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:agent-platform-terraform-personal-tfvars-*",
-          "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:agent-platform-deepseek-api-key-*",
-          "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:agent-platform-anthropic-api-key-*",
-        ]
       },
       {
         # Decision 237 (secrets-to-ssm-grants): VALUE reads on exactly the three /secret/ parameters the apply role

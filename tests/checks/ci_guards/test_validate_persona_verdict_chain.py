@@ -119,7 +119,13 @@ RED = [
     _red("local-uses", "not pinned", lambda d: _jobs(d)["prepare"]["steps"][0].update({"uses": "./.github/actions/x"})),
     _red("checks-write-on-run", "holds checks: write", lambda d: _jobs(d)["run"]["permissions"].update({"checks": "write"})),
     _red("id-token", "id-token: write", lambda d: _jobs(d)["prepare"]["permissions"].update({"id-token": "write"})),
-    _red("environment-on-post", "names an Environment", lambda d: _jobs(d)["post"].update({"environment": "persona-verdict"})),
+    _red("environment-on-run", "names an Environment", lambda d: _jobs(d)["run"].update({"environment": "persona-verdict"})),
+    _red(
+        "environment-on-wake",
+        "names an Environment",
+        lambda d: _jobs(d)["wake"].update({"environment": "persona-verdict-app"}),
+    ),
+    _red("checks-write-on-post", "holds checks: write", lambda d: _jobs(d)["post"]["permissions"].update({"checks": "write"})),
     _red(
         "prepare-permissions", "permissions differ", lambda d: _jobs(d)["prepare"]["permissions"].update({"contents": "write"})
     ),
@@ -430,12 +436,32 @@ RED = [
         "keyprep-id-token", "holds id-token: write", lambda d: _jobs(d)["keyprep"]["permissions"].update({"id-token": "write"})
     ),
     _red(
-        "third-id-token-job", "holds id-token: write", lambda d: _jobs(d)["post"]["permissions"].update({"id-token": "write"})
+        "third-id-token-job", "holds id-token: write", lambda d: _jobs(d)["run"]["permissions"].update({"id-token": "write"})
     ),
     _red(
         "refusal-environment", "names an Environment", lambda d: _jobs(d)["refusal"].update({"environment": "persona-verdict"})
     ),
     _red("smoke-without-environment", "persona-verdict Environment", lambda d: _jobs(d)["smoke"].pop("environment")),
+    _red(
+        "floor-with-env",
+        "has ['env']",
+        lambda d: _named(_jobs(d)["smoke"], "Lay the egress floor").update({"env": {"A": "b"}}),
+    ),
+    _red(
+        "floor-with-workdir",
+        "has ['working-directory']",
+        lambda d: _named(_jobs(d)["refusal"], "Lay the egress floor").update({"working-directory": "x"}),
+    ),
+    _red(
+        "second-sudo-python-step",
+        "run.py steps are not exactly",
+        lambda d: _jobs(d)["smoke"]["steps"].append({"id": "x", "run": "sudo " + v.RUN_PREFIX + "egress-floor"}),
+    ),
+    _red(
+        "final-check-without-always",
+        "final self-check must carry",
+        lambda d: _named(_jobs(d)["smoke"], "Check the egress filter again").pop("if"),
+    ),
     _red(
         "other-secret-in-smoke",
         "other than secrets.GITHUB_TOKEN",

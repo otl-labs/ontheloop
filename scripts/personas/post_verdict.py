@@ -17,7 +17,7 @@ from typing import Any
 
 import jsonschema
 
-from scripts.personas import execute, override, resolve_pr
+from scripts.personas import app_token, execute, override, resolve_pr
 
 SUCCESS_VERDICTS = frozenset({"NO_FLAGS", "FLAGS_FOUND", "PROCEED"})
 FAILURE_VERDICTS = frozenset({"BLOCK", "REVISE"})
@@ -76,7 +76,7 @@ def post_check(
     summary: str,
     sleep: Callable[[float], None] = time.sleep,
     text: str | None = None,
-) -> None:
+) -> dict[str, Any]:
     body: dict[str, Any] = {
         "name": name,
         "head_sha": head_sha,
@@ -88,9 +88,13 @@ def post_check(
         body["output"]["text"] = text[:TEXT_LIMIT]
     status = 0
     for attempt in range(RETRIES):
-        status, _ = resolve_pr.request("POST", f"/repos/{repo}/check-runs", token, body)
+        status, raw = resolve_pr.request("POST", f"/repos/{repo}/check-runs", token, body)
         if status == 201:
-            return
+            try:
+                created = json.loads(raw)
+            except (TypeError, ValueError):
+                created = None
+            return created if isinstance(created, dict) else {}
         if attempt < RETRIES - 1:
             sleep(2.0 * (attempt + 1))
     raise RuntimeError(f"check-run POST for {name} failed with {status}")
@@ -147,16 +151,14 @@ def _override_form(approved: dict[str, Any], verdict: str, ids: list[str], recor
     return title, summary, text
 
 
-def post_override(
-    resolution: dict[str, Any], repo: str, token: str | None, sleep: Callable[[float], None] = time.sleep
-) -> str:
-    """The re-run event: one new success check run of the failing check's name, from the stored record."""
+def plan_override(resolution: dict[str, Any], repo: str, read_token: str | None) -> dict[str, Any]:
+    """The re-run event: the body of one new success check run of the failing check's name, from the stored record."""
     ov = resolution["override"]
     route_id, head = ov["route"], ov["head_sha"]
     try:
         if not override.overridable(route_id):
             raise override.Refused("the route is not overridable")
-        rec, _text = override.origin(repo, token, head, route_id, int(ov["check_run_id"]))
+        rec, _text = override.origin(repo, read_token, head, route_id, int(ov["check_run_id"]))
         if (
             not rec["blocking_ids"]
             or rec["verdict"] not in override.OVERRIDABLE_VERDICTS
@@ -167,12 +169,15 @@ def post_override(
         raise RuntimeError(f"override re-check failed: {exc}") from exc
     record = override.render_record(route_id, head, rec["verdict"], rec["blocking_ids"], rec["run_id"])
     title, summary, text = _override_form(ov, rec["verdict"], rec["blocking_ids"], record)
-    name = f"persona-verdict/{route_id}"
-    post_check(repo, token, head, name, "success", title, summary, sleep, text)
-    return name
+    return _body(f"persona-verdict/{route_id}", head, "success", title, summary, text)
 
 
-def post_all(root: Path, work: Path, repo: str, token: str | None, sleep: Callable[[float], None] = time.sleep) -> list[str]:
+def _body(name: str, head_sha: str, conclusion: str, title: str, summary: str, text: str | None) -> dict[str, Any]:
+    return {"name": name, "head_sha": head_sha, "conclusion": conclusion, "title": title, "summary": summary, "text": text}
+
+
+def plan_all(root: Path, work: Path, repo: str, read_token: str | None) -> list[dict[str, Any]]:
+    """Every check body, built with GH_TOKEN reads only; never touches the App role or key."""
     resolution = _read(work / "prepared" / "resolution.json")
     routes_doc = _read(work / "prepared" / "routes.json")
     if not isinstance(resolution, dict) or not isinstance(routes_doc, dict):
@@ -180,8 +185,8 @@ def post_all(root: Path, work: Path, repo: str, token: str | None, sleep: Callab
     if not resolution.get("resolved"):
         return []
     if resolution.get("override"):
-        return [post_override(resolution, repo, token, sleep)]
-    posted = []
+        return [plan_override(resolution, repo, read_token)]
+    bodies = []
     for route_id in routes_doc.get("routes", []):
         result = _read(work / "results" / f"{route_id}.json")
         allowlisted = bool(resolution.get("allowlisted"))
@@ -194,20 +199,56 @@ def post_all(root: Path, work: Path, repo: str, token: str | None, sleep: Callab
             if conclusion == "failure":
                 try:
                     approved = override.lookup(
-                        repo, token, int(resolution["number"]), resolution["head_sha"], route_id, override.ids_digest(ids)
+                        repo,
+                        read_token,
+                        int(resolution["number"]),
+                        resolution["head_sha"],
+                        route_id,
+                        override.ids_digest(ids),
                     )
                 except override.Refused:
                     approved = None
                 if approved:
                     conclusion = "success"
                     title, summary, text = _override_form(approved, verdict, ids, text)
-        name = f"persona-verdict/{route_id}"
-        post_check(repo, token, resolution["head_sha"], name, conclusion, title, summary, sleep, text)
-        posted.append(name)
+        bodies.append(_body(f"persona-verdict/{route_id}", resolution["head_sha"], conclusion, title, summary, text))
+    return bodies
+
+
+def post_all(
+    root: Path, work: Path, repo: str, read_token: str | None, sleep: Callable[[float], None] = time.sleep
+) -> list[str]:
+    bodies = plan_all(root, work, repo, read_token)
+    if not bodies:
+        return []
+    expected = override.app_id()
+    posted: list[str] = []
+    with app_token.session(repo) as token:
+        for body in bodies:
+            created = post_check(
+                repo,
+                token,
+                body["head_sha"],
+                body["name"],
+                body["conclusion"],
+                body["title"],
+                body["summary"],
+                sleep,
+                body["text"],
+            )
+            if not posted and (created.get("app") or {}).get("id") != expected:
+                raise RuntimeError("the created check run is not from the verdict App")
+            posted.append(body["name"])
     return posted
 
 
 def main(argv: list[str]) -> int:
-    posted = post_all(execute.ROOT, Path.cwd(), os.environ["GITHUB_REPOSITORY"], os.environ.get("GH_TOKEN"))
+    try:
+        posted = post_all(execute.ROOT, Path.cwd(), os.environ["GITHUB_REPOSITORY"], os.environ.get("GH_TOKEN"))
+    except app_token.AppTokenError:
+        return 1
+    except Exception as exc:  # noqa: BLE001 - reported by class only
+        print(f"PERSONA-VERDICT FAIL {type(exc).__name__}", flush=True)
+        return 1
     print(f"PERSONA-VERDICT posted={len(posted)}")
     return 0

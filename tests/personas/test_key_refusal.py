@@ -38,7 +38,7 @@ def test_passes_only_on_403_access_denied(monkeypatch: pytest.MonkeyPatch, capsy
     assert key_refusal.main([]) == 0
     out = capsys.readouterr().out
     assert "KEY-REFUSAL PASS" in out and "OIDC-CLAIMS sub=repo:o/r:ref:refs/heads/main" in out
-    assert "expect=AccessDenied got=AccessDenied" in out and calls == [oidc_assume.ROLE]
+    assert "expect=AccessDenied got=AccessDenied" in out and calls == [oidc_assume.ROLE, oidc_assume.APP_ROLE]
 
 
 @pytest.mark.parametrize(
@@ -78,4 +78,15 @@ def test_oidc_errors_fail(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Captur
 def test_the_role_name_equals_the_terraform_role() -> None:
     tf = (ROOT / "terraform/personal/oidc_persona_verdict_role.tf").read_text(encoding="utf-8")
     assert f'"{oidc_assume.ROLE}"' in tf
-    assert key_refusal.ATTEMPTS == ((oidc_assume.ROLE, "AccessDenied"),)
+    app_tf = (ROOT / "terraform/personal/oidc_persona_verdict_app_role.tf").read_text(encoding="utf-8")
+    assert f'"{oidc_assume.APP_ROLE}"' in app_tf
+    assert key_refusal.ATTEMPTS == ((oidc_assume.ROLE, "AccessDenied"), (oidc_assume.APP_ROLE, "AccessDenied"))
+
+
+def test_an_ok_on_the_app_role_fails(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    ok = oidc_assume.Outcome(200, "ok", {"AccessKeyId": "a", "SecretAccessKey": "b", "SessionToken": "c"})
+    denied = oidc_assume.Outcome(403, "AccessDenied")
+    _arrange(monkeypatch)
+    monkeypatch.setattr(oidc_assume, "assume", lambda role, jwt, env=None: ok if role == oidc_assume.APP_ROLE else denied)
+    assert key_refusal.main([]) == 1
+    assert "KEY-REFUSAL FAIL" in capsys.readouterr().out

@@ -135,14 +135,6 @@ resource "aws_iam_role_policy" "ducklake_catalog_dr" {
         Resource = ["${aws_cloudwatch_log_group.ducklake_catalog_dr.arn}:*"]
       },
       {
-        Sid    = "NeonDsnRead"
-        Effect = "Allow"
-        Action = ["secretsmanager:GetSecretValue"]
-        # pragma: allowlist secret
-        Resource = [aws_secretsmanager_secret.ducklake_neon_catalog_dsn.arn]
-      },
-      {
-        # Decision 237: SSM twin of the Secrets Manager read above; secrets-to-ssm-retire removes the old one.
         Sid      = "NeonDsnParameterRead"
         Effect   = "Allow"
         Action   = ["ssm:GetParameter"]

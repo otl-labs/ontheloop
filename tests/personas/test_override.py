@@ -18,6 +18,8 @@ IDS = ["probe:block-1", "probe:block-2"]
 DIGEST = override.ids_digest(IDS)
 TITLE = f"persona-verdict-override 7 {HEAD} {ROUTE} 55 {DIGEST}"
 PRODUCER = f"persona-verdict pull_request {HEAD}"
+APP_ID = 424242
+APP = {"id": APP_ID, "slug": "persona-verdict-app"}
 
 
 def _text(**over: Any) -> str:
@@ -31,13 +33,13 @@ class Api:
         self.routes: dict[str, Any] = {
             "/repos/o/r/pulls/7": {"state": "open", "head": {"sha": HEAD, "repo": {"full_name": REPO}}},
             "/repos/o/r/check-runs/55": {
-                "app": {"slug": "github-actions"},
+                "app": APP,
                 "name": f"persona-verdict/{ROUTE}",
                 "head_sha": HEAD,
                 "check_suite": {"id": 120013128966},
                 "output": {"text": _text()},
             },
-            f"/repos/o/r/commits/{HEAD}/check-runs": {"check_runs": [{"id": 55}, {"id": 40}]},
+            f"/repos/o/r/commits/{HEAD}/check-runs": {"check_runs": [{"id": 55, "app": APP}, {"id": 40, "app": APP}]},
             "/repos/o/r/actions/runs/900": {
                 "path": override.VERDICT_WORKFLOW,
                 "event": "workflow_run",
@@ -75,6 +77,7 @@ class Api:
 def api(monkeypatch: pytest.MonkeyPatch) -> Api:
     fake = Api()
     monkeypatch.setattr(resolve_pr, "get_json", fake)
+    monkeypatch.setattr(override, "app_id", lambda: APP_ID)
     return fake
 
 
@@ -131,7 +134,8 @@ def test_overridable_follows_persona_class(monkeypatch: pytest.MonkeyPatch) -> N
 @pytest.mark.parametrize(
     "path,patch",
     [
-        ("/repos/o/r/check-runs/55", {"app": {"slug": "other"}}),
+        ("/repos/o/r/check-runs/55", {"app": {"id": 1, "slug": "other"}}),
+        ("/repos/o/r/check-runs/55", {"app": {"id": 15368, "slug": "github-actions"}}),
         ("/repos/o/r/check-runs/55", {"name": "persona-verdict/x"}),
         ("/repos/o/r/check-runs/55", {"head_sha": "b" * 40}),
         ("/repos/o/r/check-runs/55", {"output": {"text": "no record"}}),
@@ -140,7 +144,7 @@ def test_overridable_follows_persona_class(monkeypatch: pytest.MonkeyPatch) -> N
         ("/repos/o/r/actions/runs/900", {"event": "push"}),
         ("/repos/o/r/actions/runs/900", {"head_branch": "feat"}),
         ("/repos/o/r/actions/runs/900", {"display_title": "x"}),
-        (f"/repos/o/r/commits/{HEAD}/check-runs", {"check_runs": [{"id": 55}, {"id": 56}]}),
+        (f"/repos/o/r/commits/{HEAD}/check-runs", {"check_runs": [{"id": 55, "app": APP}, {"id": 56, "app": APP}]}),
         (f"/repos/o/r/commits/{HEAD}/check-runs", {"check_runs": []}),
     ],
 )
@@ -148,6 +152,42 @@ def test_origin_refuses(api: Api, path: str, patch: dict[str, Any]) -> None:
     api.routes[path] = {**api.routes[path], **patch}
     with pytest.raises(override.Refused):
         override.origin(REPO, "t", HEAD, ROUTE, 55)
+
+
+def test_origin_ignores_a_newer_same_named_run_from_another_app(api: Api) -> None:
+    key = f"/repos/o/r/commits/{HEAD}/check-runs"
+    api.routes[key] = {"check_runs": [{"id": 56, "app": {"id": 15368}}, {"id": 55, "app": APP}, {"id": 57, "app": {"id": 9}}]}
+    assert override.origin(REPO, "t", HEAD, ROUTE, 55)[0]["run_id"] == "900"
+
+
+def test_origin_refuses_a_newer_run_from_the_verdict_app(api: Api) -> None:
+    api.routes[f"/repos/o/r/commits/{HEAD}/check-runs"] = {"check_runs": [{"id": 55, "app": APP}, {"id": 56, "app": APP}]}
+    with pytest.raises(override.Refused, match="not the newest"):
+        override.origin(REPO, "t", HEAD, ROUTE, 55)
+
+
+def test_origin_refuses_while_the_row_is_null(api: Api, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.undo()
+    monkeypatch.setattr(resolve_pr, "get_json", api)
+    monkeypatch.setattr(override, "ROOT", Path("/nonexistent-root"))
+    with pytest.raises(override.Refused, match="no verdict App is set"):
+        override.origin(REPO, "t", HEAD, ROUTE, 55)
+
+
+@pytest.mark.parametrize("value", ["null", "424242"])
+def test_app_id_reads_the_row_of_the_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    cfg = tmp_path / "docs/contracts"
+    cfg.mkdir(parents=True)
+    (cfg / "project-configuration.yaml").write_text(
+        f"settings:\n  - id: {merge_checks.VERDICT_APP_ROW}\n    defaults: {{local: {value}, cloud: {value}}}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(override, "ROOT", tmp_path)
+    if value == "null":
+        with pytest.raises(override.Refused, match="no verdict App is set"):
+            override.app_id()
+    else:
+        assert override.app_id() == 424242
 
 
 def test_origin_admits_a_check_in_a_different_suite_from_its_producing_run(api: Api) -> None:

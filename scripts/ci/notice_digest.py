@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import yaml
@@ -27,6 +28,8 @@ LIMIT = 65536
 _ZERO = re.compile(r"^0+$")
 _PR = re.compile(r"\(#(\d+)\)\s*$")
 _ISSUE_URL = re.compile(r"/issues/(\d+)\s*$", re.M)
+_TRANSIENT = re.compile(r"HTTP (?:499|502|503|504)\b")
+_WAITS = (2, 5, 10)
 
 
 def _git(*args: str) -> str | None:
@@ -91,10 +94,26 @@ def rows(before: str, after: str, map_file: str | None) -> list[str]:
     return out
 
 
-def _gh(*args: str, check: bool = True) -> subprocess.CompletedProcess:
-    done = subprocess.run(["gh", *args], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace")
+def _sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def _gh_once(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["gh", *args], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+
+def _fail(args: tuple[str, ...], done: subprocess.CompletedProcess) -> RuntimeError:
+    return RuntimeError(f"gh {' '.join(args[:2])} failed: {done.stderr.strip()}")
+
+
+def _gh(*args: str, check: bool = True, retry: bool = True) -> subprocess.CompletedProcess:
+    for wait in (*_WAITS, None):
+        done = _gh_once(*args)
+        if done.returncode == 0 or wait is None or not retry or not _TRANSIENT.search(done.stderr):
+            break
+        _sleep(wait)
     if check and done.returncode != 0:
-        raise RuntimeError(f"gh {' '.join(args[:2])} failed: {done.stderr.strip()}")
+        raise _fail(args, done)
     return done
 
 
@@ -126,7 +145,15 @@ def _ensure_issue() -> int:
     if made.returncode != 0 and "already exists" not in made.stderr:
         raise RuntimeError(f"gh label create failed: {made.stderr.strip()}")
     created = _gh(
-        "issue", "create", "--title", TITLE, "--label", LABEL, "--body-file", _body_file("One comment per merged commit.")
+        "issue",
+        "create",
+        "--title",
+        TITLE,
+        "--label",
+        LABEL,
+        "--body-file",
+        _body_file("One comment per merged commit."),
+        retry=False,
     )
     found = _ISSUE_URL.findall(created.stdout or "")
     if not found:
@@ -134,10 +161,48 @@ def _ensure_issue() -> int:
     return int(found[-1])
 
 
+def _norm(text: str) -> str:
+    return text.replace("\r\n", "\n").strip()
+
+
+def _landed(number: int, body: str) -> bool:
+    try:
+        done = _gh(
+            "api", "--paginate", "--slurp", f"repos/{{owner}}/{{repo}}/issues/{number}/comments", check=False, retry=False
+        )
+        if done.returncode != 0:
+            return False
+        pages = json.loads(done.stdout or "")
+        return any(
+            isinstance(item, dict) and isinstance(item.get("body"), str) and _norm(item["body"]) == body
+            for page in pages
+            if isinstance(page, list)
+            for item in page
+        )
+    except (ValueError, TypeError, RuntimeError, OSError):
+        return False
+
+
+def _comment(number: int, row: str) -> None:
+    text = _fit(row)
+    args = ("issue", "comment", str(number), "--body-file", _body_file(text))
+    for wait in (*_WAITS, None):
+        done = _gh(*args, check=False, retry=False)
+        if done.returncode == 0:
+            return
+        if not _TRANSIENT.search(done.stderr):
+            raise _fail(args, done)
+        if wait is not None:
+            _sleep(wait)
+        if _landed(number, _norm(text)):
+            return
+    raise _fail(args, done)
+
+
 def post(lines: list[str]) -> None:
     number = _ensure_issue()
     for line in lines:
-        _gh("issue", "comment", str(number), "--body-file", _body_file(_fit(line)))
+        _comment(number, line)
 
 
 def main(argv: list[str] | None = None) -> int:
