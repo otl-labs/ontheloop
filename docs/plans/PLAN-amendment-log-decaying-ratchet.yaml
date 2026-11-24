@@ -6,8 +6,9 @@ slug: amendment-log-decaying-ratchet
 intent: >-
   Make the 27 contracts over Decision 275's five full amendment_log rows shrink back on their own, so every agent that
   loads them reads less history (NS.4): a change that adds a top-level row also compacts one more row the compaction
-  tool can select, an old row changes only by a lossless terse compaction, and a new non-break row carries only the
-  terse keys (rec-5453). A new Decision amends Decision 275 cl.4; drift Pass 2 enforces it.
+  tool can select, an old full row changes only by a lossless terse compaction and stays compactable if it was, and a
+  new non-break row is terse or compactable (rec-5453). A new Decision amends Decision 275 cl.4; drift Pass 2 enforces
+  it.
 plan_type: IMPLEMENTATION
 verification_tier: V2
 plan_path: docs/plans/PLAN-amendment-log-decaying-ratchet.yaml
@@ -24,68 +25,83 @@ scope:
     action: Modify
     purpose: >-
       Exactly the approved-text sidecar docs/plans/approved/amendment-log-decaying-ratchet.yaml: block DECISIONS-1 adds
-      the new Decision at the top of the file (kind direction, amends 275, delegates keep_full {min 3, max 5} and
-      decay_per_change {min 1, max 3}); block DECISIONS-2 adds the dated "Amended by" note after Decision 275's Related
-      line (Decision 177's annotation form). {{N}} is the next free number at build time and {{DATE}} the build date.
+      the new Decision at the top of the file (kind direction, amends 275, delegates keep_full {min 3, max 5}; the decay
+      step is one, fixed by the Decision); block DECISIONS-2 adds the dated "Amended by" note after Decision 275's
+      Related line (Decision 177's annotation form). {{N}} is the next free number at build time and {{DATE}} the build
+      date.
   - file: docs/contracts/contract-population.yaml
     action: Modify
     purpose: >-
-      amendment_log_retention gains decay_per_change: 1 (the new Decision's delegated D), and its rule, exempt_rows and
-      new_row_identity text restate, citing the new Decision: (a) when a change adds a new row (pairing below), head full
-      rows may not exceed hold = max(keep_full, base full rows), nor decay_target = max(keep_full, base full rows -
-      decay_per_change) while the tool's selected set on the head is non-empty; (b) newest ranks full rows by date,
-      equal dates reading the later row in the file as older (the tool's compaction_order); (c) pairing: rows with
-      identical dumps (dates included) match as a multiset in file order; every unmatched base row must be a full,
-      non-break row paired, first unpaired in file order, with a head row of equal date, semantic_break and
-      change_class that _amendment_terse.lossless accepts; unmatched head rows are the change's new rows; (d) a new row
-      with semantic_break false carries exactly terse_row.keys; (e) the pointer set is the tool's pointer_tokens. One
+      Text only, no value the check reads changes: amendment_log_retention's rule, exempt_rows and new_row_identity are
+      rewritten, citing the new Decision, to state (a) the hold and the decay below, (b) newest by date with equal dates
+      reading the later row in the file as older (the tool's compaction_order), (c) the pairing rule, (d) the new-row
+      rule, and (e) that "pointer" means _amendment_terse.pointer_tokens read over every string value of a row. One
       amendment_log row for this change; the build then satisfies the new rule on this file itself (gotcha in context).
   - file: scripts/checks/contracts/_amendment_retention.py
     action: Modify
     purpose: >-
-      Pure helpers, never raising (Decision 55). decay_per_change(cfg) (absent, bool, non-int or below 1 reads as 1).
-      pair_rows(base_log, head_log, cfg) -> (new_rows, unpaired_base) per the contract's pairing rule.
-      change_violation(name, base_data, head_data, cfg): an unpaired base row fails, naming its date and change_class
-      and why (changed but not a lossless terse compaction; a terse or semantic_break row changed; a row dropped).
-      new_row_violation: a new row with semantic_break false and keys other than terse_row.keys fails.
-      retention_violation(name, base_data, head_data, cfg=None, head_text=None, base_text=None): when new_rows is
-      non-empty, F = full_rows counts, selected = amendment_compact.selected_rows(head_text, cfg) when head_text is
-      given, else _amendment_terse.compaction_order(head_log, cfg); fail when F_head > hold, or when F_head >
-      decay_target and selected is non-empty; the message names N = min(len(selected), F_head - decay_target) and the
-      command bin/venv-python -m scripts.checks.contracts.amendment_compact --write --rows N docs/contracts/<name>, or,
-      when selected is empty, says the tool selects no row and an older row needs a lossless hand compaction.
-      unselectable_violation(base_text, head_text, cfg): a row in selected_rows(base_text) whose identical head row
-      (pair_rows' matching) is neither in selected_rows(head_text) nor among the head's newest keep_full full rows
-      fails (a comment or shared line added to its span). pass2_messages(name, base_data, head_data, both_class_d,
-      base_text=None, head_text=None) runs all four, then rewrite_violation unchanged. Exempt files (exempt_file) skip
-      every leg. Existing nodes keep passing: their full-row fixtures carry migration_story, so the tool selects none
-      and the hold binds as today. Under 500 SLOC (Decision 128).
+      Pure helpers, never raising (Decision 55); each new leg returns None when the retention config is None (as
+      retention_violation does today) or the file is exempt (exempt_file). "Selected" below is
+      amendment_compact.selected_rows(text, cfg): log indexes, as compaction_order returns them (dependency plan
+      scope[1]); "selectable" is membership of selected_rows(text, {**cfg, "keep_full": 0}), or, when the text is None,
+      of _amendment_terse.compaction_order(log, {**cfg, "keep_full": 0}). A row is full when it is neither terse nor
+      semantic_break is True (full_rows today), so a row whose semantic_break is absent, null or "false" is a non-break
+      full row. (1) pair_rows(base_log, head_log, cfg) -> (pairs, new_rows, unpaired_base): rows whose canonical dumps
+      (dates included) are equal match as a multiset, first unmatched in file order; each remaining base row pairs with
+      the first remaining head row of equal date, semantic_break and change_class; unmatched head rows are new_rows.
+      (2) change_violation: a paired or unpaired base row fails unless it is a non-break full row and its head row
+      passes _amendment_terse.lossless and keeps row_pointers(base row) (pointer_tokens over every string value of the
+      row, migration_story included) within pointer_tokens(head summary); the message names the row's date and
+      change_class and the reason (not lossless, pointer lost, terse or semantic-break row changed, row dropped,
+      re-dated). (3) new_row_violation: each new row that is not a mapping fails; each new row whose semantic_break is
+      not True must be terse (is_terse) or selectable on the head. (4) selectability_violation(base_text, head_text): a
+      base row selectable on the base whose identical head row (pair_rows' dump match) is not selectable on the head
+      fails (a comment or shared line added to its span); skipped when either text is None. (5) retention_violation(name,
+      base_data, head_data, cfg=None, head_text=None): the trigger stays genuinely_new > 0 and the dropped-row message
+      stays; hold = max(keep_full, F_base) and decay_target = max(keep_full, F_base - 1) over full_rows counts; fail
+      when F_head > hold, or when F_head > decay_target and the head's selected set is non-empty; the message names
+      N = min(len(selected), F_head - decay_target) and bin/venv-python -m scripts.checks.contracts.amendment_compact
+      --write --rows N docs/contracts/<name>, or, with an empty selected set, says the tool selects no row and an older
+      full row needs a lossless hand compaction. (6) pass2_messages(name, base_data, head_data, both_class_d,
+      base_text=None, head_text=None) runs retention, change, new-row and selectability legs (labels "Contract drift
+      (retention|change|new-row|selectability)") and rewrite_violation unchanged. Import the two tool modules as
+      modules (from scripts.checks.contracts import _amendment_terse, amendment_compact), never their names, since both
+      import this module. Under 500 SLOC (Decision 128).
     new_imports: [scripts.checks.contracts._amendment_terse, scripts.checks.contracts.amendment_compact]
   - file: scripts/checks/contracts/validate_contract_drift.py
     action: Modify
     purpose: >-
-      Pass 2 (around :365-404) keeps the head file text it already reads and hands base_text and head text to
-      _amendment_retention.pass2_messages. No other behaviour change.
+      Pass 2 (around :359-404) keeps the head file text it already reads at :365 and hands base_text and that head text
+      to _amendment_retention.pass2_messages. No other behaviour change.
   - file: tests/checks/contracts/test__amendment_retention.py
     action: Modify
     purpose: >-
-      New nodes with compactable fixtures (rows of the four keys whose summary names a PLAN-, rec- or Decision token, no
-      migration_story): test_decaying_ratchet (rec-5453's acceptance: a base of 7 compactable full rows plus a new row
-      fails with one compaction and passes with two; adding two rows needs three; the message names --rows and the
-      tool); test_decay_counts_only_selected_rows (compactable rows only inside the newest five, and newest rows
-      uncompactable: the rule never asks for more than selected_rows offers); test_hold_binds_where_the_tool_selects_nothing;
-      test_semantic_break_or_terse_new_row_still_triggers_decay; test_old_row_changes_only_by_lossless_compaction
-      (reworded, pointer dropped, re-dated, semantic_break row changed, terse row changed and dropped row fail; a lossless
-      compaction passes, with and without a new row); test_new_non_break_row_carries_only_terse_keys;
-      test_comment_in_span_cannot_make_a_row_unselectable (text fixtures); test_decay_per_change_reads_the_contract;
-      test_real_contracts_can_meet_the_ratchet (for every non-exempt docs/contracts file: add one compactable row dated
-      after every row, apply the tool's compaction of the N rows the message names to the text, and assert
-      pass2_messages is empty). test_real_retention_mapping also asserts decay_per_change >= 1 and that terse_row.keys
-      is the four keys.
+      Fixtures: add _plain(n) (the four keys, summary "PLAN-x-n: " plus over 160 characters, no migration_story: full and
+      compactable). Existing nodes adjusted for the new legs, each a tightening, never a loosening (validate_weakening
+      dispositions "tightened"): TestPass2Messages::test_labels' first case adds _plain(9) as the new row (still one
+      retention message); its reworded-row cases now expect the change message too (both_class_d True: rewrite and
+      change messages; False: the change message alone, where it expected []); test_adding_a_terse_row_never_fails is
+      renamed test_adding_a_terse_row_to_a_held_base_passes, its assertion unchanged. New nodes: test_decaying_ratchet
+      (rec-5453's acceptance: a base of 7 _plain rows plus one new _plain row fails with one compaction and passes with
+      two; two new rows need three; the message names --rows and the tool); test_decay_counts_only_selected_rows
+      (compactable rows only inside the newest five, and newest rows refused: never asks more than selected offers);
+      test_hold_binds_where_the_tool_selects_nothing; test_semantic_break_or_terse_new_row_still_triggers_decay;
+      test_old_row_changes_only_by_lossless_compaction (reworded, pointer dropped, pointer held only in migration_story
+      dropped, re-dated, semantic_break row changed, terse row changed and dropped row fail; a lossless compaction
+      passes with and without a new row); test_new_non_break_row_is_terse_or_compactable (migration_story,
+      semantic_break absent or "false", no pointer, overflow and non-mapping new rows fail; terse, _plain and
+      semantic_break True rows pass); test_comment_in_span_cannot_make_a_row_unselectable (text fixtures: a comment
+      added inside a selectable row in the newest five and one past them both fail; texts None skip the leg);
+      test_none_config_and_exempt_file_skip_every_leg; test_real_contracts_can_meet_the_ratchet (for every non-exempt
+      docs/contracts file: adding one terse row dated after every row, then applying the tool's compaction of the N
+      rows the message names, leaves pass2_messages empty; adding one _plain row instead leaves it empty or holds only
+      the hand-compaction message).
   - file: tests/checks/contracts/validate_contract_drift/test_amendment_retention_wiring.py
     action: Modify
     purpose: >-
-      A new class TestDecayWiring with two nodes: test_decay_failure_names_the_tool_command (a changed contract whose base holds compactable rows past keep_full
+      TestRetentionWiring::test_genuinely_new_row_with_a_compaction_passes takes a four-key new row (its _row(9) loses
+      migration_story), assertion unchanged (tightened rule, same claim). A new class TestDecayWiring with two nodes:
+      test_decay_failure_names_the_tool_command (a changed contract whose base holds compactable rows past keep_full
       fails Pass 2 with the amendment_compact command) and test_pass2_receives_file_texts (a comment added inside a
       selectable row's span fails through the real Pass 2 path).
   - file: audits/standards-cleanup-census.yaml
@@ -93,15 +109,15 @@ scope:
     purpose: >-
       Row S8: source "Decision 275 cl.4, Decision <N> cl.1-4"; disposition conform; owner "Decision <N> cl.1"; reason
       "files over keep_full shrink by one selected row per row-adding change under the decaying ratchet; rows the
-      compaction tool refuses are held, never grown, and new non-break rows carry only the terse keys." The reason
-      names no rec (file header), so rec-5453 leaves the file.
+      compaction tool refuses are held, never grown, and new non-break rows are terse or compactable." The reason names
+      no rec (file header), so rec-5453 leaves the file.
 bundled_recommendations: [rec-5453]
 followon_recs: []
 infrastructure_dependencies: []
 acceptance_criteria:
   - "bin/venv-python -m pytest tests/checks/contracts/test__amendment_retention.py::test_decaying_ratchet -q passes, fails before the change (node absent), and audits/standards-cleanup-census.yaml no longer names rec-5453 (rec-5453's acceptance)."
   - "docs/DECISIONS.md differs from its base by exactly the sidecar's two blocks with {{N}} and {{DATE}} filled; validate_merge_step reads the operator's GitHub approval of the sidecar."
-  - "Every real contract can meet the new rule by running the printed tool command (test_real_contracts_can_meet_the_ratchet), and the build's own contract-population.yaml change passes validate_contract_drift under it."
+  - "Every real contract can meet the new rule for a terse new row by running the printed tool command alone, and for a full new row by that command or a lossless hand compaction (test_real_contracts_can_meet_the_ratchet); the build's own contract-population.yaml change passes validate_contract_drift under it."
   - "standards_census --verify --read-owners exits 0 with S8 conform and owned by the new Decision."
   - "rec-5453 is closed by the build's squash-merge Resolves trailer once its acceptance holds (Decision 201)."
 verification_plan:
@@ -113,13 +129,14 @@ verification_plan:
       tests/checks/contracts/test__amendment_retention.py::test_decay_counts_only_selected_rows
       tests/checks/contracts/test__amendment_retention.py::test_hold_binds_where_the_tool_selects_nothing
       tests/checks/contracts/test__amendment_retention.py::test_old_row_changes_only_by_lossless_compaction
-      tests/checks/contracts/test__amendment_retention.py::test_new_non_break_row_carries_only_terse_keys
+      tests/checks/contracts/test__amendment_retention.py::test_new_non_break_row_is_terse_or_compactable
       tests/checks/contracts/test__amendment_retention.py::test_comment_in_span_cannot_make_a_row_unselectable
+      tests/checks/contracts/test__amendment_retention.py::test_none_config_and_exempt_file_skip_every_leg
       tests/checks/contracts/validate_contract_drift/test_amendment_retention_wiring.py::TestDecayWiring -q
-    expected: exit 0 with 8 passed (TestDecayWiring holds the two wiring nodes); before the change the nodes do not exist and pytest exits non-zero
+    expected: exit 0 with 9 passed (TestDecayWiring holds the two wiring nodes); before the change the nodes do not exist and pytest exits non-zero
     fix_if: a node fails; the decay asks more than the tool selects, the hold no longer binds, a lossy or re-dated row passes, or Pass 2 drops the texts
     hermetic: true
-    expected_literals: ["8 passed"]
+    expected_literals: ["9 passed"]
     graduation: graduate
     graduation_check_id: amendment-log-decaying-ratchet
   - step: 2
@@ -191,27 +208,53 @@ test_obligations:
     test_selector: tests/checks/contracts/validate_contract_drift/test_amendment_retention_wiring.py::TestDecayWiring
     red_green_expectation: red before (class absent), green after
   - source: docs/contracts/contract-population.yaml
-    behavior: the delegated decay value is present and at least one
+    behavior: the retention values the check reads stay keep_full 5 and the four terse keys
     verification_step: 2
     test_selector: tests/checks/contracts/test__amendment_retention.py::test_real_retention_mapping
-    red_green_expectation: red before (decay_per_change absent), green after
+    waiver_reason: Text-only edit of the rule, exempt_rows and new_row_identity prose; no value the check reads changes, so no test can fail without it.
+  - source: scripts/checks/contracts/_amendment_retention.py
+    behavior: a new non-break row is terse or compactable, and a compactable row stays so
+    verification_step: 1
+    test_selector: tests/checks/contracts/test__amendment_retention.py::test_new_non_break_row_is_terse_or_compactable
+    red_green_expectation: red before (node absent), green after
 constraints:
   - "Start only after the rec-5452 build (PLAN-amendment-log-compaction-tool) merges: this plan imports amendment_compact.selected_rows and _amendment_terse.lossless, compaction_order and pointer_tokens as that plan's scope rows define them. If their names or signatures differ on main, stop and report a plan defect (coordinator.yaml routing.plan_defect); never re-implement them here."
   - DECISIONS.md words come only from the approved sidecar; any other wording change needs a new approval run.
   - No CI autofix and no write to any contract other than contract-population.yaml; the eight near-cap files are rec-5454's.
   - Never raise in import; no eval or exec; PyYAML only. No rescue agents or workaround loops (Decision 55).
 context:
-  - "Decision-scout round 1 (draft, 2026-11-24): FLAGS_FOUND. Decisions triaged: 228 of 228; roadmap 5 RELATED, 0 CONFLICT. Serves NS.4 4/5. CITE: dec:275, dec:276, dec:177, dec:279. NOTE Decision 276 cl.2 (sets restated in Decision and contract): pivoted, the Decision keeps the rulings and the contract the sets (tie-break, pointer set, new-row keys = terse_row.keys). RELATED 240 cl.4, 167, 181 cl.2, 166, 128, 163, 278, 150, 243, 86/127."
-  - "Advisor (fresh Fable, 2026-11-24): /mnt/project-files/decision-growth/amendment-log/ratchet/advisor-brief/ADVICE.md. Adopted: head-floored decay with today's hold kept (the floated uncompactable + (compactable_base - 1) formula and a base-anchored one both demand impossible compactions), verification in drift Pass 2 only (no tool --verify mode: one judge), direction kind with delegates, fail at once, S8 conform owned by the Decision, new-row key rule. Not adopted: a census query for refused rows by reason (clause 4 stops new ones; residual named in the Decision's Coverage)."
-  - "Operator: 'write the plan' 2026-11-24 17:31 UTC; clause 4 (new non-break rows carry only the terse keys) chosen on a decision card 17:31 UTC. Wording approval: GitHub approval run of the sidecar (Decision 246), link in the handoff."
+  - "Decision-scout round 2 (written plan, 2026-11-24): NO_FLAGS. Decisions triaged: 228 of 228. Roadmap items intersected: 5; CONFLICT: 0; RELATED: 5. Serves: NS.4 4/5. CITE: dec:275, dec:276, dec:177, dec:279. Round 1 (draft) was FLAGS_FOUND with a NOTE on Decision 276 cl.2 (sets restated in Decision and contract); the pivot (rulings in the Decision, sets in the contract) holds. RELATED 240 cl.4, 278, 167/150, 181 cl.2, 166/168, 128, 86/127, 163, 55, 243, 246, 201, 189/244, 245."
+  - "Decay step fixed at one in the Decision, not delegated: wording-check round 1 failed because a delegate key must resolve at head and contract-population.yaml is not a sidecar file; the step is the operator's ruling (max(5, base - 1))."
+  - "Advisor (fresh Fable, 2026-11-24): /mnt/project-files/decision-growth/amendment-log/ratchet/advisor-brief/ADVICE.md. Adopted: head-floored decay with today's hold kept (the floated uncompactable + (compactable_base - 1) formula and a base-anchored one both demand impossible compactions), verification in drift Pass 2 only (no tool --verify mode: one judge), direction kind with a keep_full delegate, fail at once, S8 conform owned by the Decision, new-row key rule. Not adopted: a census query for refused rows by reason (clause 4 stops new ones; residual named in the Decision's Coverage)."
+  - "Operator: 'write the plan' 2026-11-24 17:31 UTC; clause 4 (new non-break rows carry only the terse keys) chosen on a decision card 17:31 UTC; critique round 1 (GIC-01) widened it to 'terse or compactable' (a pointer and a fitting label too), shown in the approval run's wording. Wording approval: GitHub approval run of the sidecar (Decision 246), link in the handoff."
   - "Measured on main 30a7a678 with a prototype of the tool's rule (/mnt/project-files/decision-growth/amendment-log/ratchet/evidence/): 27 files over keep_full, 286 full rows, 107 selectable, 44 refused past the newest five; 4 files select nothing (hold only). 105 top-level non-break rows carry migration_story, 21 added in November; nothing reads it there (_rule_ratchet.py reads only field-level logs, :64-65, :85-86)."
-  - "Arithmetic pinned: adding k rows to a file at base B > keep_full with enough selectable rows compacts k + decay_per_change rows; at B <= keep_full it compacts down to keep_full; with fewer selectable rows it compacts all of them and the hold still binds."
+  - "Arithmetic pinned: adding k rows to a file at base B > keep_full with enough selectable rows compacts k + 1 rows; at B <= keep_full it compacts down to keep_full; with fewer selectable rows it compacts all of them and the hold still binds."
   - "Gotcha: this build's own contract-population.yaml row is a row-adding change to a file over keep_full (6 full rows, none selectable today). Run the tool on it; if the hold still fails, compact its oldest refused row by hand to a lossless terse row (clause 3 allows it)."
   - "Concurrency: same-base PRs emit identical compaction hunks; after one merges, update-branch moves the merge base and the other owes another decay (re-run the printed command). rec-5454 (the eight near-cap files) runs in parallel; its tool-made compactions pass the pairing rule by construction."
-  - "Graduated shard contract-amendment-log-retention (whole test__amendment_retention.py) is kept unchanged: the file keeps passing with the new nodes."
+  - "Graduated shard contract-amendment-log-retention (whole test__amendment_retention.py) is kept; three of its existing assertions tighten and one node is renamed (scope[4]), none loosened. The wiring file's one fixture change keeps its claim."
   - "Cross-project: Decision Growth claim on #1963 posted 2026-11-24 (comment 7138413914); post the merge line there. Every project's later contract PRs meet the rule."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:c84b86845b898ccdaa4924bdd49eb5095a7ef001b6d2e8e461f713d057f45cfe"}
+  - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: "v1:e75d21c74aaba377b92817a7d32eecdd739a5239fe4dcfdc9681efd2a8eb0e23"}
+  - {gate: wording-check, round: 1, verdict: FAIL, digest: bf2bdad7dedc7e2f310a1416098d2c0776bf1b27a2e127226ee024c2940d4c5c, base: 85ad623b69a31e3f5117e9f211495ac392b0ce05, selection: degraded}  # pragma: allowlist secret
+  - gate: plan-critique
+    round: 1
+    verdict: REVISE
+    blocking: 5
+    nits: 7
+    findings:
+      - {id: RTE-01, severity: blocking, origin: judgement, anchor: "scope[2].purpose", subject: "existing test_labels and wiring nodes fail under the new legs; each named with its tightened expectation, rename listed, kept-unchanged claim dropped", disposition: fixed}
+      - {id: FEAS-01, severity: blocking, origin: judgement, anchor: "scope[4].purpose", subject: "a full new row on a file whose pushed-out rows are refused needs a hand compaction; real-tree node adds a terse row (tool alone) and a full row (tool or hand-compaction message), AC 3 reworded", disposition: fixed}
+      - {id: GIC-01, severity: blocking, origin: judgement, anchor: "scope[2].purpose", subject: "input forms a-f stated: non-break means semantic_break not True; new rows terse or selectable; selectable rows stay so; pointers over every string value", disposition: fixed}
+      - {id: KND-01, severity: blocking, origin: judgement, anchor: "sidecar blocks[DECISIONS-1].after", subject: "kind justification named a mechanism clause and clause 1 stated no bounds; justification cites Decision 279 cl.2 and the gate clause 1 sets, clause 1 states keep_full 3-5", disposition: fixed}
+      - {id: RVC-01, severity: blocking, origin: judgement, anchor: "sidecar blocks[DECISIONS-1].after", subject: "refused-grows fired while clause 4 holds (75 refused rows inside the newest five); now counts refused rows added after install", disposition: fixed}
+      - {id: N-01, severity: nit, origin: mechanical, anchor: "scope[2].new_imports", subject: "import cycle with the tool modules; module imports pinned in scope", disposition: fixed}
+      - {id: N-02, severity: nit, origin: mechanical, anchor: "execution_steps[3]", subject: "regenerate docs/decisions-index.json before VP 3 so S8's owner reads live", disposition: fixed}
+      - {id: N-03, severity: nit, origin: judgement, anchor: "scope[4].purpose", subject: "test_decaying_ratchet's added row is full (_plain)", disposition: fixed}
+      - {id: N-04, severity: nit, origin: judgement, anchor: "sidecar clause 3", subject: "clause 3 now says terse rows do not change", disposition: fixed}
+      - {id: N-05, severity: nit, origin: judgement, anchor: "sidecar envelope", subject: "no serves field; the NS.4 claim stays the plan's, not the entry's", disposition: disputed}
+      - {id: N-06, severity: nit, origin: judgement, anchor: "sidecar clause 3", subject: "pointer set no longer listed in the Decision (as the tool reads pointers)", disposition: fixed}
+      - {id: N-07, severity: nit, origin: mechanical, anchor: "verification_plan[3]", subject: "delegate resolution needs the contract edit first; moot, the decay delegate is dropped and keep_full resolves today", disposition: fixed}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -223,6 +266,6 @@ execution_steps:
   - Apply the sidecar's two DECISIONS.md blocks, filling {{N}} with the next free Decision number and {{DATE}} with today.
   - Edit docs/contracts/contract-population.yaml amendment_log_retention, add its amendment_log row, and satisfy the new rule on that file (context gotcha).
   - Extend scripts/checks/contracts/_amendment_retention.py and thread the texts through validate_contract_drift.py Pass 2.
-  - Add the test nodes, then re-dispose census row S8 with the new Decision's number.
+  - Add the test nodes, then re-dispose census row S8 with the new Decision's number and regenerate docs/decisions-index.json (sanctioned companion) before VP 3 (critique N-02).
   - Execute the Verification Plan; loop until each step passes; on an unrecoverable failure stop and RCA (Decision 55).
   - 'Report: what was implemented, verification results, and the files whose next row-adding change now owes a decay.'
