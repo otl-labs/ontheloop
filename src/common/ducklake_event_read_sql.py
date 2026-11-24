@@ -10,6 +10,8 @@ are each written once here and shared by every verb that needs them (a named ver
 
 from __future__ import annotations
 
+import hashlib
+
 SESSIONS = "telemetry_sessions"
 OBSERVATIONS = "telemetry_observations"
 TRANSCRIPTS = "telemetry_transcripts"
@@ -54,11 +56,20 @@ def conflict_select(table: str) -> str:
 
     The compare is one row value over every compared column, never a per-column DISTINCT (which would ignore NULLs and hide a
     NULL-versus-value conflict).
+
+    Duplicate-first: rows are compared only for grain keys holding more than one row in scope, since a one-row key cannot
+    hold two distinct row values. This keeps the whole-window row compare inside the reader's memory limit (rec-5491).
+    Equivalence rests on the writer gate refusing NULL grain columns (the IN filter drops a NULL-component key that
+    GROUP BY would keep).
     """
+    ph = _PLACEHOLDER[table]
     return (
         f"SELECT '{table}' AS table_name, producer, event_id, parser_version, min(session_id) AS session_id "
-        f"FROM {{{_PLACEHOLDER[table]}}} WHERE {{scope}} GROUP BY producer, event_id, parser_version "
-        f"HAVING count(DISTINCT row({{cmp_{_PLACEHOLDER[table]}}})) > 1"
+        f"FROM {{{ph}}} WHERE {{scope}} AND (producer, event_id, parser_version) IN "
+        f"(SELECT producer, event_id, parser_version FROM {{{ph}}} WHERE {{scope}} "
+        f"GROUP BY producer, event_id, parser_version HAVING count(*) > 1) "
+        f"GROUP BY producer, event_id, parser_version "
+        f"HAVING count(DISTINCT row({{cmp_{ph}}})) > 1"
     )
 
 
@@ -467,21 +478,42 @@ MODEL_USAGE_ROLLUP_SQL = compose(
     + " ORDER BY tx.session_started_at, tx.root_session_id, tx.project_id, mu.model NULLS LAST",
 )
 
+_EMPTY_SHA = hashlib.sha256(b"").hexdigest()
+_REPEAT_ORDER = "ORDER BY op.event_timestamp, coalesce(op.source_ordinal, -1), op.event_id"
+
 TOOL_USE_ROLLUP_SQL = compose(
-    (SESSIONS, OBSERVATIONS, AGENTS),
+    (SESSIONS, OBSERVATIONS, AGENTS, TRANSCRIPTS),
     _USAGE_TREE + ", " + _AGENT_NAME + ", "
-    "op AS (SELECT " + _TREE_KEY + ", session_id, observation_id, name, "
+    "op AS (SELECT " + _TREE_KEY + ", producer, parser_version, session_id, observation_id, name, external_ref, "
+    "event_timestamp, source_ordinal, event_id, "
     "json_extract_string(metadata, '$.attribution_mcp_server') AS attribution_mcp_server FROM o "
     "WHERE observation_type = 'tool_call' AND event_kind = 'open' QUALIFY row_number() OVER (PARTITION BY session_id, "
     "observation_id ORDER BY event_timestamp, coalesce(source_ordinal, -1), event_id) = 1), "
-    "oc AS (SELECT session_id, observation_id, outcome FROM o WHERE observation_type = 'tool_call' "
-    "AND event_kind = 'close' QUALIFY row_number() OVER (PARTITION BY session_id, observation_id " + _LATEST + ") = 1) "
+    "oc AS (SELECT session_id, observation_id, outcome, output_bytes, "
+    "CASE WHEN output_sha256 IS NOT NULL AND output_bytes > 0 THEN output_sha256 END AS osha FROM o "
+    "WHERE observation_type = 'tool_call' AND event_kind = 'close' "
+    "QUALIFY row_number() OVER (PARTITION BY session_id, observation_id " + _LATEST + ") = 1), "
+    "ti AS (SELECT tenant_id, project_id, producer, session_id, parser_version, external_ref, "
+    f"nullif(content_sha256, '{_EMPTY_SHA}') AS digest FROM t WHERE purpose = 'tool_input' "
+    "QUALIFY row_number() OVER (PARTITION BY tenant_id, project_id, producer, session_id, parser_version, external_ref "
+    "ORDER BY event_timestamp, coalesce(source_ordinal, -1), event_id) = 1), "
+    "rc AS (SELECT op.session_id, op.observation_id, oc.output_bytes, "
+    "ti.digest IS NOT NULL AND row_number() OVER (PARTITION BY op.session_id, op.name, ti.digest "
+    + _REPEAT_ORDER
+    + ") > 1 AS rep_in, oc.osha IS NOT NULL AND row_number() OVER (PARTITION BY op.session_id, op.name, oc.osha "
+    + _REPEAT_ORDER
+    + ") > 1 AS rep_out FROM op LEFT JOIN ti ON (ti.tenant_id, ti.project_id, ti.producer, ti.session_id, "
+    "ti.parser_version, ti.external_ref) = (op.tenant_id, op.project_id, op.producer, op.session_id, op.parser_version, "
+    "regexp_replace(op.external_ref, '/tool_call_open$', '')) "
+    "LEFT JOIN oc ON (oc.session_id, oc.observation_id) = (op.session_id, op.observation_id)) "
     "SELECT " + _TREE_COLS + ", coalesce(ses.is_root, FALSE) AS is_root, "
     "CASE WHEN coalesce(ses.is_root, FALSE) THEN NULL ELSE ag.agent_name END AS agent_name, ses.workflow AS workflow, "
     "op.name AS tool_name, nullif(regexp_extract(op.name, '^mcp__(.+?)__', 1), '') AS mcp_server, "
     "op.attribution_mcp_server AS attribution_mcp_server, count(*) AS call_count, "
     "count(*) FILTER (WHERE oc.outcome = 'error') AS error_count, count(*) FILTER (WHERE oc.outcome = 'blocked') "
     "AS blocked_count, count(*) FILTER (WHERE oc.outcome = 'interrupted') AS interrupted_count, "
+    "count(*) FILTER (WHERE rc.rep_in) AS repeat_input_count, count(*) FILTER (WHERE rc.rep_out) AS repeat_output_count, "
+    "CAST(coalesce(sum(rc.output_bytes) FILTER (WHERE rc.rep_out), 0) AS BIGINT) AS repeat_output_bytes, "
     "count(DISTINCT op.session_id) AS session_count, "
     + _TREE_STAMPS
     + " FROM op JOIN tx"
@@ -489,6 +521,7 @@ TOOL_USE_ROLLUP_SQL = compose(
     + " LEFT JOIN ses ON (ses.tenant_id, ses.project_id, ses.session_started_at, "
     "ses.session_id) = (op.tenant_id, op.project_id, op.session_started_at, op.session_id) "
     "LEFT JOIN ag ON ag.session_id = op.session_id LEFT JOIN oc ON (oc.session_id, oc.observation_id) = "
+    "(op.session_id, op.observation_id) LEFT JOIN rc ON (rc.session_id, rc.observation_id) = "
     "(op.session_id, op.observation_id) GROUP BY ALL ORDER BY tx.session_started_at, tx.root_session_id, "
     "is_root DESC, agent_name NULLS FIRST, workflow, tool_name, mcp_server, attribution_mcp_server",
 )

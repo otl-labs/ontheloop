@@ -12,6 +12,7 @@ from scripts.personas import run
 
 ROOT = Path(__file__).resolve().parents[2]
 STDLIB = set(sys.stdlib_module_names)
+INFERENCE_SMOKE_ALLOWED = {"boto3", "botocore", "yaml", "litellm", "src"}
 ALLOWED = {
     "resolve_pr": {"yaml"},
     "route": {"yaml"},
@@ -24,6 +25,14 @@ ALLOWED = {
     "egress_probe": set(),
     "egress_self_check": set(),
     "egress_control": {"yaml"},
+    "egress_floor": set(),
+    "egress_revert_drill": set(),
+    "egress_revert_drill_control": set(),
+    "egress_fail_closed": set(),
+    "egress_fail_closed_verdict": set(),
+    "key_refusal": set(),
+    "oidc_assume": set(),
+    "inference_smoke": INFERENCE_SMOKE_ALLOWED,
 }
 
 
@@ -109,6 +118,13 @@ def test_run_itself_is_stdlib_only_at_import() -> None:
         ("egress-probe", "egress_probe"),
         ("egress-self-check", "egress_self_check"),
         ("egress-control", "egress_control"),
+        ("egress-floor", "egress_floor"),
+        ("egress-revert-drill", "egress_revert_drill"),
+        ("egress-revert-drill-control", "egress_revert_drill_control"),
+        ("egress-fail-closed", "egress_fail_closed"),
+        ("egress-fail-closed-verdict", "egress_fail_closed_verdict"),
+        ("inference-smoke", "inference_smoke"),
+        ("key-refusal", "key_refusal"),
     ],
 )
 def test_egress_verbs_dispatch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, verb: str, module: str) -> None:
@@ -118,3 +134,14 @@ def test_egress_verbs_dispatch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, 
         run.importlib, "import_module", lambda name: type("M", (), {"main": staticmethod(lambda a: called.append(name) or 0)})
     )
     assert run.main([verb]) == 0 and called == [f"scripts.personas.{module}"]
+
+
+def test_inference_smoke_imports_come_from_the_pinned_persona_distributions() -> None:
+    pins = {
+        line.split("==")[0].strip().lower()
+        for line in (ROOT / "docker/persona/requirements-persona.txt").read_text(encoding="utf-8").splitlines()
+        if "==" in line and not line.startswith((" ", "#"))
+    }
+    dist = {"boto3": "boto3", "botocore": "botocore", "litellm": "litellm", "yaml": "pyyaml"}
+    for name in INFERENCE_SMOKE_ALLOWED - {"src"}:
+        assert dist[name] in pins, name

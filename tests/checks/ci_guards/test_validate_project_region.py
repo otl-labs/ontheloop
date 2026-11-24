@@ -429,3 +429,19 @@ class TestBranchCoverage:
         _write(tmp_path, ".github/workflows/w.yml", "name: fixture\non: push\njobs:\n  a: not-a-mapping\n")
         failed = _run(tmp_path)
         assert failed == []
+
+
+def test_the_renamed_helper_keeps_r4_behaviour_through_the_public_name() -> None:
+    from scripts.checks.ci_guards import validate_project_region as vpr
+
+    good = {
+        "outputs": {"aws_region": "${{ steps.r.outputs.aws_region }}"},
+        "steps": [{"id": "r", "uses": vpr._AWS_REGION_ACTION}],
+    }
+    assert vpr.job_outputs_aws_region_via_action(good) is True
+    literal = {**good, "outputs": {"aws_region": "eu-west-2"}}
+    assert vpr.job_outputs_aws_region_via_action(literal) is False
+    other = {**good, "steps": [{"id": "r", "uses": "x/y@z"}]}
+    assert vpr.job_outputs_aws_region_via_action(other) is False
+    assert vpr.job_outputs_aws_region_via_action(None) is False
+    assert not hasattr(vpr, "_job_outputs_aws_region_via_action")

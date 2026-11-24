@@ -119,20 +119,24 @@ def test_litellm_prefix_matches_the_producer_root_ref() -> None:
 
 def test_two_workers_report_equals_one_worker() -> None:
     pytest.importorskip("duckdb", reason="env: duckdb is not installed in the fast tier")
-    from tests.telemetry_verify import test_monitor as tm
-
     skip = {"run_level_s", "elapsed_s", "max_call_s", "calls_over_10s", "call_p95_s", "workers"}
-    one = _locked_world().run(workers=1)
-    two = _locked_world().run(workers=2)
-    assert {k: v for k, v in vars(one).items() if k not in skip} == {k: v for k, v in vars(two).items() if k not in skip}
-    assert two.workers == 2 and one.workers == 1
+    reports = {}
     for workers in (1, 2):
         world = _locked_world()
         world.cost = 11.0
-        r = world.run(workers=workers, budget=monitor.Budget(10**6, world.clock))
+        reports[workers] = world.run(workers=workers, budget=monitor.Budget(10**6, world.clock))
+    one, two = reports[1], reports[2]
+    assert {k: v for k, v in vars(one).items() if k not in skip} == {k: v for k, v in vars(two).items() if k not in skip}
+    assert two.workers == 2 and one.workers == 1
+    for workers, r in reports.items():
         assert r.workers == workers and r.calls_over_10s == r.reader_calls - 2
         assert (r.call_p95_s == 11) if workers == 1 else (r.call_p95_s >= 11)
-    assert tm  # module imported for World
+
+
+@pytest.fixture(scope="module")
+def baseline_reader_calls() -> int:
+    pytest.importorskip("duckdb", reason="env: duckdb is not installed in the fast tier")
+    return int(_locked_world().run().reader_calls)
 
 
 def _locked_world() -> Any:
@@ -167,33 +171,33 @@ def _litellm_world(monkeypatch: pytest.MonkeyPatch, floor: int) -> Any:
     return world
 
 
-def _refuse_last_litellm(monkeypatch: pytest.MonkeyPatch, floor: int) -> monitor.MonitorReport:
-    full = _litellm_world(monkeypatch, floor).run()
-    assert full.litellm_quiet == 1 and full.litellm_read == 1
-    baseline = _locked_world().run()
-    monkeypatch.setattr(monitor, "MAX_READER_CALLS", baseline.reader_calls)
-    return _litellm_world(monkeypatch, floor).run()
+def _refuse_last_litellm(
+    monkeypatch: pytest.MonkeyPatch, floor: int, baseline_calls: int, check_full: bool
+) -> monitor.MonitorReport:
+    world = _litellm_world(monkeypatch, floor)
+    if check_full:
+        full = world.run()
+        assert full.litellm_quiet == 1 and full.litellm_read == 1
+        if full.reader_calls != baseline_calls:
+            world = _litellm_world(monkeypatch, floor)
+    monkeypatch.setattr(monitor, "MAX_READER_CALLS", baseline_calls)
+    return world.run()
 
 
-def test_floor_met_excuses_litellm_without_coverage_alarm(monkeypatch: pytest.MonkeyPatch) -> None:
-    pytest.importorskip("duckdb", reason="env: duckdb is not installed in the fast tier")
-    r = _refuse_last_litellm(monkeypatch, 0)
+def test_floor_met_excuses_litellm_without_coverage_alarm(monkeypatch: pytest.MonkeyPatch, baseline_reader_calls: int) -> None:
+    r = _refuse_last_litellm(monkeypatch, 0, baseline_reader_calls, True)
     assert r.litellm_sampled_out == 1 and r.not_read_budget == 0
     assert "monitor_coverage_incomplete" not in r.findings()
 
 
-def test_floor_missed_raises_coverage_incomplete(monkeypatch: pytest.MonkeyPatch) -> None:
-    pytest.importorskip("duckdb", reason="env: duckdb is not installed in the fast tier")
-    r = _refuse_last_litellm(monkeypatch, 1)
+def test_floor_missed_raises_coverage_incomplete(monkeypatch: pytest.MonkeyPatch, baseline_reader_calls: int) -> None:
+    r = _refuse_last_litellm(monkeypatch, 1, baseline_reader_calls, False)
     assert r.litellm_sampled_out == 0 and r.not_read_budget == 1
     assert r.findings()["monitor_coverage_incomplete"] == 1
 
 
-def test_oversize_day_counts_sum_and_backfill_reads_rest(monkeypatch: pytest.MonkeyPatch) -> None:
-    pytest.importorskip("duckdb", reason="env: duckdb is not installed in the fast tier")
-    world = _locked_world()
-    full = world.run()
-    monkeypatch.setattr(monitor, "MAX_READER_CALLS", max(10, full.reader_calls // 2))
+def test_oversize_day_counts_sum_and_backfill_reads_rest(monkeypatch: pytest.MonkeyPatch, baseline_reader_calls: int) -> None:
+    monkeypatch.setattr(monitor, "MAX_READER_CALLS", max(10, baseline_reader_calls // 2))
     r = _locked_world().run()
     total = r.trees_read + r.tree_too_large + r.tree_read_failed + r.not_read_budget + r.litellm_sampled_out
     assert total == r.quiet - r.skip_trees

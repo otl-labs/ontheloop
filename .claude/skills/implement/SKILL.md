@@ -371,6 +371,6 @@ Then via GitHub MCP (owner/repo from `git remote get-url origin`):
    `trailer-closure` job (`mcp__github__actions_list` by merge sha -> `get_job_logs`, never
    `$GITHUB_STEP_SUMMARY`) to CONCLUDE, then follow the conditional fallback in
    `docs/contracts/git-ops.yaml#resolves_trailer`: an acceptance-verdict refusal takes that clause's
-   route, a Decision 186 refusal stays open and is reported, a merge-leg refusal or a non-refusal
-   per-rec log line permits the fallback, a trailer readback found missing goes to `merge_step
-   recover` (never the fallback); anything else waits.
+   route, a Decision 186 refusal stays open and is reported, a `TRAILER-RANGE` line waits, a
+   merge-leg refusal or other per-rec log line permits the fallback, a missing trailer goes to
+   `merge_step recover` (no fallback); anything else waits.

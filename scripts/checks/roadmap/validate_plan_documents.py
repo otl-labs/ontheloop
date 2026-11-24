@@ -8,7 +8,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from scripts.checks import _common, registry
-from scripts.checks.roadmap import _plan_category_verdicts, _plan_rescout_wiring, _plan_sidecar_approval
+from scripts.checks.roadmap import _plan_category_verdicts, _plan_critique_end, _plan_rescout_wiring, _plan_sidecar_approval
 from scripts.roadmap import approved_text_provenance as prov
 
 _NON_BEHAVIOR_PREFIXES = ("tests/", "docs/plans/")
@@ -73,25 +73,14 @@ def _gate_round_gaps(path: Path, doc: Any, added_names: set[str]) -> list[str]:
     gaps = []
     if not any(row.gate == "decision-scout" for row in doc.gate_rounds):
         gaps.append(f"{path.name}: gate_rounds has no decision-scout row (planning SKILL.md Decision Scout Gate)")
-    if not critique or not _critique_ended(critique):
-        gaps.append(
-            f"{path.name}: gate_rounds must end with a plan-critique PROCEED that ends Step 9 (no nits, or the confirming "
-            "round after a PROCEED listing nits) or an accept-with-deferral answer (planning SKILL.md Step 9)"
-        )
+    if not critique or not _plan_critique_end.ended(critique, doc.schema_version):
+        gaps.append(_plan_critique_end.gap_message(path.name))
     gaps += [
         f"{path.name}: gate_rounds {row.gate} round {row.round} escalated with no escalation_choice (an open escalation)"
         for row in doc.gate_rounds
         if row.escalated and row.escalation_choice is None
     ]
     return gaps
-
-
-def _critique_ended(critique: list[Any]) -> bool:
-    last = critique[-1]
-    if last.escalation_choice == "accept-with-deferral":
-        return True
-    confirming = len(critique) > 1 and critique[-2].verdict == "PROCEED" and critique[-2].nits > 0
-    return last.verdict == "PROCEED" and (last.nits == 0 or confirming)
 
 
 def _changed_sidecar_digest(slug: str, base: str) -> str | None:

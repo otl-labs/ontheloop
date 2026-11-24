@@ -7,7 +7,10 @@ import json
 import pytest
 
 from src.turn_capture.host_run import (
+    LOCAL_RUNTIMES,
+    LocalRun,
     parse_host_run,
+    parse_persona_host_run,
     render_host_run_ref,
     resolve_pin,
     valid_host_facts,
@@ -137,3 +140,47 @@ def test_the_exported_validators_share_the_sidecar_grammar() -> None:
 def test_a_root_with_no_close_or_assistant_yet_has_no_top_level_rows() -> None:
     files = {**make_files([prompt("u1", 1, "p1", "hi")]), f"{SID}/host-run.json": cases.sidecar()}
     assert not [r for r in _rows(files, final=False) if r["entity_ref"].endswith("/run")]
+
+
+def _local_sidecar(**host: object) -> dict:
+    body = json.loads(cases.sidecar())
+    body["host"] = {"kind": "local", "runtime": "local_container", "run_id": "abc-1.2_x", **host}
+    return body
+
+
+@pytest.mark.parametrize("runtime", LOCAL_RUNTIMES)
+def test_persona_reader_accepts_each_local_runtime(runtime: str) -> None:
+    host = parse_persona_host_run(_bytes(_local_sidecar(runtime=runtime)))
+    assert isinstance(host, LocalRun) and host.runtime == runtime
+    assert render_host_run_ref(host) == f"local:{runtime}/abc-1.2_x"
+    assert parse_host_run(_bytes(_local_sidecar(runtime=runtime))) is None
+
+
+@pytest.mark.parametrize(
+    "host",
+    [{"runtime": "fargate"}, {"run_id": "a:b"}, {"run_id": "a" * 129}, {"extra": 1}, {"run_id": 5}],
+)
+def test_persona_reader_refuses_a_bad_local_host(host: dict) -> None:
+    assert parse_persona_host_run(_bytes(_local_sidecar(**host))) is None
+
+
+def test_persona_reader_refuses_a_missing_run_id_and_junk() -> None:
+    body = _local_sidecar()
+    del body["host"]["run_id"]
+    assert parse_persona_host_run(_bytes(body)) is None
+    assert parse_persona_host_run(None) is None
+    assert parse_persona_host_run(b"not json") is None
+
+
+def test_persona_reader_still_reads_gha() -> None:
+    assert parse_persona_host_run(cases.sidecar().encode()) == parse_host_run(cases.sidecar().encode())
+
+
+def test_local_runtimes_are_persona_compute_host_adapters() -> None:
+    from pathlib import Path
+
+    import yaml
+
+    ports = yaml.safe_load((Path(__file__).resolve().parents[2] / "docs/contracts/ports.yaml").read_text(encoding="utf-8"))
+    port = next(p for p in ports["ports"] if p["id"] == "persona_compute_host")
+    assert set(LOCAL_RUNTIMES) <= {a["id"] for a in port["adapters"]}

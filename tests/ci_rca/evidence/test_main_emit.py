@@ -249,3 +249,38 @@ def test_module_entrypoint_rejects_missing_log(monkeypatch, tmp_path):
     )
     with pytest.raises(SystemExit):
         runpy.run_module("scripts.ci_rca.evidence", run_name="__main__")
+
+
+def test_no_upload_never_uploads_and_reports_the_pending_path(log_file, taxonomy_file, tmp_path, capsys):
+    """--no-upload (rec-5493): the S3 leg is never called, BUNDLE_S3_URI is empty, the emit file is still written."""
+    import scripts.ci_rca.evidence as ev_mod
+
+    emit_dir = tmp_path / "emit_no_upload"
+    with (
+        patch.object(ev_mod, "_PENDING_DIR", tmp_path / "pending"),
+        patch("scripts.ci_rca.tier_map.probe_runtime", return_value=("median=50ms", 0.05)),
+        patch("scripts.ci_rca.tier_map.build_tier_membership", return_value={}),
+        patch("scripts.ci_rca.evidence._upload_to_s3") as upload,
+        patch("scripts.ci_rca.evidence._resolve_bucket", return_value="test-bucket"),
+    ):
+        main(
+            [
+                "--no-upload",
+                "--log-file",
+                str(log_file),
+                "--workflow-name",
+                "CI",
+                "--workflow-run-id",
+                "5",
+                "--taxonomy-path",
+                str(taxonomy_file),
+                "--emit-dir",
+                str(emit_dir),
+            ]
+        )
+    upload.assert_not_called()
+    out = dict(line.split("=", 1) for line in capsys.readouterr().out.splitlines() if "=" in line)
+    assert out["BUNDLE_S3_URI"] == ""
+    assert Path(out["BUNDLE_PATH"]).parent == tmp_path / "pending"
+    assert Path(out["BUNDLE_PATH"]).exists()
+    assert Path(out["BUNDLE_LOCAL"]).exists()

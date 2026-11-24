@@ -57,6 +57,14 @@ _TOKEN_TOTALS = (
 )
 
 
+BOOKKEEPING_TOOLS = ("mcp__hearthbot__no_reply_needed", "ReadNotifications")
+REPEAT_KEYS = ("repeat_input_count", "repeat_output_count", "repeat_output_bytes")
+
+
+class RepeatKeysMissing(RuntimeError):
+    """A tool_use_rollup row lacks the repeat counts (a reader not yet deployed with them)."""
+
+
 class WindowFailed(RuntimeError):
     """A window could not be read; the CLI prints no total."""
 
@@ -155,6 +163,23 @@ def models(rows: list[dict[str, Any]], args: argparse.Namespace) -> list[dict[st
     return out
 
 
+def _repeat_sums(rows: list[dict[str, Any]]) -> dict[str, int]:
+    for row in rows:
+        absent = [k for k in REPEAT_KEYS if k not in row]
+        if absent:
+            raise RepeatKeysMissing(
+                f"tool_use_rollup rows lack {', '.join(absent)}; the reader is not deployed with the repeat counts"
+            )
+    return {k: sum(r[k] or 0 for r in rows) for k in REPEAT_KEYS}
+
+
+def repeat_totals(rows: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    return {
+        "all": _repeat_sums(rows),
+        "without_bookkeeping": _repeat_sums([r for r in rows if r.get("tool_name") not in BOOKKEEPING_TOOLS]),
+    }
+
+
 def tools(rows: list[dict[str, Any]], args: argparse.Namespace) -> list[dict[str, Any]]:
     names = _widen(args, (("is_root", "agent_name") if args.by_agent else ()) + ("tool_name", "mcp_server"))
     out = []
@@ -167,6 +192,8 @@ def tools(rows: list[dict[str, Any]], args: argparse.Namespace) -> list[dict[str
                 "blocked_count": _sum(r["blocked_count"] for r in group),
                 "interrupted_count": _sum(r["interrupted_count"] for r in group),
                 "session_row_count": _sum(r["session_count"] for r in group),
+                **_repeat_sums(group),
+                "bookkeeping": dict(zip(names, key)).get("tool_name") in BOOKKEEPING_TOOLS,
                 "trees": len({_tree(r) for r in group}),
             }
         )
@@ -369,7 +396,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-windows", type=int, default=DEFAULT_MAX_WINDOWS, help="refuse a longer range before any call")
     parser.epilog = (
         "tools: session_row_count sums the verb's per-row session_count, so a session whose calls of one tool differ in "
-        "attribution_mcp_server counts once per value. models: sessions sums per (tree, model) rows the same way."
+        "attribution_mcp_server counts once per value. tools: bookkeeping marks the acknowledgement tools whose inputs "
+        "repeat by design; repeat_totals sums the repeat counts over all rows and without them. models: sessions sums per "
+        "(tree, model) rows the same way."
     )
     return parser
 
@@ -445,7 +474,13 @@ def run(
     if args.command == "friction":
         result["by_classifier_version"] = friction(reads.rows, args)
     else:
-        result["rows"] = SUMMARIES[args.command](reads.rows, args)
+        try:
+            result["rows"] = SUMMARIES[args.command](reads.rows, args)
+            if args.command == "tools":
+                result["repeat_totals"] = repeat_totals(reads.rows)
+        except RepeatKeysMissing as exc:
+            print(f"telemetry_usage FAIL {exc}", file=err)
+            return 1
     print(json.dumps(result, sort_keys=True, default=str), file=out)
     return 0
 

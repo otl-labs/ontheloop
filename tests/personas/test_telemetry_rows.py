@@ -37,7 +37,7 @@ def test_exit_0_writes_the_rows_file_equal_to_map_run(tmp_path):
     assert document == entry.rows_document(mapped) | {"batches": document["batches"]}
     assert [b["table"] for b in document["batches"]] == ["telemetry_observations", "telemetry_agents", "telemetry_sessions"]
     assert document["batches"] == entry.rows_document(mapped)["batches"]
-    assert (document["producer"], document["parser_version"], document["producer_version"]) == ("litellm", 1, "litellm-1")
+    assert (document["producer"], document["parser_version"], document["producer_version"]) == ("litellm", 2, "litellm-2")
     stamp = document["batches"][2]["rows"][0]["event_timestamp"]
     assert stamp.endswith("Z") and len(stamp.split(".")[1]) == 4 and stamp.startswith("2026-")
 

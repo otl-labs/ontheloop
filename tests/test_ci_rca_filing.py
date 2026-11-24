@@ -7,7 +7,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from scripts.ci_rca.filing import extract_filed_rec_id, extract_filed_recs
+import pytest
+
+from scripts.ci_rca.filing import extract_filed_rec_id, extract_filed_recs, main
 
 
 def _write(tmp_path: Path, content: str) -> Path:
@@ -217,3 +219,89 @@ class TestCLI:
         result = self._run("--all", str(f))
         assert result.returncode == 0
         assert result.stdout == "rec-55,\n"
+
+
+class TestMainInProcess:
+    def _main(self, monkeypatch: pytest.MonkeyPatch, *args: str) -> None:
+        monkeypatch.setattr(sys, "argv", ["filing", *args])
+        main()
+
+    def test_usage_error(self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+        with pytest.raises(SystemExit) as exc:
+            self._main(monkeypatch)
+        assert exc.value.code == 1
+        assert "Usage" in capsys.readouterr().err
+
+    def test_all_prints_pairs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._main(monkeypatch, "--all", str(_write(tmp_path, "FILED: rec-1 environment\nFILED: rec-2 code\n")))
+        out = capsys.readouterr()
+        assert out.out.splitlines() == ["rec-1,environment", "rec-2,code"]
+        assert out.err == ""
+
+    def test_single_prints_id(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._main(monkeypatch, str(_write(tmp_path, "FILED: rec-42\n")))
+        out = capsys.readouterr()
+        assert out.out.strip() == "rec-42"
+        assert out.err == ""
+
+    def test_single_no_marker_exits_1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit) as exc:
+            self._main(monkeypatch, str(_write(tmp_path, "nothing here")))
+        assert exc.value.code == 1
+        assert "No FILED" in capsys.readouterr().err
+
+    def test_non_envelope_output_names_the_cause_on_stderr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        envelope = json.dumps({"result": "FILED: rec-5 environment"})
+        bad = _write(tmp_path, "Warning: workspace has not been trusted\n" + envelope + "\n")
+        self._main(monkeypatch, "--all", str(bad))
+        out = capsys.readouterr()
+        assert out.out == ""
+        assert "is not a single claude -p JSON envelope" in out.err
+        good = tmp_path / "good.json"
+        good.write_text(envelope, encoding="utf-8")
+        self._main(monkeypatch, "--all", str(good))
+        out = capsys.readouterr()
+        assert out.out.strip() == "rec-5,environment"
+        assert out.err == ""
+
+    def test_missing_file_is_silent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._main(monkeypatch, "--all", str(tmp_path / "absent.json"))
+        out = capsys.readouterr()
+        assert out.out == ""
+        assert out.err == ""
+
+    def test_non_string_result_falls_back_to_raw(self, tmp_path: Path) -> None:
+        assert extract_filed_recs(_write(tmp_path, json.dumps({"result": ""}))) == []
+
+
+class TestSmokeMarker:
+    """rec-5493: a smoke-N marker parses only while CI_RCA_SMOKE_SINK is set."""
+
+    def test_smoke_marker_parses_with_the_sink_set(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("CI_RCA_SMOKE_SINK", "/tmp/sink.jsonl")
+        f = _write(tmp_path, "FILED: smoke-42 code_regression\n")
+        assert extract_filed_rec_id(f) == "smoke-42"
+        assert extract_filed_recs(f) == [("smoke-42", "code_regression")]
+
+    def test_smoke_marker_is_ignored_without_the_sink(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("CI_RCA_SMOKE_SINK", raising=False)
+        f = _write(tmp_path, "FILED: smoke-42 code_regression\n")
+        assert extract_filed_rec_id(f) is None
+        assert extract_filed_recs(f) == []
+
+    def test_real_marker_before_an_ignored_smoke_marker_still_wins(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("CI_RCA_SMOKE_SINK", raising=False)
+        f = _write(tmp_path, "FILED: rec-7\nFILED: smoke-42\n")
+        assert extract_filed_rec_id(f) == "rec-7"

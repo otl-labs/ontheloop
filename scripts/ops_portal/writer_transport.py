@@ -18,6 +18,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 from typing import Optional
 
@@ -106,6 +107,25 @@ def _project_ops_record(table: str, record: dict) -> dict:
     return {k: v for k, v in record.items() if k in inputs}
 
 
+_SMOKE_SINK_ENV = "CI_RCA_SMOKE_SINK"
+_SMOKE_ID_ENV = "CI_RCA_SMOKE_ID"
+_SMOKE_ID_RE = re.compile(r"^smoke-[0-9]+$")
+
+
+def _smoke_sink_write(table: str, record: dict, action: str, sink: str, smoke_id: str) -> dict:
+    """CI RCA smoke dry-run sink (rec-5493): append the projected write to a local file; never reach the writer."""
+    if not sink or not smoke_id:
+        raise RuntimeError(f"{_SMOKE_SINK_ENV} and {_SMOKE_ID_ENV} must both be set or both unset")
+    if not _SMOKE_ID_RE.match(smoke_id) or action != "file_ops" or table != "ops_recommendations":
+        raise RuntimeError(
+            f"smoke sink refuses {action} {table} (id {smoke_id!r}): only a smoke-N file_ops on ops_recommendations"
+        )
+    line = json.dumps({"action": action, "table": table, "record": _project_ops_record(table, record)})
+    with open(sink, "a", encoding="utf-8") as handle:
+        handle.write(line + "\n")
+    return {"key": smoke_id}
+
+
 def _ducklake_write(
     table: str,
     record: dict,
@@ -123,6 +143,11 @@ def _ducklake_write(
     request returns the originally allocated id instead of double-filing. Maps the writer's
     loud-fail status codes back to portal exceptions.
     """
+    sink = os.environ.get(_SMOKE_SINK_ENV, "")
+    smoke_id = os.environ.get(_SMOKE_ID_ENV, "")
+    if sink or smoke_id:
+        return _smoke_sink_write(table, record, action, sink, smoke_id)
+
     import time as _time  # noqa: PLC0415
 
     import boto3  # noqa: PLC0415

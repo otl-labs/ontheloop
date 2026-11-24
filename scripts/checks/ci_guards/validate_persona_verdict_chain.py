@@ -1,7 +1,8 @@
 """Shape check for the verdict chain workflows (PLAN-persona-verdict-chain; T4.2 c8, c9 and c12; Decision 205 cl.2).
 
 Refuses an unsafe shape of .github/workflows/persona-verdict-trigger.yml (a secretless pull_request trigger),
-persona-verdict.yml (the workflow_run verdict workflow on main's definition, two upstreams) or
+persona-verdict.yml (the workflow_run verdict workflow on main's definition, two upstreams, and the keyed jobs keyprep,
+smoke and refusal whose pins live in _persona_verdict_keyed.py) or
 persona-verdict-override.yml (the operator-gated override, PLAN-persona-verdict-override): any widened trigger,
 permission, secret, Environment or OIDC grant, any unpinned action, any python step off the pinned argv, working directory
 or snapshot variable, any token in the steps that handle untrusted data, an unpinned or unclassified inter-job artifact.
@@ -18,6 +19,7 @@ from typing import Any
 import yaml
 
 from scripts.checks import _common, registry
+from scripts.checks.ci_guards._persona_verdict_keyed import FLOOR, KEYED_JOBS, SELF_CHECK, keyed_problems
 from scripts.checks.ci_guards._shared import is_sha_pinned
 
 TRIGGER = ".github/workflows/persona-verdict-trigger.yml"
@@ -27,7 +29,10 @@ EVIDENCE = "docs/contracts/github-actions-evidence.yaml"
 PR_TYPES = ["opened", "ready_for_review", "reopened", "synchronize"]
 MKDIR = 'mkdir -p "$RUNNER_TEMP/work"'
 RUN_PREFIX = 'python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" '
-VERBS = frozenset({"resolve", "route", "fetch", "materialise", "execute", "post", "wake"})
+VERBS = frozenset({"resolve", "route", "fetch", "materialise", "execute", "post", "wake", "inference-smoke", "key-refusal"})
+REGION_ACTION = "./.github/actions/aws-region"
+KEYED_ENVIRONMENTS = frozenset({"smoke"})
+KEYED_ID_TOKEN = frozenset({"smoke", "refusal"})
 SNAPSHOT = "${{ runner.temp }}/snapshot"
 WORKDIR = "${{ runner.temp }}/work"
 PIP_SETS = {"prepare": "pyyaml", "run": "jsonschema", "post": "pyyaml jsonschema", "wake": "pyyaml"}
@@ -36,6 +41,9 @@ JOB_PERMISSIONS: dict[str, dict[str, str]] = {
     "run": {"contents": "read"},
     "post": {"checks": "write", "contents": "read", "actions": "read"},
     "wake": {"contents": "read", "actions": "read", "checks": "read", "pull-requests": "write"},
+    "keyprep": {"contents": "read"},
+    "smoke": {"contents": "read", "id-token": "write"},
+    "refusal": {"contents": "read", "id-token": "write"},
 }
 WAKE_ENV = {
     "GH_TOKEN": "${{ github.token }}",
@@ -43,7 +51,11 @@ WAKE_ENV = {
     "POST_RESULT": "${{ needs.post.result }}",
 }
 WAKE_NEEDS = ["prepare", "post"]
-ARTIFACT_DIRS = {"persona-verdict-prepared": "prepared", "persona-verdict-results": "results"}
+ARTIFACT_DIRS = {
+    "persona-verdict-prepared": "prepared",
+    "persona-verdict-results": "results",
+    "persona-verdict-wheels": "wheels",
+}
 RUN_CONDITION = "!cancelled() && needs.prepare.result == 'success' && github.event.workflow_run.event == 'pull_request'"
 UPSTREAMS = ["persona-verdict-trigger", "persona-verdict-override"]
 VERDICT_RUN_NAME = "persona-verdict ${{ github.event.workflow_run.event }} ${{ github.event.workflow_run.head_sha }}"
@@ -132,18 +144,21 @@ def _load(root: Path, rel: str) -> tuple[dict[str, Any] | None, str | None]:
     return (data, None) if isinstance(data, dict) else (None, f"{rel} is not a mapping")
 
 
-def _common_problems(rel: str, doc: dict[str, Any], environments: frozenset[str] = frozenset()) -> list[str]:
+def _common_problems(
+    rel: str, doc: dict[str, Any], environments: frozenset[str] = frozenset(), id_token: frozenset[str] = frozenset()
+) -> list[str]:
     out: list[str] = []
     jobs = _jobs(doc)
     for name, job in jobs.items():
         for step in _steps(job):
             uses = step.get("uses")
-            if uses is not None and not is_sha_pinned(str(uses)):
+            local_ok = rel == VERDICT and name == "keyprep" and uses == REGION_ACTION
+            if uses is not None and not local_ok and not is_sha_pinned(str(uses)):
                 out.append(f"{rel}: job {name} uses {uses!r}, which is not pinned to a 40-hex SHA")
         if "environment" in job and name not in environments:
             out.append(f"{rel}: job {name} names an Environment")
         perms = job.get("permissions")
-        if isinstance(perms, dict) and perms.get("id-token") == "write":
+        if isinstance(perms, dict) and perms.get("id-token") == "write" and name not in id_token:
             out.append(f"{rel}: job {name} holds id-token: write")
     return out
 
@@ -174,6 +189,9 @@ def _python_steps(job: dict[str, Any]) -> list[dict[str, Any]]:
 def _python_step_problems(name: str, step: dict[str, Any]) -> list[str]:
     out: list[str] = []
     run = str(step.get("run", "")).strip()
+    if name in KEYED_JOBS and run in (SELF_CHECK, FLOOR):
+        env_keys = {"env", "working-directory"} & set(step)
+        return [f"{VERDICT}: job {name} step {run!r} has {sorted(env_keys)}"] if env_keys else out
     verb = run[len(RUN_PREFIX) :] if run.startswith(RUN_PREFIX) else ""
     env = _map(step.get("env"))
     if verb not in VERBS:
@@ -182,6 +200,8 @@ def _python_step_problems(name: str, step: dict[str, Any]) -> list[str]:
         out.append(f"{VERDICT}: job {name} python step {run!r} lacks PERSONA_SNAPSHOT: {SNAPSHOT}")
     if step.get("working-directory") != WORKDIR:
         out.append(f"{VERDICT}: job {name} python step {run!r} working-directory is not {WORKDIR}")
+    if verb in ("inference-smoke", "key-refusal") and name not in KEYED_JOBS:
+        out.append(f"{VERDICT}: the {verb} verb runs in job {name}, not only in a keyed job")
     if name == "run" and verb != "execute":
         out.append(f"{VERDICT}: the run job runs {verb or run!r}, not only the execute verb")
     if name == "wake" and verb != "wake":
@@ -207,13 +227,14 @@ def _job_problems(name: str, job: dict[str, Any]) -> list[str]:
         out.append(f"{VERDICT}: job {name} holds pull-requests: write")
     for step in steps:
         run = str(step.get("run", ""))
-        if "pip install" in run:
+        if "pip install" in run and name not in KEYED_JOBS:
             want = f'pip install {PIP_SETS[name]} -c "$GITHUB_WORKSPACE/main/requirements.txt"'
             if run.strip() != want:
                 out.append(f"{VERDICT}: job {name} pip line is not exactly {want!r}")
     py = _python_steps(job)
     for step in py:
         out.extend(_python_step_problems(name, step))
+    py = [s for s in py if str(s.get("run", "")).strip() != FLOOR]
     if py:
         first_python = steps.index(py[0])
         if not any(str(s.get("run", "")).strip() == MKDIR for s in steps[:first_python]):
@@ -256,7 +277,7 @@ def _artifact_problems(jobs: dict[str, Any], evidence: dict[str, Any] | None) ->
 
 
 def verdict_problems(doc: dict[str, Any], evidence: dict[str, Any] | None) -> list[str]:
-    out = _common_problems(VERDICT, doc)
+    out = _common_problems(VERDICT, doc, KEYED_ENVIRONMENTS, KEYED_ID_TOKEN)
     on = _on(doc)
     if not (isinstance(on, dict) and set(on) == {"workflow_run"}):
         out.append(f"{VERDICT}: the trigger is not exactly workflow_run")
@@ -274,7 +295,7 @@ def verdict_problems(doc: dict[str, Any], evidence: dict[str, Any] | None) -> li
         out.append(f"{VERDICT}: the concurrency group is not {VERDICT_GROUP!r}")
     jobs = _jobs(doc)
     if set(jobs) != set(JOB_PERMISSIONS):
-        out.append(f"{VERDICT}: jobs are not exactly prepare, run, post and wake")
+        out.append(f"{VERDICT}: jobs are not exactly prepare, run, keyprep, smoke, refusal, post and wake")
     for name in sorted(set(jobs) & set(JOB_PERMISSIONS)):
         out.extend(_job_problems(name, jobs[name]))
     for name, job in jobs.items():
@@ -291,6 +312,7 @@ def verdict_problems(doc: dict[str, Any], evidence: dict[str, Any] | None) -> li
             out.append(f"{VERDICT}: the wake job condition is not {POST_CONDITION}")
         out.extend(_wake_download_problems(jobs["wake"]))
     out.extend(_prepare_problems(jobs.get("prepare")))
+    out.extend(keyed_problems(doc))
     out.extend(_token_problems(doc, jobs))
     out.extend(_artifact_problems(jobs, evidence))
     return out
@@ -396,7 +418,7 @@ def _token_problems(doc: dict[str, Any], jobs: dict[str, Any]) -> list[str]:
                 if TOKEN_REF.search(_text(step.get("env", {}))):
                     out.append(f"{VERDICT}: the {run.strip()[len(RUN_PREFIX) :]} step env holds a token")
     for match in SECRETS_CTX.finditer(_text(doc)):
-        if (match.group(1) or "").upper() != "GITHUB_TOKEN":
+        if (match.group(1) or "").upper() not in ("GITHUB_TOKEN", "AWS_ACCOUNT_ID"):
             out.append(f"{VERDICT}: a secrets context reference other than secrets.GITHUB_TOKEN: {match.group(0)!r}")
     return out
 

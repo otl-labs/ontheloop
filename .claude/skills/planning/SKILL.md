@@ -294,7 +294,7 @@ Derive the plan slug from the task, not the branch. Author only `docs/plans/PLAN
 ## PLAN-{slug}.yaml Template (Workflow Step 8)
 The plan is a YAML document validated against the `PlanDocument` Pydantic schema (`scripts/roadmap/plan_document.py`, enforced by `validate.py` in both tiers). Unknown keys FAIL validation (`extra="forbid"`). Use exactly this structure -- comments document field semantics:
 ```yaml
-schema_version: 6 # NEW plans: the newest version on main; versions 1-5 stay valid
+schema_version: 7 # NEW plans: the newest version on main; versions 1-6 stay valid
 handoff_policy:
   full_validation_required_before_commit: true # exact literal; commit/PR waits for completed full exit 0
   timeout_disposition: blocked # exact literal; resume later and rerun full from the start
@@ -339,7 +339,7 @@ context: # <= 40 rendered lines; link evidence (ids/paths), never restate it
   - Relevant decisions, phase dependencies, known gotchas
   - "Decision-scout verdict + CITE list (verbatim decision ids)" # REQUIRED ITEM (WF-04a)
 gate_rounds: # REQUIRED on new plans; one row per gate round (+gate_run_id if dispatched)
-  - {gate: decision-scout, round: 1, verdict: NO_FLAGS} # critique rows add blocking, nits, category_consistency (12p per drafted entry); escalated + escalation_choice when asked
+  - {gate: decision-scout, round: 1, verdict: NO_FLAGS} # critique rows add blocking, nits, findings list, category_consistency (12p); escalated + escalation_choice when asked
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -392,7 +392,7 @@ Scope rows name hand-edited files only: generator-touched files are sanction_row
 triggered, do not invoke `plan-critique` inline (same-context bias); return `GATE_REQUEST`
 (`gate: plan-critique`) and resume via `SendMessage` on verdict.
 
-Launch a zero-context Claude subagent via the `Agent` tool to run the `plan-critique` skill in a fresh context window. Fresh context is non-negotiable: it removes the author's bias. Do NOT invoke the `plan-critique` skill in the current session via the `Skill` tool (same context = same bias). Never use `scripts.agent_development.run_skill` (broken, rec-568).
+Launch a zero-context Claude subagent via the `Agent` tool to run the `plan-critique` skill in a fresh context window. Fresh context removes the author's bias: never invoke `plan-critique` here via the `Skill` tool, nor `run_skill` (rec-568).
 
 **Invocation shape:**
 - `subagent_type: "general-purpose"` (needs `Skill`, `Read`, and `Grep` access)
@@ -400,18 +400,16 @@ Launch a zero-context Claude subagent via the `Agent` tool to run the `plan-crit
 - `prompt:` self-contained per the Example body below.
 
 **Example prompt body:**
-> "You are running the plan-critique gate in a fresh context window. **First, run `git fetch origin main --quiet`** so the local `origin/main` ref is current. Then invoke the `plan-critique` skill via the Skill tool to critique `/abs/path/to/docs/plans/PLAN-{slug}.yaml`. Read `docs/PROJECT_CONTEXT.md` in full; extract only the roadmap items and decision sections the plan names per the skill's Phase 1 (do not load full ROADMAP-PLATFORM.yaml/DECISIONS.md). For IMPLEMENTATION plans, also read every file in the plan's Scope table. If `git diff origin/main -- docs/DECISIONS.md docs/ROADMAP-PLATFORM.yaml` shows divergence, note that the critique evaluates against the branch's (possibly stale) view of these docs. Return the skill's structured critique output verbatim, including the final `Recommendation:` verdict line. Do not edit any files."
+> "You are running the plan-critique gate in a fresh context window. **First, run `git fetch origin main --quiet`** so the local `origin/main` ref is current. Then invoke the `plan-critique` skill via the Skill tool to critique `/abs/path/to/docs/plans/PLAN-{slug}.yaml`. Read `docs/PROJECT_CONTEXT.md` in full; extract only the roadmap items and decision sections the plan names per the skill's Phase 1 (do not load full ROADMAP-PLATFORM.yaml/DECISIONS.md). For IMPLEMENTATION plans, also read every file in the plan's Scope table. If `git diff origin/main -- docs/DECISIONS.md docs/ROADMAP-PLATFORM.yaml` shows divergence, note that the critique evaluates against the branch's (possibly stale) view of these docs. Give each finding a short unique id. Return the skill's structured critique output verbatim, including the final `Recommendation:` verdict line. Do not edit any files."
 
-Read the critique output returned by the subagent.
-If it suggests revisions, update the plan with these fixes and re-launch the same subagent invocation against the revised plan. Each Agent call is a fresh window, so the re-launch genuinely re-evaluates.
 Loop per the Convergence rule below.
 If the gate subagent errors or returns output missing the required `Recommendation:` line, the gate has NOT completed -- re-dispatch; never proceed past an incomplete gate.
 
 **Convergence rule -- findings, not rounds:**
 
-Every round is a full fresh read and no count caps them. The critic tags each finding blocking or nit (plan-critique's Finding-Origin Attribution); REVISE means at least one blocking finding. Fix every finding, record one disposition each (fixed, or disputed with evidence -- re-measure a figure before applying it), and run `bin/venv-python -m scripts.validate --pre` before EVERY re-dispatch (a pre-check; Decision 73 makes `--pre` authoritative only via PR CI). REVISE -> re-dispatch. Clean PROCEED -> done. PROCEED listing nits -> apply them and dispatch ONE fresh confirming round, no card; it ends the loop unless it returns a blocking finding (its own nits are applied, not re-read). Write each round to `gate_rounds`.
+Every round is a full fresh read and no count caps them. The critic tags each finding blocking or nit (plan-critique's Finding-Origin Attribution); REVISE means at least one blocking finding. On REVISE fix every finding, record one disposition each (fixed, or disputed with evidence -- re-measure a figure before applying it), run `bin/venv-python -m scripts.validate --pre` (advisory, Decision 73) and re-dispatch. The first PROCEED ends the loop, no confirming round: apply a nit that changes only wording, citation or ordering (applied-wording); every other nit (a scope file, a command, a selector, an expected literal, a number or more) is never edited in unread but recorded build-note, its subject the instruction /implement reads. Write each round to `gate_rounds` with its findings list.
 
-**Escalate** only on: a finding recurring at a tag+anchor you recorded fixed (oscillation interrupts, not the count); a disputed blocking finding; or a fix that would change approved scope, tier or a cited Decision. Present, per finding, the finding verbatim with tags and anchor; why it did not converge; your recommendation; and, when re-escalating, a clause that starts a new series naming the predecessor rounds -- plus the five choices: accept-with-deferral / re-scope / split / abandon / one more round. Carrier: AskUserQuestion if held, else chat; dispatched, GATE_REQUEST `open_questions`. An open escalation is a stop: no round, no plan edit, until the human answers; record the answer as the row's `escalation_choice` (accept-with-deferral is human-authored only). Revisit when 20 plans carry `gate_rounds`: did a confirming round ever find a blocking finding, and were findings after round 5 real?
+**Escalate** only on: a finding recurring at a tag+anchor you recorded fixed (oscillation interrupts, not the count); a third blocking finding on one plan row (the anchor up to its first `]`) or sidecar block, or a REVISE at the sixth round, in one series; a disputed blocking finding; or a fix that would change approved scope, tier or a cited Decision. Present, per finding, the finding verbatim with tags and anchor; why it did not converge; your recommendation (one more round when plan-critique 5c applies); and, when re-escalating, a clause that starts a new series naming the predecessor rounds -- plus the five choices: accept-with-deferral / re-scope / split / abandon / one more round. Carrier: AskUserQuestion if held, else chat; dispatched, GATE_REQUEST `open_questions`. An open escalation is a stop: no round, no plan edit, until the human answers; record the answer as the row's `escalation_choice` (accept-with-deferral is human-authored only). Revisit when 20 plans carry findings lists: a 5c-class finding first raised at round 4 or later, or a plan amendment caused by a build-note nit, reopens this rule and plan-critique's blocking rule.
 
 **Contested-residue consult:** On a disputed blocking finding only, consult `model: "fable"` per the overseer skill's Fable Advice-Consult Protocol (dispatched: an `open_questions` item of the same GATE_REQUEST) -- a third fresh reading of THIS plan against the repo's own Decisions, not industry practice. It recommends a disposition and decides nothing. Revisit after 10 contested escalations; demote if it changed nothing in 8 or more.
 

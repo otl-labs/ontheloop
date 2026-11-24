@@ -295,3 +295,70 @@ class TestDuckLakeTransportHelpers:
                 "ops_recommendations", {"status": "open", "title": "t"}, action="file_ops", idempotency_ulid="u2"
             )
         assert len(bodies) == 3
+
+
+class TestCiRcaSmokeSink:
+    """The CI RCA smoke dry-run sink (rec-5493): writes one projected line locally, never reaches the writer."""
+
+    @staticmethod
+    def _armed(monkeypatch, tmp_path, smoke_id: str = "smoke-77"):
+        import boto3
+        import requests
+
+        sink = tmp_path / "sink.jsonl"
+        monkeypatch.setenv("CI_RCA_SMOKE_SINK", str(sink))
+        monkeypatch.setenv("CI_RCA_SMOKE_ID", smoke_id)
+        monkeypatch.setattr(requests, "post", lambda *a, **k: pytest.fail("requests.post reached"))
+        monkeypatch.setattr(boto3, "Session", lambda *a, **k: pytest.fail("boto3 reached"))
+        monkeypatch.setattr(_writer_transport_mod, "_resolve_writer_url", lambda *a, **k: pytest.fail("writer URL resolved"))
+        return sink
+
+    def test_file_rec_writes_one_projected_line_and_returns_the_smoke_id(self, monkeypatch, tmp_path) -> None:
+        import scripts.ops_data_portal as p
+
+        sink = self._armed(monkeypatch, tmp_path)
+        out = p._ducklake_write("ops_recommendations", {"status": "open", "title": "t", "stray": 1}, action="file_ops")
+        assert out == {"key": "smoke-77"}
+        line = json.loads(sink.read_text(encoding="utf-8"))
+        assert line["action"] == "file_ops"
+        assert line["table"] == "ops_recommendations"
+        assert line["record"]["title"] == "t"
+        assert "stray" not in line["record"]
+
+    @pytest.mark.parametrize("var", ["CI_RCA_SMOKE_SINK", "CI_RCA_SMOKE_ID"])
+    def test_one_variable_alone_raises(self, monkeypatch, tmp_path, var) -> None:
+        import scripts.ops_data_portal as p
+
+        self._armed(monkeypatch, tmp_path)
+        monkeypatch.delenv(var)
+        with pytest.raises(RuntimeError, match="both be set"):
+            p._ducklake_write("ops_recommendations", {"title": "t"}, action="file_ops")
+
+    @pytest.mark.parametrize(
+        ("smoke_id", "action", "table"),
+        [
+            ("smoke-x", "file_ops", "ops_recommendations"),
+            ("rec-1", "file_ops", "ops_recommendations"),
+            ("smoke-77", "update_ops", "ops_recommendations"),
+            ("smoke-77", "write_ops", "ops_recommendations"),
+            ("smoke-77", "file_ops", "ops_decisions"),
+        ],
+    )
+    def test_every_other_shape_raises(self, monkeypatch, tmp_path, smoke_id, action, table) -> None:
+        import scripts.ops_data_portal as p
+
+        sink = self._armed(monkeypatch, tmp_path, smoke_id)
+        with pytest.raises(RuntimeError, match="smoke sink refuses"):
+            p._ducklake_write(table, {"title": "t"}, action=action)
+        assert not sink.exists()
+
+    def test_both_unset_takes_the_writer_path(self, monkeypatch) -> None:
+        import scripts.ops_data_portal as p
+
+        monkeypatch.delenv("CI_RCA_SMOKE_SINK", raising=False)
+        monkeypatch.delenv("CI_RCA_SMOKE_ID", raising=False)
+        monkeypatch.setattr(_writer_transport_mod, "_resolve_writer_url", lambda *a, **k: "https://w.example")
+        bodies = _patch_writer_transport(monkeypatch, [_FakeResp(200, {"key": "rec-9"})])
+        out = p._ducklake_write("ops_recommendations", {"status": "open", "title": "t"}, action="file_ops")
+        assert out == {"key": "rec-9"}
+        assert len(bodies) == 1

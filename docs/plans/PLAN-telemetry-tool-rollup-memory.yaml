@@ -1,0 +1,299 @@
+schema_version: 6
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: telemetry-tool-rollup-memory
+intent: >-
+  A 7-day telemetry_usage tools range completes again (rec-5490), so the feedback loop can read a week of tool use in one
+  command. tool_use_rollup is the only telemetry verb that reads the observations metadata column, and it reads it from the
+  shared deduped o CTE, which drags the wide column through the Decision 207 dedupe windows and overflows the reader's own
+  300 MB memory plus 300 MB spill budget. The plan reads that one key from a narrow side scan instead (same rows out), and
+  the CLI halves a window on a reader out-of-memory 500 as it already does on 413 and 504.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-telemetry-tool-rollup-memory.yaml
+phase: >-
+  ad_hoc_rec (soft-warn exception category): repairs rec-5490 (Medium, source implement-agent), a regression of
+  PLAN-telemetry-repeated-tool-calls (#2353). No tier_item is targeted and no exit criterion is closed.
+closes_criteria: []
+cites:
+  - dec:79
+  - dec:199
+  - dec:207
+  - dec:236
+  - dec:249
+  - dec:254
+  - dec:272
+scope:
+  - file: src/common/ducklake_event_read_sql.py
+    action: Modify
+    purpose: >-
+      TOOL_USE_ROLLUP_SQL only. The op CTE stops selecting json_extract_string(metadata, '$.attribution_mcp_server') from the
+      deduped o CTE. A new CTE am reads the raw observations placeholder under the same {scope}: SELECT producer, event_id,
+      parser_version, arg_min_null(json_extract_string(metadata, '$.attribution_mcp_server'), created_timestamp) AS
+      attribution_mcp_server WHERE observation_type = 'tool_call' AND event_kind = 'open' GROUP BY producer, event_id,
+      parser_version. op LEFT JOINs am on (producer, event_id, parser_version), the surviving row's full grain key, so the
+      value is the R5b survivor's own, NULL included (arg_min_null, never arg_min, which skips a NULL value and would
+      return a later row's attribution; Decision 207: within one grain key the survivor is the earliest created_timestamp;
+      R5a retirement already fixed parser_version through o). No other CTE, verb or the shared dedupe_ctes/compose text
+      changes, so only tool_use_rollup's read_version moves. A short comment states why metadata is read beside o, not
+      through it (rec-5490), and that a created_timestamp tie inside a conflicted grain key falls under Decision 207's
+      unspecified survivor (R5b has no further tiebreak either).
+    new_imports: []
+  - file: scripts/telemetry_usage.py
+    action: Modify
+    purpose: >-
+      _Reads.read halves a window on a ReaderInvokeError whose status is 500 and whose body names error_type unmapped and
+      error_class OutOfMemoryException (the reader's typed answer for a DuckDB out-of-memory, src/common/ducklake_handler_errors.py
+      unmapped), exactly as for ResponseTooLargeError and ReadDeadlineExceededError: a one-day window still fails closed
+      naming error_type unmapped, and the MAX_CALLS cap is unchanged. Any other 500 keeps failing closed. The module
+      docstring and _Reads docstring name the third halving cause, and the _Reads docstring names the source of the match:
+      the body shape of ducklake_handler_errors.unmapped, so a later typed out-of-memory row must update this match and its
+      acceptance test.
+    new_imports: []
+  - file: tests/common/test_ducklake_event_read_memory.py
+    action: Modify
+    purpose: >-
+      A second module-scoped fixture writes a tool-shaped corpus as Parquet (ROW_GROUP_SIZE 20000, the writer connection
+      bounded by ev.TELEMETRY_MEMORY_LIMIT as the existing fixture does): 3,000 root sessions over 7 days, 450,000
+      observations in thirds (tool_call open rows, tool_call close rows with outcome, output_bytes and output_sha256, and
+      model_call rows), every observation row carrying an 800-byte JSON metadata with attribution_mcp_server one of five
+      names (the plan-time probe shape; with metadata on the opens only the current SQL passes, measured in critique round 1), 150,000 tool_input
+      transcripts with content_sha256, 1,500 agents; and opens the reader-settings connection the same way as reader_con
+      (tests.fixtures.duckdb_connect, threads 1, ev.TELEMETRY_MEMORY_LIMIT, ev.TELEMETRY_MAX_TEMP_SIZE). Node
+      test_tool_use_week_fits_the_reader_memory runs ev.execute(con, verb="tool_use_rollup", 7-day window) and asserts the
+      summed call_count equals the planted open count and the attribution_mcp_server values are exactly the five planted
+      names. The module docstring's first line covers both reads (root sessions and tool use). Red before
+      (OutOfMemoryException), green after; measured at plan time on this shape at 450,000 (current SQL
+      out of memory, side scan 4.6 s).
+    new_imports: []
+  - file: tests/common/test_ducklake_event_read_tool_usage.py
+    action: Modify
+    purpose: >-
+      Two survivor nodes on hand-built rows, each also compared with derive_usage.tool_use_rollup as the existing nodes do:
+      test_attribution_follows_the_retained_parser_version (one tool_call open stored at parser_version 1 with attribution
+      "old" and at parser_version 2 with "new", the session open at 2: the row reads "new") and
+      test_conflicted_open_keeps_the_earliest_created_attribution (two rows of one grain key differing only in metadata and
+      created_timestamp: derivation_conflicted is true and the attribution is the earlier created row's, the R5b survivor),
+      plus a second case in that node where the earlier created row has no attribution_mcp_server key and the later one has
+      a value: the row reads NULL. Green before and after: they pin the survivor choice the side scan must keep (the NULL case
+      fails under arg_min).
+    new_imports: []
+  - file: tests/test_telemetry_usage.py
+    action: Modify
+    purpose: >-
+      test_a_reader_out_of_memory_500_halves_the_window (rec-5490 acceptance): a FakeReader raising
+      ReaderInvokeError("named_read", 500, "oom", {"error_type": "unmapped", "error_class": "OutOfMemoryException"}) on the
+      7-day window, rows on the halves; exit 0, the calls list is the 7-day window then its two halves, and the totals sum the
+      halves. The fail-closed cases join the existing cases tuple of test_a_failed_chunk_prints_no_total_and_exits_1 (two
+      added rows, none changed): the same out-of-memory error on a one-day window exits 1 naming error_type unmapped, and a
+      500 unmapped with error_class RuntimeError on a 7-day window exits 1 naming error_type unmapped with no halving (the
+      test's existing assertions; exit 1 already shows no halving, since halves would return rows and exit 0). The module
+      docstring's "halving on 413/504" names the out-of-memory 500 too. The file is 474 of 500 SLOC, so the additions stay
+      within about 20 lines (relief in execution steps).
+    new_imports: []
+bundled_recommendations:
+  - rec-5490
+followon_recs: []
+infrastructure_dependencies:
+  - "ducklake_telemetry_reader (active): governed deploy-ducklake-lambdas run after merge (Decisions 249, 254); VP 6 reads the
+    deployed stamp, VP 7 and VP 8 are the live smoke."
+  - "ducklake_telemetry_content_reader (active; packages ducklake_event_read_sql.py, serves no tool_use_rollup): Decision 79
+    step is VP 10, its next operator-approved deploy-telemetry-content run (Decision 272 cl.1, residual while rec-5333 is
+    open); the build never dispatches one. VP 4 proves the change is inert there."
+acceptance_criteria:
+  - A 7-day tool_use_rollup over the 450,000-observation tool-shaped corpus completes under the reader's own memory and spill limits with the planted counts and attributions (red before, green after).
+  - tool_use_rollup output is unchanged, the oracle tests pass unedited and the two survivor nodes pass before and after.
+  - The telemetry_usage CLI halves a window on a reader out-of-memory 500 and prints a total; a one-day out-of-memory window and any other 500 fail closed.
+  - The content reader's read_version stamps are unchanged by the build.
+  - After the governed deploy, three live 7-day tool_use_rollup reads each answer rows or a 413, never an out-of-memory 500, and a live 7-day telemetry_usage tools range exits 0 with a total.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: Memory regression on the reader's own limits
+    command: bin/venv-python -m pytest tests/common/test_ducklake_event_read_memory.py::test_tool_use_week_fits_the_reader_memory -q
+    expected: The node passes; before the SQL change it fails with an OutOfMemoryException.
+    fix_if: >-
+      An out-of-memory error after the change means a wide column still rides the o CTE windows; find it with EXPLAIN
+      ANALYZE on the same corpus. Green before the change means the fixture is too light: grow the observation count until
+      the current SQL is red, never weaken the node. Never raise the reader's limits.
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: telemetry-tool-rollup-fits-reader-memory
+  - step: 2
+    phase: pre-deploy
+    action: tool_use_rollup semantics unchanged
+    command: bin/venv-python -m pytest tests/common/test_ducklake_event_read_tool_usage.py tests/common/test_ducklake_event_read_memory.py tests/common/test_ducklake_event_read_dedupe.py tests/common/test_ducklake_event_read_verbs.py -q
+    expected: All nodes pass; no pre-existing node in these files is edited.
+    fix_if: A changed oracle comparison or survivor node means the side scan picks a different row than R5b; fix the SQL, never the oracle or vectors.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: These are standing full-tier tests that already guard the same semantics on every main run, so a graduated row would only duplicate them.
+  - step: 3
+    phase: pre-deploy
+    action: rec-5490 acceptance and the fail-closed cases
+    command: bin/venv-python -m pytest tests/test_telemetry_usage.py::test_a_reader_out_of_memory_500_halves_the_window tests/test_telemetry_usage.py::test_a_failed_chunk_prints_no_total_and_exits_1 -q
+    expected: Both nodes pass; before the change the first fails (exit 1, no total).
+    fix_if: A failure means _Reads does not read the error's status and body; never widen halving to every 500.
+    hermetic: true
+    expected_literals: []
+    graduation: graduate
+    graduation_check_id: telemetry-usage-halves-on-reader-oom
+  - step: 4
+    phase: pre-deploy
+    action: Content reader stamps unchanged (it packages this SQL module; tool_use_rollup is not in its served set)
+    command: >-
+      R=$PWD && base=$(git merge-base HEAD origin/main) && rm -rf /tmp/trm-base && git worktree add -q --detach /tmp/trm-base
+      "$base" && s='from src.common import ducklake_content_read_verbs as cv; print(sorted((k, cv.content_read_version(v)) for k,
+      v in cv.CONTENT_READS.items()))' && a=$(bin/venv-python -c "$s") && b=$(cd /tmp/trm-base && "$R/bin/venv-python" -c "$s");
+      git worktree remove --force /tmp/trm-base; echo "$a"; test -n "$a" && test "$a" = "$b" && echo content-stamps-unchanged
+    expected: The stamp list, then content-stamps-unchanged, exit 0 (measured at plan time on main 9d167c64).
+    fix_if: A moved stamp means the edit reached shared SQL; keep it inside TOOL_USE_ROLLUP_SQL.
+    hermetic: false
+    graduation: not-applicable
+  - step: 5
+    phase: pre-deploy
+    action: Full tier, then HEAD attestation, after the build commit and rebase and before the push (handoff_policy); start it from the top-level session, backgrounded with a 2 h limit, and read only the attestation.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: The full tier exits 0 and the validation result attests the current HEAD's tree.
+    fix_if: Any failure; fix and rerun the full tier from the start. A timeout is BLOCKED (timeout_disposition blocked).
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: post-deploy
+    action: The deployed telemetry reader serves the new tool_use_rollup SQL
+    command: >-
+      OTL_OPS_VERBS_TRANSPORT=execute_api bin/venv-python -c "from scripts.telemetry_capture.read_route import make_routed_reader;
+      from src.common import ducklake_event_reads as ev; d=make_routed_reader(profile='agent_platform').describe();
+      ok=d['tool_use_rollup']['read_version']==ev.describe_all()['tool_use_rollup']['read_version']; print(ok);
+      raise SystemExit(0 if ok else 1)"
+    expected: True, exit 0, after the deploy-ducklake-lambdas run for a main commit containing the merge has deployed the telemetry reader (Decisions 249, 254).
+    fix_if: False means the deploy has not run or skipped the reader; read that run's job conclusions and deployed commit. Run from a checkout of the deployed commit, since a later merge to the shared SQL file moves main's stamp.
+    hermetic: false
+  - step: 7
+    phase: post-deploy
+    action: Live 7-day tool_use_rollup reads, three in a row, each answering rows or a 413, never a 500
+    command: |-
+      OTL_OPS_VERBS_TRANSPORT=execute_api bin/venv-python - <<'PY'
+      import datetime as d, time
+      from scripts.telemetry_capture.read_route import make_routed_reader
+      from src.common.ducklake_reader_client import ReaderInvokeError, ResponseTooLargeError
+      r = make_routed_reader(profile="agent_platform")
+      t = d.datetime.now(d.UTC).date()
+      f, bad = (t - d.timedelta(days=6)).isoformat(), 0
+      for i in (1, 2, 3):
+          s = time.monotonic()
+          try:
+              out = "rows=%d" % len(r.named("tool_use_rollup", day_from=f, day_to=t.isoformat()))
+          except ResponseTooLargeError:
+              out = "413"
+          except ReaderInvokeError as e:
+              out, bad = "FAIL status=%s error_class=%s" % (e.status, (e.body or {}).get("error_class")), bad + 1
+          print("read", i, out, "elapsed_s", round(time.monotonic() - s, 1))
+      raise SystemExit(1 if bad else 0)
+      PY
+    expected: >-
+      Three lines "read N rows=<n> elapsed_s <s>" or "read N 413 elapsed_s <s>", exit 0. A 413 is the reader's response cap,
+      which a 7-day tools read already hit before #2353; the CLI halves it (VP 8). Before this plan the reads answer FAIL
+      status=500 error_class=OutOfMemoryException.
+    fix_if: >-
+      A FAIL line with error_class OutOfMemoryException means production rows are heavier than the probe corpus: read the
+      reader log group at that time and report a plan-defect to the coordinator with the request id; never raise the
+      reader's limits. A FAIL with status 504 (read deadline) is the same class of evidence: report it to the coordinator
+      with the request id as a plan-defect, never retry into green. Any other FAIL is the client or reader's own recovery
+      (the client already retries a 503).
+    hermetic: false
+  - step: 8
+    phase: post-deploy
+    action: rec-5490 outcome, a live 7-day telemetry_usage tools range
+    command: OTL_OPS_VERBS_TRANSPORT=execute_api bin/venv-python -m scripts.telemetry_usage tools --from "$(date -u -d '6 days ago' +%F)" --to "$(date -u +%F)" > /tmp/trm-tools.json && bin/venv-python -c "import json; d=json.load(open('/tmp/trm-tools.json')); print('calls', d['calls'], 'rows', len(d['rows']))"
+    expected: Exit 0, then calls and rows counts; rows above 0 unless no tool call was captured that week.
+    fix_if: A FAIL line names the window and error_type; follow it and stop with an RCA.
+    hermetic: false
+  - step: 9
+    phase: post-deploy
+    action: rec-5490 closed by the merge's Resolves trailer
+    command: >-
+      OTL_OPS_VERBS_TRANSPORT=execute_api bin/venv-python -c "from src.common.ducklake_reader_client import make_reader, fetch_recs_by_ids;
+      rows, missing = fetch_recs_by_ids(make_reader(profile='agent_platform'), ['rec-5490']); print(rows[0]['status'] if rows else missing);
+      raise SystemExit(0 if rows and rows[0]['status'] == 'closed' else 1)"
+    expected: closed, exit 0
+    fix_if: open means the squash body lacks the Resolves trailer for rec-5490 or its acceptance failed in the closure job.
+    hermetic: false
+  - step: 10
+    phase: post-deploy
+    action: >-
+      Decision 79 for the content reader (Decision 272 residual while rec-5333 is open): its next deploy-telemetry-content run
+      that the operator approves (this build never dispatches one) is on a commit that contains this build. Waits on the
+      operator; the build reports it pending with this step named, and the coordinator keeps it on the waiting list.
+    command: >-
+      git fetch -q origin main && build=$(git log -1 --format=%H -E --grep='^Resolves: .*rec-5490([^0-9]|$)' origin/main) && test -n
+      "$build" && ok= && for id in $(gh api
+      'repos/otl-labs/ontheloop/actions/workflows/deploy-telemetry-content.yml/runs?status=success&per_page=100' --jq
+      '.workflow_runs[].id'); do job=$(gh api "repos/otl-labs/ontheloop/actions/runs/$id/jobs" --jq '.jobs[] |
+      select(.name=="record" and .conclusion=="success") | .id'); [ -n "$job" ] || continue; deployed=$(gh api
+      "repos/otl-labs/ontheloop/actions/jobs/$job/logs" | grep -oE 'LAMBDA_ARTIFACT_SHA: [0-9a-f]{40}' | head -1 | cut -d' '
+      -f2); echo "run $id deployed $deployed"; if git merge-base --is-ancestor "$build" "$deployed"; then echo contains; ok=1;
+      fi; break; done; test -n "$ok"
+    expected: >-
+      "run <id> deployed <sha>" then contains, exit 0: the newest deploy-telemetry-content run whose record job succeeded
+      deployed a commit containing the squash commit that carries the rec-5490 Resolves trailer.
+    fix_if: No approved run since the merge yet (wait, never dispatch), or the run failed (the content channel's own recovery).
+    hermetic: false
+test_obligations:
+  - source: src/common/ducklake_event_read_sql.py
+    behavior: A 7-day tool_use_rollup fits the reader's memory and spill limits with the same rows.
+    verification_step: 1
+    test_selector: tests/common/test_ducklake_event_read_memory.py::test_tool_use_week_fits_the_reader_memory
+    red_green_expectation: red before (OutOfMemoryException), green after
+  - source: scripts/telemetry_usage.py
+    behavior: A reader out-of-memory 500 halves the window; a one-day window and any other 500 fail closed.
+    verification_step: 3
+    test_selector: tests/test_telemetry_usage.py::test_a_reader_out_of_memory_500_halves_the_window
+    red_green_expectation: red before (exit 1, no total), green after
+constraints:
+  - No raise of the reader's memory_size (spend), DuckDB memory_limit or spill cap (they risk a Lambda out-of-memory kill and hide the cause).
+  - No test, assertion or oracle is loosened (Decision 235); tool_use_rollup's rows must not change.
+  - The telemetry reader deploys only through the governed deploy-ducklake-lambdas channel (Decisions 125, 126, 249, 254); no local deploy.
+  - The content reader is never deployed by this build; VP 4 proves its stamps unchanged and VP 10 waits for its next operator-approved deploy.
+  - The merge waits for rec-5491's live watch (execution step 1); no AWS account id in any log excerpt, PR text or rec.
+context:
+  - "Decision-scout verdict NO_FLAGS (round 3, 228 of 228 triaged; roadmap items intersected 1, CONFLICT 0, RELATED 1); CITE: dec:79, dec:207, dec:199, dec:236, dec:249, dec:254, dec:272. Serves: NS.9 3/5."
+  - "Operator approvals (2026-11-23, project thread): both parts (SQL side scan and CLI halving) chosen on the card, then 'write the plan'."
+  - "Plan-time probe (scratch, synthetic tool-shaped Parquet corpus, reader limits, threads 1; scripts kept in the shared project folder tool-rollup-memory/probe): current SQL passes at 300,000 observations (7.2 s, spilling), fails at 450,000 and 600,000 ('failed to offload', the production message); the side scan passes at 450,000 (4.3 s) and 600,000 (6.5 s) and fails at 800,000; identical rows at 300,000; the oracle test file passes with the side scan patched in, and fails 2 nodes with attribution nulled (negative control). So the SQL change is headroom (about 1.5x), and the CLI halving is the guarantee."
+  - "Production estimate (one-day reads 2026-11-20): about 18,000 tool calls and 16,000 model calls a day, so roughly 360,000 observations a week; inferred, not measured. tool_use_rollup is the only verb reading metadata (grep of ducklake_event_read_sql.py)."
+  - "The sibling probe's earlier finding (rec-5491 plan context) used a corpus with no tool_call rows; its out-of-memory came from the same metadata read, not tool_use_rollup's repeat CTEs."
+  - "Deploy order: merging ships the telemetry reader through deploy-ducklake-lambdas once main's full tier passes (Decisions 249, 254). rec-5491's fix went live 2026-11-23 14:41Z and its VP 7 watch runs to about 25 Nov; a second reader deploy inside that watch would not reset it but would confound it, so the merge waits (execution step 1)."
+  - "Content reader (Decision 272): packages ducklake_event_read_sql.py but serves no tool_use_rollup; VP 4 proves its stamps unchanged, and VP 10 meets Decision 79 on its next operator-approved deploy, never dispatched by the build (precedent: PLAN-telemetry-repeated-tool-calls VP 7)."
+  - "read_version: only tool_use_rollup's stamp moves; the telemetry-smoke and golden-gate smokes treat a stamp mismatch as deploy skew until the reader deploy lands."
+  - "Reader error body: a DuckDB out-of-memory answers 500 with error_type unmapped and error_class OutOfMemoryException (ducklake_handler_errors.unmapped); the client does not retry a 500 (_READER_TRANSIENT_STATUS)."
+  - "Related-work check (red_overlap, 2026-11-23 on 9d167c64): blocked; rec-5536 and rec-5538 overlap on selector-selected test paths only (no scope file is shared). Deferral rationale for rec-5536: the CI RCA filing-check red in scripts/ci/claude_p_retry.sh, Agents in GitHub's lane, unrelated to the reader. Deferral rationale for rec-5538: the telemetry-arrival red (session_presence.py _walk repeats a deadline-exceeded 7-day read), raised with the coordinator 2026-11-23 for an owner; this plan edits none of its files. Neither red's repair depends on this plan; the build re-runs red_overlap (execution step 2)."
+  - "Critique round 3 nits deferred to the build (operator ruling 2026-11-23, accept with deferral, no confirming round): state created_timestamp(pv1) < created_timestamp(pv2) in the retained-parser-version node; note in the SQL comment that am skips R5a retirement for a grain key spanning sessions (outside Decision 207 grain); the probe measured an op0-then-join wrapper, either shape is fine, VP 1 decides; the report names PR, merge SHA, VP 5 attestation, deploy run id and merge-gate state; PLAN-telemetry-repeated-tool-calls shows unbuilt only because its flag never flipped (#2353 shipped); the CLI module docstring says halving applies to every window command."
+  - "Data-model: no table, column or stored field is added; the existing-data rule holds (attribution_mcp_server is already stored in metadata)."
+  - "Shared files (plan_obligations 2026-11-23): src/common/ducklake_event_read_sql.py 482 of 500 SLOC (NEAR_CAP; this edit adds about 5) and tests/test_telemetry_usage.py 474 of 500 are also scoped by unbuilt plans billing-shape-local, merge-annotate-contract-reader, telemetry-claude-p-capture-adapter and telemetry-planning-cost-reads; whichever builds second rebases. Relief: execution step 3."
+  - "Graduated shards kept unchanged (none of their nodes is renamed, removed or loosened): friction-signature-registration-and-cli, telemetry-conflict-report-fits-reader-memory, telemetry-tool-use-repeat-counts, telemetry-usage-cli-fails-closed (its node gains two cases), telemetry-usage-repeat-totals, telemetry-usage-verbs-registered."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:ebdacf369a5d9fef284475e9769bd3c165e1a05f99f4cf164bf1fcff6232f79c'}
+  - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:a979ace8a5afed552df1bf78f4ef764ccfc20b6c3217cb2a8a2599194cb9c776'}
+  - {gate: plan-critique, round: 1, verdict: REVISE, blocking: 3, nits: 5}
+  - {gate: plan-critique, round: 2, verdict: REVISE, blocking: 1, nits: 5}
+  - {gate: decision-scout, round: 3, verdict: NO_FLAGS, scout_input_fingerprint: 'v1:59ce441990060a7b7d6c9906672c68c2bb60e0a1bf074df593dcc64eab301016'}
+  - {gate: plan-critique, round: 3, verdict: PROCEED, blocking: 0, nits: 6, escalated: true, escalation_choice: accept-with-deferral}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "Set implementation_declared: true in this plan with the build commit. Merge gate, checked again just before merging: rec-5491's live watch reads clean. Run docs/plans/PLAN-telemetry-reader-conflict-memory.yaml VP 7 with LIVE_MS=$(date -u -d '2026-11-23T14:41:00Z' +%s000); it must exit 0 (31 or more readable runs, none unreadable). Until it does, the build may finish and push the PR but does not merge."
+  - "Run bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-telemetry-tool-rollup-memory.yaml; rec-5490 must read clear. A new red that overlaps follows red-main-recovery.yaml."
+  - "Size relief, measured on the rebased tree: after the edits run bin/venv-python -m scripts.validate --pre (validate_sloc_limits). If src/common/ducklake_event_read_sql.py or tests/test_telemetry_usage.py would pass its budget (another plan landed first), never raise it: tighten the added lines, or send a plan-defect report for a facade decomposition (Decision 128)."
+  - Add the tool-shaped fixture and test_tool_use_week_fits_the_reader_memory to tests/common/test_ducklake_event_read_memory.py; confirm it fails on the current SQL with OutOfMemoryException and record the node's duration.
+  - Add the two survivor nodes to tests/common/test_ducklake_event_read_tool_usage.py; confirm they pass on the current SQL.
+  - Modify TOOL_USE_ROLLUP_SQL in src/common/ducklake_event_read_sql.py (side scan am, op joins it); run VP 1, 2 and 4. Report VP 1's node duration; above 30 s locally, shrink nothing silently, send a plan-defect report.
+  - Write the acceptance node and the two added cases in tests/test_telemetry_usage.py, confirm the acceptance node fails, then change _Reads in scripts/telemetry_usage.py; run VP 3.
+  - Execute Verification Plan -- run each step; loop until pass; on unrecoverable V3 failure stop and RCA (Decision 55)
+  - "Squash-merge body carries Resolves: rec-5490. After the deploy run VP 6-9."
+  - 'Report: what was implemented, verification results, VP 1 duration, VP 7 lines, VP 10 pending'
+rollback: Revert the squash commit; the reader redeploys the previous SQL through the same channel, and the CLI returns to halving on 413 and 504 only.

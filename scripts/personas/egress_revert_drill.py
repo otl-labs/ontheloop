@@ -1,0 +1,54 @@
+"""Verb egress-revert-drill: keyless probe jobs only (PLAN-persona-verdict-egress-floor).
+
+Lays the floor, then schedules the filter agent's own revert side effects and its exit two minutes later, so the drill
+job shows what a mid-job revert does to a job that holds the floor's exit hook (cut off) and, in the control, to one
+that does not. The revert order follows the agent's RevertChanges, firewall and DNS legs.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+
+from scripts.personas import egress_floor
+
+DRILL_RESOLVER = "1.1.1.1"
+DELAY_SECONDS = 120
+UNIT = "egress-revert-drill"
+REVERT = (
+    "iptables -w -F OUTPUT; iptables -w -F DOCKER-USER; "
+    f"printf '[Resolve]\\nDNS={DRILL_RESOLVER}\\nDomains=~.\\n' > /etc/systemd/resolved.conf; "
+    "systemctl restart systemd-resolved; systemctl daemon-reload; systemctl restart docker; "
+    "systemctl kill -s KILL agent.service"
+)
+
+
+def schedule_argv() -> list[str]:
+    return ["systemd-run", f"--on-active={DELAY_SECONDS}", f"--unit={UNIT}", "/bin/sh", "-c", REVERT]
+
+
+def _hook_present() -> bool:
+    return egress_floor.hook_present(egress_floor._run(["systemctl", "show", egress_floor.UNIT, "-p", "ExecStop"])[1])
+
+
+def arm(hooked: bool) -> int:
+    applied = egress_floor.apply()
+    checks = [("apply", applied), *egress_floor.verify()]
+    if not egress_floor.report(checks):
+        return 1
+    if not hooked:
+        egress_floor.UNHOOK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        egress_floor.UNHOOK_PATH.write_text(egress_floor.unhook_text(), encoding="utf-8")
+        egress_floor._run(["systemctl", "daemon-reload"])
+        if _hook_present():
+            print("EGRESS-DRILL FAIL exit hook still loaded")
+            return 1
+        print("EGRESS-DRILL UNHOOKED")
+    if egress_floor._run(schedule_argv())[0] != 0:
+        print("EGRESS-DRILL FAIL systemd-run refused")
+        return 1
+    print("EGRESS-DRILL ARMED")
+    return 0
+
+
+def main(argv: Sequence[str]) -> int:
+    return arm(hooked=True)

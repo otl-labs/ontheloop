@@ -63,3 +63,33 @@ def test_wording_check_rows_number_one_to_n_like_every_gate(rounds: list[int]) -
 def test_gate_rounds_require_schema_version_five() -> None:
     with pytest.raises(ValidationError, match="gate_rounds requires schema_version 5"):
         PlanDocument.model_validate(_mutate(gate_rounds=[_row()]))
+
+
+def _v7(rows: list[dict]) -> dict:
+    return _mutate(schema_version=7, handoff_policy=dict(_HANDOFF), gate_rounds=rows)
+
+
+def test_v7_loads_with_findings_and_refuses_the_closed_shapes() -> None:
+    ok = _row(
+        nits=1,
+        findings=[
+            {"id": "N1", "severity": "nit", "origin": "mechanical", "anchor": "a", "subject": "s", "disposition": "build-note"}
+        ],
+    )
+    assert PlanDocument.model_validate(_v7([ok])).schema_version == 7
+    with pytest.raises(ValidationError, match="findings: \\[\\{id"):
+        PlanDocument.model_validate(_v7([_row()]))
+    deferral = _row(escalated=True, escalation_choice="accept-with-deferral", findings=[])
+    with pytest.raises(ValidationError, match="accept-with-deferral on a PROCEED"):
+        PlanDocument.model_validate(_v7([deferral]))
+    rescope = _row(escalated=True, escalation_choice="re-scope", findings=[])
+    assert PlanDocument.model_validate(_v7([rescope]))
+
+
+def test_v6_with_findings_fails_and_handoff_policy_required_at_v7() -> None:
+    with pytest.raises(ValidationError, match="findings requires schema_version 7"):
+        PlanDocument.model_validate(_mutate(schema_version=6, handoff_policy=dict(_HANDOFF), gate_rounds=[_row(findings=[])]))
+    bad = _v7([_row(findings=[])])
+    bad.pop("handoff_policy")
+    with pytest.raises(ValidationError, match="require handoff_policy"):
+        PlanDocument.model_validate(bad)

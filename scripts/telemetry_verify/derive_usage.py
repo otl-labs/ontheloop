@@ -12,11 +12,12 @@ come from ducklake_reader_client.VERB_FIELDS (never from src.common.event_usage_
 Declared conventions with no contract text, aligned to the verbs' observable behaviour: a session with observation rows but no
 sessions row is not a root and has no workflow or agent_name beyond its agent rows; the tool open row of an observation is the
 earliest by (event_timestamp, source_ordinal, event_id) and its current close the latest; an unmatched mcp__ name has
-no server.
+no server; repeat_input_count, repeat_output_count and repeat_output_bytes are 0, never None, when nothing repeats.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import datetime, timedelta, timezone
@@ -27,6 +28,7 @@ from scripts.telemetry_verify.derive import AGENTS, OBSERVATIONS, SESSIONS, TRAN
 from src.common.ducklake_event_read_verbs import FRICTION_RULES
 from src.common.ducklake_reader_client import VERB_FIELDS
 
+_EMPTY_DIGEST = hashlib.sha256(b"").hexdigest()
 _MCP_SERVER = re.compile(r"^mcp__(.+?)__")
 _MERGE_SHA = re.compile(r":merge:([0-9a-f]+)#0/annotate$")
 _TOKEN_SUMS = (
@@ -161,6 +163,10 @@ def tool_use_rollup(tables: Tables, projects: Mapping[str, str], day_from: str, 
     trees = _Trees(tables, projects, day_from, day_to, "tool_use_rollup")
     groups: dict[tuple[Any, ...], dict[str, Any]] = {}
     tools = [r for r in trees.observations if r.get("observation_type") == "tool_call" and _pin(r) in trees.pins]
+    inputs: dict[tuple[Any, ...], Row] = {}
+    for row in sorted((r for r in trees.scope.tables.get(TRANSCRIPTS, []) if r.get("purpose") == "tool_input"), key=_order):
+        inputs.setdefault(_link_key(row, row["external_ref"]), row)
+    calls: list[tuple[Any, ...]] = []
     for (pin, sid, observation), opens in _by_observation(tools, "open").items():
         opener = min(opens, key=_order)
         closes = _by_observation(tools, "close").get((pin, sid, observation), [])
@@ -173,11 +179,27 @@ def tool_use_rollup(tables: Tables, projects: Mapping[str, str], day_from: str, 
         meta = json.loads(opener["metadata"]) if opener.get("metadata") else {}
         attribution = meta.get("attribution_mcp_server") if isinstance(meta, dict) else None
         key = (pin, root, agent, _first(rows, "workflow"), name, match.group(1) if match else None, attribution)
-        group = groups.setdefault(key, {"calls": 0, "error": 0, "blocked": 0, "interrupted": 0, "sessions": set()})
+        group = groups.setdefault(
+            key,
+            {"calls": 0, "error": 0, "blocked": 0, "interrupted": 0, "sessions": set(), "rep_in": 0, "rep_out": 0, "bytes": 0},
+        )
+        stored = inputs.get(_link_key(opener, str(opener.get("external_ref")).removesuffix("/tool_call_open")))
+        digest = stored.get("content_sha256") if stored else None
+        digest = None if digest == _EMPTY_DIGEST else digest
+        last = max(closes, key=_order) if closes else {}
+        sha = last.get("output_sha256") if (last.get("output_bytes") or 0) > 0 else None
+        calls.append((sid, name, _order(opener), digest or None, sha or None, last.get("output_bytes"), group))
         group["calls"] += 1
         group["sessions"].add(sid)
         for state in ("error", "blocked", "interrupted"):
             group[state] += outcome == state
+    seen: set[tuple[Any, ...]] = set()
+    for sid, name, _, digest, sha, size, group in sorted(calls, key=lambda c: c[:3]):
+        for kind, value in (("in", digest), ("out", sha)):
+            if value is not None:
+                group["rep_" + kind] += (sid, name, kind, value) in seen
+                group["bytes"] += size if kind == "out" and (sid, name, kind, value) in seen else 0
+                seen.add((sid, name, kind, value))
     out = []
     for (pin, root, agent, workflow, name, server, attribution), group in groups.items():
         row = {
@@ -192,11 +214,18 @@ def tool_use_rollup(tables: Tables, projects: Mapping[str, str], day_from: str, 
             "error_count": group["error"],
             "blocked_count": group["blocked"],
             "interrupted_count": group["interrupted"],
+            "repeat_input_count": group["rep_in"],
+            "repeat_output_count": group["rep_out"],
+            "repeat_output_bytes": group["bytes"],
             "session_count": len(group["sessions"]),
         }
         order = (row["session_started_at"], _nulls_last(row["root_session_id"]), not root, agent is not None, agent or "")
         out.append((*order, *map(_nulls_last, (workflow, name, server, attribution)), row))
     return trees.finish([entry[-1] for entry in sorted(out, key=lambda e: e[:-1])])
+
+
+def _link_key(row: Row, ref: str) -> tuple[Any, ...]:
+    return (row["tenant_id"], row["project_id"], row["producer"], row["session_id"], row["parser_version"], ref)
 
 
 def _by_observation(rows: list[Row], kind: str) -> dict[tuple[Pin, str, Any], list[Row]]:
