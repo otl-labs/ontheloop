@@ -11,7 +11,7 @@ from collections.abc import Sequence
 
 from scripts.personas import oidc_assume
 
-ATTEMPTS: tuple[tuple[str, str], ...] = ((oidc_assume.ROLE, "AccessDenied"),)
+ATTEMPTS: tuple[tuple[str, str], ...] = ((oidc_assume.ROLE, "AccessDenied"), (oidc_assume.APP_ROLE, "AccessDenied"))
 WORKFLOW_REF = "/.github/workflows/persona-verdict.yml@refs/heads/main"
 
 

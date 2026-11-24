@@ -16,6 +16,7 @@ import yaml
 
 from scripts.checks import registry
 from scripts.checks.contracts.validate_project_configuration import validate_project_configuration
+from scripts.session.merge_checks import verdict_app_id
 
 _REPO = Path(__file__).resolve().parents[3]
 _CONTRACT = "docs/contracts/project-configuration.yaml"
@@ -376,7 +377,9 @@ def test_real_contract_passes_rule_m(root: Path) -> None:
     validate_project_configuration(failed, root=root)
     assert failed == []
     data = yaml.safe_load((root / _CONTRACT).read_text(encoding="utf-8"))
-    assert _row(data, _APP_ROW)["defaults"] == {"local": None, "cloud": None}
+    app_id = verdict_app_id((root / _CONTRACT).read_text(encoding="utf-8"))
+    assert isinstance(app_id, int) and app_id > 0
+    assert _row(data, _APP_ROW)["defaults"] == {"local": app_id, "cloud": app_id}
 
 
 def _drop_app_row(d: dict[str, Any]) -> None:

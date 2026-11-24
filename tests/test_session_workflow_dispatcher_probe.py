@@ -124,8 +124,67 @@ def test_unparseable_child_line_proves_nothing(wired: dict[str, Any], line: str)
 
 
 def test_empty_child_output(wired: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(probe, "_run_child", lambda repo, run_id, token: (3, ""))
+    monkeypatch.setattr(probe, "_run_child", lambda repo, run_id, token, environment_id=None: (3, ""))
     assert _main() == 2
+
+
+VERDICT_KEY = "/secret/agent-platform-persona-verdict-app-key"
+
+
+def _verdict(wired: dict[str, Any], monkeypatch: pytest.MonkeyPatch, row: int | None = 424242) -> None:
+    from scripts.personas import override
+
+    if row is None:
+        monkeypatch.setattr(override, "app_id", lambda: (_ for _ in ()).throw(override.Refused("no verdict App is set")))
+    else:
+        monkeypatch.setattr(override, "app_id", lambda: row)
+    seen: list[str] = []
+
+    def app_jwt(client_id: str, pem: str, now: int) -> str:
+        seen.append(client_id)
+        return "JWTSECRET"
+
+    monkeypatch.setattr(gat, "app_jwt", app_jwt)
+    wired["iss"] = seen
+
+
+def test_verdict_app_reads_the_fixed_key_signs_with_the_row_and_asks_the_post_permissions(
+    wired: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _verdict(wired, monkeypatch)
+    assert probe.main(["--run-id", "5", "--key-parameter", VERDICT_KEY, "--app", "verdict"], version=(3, 12)) == 0
+    aws_cmd = wired["runs"][0][0]
+    assert aws_cmd[aws_cmd.index("--name") + 1] == VERDICT_KEY
+    assert wired["iss"] == ["424242"] and wired["perms"] == {"checks": "write", "metadata": "read"}
+    assert wired["revoked"] == [TOKEN]
+
+
+@pytest.mark.parametrize("key", [KEY, "/secret/other"])
+def test_verdict_app_refuses_another_key_parameter_before_any_read(
+    wired: dict[str, Any], monkeypatch: pytest.MonkeyPatch, key: str
+) -> None:
+    _verdict(wired, monkeypatch)
+    assert probe.main(["--run-id", "5", "--key-parameter", key, "--app", "verdict"], version=(3, 12)) == 2
+    assert wired["runs"] == []
+
+
+def test_verdict_app_refuses_a_null_row_before_any_read(wired: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    _verdict(wired, monkeypatch, row=None)
+    assert probe.main(["--run-id", "5", "--key-parameter", VERDICT_KEY, "--app", "verdict"], version=(3, 12)) == 2
+    assert wired["runs"] == []
+
+
+def test_environment_id_reaches_the_child_only_when_given(wired: dict[str, Any]) -> None:
+    _main()
+    assert "--environment-id" not in wired["runs"][1][0]
+    _main("--environment-id", "77")
+    child = wired["runs"][3][0]
+    assert child[child.index("--environment-id") + 1] == "77"
+
+
+def test_the_default_app_stays_the_dispatcher(wired: dict[str, Any]) -> None:
+    _main()
+    assert wired["perms"] == {"actions": "write", "metadata": "read"}
 
 
 def _imports(path: Path) -> set[str]:
