@@ -2,7 +2,7 @@
 
 Registered check and the evaluator of docs/contracts/executor-personas.yaml: the closed capability vocabulary, the
 refused targets and verbs, every personas row's contract shape, budget, schema dialect, rendered prompt and skill
-tether, a verdict_consistency rule (required of a verdict persona by the index's required_for_verdict; ordered cases
+tether, a verdict_consistency rule (required of a verdict or fixture persona by the index's required_for_verdict; ordered cases
 "verdict V when any element of array A [with field F in S]", then otherwise; checked against output_schema and the
 prose verdict_rule), a row's required registry_key (a
 registered, unique source_registry.yaml canonical_id equal to the contract's skill_tether.skill; the registry is read
@@ -38,6 +38,7 @@ _CAPS_REL = "config/agent/executor/capabilities.yaml"
 _REGISTRY_REL = "config/agent/data_quality/source_registry.yaml"
 _MCP_SERVER = "scripts/agent_sdk/mcp_server.py"
 _LABEL = "Persona contracts"
+VERDICT_RULE_KINDS = frozenset({"verdict", "fixture"})
 _MONEY = re.compile(r"\b(cost|price|spend|currency|dollars?|usd|eur|gbp|money)\b|\$", re.IGNORECASE)
 _MONEY_KEY = re.compile(r"cost|price|spend|currency|dollar|usd|money", re.IGNORECASE)
 _VERDICT_TOKEN = re.compile(r"[A-Z][A-Z_]+")
@@ -121,8 +122,8 @@ def _capability_failures(persona: str, caps: list[str], raw: dict[str, Any], ind
             out.append(
                 f"{_LABEL}: {persona}: write capability {cap_id} is not allowed here (edit_repo_outside_implement_agent)"
             )
-        if raw.get("kind") == "verdict" and cap.target == "repo":
-            out.append(f"{_LABEL}: {persona}: a verdict contract names repo-target capability {cap_id}")
+        if raw.get("kind") in VERDICT_RULE_KINDS and cap.target == "repo":
+            out.append(f"{_LABEL}: {persona}: a verdict or fixture contract names repo-target capability {cap_id}")
     return out
 
 
@@ -341,7 +342,7 @@ def _contract_failures(row: Any, index: PersonaIndex, root: Path) -> list[str]:
     if raw is None:
         return [f"{_LABEL}: {persona}: contract {row.contract} is missing or unparseable"]
     required = list(index.persona_contract["required"])
-    if row.kind == "verdict":
+    if row.kind in VERDICT_RULE_KINDS:
         required += list(index.persona_contract["required_for_verdict"])
     missing = [f for f in required if raw.get(f) is None]
     if missing:
@@ -378,6 +379,30 @@ def _contract_failures(row: Any, index: PersonaIndex, root: Path) -> list[str]:
     return out
 
 
+def _fixture_failures(index: PersonaIndex) -> list[str]:
+    from scripts.session import merge_checks
+
+    listed = set(index.fixture_kind.personas)
+    kinds = {r.persona: r.kind for r in index.personas}
+    out = [
+        f"{_LABEL}: {r.persona}: a fixture row is not named in fixture_kind.personas"
+        for r in index.personas
+        if r.kind == "fixture" and r.persona not in listed
+    ]
+    for name in sorted(listed):
+        if name not in kinds:
+            out.append(f"{_LABEL}: fixture_kind.personas names {name}, which has no personas row")
+        elif kinds[name] != "fixture":
+            out.append(f"{_LABEL}: fixture_kind.personas names {name}, whose row is not kind fixture")
+    gated = set(merge_checks.PERSONA_CLASSES)
+    out += [
+        f"{_LABEL}: {r.persona}: a fixture persona is a merge-gate persona (merge_checks.PERSONA_CLASSES key), never gated"
+        for r in index.personas
+        if r.kind == "fixture" and r.persona in gated
+    ]
+    return out
+
+
 def _leash_failures(root: Path) -> list[str]:
     caps = _load_raw(root / _CAPS_REL) or {}
     patterns = caps.get("boundary_patterns") or []
@@ -400,6 +425,7 @@ def validate_persona_contracts(failed: list[str], root: Path | None = None) -> N
     try:
         failed.extend(_vocabulary_failures(index, root))
         failed.extend(_registry_key_failures(index, root))
+        failed.extend(_fixture_failures(index))
         for row in index.personas:
             failed.extend(_contract_failures(row, index, root))
     except (OSError, yaml.YAMLError, ImportError, AttributeError, KeyError) as exc:
