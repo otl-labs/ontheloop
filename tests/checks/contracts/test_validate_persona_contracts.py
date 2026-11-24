@@ -55,6 +55,18 @@ def test_red_rule(rule: str, tree: Path) -> None:
     assert any(EXPECTED[rule] in f for f in failures), failures
 
 
+@pytest.mark.parametrize("rule", sorted(MUTATORS))
+def test_red_rule_on_fixture_base(rule: str, tmp_path: Path) -> None:
+    root = build_tree(tmp_path, kind="fixture")
+    MUTATORS[rule](root)
+    failures = _run(root)
+    assert any(EXPECTED[rule] in f for f in failures), failures
+
+
+def test_fixture_contract_passes_every_verdict_rule(tmp_path: Path) -> None:
+    assert _run(build_tree(tmp_path, kind="fixture")) == []
+
+
 def test_both_checks_registered_in_both_sequences() -> None:
     entries = {e.name: e for e in ENTRIES}
     for name in _NAMES:
