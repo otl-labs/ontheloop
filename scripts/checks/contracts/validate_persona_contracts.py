@@ -2,7 +2,9 @@
 
 Registered check and the evaluator of docs/contracts/executor-personas.yaml: the closed capability vocabulary, the
 refused targets and verbs, every personas row's contract shape, budget, schema dialect, rendered prompt and skill
-tether, a verdict_consistency rule (required of a verdict or fixture persona by the index's required_for_verdict; ordered cases
+tether, a guidance_slots list (Decision 280: distinct role names, each a required plain string input offered through
+read_input, never a head-filled field), a verdict_consistency rule
+(required of a verdict or fixture persona by the index's required_for_verdict; ordered cases
 "verdict V when any element of array A [with field F in S]", then otherwise; checked against output_schema and the
 prose verdict_rule), a row's required registry_key (a
 registered, unique source_registry.yaml canonical_id equal to the contract's skill_tether.skill; the registry is read
@@ -42,6 +44,8 @@ VERDICT_RULE_KINDS = frozenset({"verdict", "fixture"})
 _MONEY = re.compile(r"\b(cost|price|spend|currency|dollars?|usd|eur|gbp|money)\b|\$", re.IGNORECASE)
 _MONEY_KEY = re.compile(r"cost|price|spend|currency|dollar|usd|money", re.IGNORECASE)
 _VERDICT_TOKEN = re.compile(r"[A-Z][A-Z_]+")
+_SLOT_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
+_HEAD_FILLED = ("change_id", "head_sha", "plan")
 _LEASH_PATHS = (
     _INDEX_REL,
     "docs/contracts/personas/",
@@ -335,6 +339,48 @@ def _verdict_rule_failures(persona: str, contract: PersonaContract) -> list[str]
     return out
 
 
+def _guidance_failures(persona: str, raw: dict[str, Any]) -> list[str]:
+    slots = raw.get("guidance_slots")
+    if slots is None:
+        return []
+    where = f"{_LABEL}: {persona}: guidance_slots"
+    schema = raw.get("input_schema") or {}
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        return [f"{where}: input_schema.properties is not a mapping"] if slots else []
+    required = schema.get("required") or []
+    caps = raw.get("capabilities") or []
+    if not isinstance(required, list) or not isinstance(caps, list):
+        return [f"{where}: input_schema.required and capabilities must be lists"]
+    out: list[str] = []
+    for slot, count in Counter(map(repr, slots)).items():
+        if count > 1:
+            out.append(f"{where}: slot {slot} is declared more than once")
+    for slot in {repr(s): s for s in slots}.values():
+        out += _slot_failures(where, slot, props, required, caps)
+    return out
+
+
+def _slot_failures(where: str, slot: Any, props: dict[str, Any], required: list[Any], caps: list[Any]) -> list[str]:
+    if not isinstance(slot, str) or not _SLOT_NAME.match(slot):
+        return [f"{where}: slot {slot!r} is not a role name matching ^[a-z][a-z0-9_]*$"]
+    out: list[str] = []
+    if slot in _HEAD_FILLED:
+        out.append(f"{where}: slot {slot} is a field the input builder fills from the change")
+    sub = props.get(slot)
+    if not isinstance(sub, dict):
+        out.append(f"{where}: slot {slot} is not an input_schema property")
+    elif sub.get("type") != "string" or not set(sub) <= {"type", "description"}:
+        out.append(f"{where}: slot {slot} must have exactly {{type: string}} plus an optional description")
+    elif "description" in sub and not isinstance(sub["description"], str):
+        out.append(f"{where}: slot {slot} has a non-string description")
+    if slot not in required:
+        out.append(f"{where}: slot {slot} is not in input_schema.required")
+    if f"read_input:{slot}" not in caps:
+        out.append(f"{where}: slot {slot} lacks read_input:{slot} in capabilities")
+    return out
+
+
 def _contract_failures(row: Any, index: PersonaIndex, root: Path) -> list[str]:
     persona = row.persona
     path = root / row.contract
@@ -363,6 +409,7 @@ def _contract_failures(row: Any, index: PersonaIndex, root: Path) -> list[str]:
     out += check_schema_dialect(raw["input_schema"], keywords, f"{_LABEL}: {persona}: input_schema")
     out += check_schema_dialect(raw["output_schema"], keywords, f"{_LABEL}: {persona}: output_schema")
     out += _capability_failures(persona, contract.capabilities, raw, index, root)
+    out += _guidance_failures(persona, raw)
     out += _budget_failures(persona, raw["budget"], index, root)
     ids = {f.id for f in contract.failure_outputs}
     out += [
@@ -403,12 +450,15 @@ def _fixture_failures(index: PersonaIndex) -> list[str]:
     return out
 
 
-def _leash_failures(root: Path) -> list[str]:
+def _leash_failures(root: Path, index: PersonaIndex | None = None) -> list[str]:
     caps = _load_raw(root / _CAPS_REL) or {}
     patterns = caps.get("boundary_patterns") or []
+    paths = list(_LEASH_PATHS)
+    if index is not None:
+        paths.append(index.guidance_slot.home.split("<persona>")[0])
     return [
         f"{_LABEL}: leash path {p} is not covered by capabilities.yaml boundary_patterns"
-        for p in _LEASH_PATHS
+        for p in paths
         if not any(pat in p for pat in patterns)
     ]
 
@@ -430,5 +480,5 @@ def validate_persona_contracts(failed: list[str], root: Path | None = None) -> N
             failed.extend(_contract_failures(row, index, root))
     except (OSError, yaml.YAMLError, ImportError, AttributeError, KeyError) as exc:
         failed.append(f"{_LABEL}: a source file is missing or unreadable ({type(exc).__name__}: {exc})")
-    failed.extend(_leash_failures(root))
+    failed.extend(_leash_failures(root, index))
     registry.examined(len(index.capability_vocabulary.capabilities) + len(index.personas), unit="persona_contract_items")
