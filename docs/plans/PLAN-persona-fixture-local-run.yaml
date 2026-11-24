@@ -39,20 +39,25 @@ scope:
       test_cli_run_is_measured, parametrized on the adapter fixture through a CLI_BUILDERS map keyed like ARGV_BUILDERS
       (local_container's entry runs python -m src.persona_hosts.local_container.cli; a later adapter adds its own entry,
       never a skip, so the suite stays the port's one suite under Decision 212 cl.1). The CLI with project_ref and agent
-      writes result.json, events.json and host_run.json;
-      scripts.personas.telemetry_rows exits 0 on them and its rows file holds a telemetry_agents row carrying that
-      project_ref and agent canary-persona). Test project_ref values use the reserved synthetic namespace (Decision 200).
+      writes result.json, events.json and host_run.json; host_run.json parses (parse_persona_host_run) carrying that
+      project_ref and agent; scripts.personas.telemetry_rows exits 0 on them and its rows file's telemetry_agents rows
+      carry agent_type canary-persona and host_run_ref local:local_container/<host_run.json host.run_id> (rows carry no
+      project_ref: the sidecar binds it, Decision 200 cl.1). Test project_ref values use the reserved synthetic
+      namespace (Decision 200). The image_id fixture's teardown removes the tree-built image only when it was not
+      prebuilt (PERSONA_IMAGE_UNDER_TEST unset), so no run leaves a dangling image.
   - file: tests/persona_hosts/fixture_image/Dockerfile
     action: Delete
     purpose: The derived fixture layer; the image carries canary_persona since rec-5553.
   - file: tests/persona_hosts/stub_provider.py
     action: Modify
     purpose: >-
-      The final object follows canary_persona's task over the tool message text: one finding {id line:<n>, severity
-      blocking or nit, origin mechanical, anchor the line, summary} per line starting BLOCKING: or NIT:, verdict REVISE
-      when any is blocking, else PROCEED with findings [] (input_complete.json's reply is unchanged). A tool message
-      carrying the line INJECTION FIXTURE yields {outcome: failure, failure: injection_suspected, detail: stub}. Port 0
-      binds an ephemeral port and the stub prints STUB_PORT <n> first, so a test can start it as a subprocess.
+      The final object follows canary_persona's task over the tool message text: read_input's lines mode prefixes each
+      line with "<n>: " and appends a "[notes: N lines]" trailer, so the stub strips the numeric prefix, takes n from it,
+      and emits one finding {id line:<n>, severity blocking or nit, origin mechanical, anchor the line, summary} per
+      stripped line starting BLOCKING: or NIT:, verdict REVISE when any is blocking, else PROCEED with findings []
+      (input_complete.json's reply is unchanged). A stripped line equal to INJECTION FIXTURE yields {outcome: failure,
+      failure: injection_suspected, detail: stub}. Port 0 binds 127.0.0.1 on an ephemeral port and the stub prints
+      STUB_PORT <n> first, so a test can start it as a host subprocess; the in-network docker stub keeps 0.0.0.0.
   - file: tests/persona_hosts/fixtures/input_complete.json
     action: Modify
     purpose: Gains plan "" (canary_persona requires the verdict chain's shared fields change_id, head_sha and plan, as every verdict persona does); notes unchanged.
@@ -74,15 +79,19 @@ scope:
       python -m src.persona_hosts.local_container.cli --image REF --persona ID --input PATH --out DIR --project-ref REF
       --agent KEY [--key-variable V] [--base-url-variable V] [--network N] [--timeout S]: reads the input JSON, calls
       run_image with project_ref and agent, writes DIR/result.json (the parsed stdout or null), DIR/events.json and
-      DIR/host_run.json (RunImageResult.host_run bytes), and exits with the container's exit code; refuses (exit 2,
-      nothing written) a non-empty DIR or an unreadable input. Names no persona id. Imports nothing from scripts or
+      DIR/host_run.json (RunImageResult.host_run bytes); events.json holds null when the run wrote none. Exits with the
+      container's exit code; refuses (exit 2, nothing written) a non-empty DIR, an unreadable input, or a ValueError
+      from run_image (bad sidecar or variable arguments); exit 3, nothing written, on run_image's RuntimeError
+      (docker unreachable). Names no persona id. Imports nothing from scripts or
       src.persona_backends (tests/persona_hosts/test_package_boundary.py). The first caller that writes the sidecar
       beside the events file (PLAN-litellm-local-host-root, Not in scope note).
   - file: tests/persona_hosts/local_container/test_cli.py
     action: Create
     purpose: >-
       run_image monkeypatched: test_cli_writes_result_events_and_sidecar (argument mapping, the three files written,
-      exit code passthrough) and test_cli_refuses_a_non_empty_out_dir_or_unreadable_input (exit 2, nothing written).
+      exit code passthrough, events.json null when no events) and
+      test_cli_refuses_a_non_empty_out_dir_or_unreadable_input (exit 2 on a non-empty DIR, an unreadable input or a
+      run_image ValueError; exit 3 on a run_image RuntimeError; nothing written in each case).
   - file: tests/persona_hosts/test_fixture_persona_run.py
     action: Create
     purpose: >-
@@ -97,9 +106,13 @@ scope:
     action: Create
     purpose: >-
       A stand-in docker executable for run_image's real argv: lays out a temporary /app from docker/persona/Dockerfile's
-      own COPY lines (so a COPY that drops the personas tree fails the test), maps run_argv's two -v mounts, passes only
-      the -e variables named in argv, and runs the image's ENTRYPOINT argv with sys.executable -I. Named outside
-      test_*.py so it is never collected.
+      own COPY lines into /app (so a COPY that drops the personas tree fails the test; COPY targets outside /app, such
+      as requirements-persona.txt to /tmp, are skipped), honours the Dockerfile's ENV HOME and WORKDIR, maps run_argv's
+      two -v mounts, passes only the -e variables named in argv, and runs the image's ENTRYPOINT argv with
+      sys.executable -I. The test passes run_image a generated wrapper script that runs sys.executable on
+      docker_shim.py, so the venv interpreter is used and no exec bit is needed. It proves the image layout, not the
+      image's pinned dependency set (the venv's litellm, not requirements-persona.txt); the conformance suite stays the
+      image proof. Named outside test_*.py so it is never collected.
 bundled_recommendations: [rec-5548]
 followon_recs: []
 infrastructure_dependencies: []
@@ -107,7 +120,7 @@ acceptance_criteria:
   - The conformance suite runs canary_persona on the image built from docker/persona/Dockerfile with no derived layer (green on CC-web and in pr-validate).
   - tests/persona_hosts/test_fixture_persona_run.py::test_fixture_persona_runs_through_run_image_on_stub_provider passes with no Docker daemon.
   - "A notes body with a BLOCKING: line yields REVISE with its findings through run_image; the injection fixture yields outcome failure with failure injection_suspected, never success (stub plumbing)."
-  - The CLI writes result.json, events.json and host_run.json, and scripts.personas.telemetry_rows maps them to a rows file whose telemetry_agents row carries the given project_ref and agent.
+  - The CLI writes result.json, events.json and host_run.json; host_run.json parses with the given project_ref and agent, and scripts.personas.telemetry_rows maps them to a rows file whose telemetry_agents rows carry agent_type canary-persona and host_run_ref local:local_container/<host_run.json host.run_id>.
   - No reference to tests/persona_hosts/fixture_image remains.
   - rec-5548 is closed by the merge's Resolves trailer.
 verification_plan:
@@ -181,6 +194,11 @@ test_obligations:
     verification_step: 1
     test_selector: tests/persona_hosts/test_fixture_persona_run.py::test_fixture_persona_runs_through_run_image_on_stub_provider
     red_green_expectation: red before (module absent), green after
+  - source: tests/persona_hosts/stub_provider.py
+    behavior: the INJECTION FIXTURE line yields the injection_suspected failure value through run_image, never success
+    verification_step: 1
+    test_selector: tests/persona_hosts/test_fixture_persona_run.py::test_injection_input_yields_the_failure_value
+    red_green_expectation: red before (module absent), green after
   - source: src/persona_hosts/local_container/cli.py
     behavior: writes result, events and sidecar side by side
     verification_step: 1
@@ -210,6 +228,8 @@ context:
   - "Decision-scout r3 FLAGS_FOUND: CITE dec:200, dec:205, dec:212. NOTE Decision 212 folded in (the CLI test is keyed per adapter through CLI_BUILDERS, never local_container-only). Decisions triaged: 228 of 228. Roadmap items intersected: 1; CONFLICT: 0; RELATED: 1. Serves: NS.1 4/5."
   - "rec-5553 plan merged 2026-11-24 (#2416, a334bef4): it registers canary_persona and lands the fixture persona T4.32 decomposition_hints gave to PLAN-persona-verdict-fixture-run; its build must merge before this build starts. The canary input carries the chain's shared fields (change_id, head_sha, plan) plus notes, and its failures include input_unusable."
   - "Parallel: rec-5549 (part B) edits no file here."
+  - "closes_criteria [] is deliberate (critique r1 F5): T4.32 c3 has legs rec-5550 owns and the operator ruled the stub run meets only the local leg; the build's bookkeeping records in T4.32 progress_note that c3's local leg was met by stub and flips no criterion (precedent: the merged rec-5553 plan)."
+  - "Handoff note (critique r1 F8): once the derived layer is gone, scripts/ci/persona_image_changed.py EXTRA still lists tests/fixtures/persona_backends/ (over-triggers, fails safe; out of scope here); the build files a rec for it in its report."
   - "ports.yaml (Decision 212): no new row; the CLI adds no coupling and no repo-structure assumption beyond run_argv's existing /app paths, and the shim is test-only."
   - "Decision-scout r2 FLAGS_FOUND (r1 scouted the image-COPY design; its 254 note is gone with the publish, its 275 cite dropped with the contract edit). CITE dec:200, dec:205, dec:212. WARN Decision 181 folded in: the retirement cite is the deleted path, and the build records a disposition for every weakening candidate. Decisions triaged: 228 of 228. Roadmap items intersected: 1; CONFLICT: 0; RELATED: 1. Serves: NS.1 4/5."
 gate_rounds:
@@ -225,6 +245,21 @@ gate_rounds:
     round: 3
     verdict: FLAGS_FOUND
     scout_input_fingerprint: "v1:cc42d68c30ecf72a9dfe53a97a7d7911415baa8bdc744dc513f67e70a44c0fb0"
+  - gate: plan-critique
+    round: 1
+    verdict: REVISE
+    blocking: 1
+    nits: 8
+    findings:
+      - {id: F1, severity: blocking, origin: judgement, anchor: "acceptance_criteria[3]; scope[conformance_suite.py] test_cli_run_is_measured", subject: "telemetry rows carry no project_ref; assert the sidecar parse plus agent_type and host_run_ref instead", disposition: fixed}
+      - {id: F2, severity: nit, origin: judgement, anchor: "scope[stub_provider.py]", subject: "read_input numeric line prefix and notes trailer", disposition: applied-wording}
+      - {id: F3, severity: nit, origin: judgement, anchor: "scope[stub_provider.py]", subject: "host-subprocess stub binds 127.0.0.1", disposition: applied-wording}
+      - {id: F4, severity: nit, origin: judgement, anchor: "scope[docker_shim.py]", subject: "wrapper script runs the shim; ENV HOME, WORKDIR and non-/app COPY targets", disposition: applied-wording}
+      - {id: F5, severity: nit, origin: mechanical, anchor: closes_criteria, subject: "12l partial-leg; progress_note only", disposition: applied-wording}
+      - {id: F6, severity: nit, origin: judgement, anchor: test_obligations, subject: "obligation row for the injection test", disposition: fixed}
+      - {id: F7, severity: nit, origin: judgement, anchor: "scope[conformance_suite.py]", subject: "tree-built image removed in teardown when not prebuilt", disposition: applied-wording}
+      - {id: F8, severity: nit, origin: mechanical, anchor: "verification_plan[4]", subject: "persona_image_changed.py stale EXTRA input", disposition: build-note}
+      - {id: F9, severity: nit, origin: judgement, anchor: "scope[cli.py]", subject: "exit 2 on run_image ValueError, exit 3 on RuntimeError; events.json null", disposition: applied-wording}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
