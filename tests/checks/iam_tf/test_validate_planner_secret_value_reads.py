@@ -27,6 +27,10 @@ _FILES = [
     ".github/actions/terraform-init-retry/neon_api_key_check.sh",
 ]
 _TFVARS_ARN = "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:agent-platform-terraform-personal-tfvars-*"
+_RESERVED_CONDITION = (
+    '    condition {\n      test = "StringLike"\n      variable = "aws:userid"\n'
+    "      values = [local.convergence_writer_session_name]\n    }\n"
+)
 _PLANNER_ANCHOR = 'data "aws_iam_policy_document" "github_ci_planner" {\n'
 
 
@@ -73,7 +77,7 @@ def test_unconditioned_value_read_fails(tree: Path) -> None:
         '  statement {\n    sid = "X"\n    effect = "Allow"\n    actions = ["secretsmanager:GetSecretValue"]\n'
         '    resources = ["arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:other-*"]\n  }\n',
     )
-    assert any("unconditioned Secrets Manager value read" in f for f in _run(tree))
+    assert any("Secrets Manager value read" in f for f in _run(tree))
 
 
 def test_get_star_on_inference_keys_fails(tree: Path) -> None:
@@ -115,9 +119,81 @@ def test_condition_naming_a_different_session_fails(tree: Path) -> None:
     assert any("Other" in f for f in _run(tree))
 
 
-def test_tfvars_secret_stays_allowed_unconditioned(tree: Path) -> None:
-    assert _TFVARS_ARN in (tree / "terraform/personal/oidc.tf").read_text(encoding="utf-8")
+def test_unconditioned_tfvars_secret_read_fails(tree: Path) -> None:
+    _append_planner_statement(
+        tree,
+        '  statement {\n    sid = "TfvarsSm"\n    effect = "Allow"\n    actions = ["secretsmanager:GetSecretValue"]\n'
+        f'    resources = ["{_TFVARS_ARN}"]\n  }}\n',
+    )
+    assert any("TfvarsSm" in f and "Secrets Manager value read" in f for f in _run(tree))
+
+
+def test_conditioned_secrets_manager_value_read_fails(tree: Path) -> None:
+    _append_planner_statement(
+        tree,
+        '  statement {\n    sid = "DriftSm"\n    effect = "Allow"\n    actions = ["secretsmanager:GetSecretValue"]\n'
+        '    resources = ["arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:neon-api-key-*"]\n'
+        + _RESERVED_CONDITION
+        + "  }\n",
+    )
+    assert any("DriftSm" in f and "Secrets Manager value read" in f for f in _run(tree))
+
+
+@pytest.mark.parametrize("actions", ["local.x", 'concat(["ssm:GetParameter"], local.more)'])
+def test_non_literal_actions_on_planner_allow_fails(tree: Path, actions: str) -> None:
+    _append_planner_statement(
+        tree,
+        f'  statement {{\n    sid = "Indirect"\n    effect = "Allow"\n    actions = {actions}\n    resources = ["*"]\n  }}\n',
+    )
+    assert any("Indirect" in f and "not a list of string literals" in f for f in _run(tree))
+
+
+def test_drift_parameter_read_wildcard_action_counts(tree: Path) -> None:
+    path = "terraform/personal/oidc_pipeline_roles.tf"
+    _edit(
+        tree,
+        path,
+        f'    actions = ["ssm:GetParameter"]\n    resources = [\n      "{_SSM_PREFIX}/secret/neon-api-key"',
+        f'    actions = ["ssm:Get*"]\n    resources = [\n      "{_SSM_PREFIX}/secret/neon-api-key"',
+    )
     assert _run(tree) == []
+    both = f'["{_SSM_PREFIX}/secret/neon-api-key", "{_SSM_PREFIX}/secret/ducklake-neon-catalog-dsn"]'
+    _append_planner_statement(tree, _ssm_statement("SecondDrift", '["ssm:*"]', both, condition=True))
+    assert any("expected exactly one" in f for f in _run(tree))
+
+
+def test_override_policy_document_on_planner_fails(tree: Path) -> None:
+    _edit(
+        tree,
+        "terraform/personal/oidc_pipeline_roles.tf",
+        _PLANNER_ANCHOR,
+        _PLANNER_ANCHOR + "  override_policy_documents = [data.aws_iam_policy_document.ci_full_refresh_read.json]\n",
+    )
+    assert any("override_policy_documents" in f and "github_ci_planner" in f for f in _run(tree))
+
+
+@pytest.mark.parametrize(
+    "element", ["jsonencode({})", "local.doc", "data.aws_iam_policy_document.ci_full_refresh_read.json, local.doc"]
+)
+def test_inline_source_document_on_planner_fails(tree: Path, element: str) -> None:
+    _edit(
+        tree,
+        "terraform/personal/oidc_pipeline_roles.tf",
+        "  source_policy_documents = [data.aws_iam_policy_document.ci_full_refresh_read.json]",
+        f"  source_policy_documents = [{element}]",
+    )
+    assert any("source_policy_documents element" in f for f in _run(tree))
+
+
+@pytest.mark.parametrize("attr", ['inline_policy {\n    name = "x"\n  }', "managed_policy_arns = []"])
+def test_planner_role_inline_policy_fails(tree: Path, attr: str) -> None:
+    _edit(
+        tree,
+        "terraform/personal/oidc_pipeline_roles.tf",
+        'resource "aws_iam_role" "github_ci_planner" {\n',
+        'resource "aws_iam_role" "github_ci_planner" {\n  ' + attr + "\n",
+    )
+    assert any("inline_policy or managed_policy_arns" in f for f in _run(tree))
 
 
 def test_second_planner_role_policy_fails(tree: Path) -> None:
@@ -236,7 +312,7 @@ def test_secret_version_data_source_fails(tree: Path) -> None:
 def test_drift_value_read_statement_missing_fails(tree: Path) -> None:
     path = tree / "terraform/personal/oidc_pipeline_roles.tf"
     text = path.read_text(encoding="utf-8")
-    start = text.index('    sid     = "DriftSessionSecretValueRead"')
+    start = text.index('    sid     = "DriftSessionSecretParameterRead"')
     start = text.rindex("  statement {", 0, start)
     end = text.index("\n  }\n", start) + len("\n  }\n")
     path.write_text(text[:start] + text[end:], encoding="utf-8")
@@ -247,8 +323,7 @@ def test_drift_value_read_covering_only_one_arn_fails(tree: Path) -> None:
     _edit(
         tree,
         "terraform/personal/oidc_pipeline_roles.tf",
-        '      "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:'
-        'secret:ducklake-neon-catalog-dsn-*",\n    ]\n    condition',
+        f'      "{_SSM_PREFIX}/secret/ducklake-neon-catalog-dsn",\n    ]\n    condition',
         "    ]\n    condition",
     )
     assert any("expected exactly one" in f for f in _run(tree))

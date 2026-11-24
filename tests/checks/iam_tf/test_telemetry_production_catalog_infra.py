@@ -31,19 +31,17 @@ _SECRETS = {
     "ducklake_telemetry_reader_dsn": "agent-platform-ducklake-telemetry-reader-dsn",
     "ducklake_smoke_maintainer_dsn": "agent-platform-ducklake-smoke-maintainer-dsn",
 }
-_READ_SECRETS = {
-    "ducklake_neon_catalog_dsn",
-    "ducklake_telemetry_writer_dsn",
-    *_SECRETS,
+_READ_PARAMETERS = {
+    "ducklake-neon-catalog-dsn",
+    "agent-platform-ducklake-telemetry-writer-dsn",
+    *_SECRETS.values(),
 }
 _NEW_ROLES = (
     "role/agent-platform-ducklake-telemetry-writer-smoke",
     "role/agent-platform-ducklake-telemetry-reader",
 )
-_VERSION = (
-    'resource "aws_secretsmanager_secret_version" "x" {\n'
-    "  secret_id = aws_secretsmanager_secret.ducklake_smoke_maintainer_dsn.id\n}\n"
-)
+_ENVELOPE = 'resource "aws_secretsmanager_secret" "ducklake_smoke_maintainer_dsn" {\n  name = "x"\n}\n'
+_PARAM_ARN = "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/"
 _DATA_RW = "${aws_s3_bucket.data_lake.arn}/${local.ducklake_telemetry_data_prefix}/*"
 
 _ROOT = Path(__file__).resolve().parents[3]
@@ -163,25 +161,21 @@ def secret_problems(texts: dict[str, str]) -> list[str]:
     joined = "\n".join(_strip_comments(t) for t in texts.values())
     problems: list[str] = []
     for resource, name in _SECRETS.items():
-        block = re.search(rf'resource\s+"aws_secretsmanager_secret"\s+"{resource}"\s*\{{[^}}]*name\s*=\s*"([^"]*)"', joined)
-        if block is None or block.group(1) != name:
-            problems.append(f"secret container {resource} missing or not named {name}")
-        if re.search(rf"aws_secretsmanager_secret\.{resource}\.(?:id|arn|name)\b", _version_blocks(joined)):
-            problems.append(f"{resource} has a secret version (the value is written out of band)")
+        key = resource.removeprefix("ducklake_")
+        if not re.search(rf'^\s*{key}\s*=\s*"/secret/{name}"', joined, re.M):
+            problems.append(f"parameter name {key} missing or not /secret/{name}")
+        if re.search(rf'resource\s+"aws_secretsmanager_secret(?:_version)?"\s+"{resource}"', joined):
+            problems.append(f"{resource} still declares a Secrets Manager envelope (retired, Decision 237)")
     return problems
-
-
-def _version_blocks(joined: str) -> str:
-    return "\n".join(re.findall(r'resource\s+"aws_secretsmanager_secret_version"[^\n]*\{[^}]*\}', joined))
 
 
 def maintenance_problems(policy_block: str) -> list[str]:
     stmts = {s["sid"]: s for s in _json_statements(policy_block)}
     problems: list[str] = []
-    dsn = stmts.get("NeonDsnRead")
-    read = set(re.findall(r"aws_secretsmanager_secret\.(\w+)\.arn", dsn["resources"])) if dsn else set()
-    if read != _READ_SECRETS:
-        problems.append(f"NeonDsnRead reads {sorted(read)}, expected {sorted(_READ_SECRETS)}")
+    dsn = stmts.get("NeonDsnParameterRead")
+    read = set(re.findall(r"parameter/secret/([\w-]+)", dsn["resources"])) if dsn else set()
+    if read != _READ_PARAMETERS:
+        problems.append(f"NeonDsnParameterRead reads {sorted(read)}, expected {sorted(_READ_PARAMETERS)}")
     rw = stmts.get("TelemetryCatalogDataReadWriteDelete")
     if (
         rw is None
@@ -273,12 +267,9 @@ def test_login_secrets_are_containers_without_a_version() -> None:
     texts = _personal()
     assert secret_problems(texts) == []
     assert secret_problems({}) and len(secret_problems({})) == 3
-    versioned = {
-        **texts,
-        "extra.tf": _VERSION,
-    }
-    assert secret_problems(versioned) == [
-        "ducklake_smoke_maintainer_dsn has a secret version (the value is written out of band)"
+    revived = {**texts, "extra.tf": _ENVELOPE}
+    assert secret_problems(revived) == [
+        "ducklake_smoke_maintainer_dsn still declares a Secrets Manager envelope (retired, Decision 237)"
     ]
 
 
@@ -291,10 +282,10 @@ def test_maintenance_role_reaches_the_production_telemetry_prefix_and_login_secr
     mutations = (
         (_DATA_RW, "${aws_s3_bucket.data_lake.arn}/${local.telemetry_blob_data_prefix}/*"),
         (_DATA_RW, "${aws_s3_bucket.data_lake.arn}/*"),
-        ("aws_secretsmanager_secret.ducklake_telemetry_reader_dsn.arn,", ""),
+        (f'"{_PARAM_ARN}agent-platform-ducklake-telemetry-reader-dsn",', ""),
         (
-            "aws_secretsmanager_secret.ducklake_smoke_maintainer_dsn.arn,",
-            "aws_secretsmanager_secret.ducklake_smoke_maintainer_dsn.arn,\n aws_secretsmanager_secret.other.arn,",
+            f'"{_PARAM_ARN}agent-platform-ducklake-smoke-maintainer-dsn",',
+            f'"{_PARAM_ARN}agent-platform-ducklake-smoke-maintainer-dsn",\n "{_PARAM_ARN}other",',
         ),
         ('"s3:prefix" = ["${local.ducklake_telemetry_data_prefix}/*"]', '"s3:prefix" = ["*"]'),
     )
@@ -316,11 +307,11 @@ def test_planner_and_apply_reads_list_the_new_roles() -> None:
 
 def test_maintenance_smoke_reads_only_the_smoke_maintainer_secret() -> None:
     text = (_TERRAFORM_PERSONAL_DIR / "ducklake_maintenance_smoke.tf").read_text(encoding="utf-8")
-    assert "DUCKLAKE_DSN_SECRET_ID        = aws_secretsmanager_secret.ducklake_smoke_maintainer_dsn.name" in text
-    read = re.search(r'Sid\s*=\s*"NeonDsnRead".*?Resource\s*=\s*\[([^\]]*)\]', text, re.S)
+    assert "DUCKLAKE_DSN_PARAMETER        = local.secret_parameter_names.smoke_maintainer_dsn" in text
+    read = re.search(r'Sid\s*=\s*"NeonDsnParameterRead".*?Resource\s*=\s*\[([^\]]*)\]', text, re.S)
     assert read is not None
     assert [r.strip() for r in read.group(1).split(",") if r.strip()] == [
-        "aws_secretsmanager_secret.ducklake_smoke_maintainer_dsn.arn"
+        f'"{_PARAM_ARN}agent-platform-ducklake-smoke-maintainer-dsn"'
     ]
     assert "ducklake_neon_catalog_dsn" not in text
     assert "ducklake_telemetry_writer_dsn" not in text

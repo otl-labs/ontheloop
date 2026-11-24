@@ -105,17 +105,6 @@ locals {
         ]
       },
       {
-        # Scoped to exactly the two inference-credential secret ARNs (by-name lookup, Decision 157
-        # DescribeSecret metadata only -- the rendered document is byte-identical to live).
-        Sid    = "InferenceCredentialsRead"
-        Effect = "Allow"
-        Action = ["secretsmanager:GetSecretValue"]
-        Resource = [
-          data.aws_secretsmanager_secret.deepseek_api_key.arn,
-          data.aws_secretsmanager_secret.anthropic_api_key.arn,
-        ]
-      },
-      {
         Sid    = "ObservabilityMetricRead"
         Effect = "Allow"
         Action = [
@@ -269,14 +258,6 @@ locals {
       },
     ]
   })
-}
-
-data "aws_secretsmanager_secret" "deepseek_api_key" {
-  name = "agent-platform-deepseek-api-key"
-}
-
-data "aws_secretsmanager_secret" "anthropic_api_key" {
-  name = "agent-platform-anthropic-api-key"
 }
 
 import {

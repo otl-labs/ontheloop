@@ -281,7 +281,7 @@ def _constant_parity_problems(joined: str, texts: dict[str, str]) -> list[str]:
     # equals its source.
     personal_lambdas = (_PERSONAL / "ducklake_lambdas.tf").read_text(encoding="utf-8")
     personal_vars = (_PERSONAL / "variables.tf").read_text(encoding="utf-8")
-    personal_inference = (_PERSONAL / "inference_credentials.tf").read_text(encoding="utf-8")
+    personal_params = (_PERSONAL / "secret_parameters.tf").read_text(encoding="utf-8")
     personal_neon = (_PERSONAL / "neon_ducklake_catalog.tf").read_text(encoding="utf-8")
 
     checks = [
@@ -314,11 +314,11 @@ def _constant_parity_problems(joined: str, texts: dict[str, str]) -> list[str]:
             "ducklake_smoke_data_prefix local",
         ),
         (
-            "agent-platform-deepseek-api-key" in joined and "agent-platform-deepseek-api-key" in personal_inference,
+            "agent-platform-deepseek-api-key" in joined and "agent-platform-deepseek-api-key" in personal_params,
             "deepseek secret name",
         ),
         (
-            "agent-platform-anthropic-api-key" in joined and "agent-platform-anthropic-api-key" in personal_inference,
+            "agent-platform-anthropic-api-key" in joined and "agent-platform-anthropic-api-key" in personal_params,
             "anthropic secret name",
         ),
         (
@@ -336,7 +336,9 @@ def _constant_parity_problems(joined: str, texts: dict[str, str]) -> list[str]:
     checks.append(("agent-platform-github-ci-apply-boundary" in boundary_text, "boundary name"))
 
     adopted_secret_text = texts.get("platform_dev_policies.tf", "") + texts.get("platform_admin_data_policies.tf", "")
-    secret_arn_lines = "\n".join(line for line in adopted_secret_text.splitlines() if "arn:aws:secretsmanager" in line)
+    secret_arn_lines = "\n".join(
+        line for line in adopted_secret_text.splitlines() if "arn:aws:secretsmanager" in line or "arn:aws:ssm" in line
+    )
     checks.append((re.search(r"-\*\"", secret_arn_lines) is None, "no wildcard-suffix (`-*`) secret ARN"))
 
     return [f"constant mismatch or drift: {label}" for ok, label in checks if not ok]
@@ -545,8 +547,8 @@ class TestBootstrapOwnsPlatformIam:
     def test_wildcard_suffix_secret_arn_is_detected(self) -> None:
         texts = dict(_bootstrap_texts())
         texts["platform_dev_policies.tf"] = texts["platform_dev_policies.tf"].replace(
-            "data.aws_secretsmanager_secret.deepseek_api_key.arn,",
-            '"arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:agent-platform-deepseek-api-key-*",',
+            '"arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-deepseek-api-key",',
+            '"arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-deepseek-api-key-*",',
             1,
         )
         assert texts["platform_dev_policies.tf"] != _bootstrap_texts()["platform_dev_policies.tf"]

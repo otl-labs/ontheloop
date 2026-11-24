@@ -20,8 +20,9 @@ from tests.fixtures.terraform_hcl_blocks import _TERRAFORM_PERSONAL_DIR, find_re
 _TWIN_FILE = "ducklake_telemetry_writer_smoke.tf"
 _READER_FILE = "ducklake_telemetry_reader.tf"
 _WRITER_FILE = "ducklake_telemetry_writer.tf"
-_WRITER_SECRET = "aws_secretsmanager_secret.ducklake_telemetry_writer_dsn"  # pragma: allowlist secret
-_READER_SECRET = "aws_secretsmanager_secret.ducklake_telemetry_reader_dsn"  # pragma: allowlist secret
+_WRITER_SECRET = "local.secret_parameter_names.telemetry_writer_dsn"  # pragma: allowlist secret
+_READER_SECRET = "local.secret_parameter_names.telemetry_reader_dsn"  # pragma: allowlist secret
+_SSM_ARN = '"arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-ducklake-telemetry-'
 _TWIN_FORBIDDEN = (
     "ducklake_telemetry_meta_schema",
     "ducklake_telemetry_data_prefix",
@@ -44,7 +45,6 @@ _READER_FORBIDDEN = (
 _READER_ACTIONS = {
     "logs:CreateLogStream",
     "logs:PutLogEvents",
-    "secretsmanager:GetSecretValue",
     "ssm:GetParameter",
     "s3:GetObject",
     "s3:ListBucket",
@@ -105,15 +105,15 @@ def twin_problems(text: str, lambdas_text: str) -> list[str]:
         "TELEMETRY_META_SCHEMA": "local.ducklake_smoke_meta_schema",
         "TELEMETRY_DATA_PATH": "local.ducklake_smoke_data_path",
         "TELEMETRY_BLOB_ROOT": "local.ducklake_telemetry_smoke_blob_root",
-        "TELEMETRY_DSN_SECRET_ID": f"{_WRITER_SECRET}.name",
+        "TELEMETRY_DSN_PARAMETER": _WRITER_SECRET,
     }
     problems += [f"env {k} is {env.get(k)!r}, want {v}" for k, v in want.items() if env.get(k) != v]
     problems += [f"twin references {name}" for name in _TWIN_FORBIDDEN if name in body]
     if re.search(r"s3:Delete", body, re.I):
         problems.append("twin grants a Delete action")
-    secrets = re.findall(r"aws_secretsmanager_secret\.\w+", policy)
-    if secrets != [_WRITER_SECRET]:
-        problems.append(f"twin reads secrets {secrets}")
+    parameters = re.findall(r'"arn:aws:ssm:[^"]*:parameter/secret/[^"]*"', policy)
+    if parameters != [_SSM_ARN + 'writer-dsn"']:
+        problems.append(f"twin reads parameters {parameters}")
     s3_refs = set(re.findall(r"local\.(\w*prefix\w*|\w*meta_schema\w*)", policy))
     if s3_refs - {"ducklake_smoke_data_prefix", "telemetry_blob_data_prefix", "ducklake_smoke_meta_schema"}:
         problems.append(f"twin S3 statements reference {sorted(s3_refs)}")
@@ -132,7 +132,6 @@ def reader_problems(text: str) -> list[str]:
     sids = {_sid(s) for s in statements}
     want = {
         "Logs",
-        "TelemetryReaderDsnRead",
         "TelemetryReaderDsnParameterRead",
         "TelemetryCatalogDataRead",
         "TelemetryCatalogDataList",
@@ -150,13 +149,8 @@ def reader_problems(text: str) -> list[str]:
             if prefixes != {"ducklake_telemetry_data_prefix"}:
                 problems.append(f"{_sid(stmt)} references prefixes {sorted(prefixes)}")
     problems += [f"reader references {name}" for name in _READER_FORBIDDEN if name in body]
-    secrets = re.findall(r"aws_secretsmanager_secret\.\w+", policy)
-    if secrets != [_READER_SECRET]:
-        problems.append(f"reader reads secrets {secrets}")
     parameters = re.findall(r'"arn:aws:ssm:[^"]*:parameter/secret/[^"]*"', policy)
-    if parameters != [
-        '"arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/secret/agent-platform-ducklake-telemetry-reader-dsn"'
-    ]:
+    if parameters != [_SSM_ARN + 'reader-dsn"']:
         problems.append(f"reader reads parameters {parameters}")
     return problems
 
@@ -167,7 +161,7 @@ def reader_env_problems(text: str) -> list[str]:
     want = {
         "TELEMETRY_META_SCHEMA": "local.ducklake_telemetry_prod_meta_schema",
         "TELEMETRY_DATA_PATH": "local.ducklake_telemetry_data_path",
-        "TELEMETRY_DSN_SECRET_ID": f"{_READER_SECRET}.name",
+        "TELEMETRY_DSN_PARAMETER": _READER_SECRET,
     }
     problems = [f"env {k} is {env.get(k)!r}, want {v}" for k, v in want.items() if env.get(k) != v]
     problems += [
@@ -253,7 +247,7 @@ def _twin(text: str) -> list[str]:
 _TWIN_RED: list[Callable[[str], str]] = [
     lambda t: t.replace("local.ducklake_smoke_meta_schema\n", "local.ducklake_telemetry_meta_schema\n", 1),
     lambda t: t.replace("local.ducklake_smoke_data_path", "local.ducklake_telemetry_data_path", 1),
-    lambda t: t.replace(_WRITER_SECRET + ".name", _READER_SECRET + ".name", 1),
+    lambda t: t.replace(_WRITER_SECRET, _READER_SECRET, 1),
     lambda t: t.replace(
         'Action   = ["s3:GetObject", "s3:PutObject"]', 'Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]', 1
     ),
@@ -283,7 +277,9 @@ def test_twin_predicate_red_when_the_smoke_local_moves() -> None:
 _READER_RED: list[Callable[[str], str]] = [
     lambda t: t.replace('Action   = ["s3:GetObject"]', 'Action   = ["s3:GetObject", "s3:PutObject"]', 1),
     lambda t: t.replace("local.ducklake_telemetry_data_prefix", "local.telemetry_blob_data_prefix", 1),
-    lambda t: t.replace(_READER_SECRET + ".arn", "aws_secretsmanager_secret.ducklake_neon_catalog_dsn.arn", 1),
+    lambda t: t.replace(
+        "parameter/secret/agent-platform-ducklake-telemetry-reader-dsn", "parameter/secret/ducklake-neon-catalog-dsn", 1
+    ),
     lambda t: t.replace('Sid      = "TelemetryCatalogDataList"', 'Sid      = "TelemetryBlobRead"', 1),
     lambda t: t.replace(
         'Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]',
@@ -309,9 +305,9 @@ def test_reader_predicate_red_on_each_mutation(mutate: Callable[[str], str]) -> 
         lambda t: t.replace("local.ducklake_telemetry_prod_meta_schema", "local.ducklake_smoke_meta_schema", 1),
         lambda t: t.replace("local.ducklake_telemetry_data_path", "local.ducklake_smoke_data_path", 1),
         lambda t: t.replace(
-            "TELEMETRY_DSN_SECRET_ID       = ", "TELEMETRY_BLOB_ROOT = local.x\n      TELEMETRY_DSN_SECRET_ID       = ", 1
+            "TELEMETRY_DSN_PARAMETER       = ", "TELEMETRY_BLOB_ROOT = local.x\n      TELEMETRY_DSN_PARAMETER       = ", 1
         ),
-        lambda t: t.replace(_READER_SECRET + ".name", _WRITER_SECRET + ".name", 1),
+        lambda t: t.replace(_READER_SECRET, _WRITER_SECRET, 1),
     ],
 )
 def test_reader_env_predicate_red_on_each_mutation(mutate: Callable[[str], str]) -> None:

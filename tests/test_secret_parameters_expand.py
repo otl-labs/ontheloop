@@ -1,6 +1,6 @@
-"""Standing guard for PLAN-secrets-to-ssm-expand (Decision 237): the /secret/ parameter names, the DSN SecureString,
-the per-role parameter grants mirroring the Secrets Manager grants, the planner's drift-conditioned reads, the trusted
-plan role's read and the new env vars. Nothing reads SSM yet; every consumer still reads Secrets Manager."""
+"""Standing guard for PLAN-secrets-to-ssm-expand (Decision 237), kept through PLAN-secrets-to-ssm-retire: the /secret/
+parameter names, the DSN SecureString, the per-role parameter grants (a literal role-to-parameter table; the Secrets
+Manager grants are gone), the planner's drift-conditioned reads, the trusted plan role's read and the parameter env vars."""
 
 from __future__ import annotations
 
@@ -23,46 +23,53 @@ _OUT_OF_BAND = {  # pragma: allowlist secret
     "terraform_personal_tfvars": "agent-platform-terraform-personal-tfvars",  # pragma: allowlist secret
 }  # pragma: allowlist secret -- resource names, no credential
 _SECRET_KEYS = {
-    "ducklake_neon_catalog_dsn": "ducklake_neon_catalog_dsn",
-    "deepseek_api_key": "deepseek_api_key",  # pragma: allowlist secret
-    "anthropic_api_key": "anthropic_api_key",  # pragma: allowlist secret
-    "telemetry_writer_dsn": "ducklake_telemetry_writer_dsn",
-    "telemetry_writer_prod_dsn": "ducklake_telemetry_writer_prod_dsn",
-    "telemetry_reader_dsn": "ducklake_telemetry_reader_dsn",
-    "smoke_maintainer_dsn": "ducklake_smoke_maintainer_dsn",
+    "ducklake_neon_catalog_dsn": "ducklake-neon-catalog-dsn",
+    "deepseek_api_key": "agent-platform-deepseek-api-key",  # pragma: allowlist secret
+    "anthropic_api_key": "agent-platform-anthropic-api-key",  # pragma: allowlist secret
+    "telemetry_writer_dsn": "agent-platform-ducklake-telemetry-writer-dsn",
+    "telemetry_writer_prod_dsn": "agent-platform-ducklake-telemetry-writer-prod-dsn",
+    "telemetry_reader_dsn": "agent-platform-ducklake-telemetry-reader-dsn",
+    "smoke_maintainer_dsn": "agent-platform-ducklake-smoke-maintainer-dsn",
 }
+_DSN = "ducklake-neon-catalog-dsn"
+_LOGINS = [
+    "agent-platform-ducklake-telemetry-writer-dsn",
+    "agent-platform-ducklake-telemetry-writer-prod-dsn",
+    "agent-platform-ducklake-telemetry-reader-dsn",
+    "agent-platform-ducklake-smoke-maintainer-dsn",
+]
 
-# file, Secrets Manager Sid, parameter Sid, env pairs (var, secret resource, parameter key)
+# file, retired Secrets Manager Sid, parameter Sid, parameter names per Sid block, env pairs (var, retired var, key)
 _ROLES = [
-    ("ducklake_lambdas.tf", "NeonDsnRead", "NeonDsnParameterRead", 2, []),
-    ("ducklake_catalog_dr.tf", "NeonDsnRead", "NeonDsnParameterRead", 1, []),
-    ("ducklake_maintenance.tf", "NeonDsnRead", "NeonDsnParameterRead", 1, []),
+    ("ducklake_lambdas.tf", "NeonDsnRead", "NeonDsnParameterRead", [[_DSN], [_DSN]], []),
+    ("ducklake_catalog_dr.tf", "NeonDsnRead", "NeonDsnParameterRead", [[_DSN]], []),
+    ("ducklake_maintenance.tf", "NeonDsnRead", "NeonDsnParameterRead", [[_DSN, *_LOGINS]], []),
     (
         "ducklake_maintenance_smoke.tf",
         "NeonDsnRead",
         "NeonDsnParameterRead",
-        1,
+        [[_SECRET_KEYS["smoke_maintainer_dsn"]]],
         [("DUCKLAKE_DSN_PARAMETER", "DUCKLAKE_DSN_SECRET_ID", "smoke_maintainer_dsn")],
     ),
     (
         "ducklake_telemetry_writer.tf",
         "TelemetryDsnRead",
         "TelemetryDsnParameterRead",
-        1,
+        [[_SECRET_KEYS["telemetry_writer_prod_dsn"]]],
         [("TELEMETRY_DSN_PARAMETER", "TELEMETRY_DSN_SECRET_ID", "telemetry_writer_prod_dsn")],
     ),
     (
         "ducklake_telemetry_writer_smoke.tf",
         "TelemetryDsnRead",
         "TelemetryDsnParameterRead",
-        1,
+        [[_SECRET_KEYS["telemetry_writer_dsn"]]],
         [("TELEMETRY_DSN_PARAMETER", "TELEMETRY_DSN_SECRET_ID", "telemetry_writer_dsn")],
     ),
     (
         "ducklake_telemetry_reader.tf",
         "TelemetryReaderDsnRead",
         "TelemetryReaderDsnParameterRead",
-        1,
+        [[_SECRET_KEYS["telemetry_reader_dsn"]]],
         [("TELEMETRY_DSN_PARAMETER", "TELEMETRY_DSN_SECRET_ID", "telemetry_reader_dsn")],
     ),
 ]
@@ -72,23 +79,8 @@ def _text(name: str) -> str:
     return (PERSONAL / name).read_text(encoding="utf-8")
 
 
-def _secret_names() -> dict[str, str]:
-    """Secrets Manager resource name -> secret name, across the personal root."""
-    out: dict[str, str] = {}
-    for path in PERSONAL.glob("*.tf"):
-        for m in re.finditer(
-            r'resource "aws_secretsmanager_secret" "(\w+)" \{\s*name\s*=\s*"([^"]+)"', path.read_text("utf-8")
-        ):
-            out[m.group(1)] = m.group(2)
-    return out
-
-
 def _sid_blocks(text: str, sid: str) -> list[str]:
     return re.findall(rf'Sid\s*=\s*"{sid}"(.*?)\n      \}}', text, re.S)
-
-
-def _resource_names(block: str) -> list[str]:
-    return re.findall(r"aws_secretsmanager_secret\.(\w+)\.arn", block)
 
 
 def _parameter_arns(block: str) -> list[str]:
@@ -106,11 +98,8 @@ class TestParameterNames:
         text = _text("secret_parameters.tf")
         names = dict(re.findall(r'^\s*(\w+)\s*=\s*"(/secret/[^"]+)"', text, re.M))
         assert set(names) == set(_OUT_OF_BAND) | set(_SECRET_KEYS)
-        secrets = _secret_names()
-        for key, name in _OUT_OF_BAND.items():
+        for key, name in {**_OUT_OF_BAND, **_SECRET_KEYS}.items():
             assert names[key] == f"/secret/{name}"
-        for key, resource in _SECRET_KEYS.items():
-            assert names[key] == f"/secret/{secrets[resource]}"
 
     def test_no_arn_local_is_declared(self) -> None:
         assert "arn:" not in re.sub(r"#[^\n]*", "", _text("secret_parameters.tf"))
@@ -127,10 +116,7 @@ class TestDsnParameter:
         assert re.search(r'tier\s*=\s*"Standard"', body)
         assert "key_id" not in body
         assert re.search(r"value\s*=\s*local\.ducklake_neon_dsn_document\b", body)
-        version = re.search(
-            r'resource "aws_secretsmanager_secret_version" "ducklake_neon_catalog_dsn" \{(.*?)\n\}', text, re.S
-        )
-        assert version and re.search(r"secret_string\s*=\s*local\.ducklake_neon_dsn_document\b", version.group(1))
+        assert not re.search(r'resource "aws_secretsmanager_secret(?:_version)?"', text)
         assert text.count("jsonencode(") == 1
 
     def test_output_names_the_parameter(self) -> None:
@@ -140,27 +126,26 @@ class TestDsnParameter:
 
 
 class TestRoleGrants:
-    @pytest.mark.parametrize(("file", "sm_sid", "param_sid", "count", "env"), _ROLES)
+    @pytest.mark.parametrize(("file", "sm_sid", "param_sid", "names", "env"), _ROLES)
     def test_parameter_grant_mirrors_the_secret_grant(
-        self, file: str, sm_sid: str, param_sid: str, count: int, env: list
+        self, file: str, sm_sid: str, param_sid: str, names: list, env: list
     ) -> None:
         text = _text(file)
-        sm_blocks, param_blocks = _sid_blocks(text, sm_sid), _sid_blocks(text, param_sid)
-        assert len(sm_blocks) == len(param_blocks) == count
-        secrets = _secret_names()
-        for sm_block, param_block in zip(sm_blocks, param_blocks, strict=True):
-            want = [f"{_PREFIX}{secrets[r]}" for r in _resource_names(sm_block)]
-            assert _parameter_arns(param_block) == want
+        assert _sid_blocks(text, sm_sid) == []
+        param_blocks = _sid_blocks(text, param_sid)
+        assert len(param_blocks) == len(names)
+        for param_block, want_names in zip(param_blocks, names, strict=True):
+            assert _parameter_arns(param_block) == [f"{_PREFIX}{n}" for n in want_names]
             assert re.findall(r"Action\s*=\s*\[([^\]]*)\]", param_block) == ['"ssm:GetParameter"']
             assert re.search(r'Effect\s*=\s*"Allow"', param_block)
             assert "Condition" not in param_block
 
-    @pytest.mark.parametrize(("file", "sm_sid", "param_sid", "count", "env"), _ROLES)
-    def test_env_vars_sit_beside_the_old_ones(self, file: str, sm_sid: str, param_sid: str, count: int, env: list) -> None:
+    @pytest.mark.parametrize(("file", "sm_sid", "param_sid", "names", "env"), _ROLES)
+    def test_env_vars_sit_beside_the_old_ones(self, file: str, sm_sid: str, param_sid: str, names: list, env: list) -> None:
         text = _text(file)
         for var, old_var, key in env:
             assert _env_value(text, var) == f"local.secret_parameter_names.{key}"
-            assert _env_value(text, old_var).startswith("aws_secretsmanager_secret.")
+            assert not re.search(rf"^\s*{old_var}\s*=", text, re.M)
 
     def test_maintenance_reads_the_dsn_and_four_logins(self) -> None:
         block = _sid_blocks(_text("ducklake_maintenance.tf"), "NeonDsnParameterRead")[0]
@@ -193,10 +178,10 @@ class TestPlannerReads:
         assert 'variable = "aws:userid"' in stmt and 'test     = "StringLike"' in stmt
 
     def test_reserved_session_name_counts_six_sites(self) -> None:
-        assert "EXACTLY 6 coupled sites" in _text("oidc.tf")
+        assert "EXACTLY 5 coupled sites" in _text("oidc.tf")
         pipeline = _text("oidc_pipeline_roles.tf")
-        assert "site 6/6" in pipeline and "/5" not in "".join(re.findall(r"site \d/\d", pipeline))
-        assert "coupled site 4/6" in (REPO / ".github/workflows/terraform-drift.yml").read_text("utf-8")
+        assert "site 5/5" in pipeline and "/6" not in "".join(re.findall(r"site \d/\d", pipeline))
+        assert "coupled site 4/5" in (REPO / ".github/workflows/terraform-drift.yml").read_text("utf-8")
 
 
 class TestTrustedPlanRole:
