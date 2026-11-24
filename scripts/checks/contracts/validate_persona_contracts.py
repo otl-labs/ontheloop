@@ -344,8 +344,6 @@ def _guidance_failures(persona: str, raw: dict[str, Any]) -> list[str]:
     if slots is None:
         return []
     where = f"{_LABEL}: {persona}: guidance_slots"
-    if not isinstance(slots, list):
-        return [f"{where} is not a list"]
     schema = raw.get("input_schema") or {}
     props = schema.get("properties")
     if not isinstance(props, dict):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Any, Callable
 
 import pytest
 
@@ -162,3 +163,83 @@ def test_array_only_rule_is_accepted(tree: Path) -> None:
 def test_verdict_contract_without_rule_is_refused(tree: Path) -> None:
     edit_contract(tree, lambda c: c.pop("verdict_consistency"), rerender=True)
     assert any("missing required field(s)" in f for f in _run(tree))
+
+
+def _declare_slot(c: dict[str, Any], slot: str = "project_guidance") -> None:
+    c["input_schema"]["properties"][slot] = {"type": "string", "description": "Project guidance."}
+    c["input_schema"]["required"].append(slot)
+    c["capabilities"].append(f"read_input:{slot}")
+    c["guidance_slots"] = [slot]
+
+
+def _slot_mutation(name: str) -> Callable[[dict[str, Any]], None]:
+    def change(c: dict[str, Any]) -> None:
+        _declare_slot(c)
+        props = c["input_schema"]["properties"]
+        if name == "not_a_list":
+            c["guidance_slots"] = "project_guidance"
+        elif name == "duplicated":
+            c["guidance_slots"] = ["project_guidance", "project_guidance"]
+        elif name == "bad_name":
+            c["guidance_slots"] = ["Bad/Name"]
+        elif name == "head_filled":
+            c["guidance_slots"] = ["plan"]
+        elif name == "absent_property":
+            del props["project_guidance"]
+        elif name == "wrong_type":
+            props["project_guidance"] = {"type": "integer"}
+        elif name == "extra_keyword":
+            props["project_guidance"] = {"type": "string", "minLength": 1}
+        elif name == "description_not_string":
+            props["project_guidance"] = {"type": "string", "description": 5}
+        elif name == "not_required":
+            c["input_schema"]["required"].remove("project_guidance")
+        elif name == "no_capability":
+            c["capabilities"].remove("read_input:project_guidance")
+        elif name == "properties_not_mapping":
+            c["input_schema"]["properties"] = ["x"]
+        elif name == "required_not_list":
+            c["input_schema"]["required"] = "change_id head_sha project_guidance"
+
+    return change
+
+
+_SLOT_REFUSALS = (
+    "duplicated",
+    "bad_name",
+    "head_filled",
+    "absent_property",
+    "wrong_type",
+    "extra_keyword",
+    "description_not_string",
+    "not_required",
+    "no_capability",
+    "properties_not_mapping",
+    "required_not_list",
+)
+
+
+@pytest.mark.parametrize("name", _SLOT_REFUSALS)
+def test_malformed_guidance_slot_is_refused(tree: Path, name: str) -> None:
+    edit_contract(tree, _slot_mutation(name), rerender=False)
+    assert any("guidance_slots" in f for f in _run(tree)), name
+
+
+def test_well_formed_and_empty_guidance_slots_pass(tree: Path) -> None:
+    edit_contract(tree, _declare_slot, rerender=True)
+    assert _run(tree) == []
+    edit_contract(tree, lambda c: c.__setitem__("guidance_slots", []), rerender=True)
+    assert _run(tree) == []
+    edit_contract(tree, lambda c: c.__setitem__("input_schema", {**c["input_schema"], "properties": ["x"]}))
+    assert not any("guidance_slots" in f for f in _run(tree))
+
+
+def test_guidance_home_outside_boundary_patterns_is_refused(tree: Path) -> None:
+    caps = tree / "config/agent/executor/capabilities.yaml"
+    caps.write_text(caps.read_text(encoding="utf-8").replace("  - ontheloop/guidance/\n", ""), encoding="utf-8")
+    assert any("ontheloop/guidance/" in f and "leash" in f for f in _run(tree))
+
+
+def test_non_list_guidance_slots_is_off_schema(tree: Path) -> None:
+    edit_contract(tree, _slot_mutation("not_a_list"), rerender=False)
+    assert any("off its schema" in f for f in _run(tree))
