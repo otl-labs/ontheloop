@@ -339,7 +339,7 @@ locals {
         # here; UpdateSecret is granted on no agent-platform secret. TagResource is structurally required by the
         # default_tags block (a create with inline tags calls it -- the rec-2842 coupling);
         # UntagResource covers tag-drift reconcile; DeleteSecret has AWS's 7-30 day recovery window.
-        # secretsmanager:PutSecretValue is granted NOWHERE new by this change.
+        # This statement grants no secretsmanager:PutSecretValue.
         Sid    = "SecretsManagerMetadataWrite"
         Effect = "Allow"
         Action = [
@@ -357,7 +357,7 @@ locals {
           # false, or absent -- BoolIfExists) keeps the deleted name reserved in the
           # scheduled-for-deletion state for AWS's 7-30 day window, so the same-name recreate
           # fails loudly instead of silently succeeding with a new value. Zero autonomy cost: no
-          # terraform/personal secret sets recovery_window_in_days = 0, so the provider never
+          # Terraform-managed secret may set recovery_window_in_days = 0, so the provider never
           # sends ForceDeleteWithoutRecovery=true, and BoolIfExists keeps every request that omits
           # the key (CreateSecret / TagResource / UntagResource) allowed exactly as before.
           BoolIfExists = {
