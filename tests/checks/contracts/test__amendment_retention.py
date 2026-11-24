@@ -329,3 +329,11 @@ def test_none_config_and_exempt_file_skip_every_leg(monkeypatch) -> None:
     monkeypatch.setattr(ar, "load_retention", lambda root=None: _CFG)
     assert ar.pass2_messages("north-star.yaml", _doc(base), _doc(head, "b"), False) == []
     assert ar.pass2_messages("c.yaml", _doc(base), _doc(head, "b"), False)
+
+
+def test_tool_short_of_the_hold_names_the_rows_owed_by_hand() -> None:
+    base = [_plain(0, "2026-10-10")] + [_full(n, _dated(n + 1)) for n in range(6)]
+    head = [_plain(8, "2026-11-21"), _plain(9, "2026-11-20")] + base
+    msg = ar.retention_violation("c.yaml", _doc(base), _doc(head, "b"), _CFG)
+    assert msg is not None and "--rows 1" in msg
+    assert "1 more must be compacted by hand" in msg and "candidates dated 2026-10-11" in msg
