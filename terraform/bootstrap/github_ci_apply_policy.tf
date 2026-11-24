@@ -333,40 +333,13 @@ locals {
         Resource = ["arn:aws:iam::${var.account_id}:oidc-provider/token.actions.githubusercontent.com"]
       },
       {
-        # DuckLake Neon catalog DSN secret (T2.16b / CD.34): the apply role creates + manages the
-        # Secrets Manager secret holding the assembled Neon DSN (neon_ducklake_catalog.tf). NOTE the
-        # "-*" suffix -- Secrets Manager appends a random 6-char suffix to every secret ARN.
-        # DescribeSecret / GetResourcePolicy are refresh-time reads the AWS provider issues on every
-        # plan -- do not prune them as "unused" (dynamodb:Describe* refresh-read convention).
-        Sid    = "SecretsManagerDuckLakeNeonDSN"
-        Effect = "Allow"
-        Action = [
-          "secretsmanager:CreateSecret",
-          "secretsmanager:PutSecretValue",
-          "secretsmanager:UpdateSecret",
-          "secretsmanager:DescribeSecret",
-          "secretsmanager:GetSecretValue",
-          "secretsmanager:GetResourcePolicy",
-          "secretsmanager:TagResource",
-          "secretsmanager:UntagResource",
-          # P2 destroy symmetry (gap sweep): CreateSecret was granted here with no delete counterpart,
-          # so a guard-gated retirement or replace of the DSN secret AccessDenies AFTER human
-          # approval. DeleteSecret is recoverable by AWS design (7-30 day recovery window), so this
-          # is not an irreversible-destroy grant. Same ARN, no widening.
-          "secretsmanager:DeleteSecret"
-        ]
-        Resource = ["arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:ducklake-neon-catalog-dsn-*"]
-      },
-      {
-        # P0-6 (gap sweep), METADATA half of the deliberate two-Sid split. terraform/personal declares
-        # five agent-platform-* aws_secretsmanager_secret resources and the apply role could neither
-        # create, retire nor tag any of them (only the DSN secret above had a write grant), so any PR
-        # adding or retiring a secret AccessDenies. These four verbs are metadata-only: NONE of them
+        # P0-6 (gap sweep), METADATA write grant. A PR adding or retiring a Terraform-managed secret
+        # needs create, retire and tag on it, or the apply AccessDenies. These four verbs are metadata-only: NONE of them
         # can read or overwrite a secret VALUE, which is what makes the agent-platform-* prefix safe
-        # here while UpdateSecret below stays enumerated. TagResource is structurally required by the
+        # here; UpdateSecret is granted on no agent-platform secret. TagResource is structurally required by the
         # default_tags block (a create with inline tags calls it -- the rec-2842 coupling);
         # UntagResource covers tag-drift reconcile; DeleteSecret has AWS's 7-30 day recovery window.
-        # secretsmanager:PutSecretValue is granted NOWHERE new by this change.
+        # This statement grants no secretsmanager:PutSecretValue.
         Sid    = "SecretsManagerMetadataWrite"
         Effect = "Allow"
         Action = [
@@ -384,35 +357,13 @@ locals {
           # false, or absent -- BoolIfExists) keeps the deleted name reserved in the
           # scheduled-for-deletion state for AWS's 7-30 day window, so the same-name recreate
           # fails loudly instead of silently succeeding with a new value. Zero autonomy cost: no
-          # terraform/personal secret sets recovery_window_in_days = 0, so the provider never
+          # Terraform-managed secret may set recovery_window_in_days = 0, so the provider never
           # sends ForceDeleteWithoutRecovery=true, and BoolIfExists keeps every request that omits
           # the key (CreateSecret / TagResource / UntagResource) allowed exactly as before.
           BoolIfExists = {
             "secretsmanager:ForceDeleteWithoutRecovery" = "false"
           }
         }
-      },
-      {
-        # P0-6 (gap sweep), VALUE-CAPABLE half -- ENUMERATED, NEVER PREFIXED (S2). secretsmanager:
-        # UpdateSecret accepts a SecretString, so it can overwrite a credential; it has no
-        # metadata-only variant and no narrowing condition key, which makes it a worst verb under
-        # Decision 143 clause 1. Critically there is NO boundary intersection available to narrow it:
-        # the boundary DataPlaneAllow already carries secretsmanager:*, so this identity statement is
-        # the SOLE control -- a secret:agent-platform-* prefix here would be fully effective over the
-        # anthropic + deepseek API keys AND every
-        # future agent-platform-* secret, with no review. It is therefore held to exactly the
-        # aws_secretsmanager_secret resources terraform/personal actually declares (the DuckLake Neon
-        # DSN keeps its own SecretsManagerDuckLakeNeonDSN Sid above). A NEW secret must be added here
-        # deliberately. Accepted residual: UpdateSecret can still overwrite a value on these --
-        # marginal rather than a new capability class, since SecretsManagerValueReadEnumerated
-        # already grants GetSecretValue on them -- and it is now bounded to a named, reviewable two.
-        Sid    = "SecretsManagerUpdateEnumerated"
-        Effect = "Allow"
-        Action = ["secretsmanager:UpdateSecret"]
-        Resource = [
-          "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:agent-platform-deepseek-api-key-*",
-          "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:agent-platform-anthropic-api-key-*",
-        ]
       },
       {
         # Decision 237 (secrets-to-ssm-grants): the one Terraform-managed secret parameter is the Neon catalog DSN, whose

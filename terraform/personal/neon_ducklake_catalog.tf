@@ -8,31 +8,24 @@
 # ---------------------------------------------------------------------------
 # APPLY POSTURE (Decision 77 + the 2026-06-04 posture pivot)
 # ---------------------------------------------------------------------------
-# These Neon resources + the DSN secret AUTO-APPLY via the sandbox pipeline behind the Neon-aware
+# These Neon resources + the DSN parameter AUTO-APPLY via the sandbox pipeline behind the Neon-aware
 # fail-closed guard (scripts/terraform_apply_guard.py) + subagent review -- they are NOT carved out of
 # Decision-77. The guard blocks any neon_* update / replace / delete (the mutation surface where
 # allow-list widening, credential rotation, or project deletion would happen) and ALLOWS a neon_*
 # create. A create is safe on the strength of compensating controls, NOT an IP allow-list: enforced
-# TLS (sslmode=require), a scoped non-owner neon_role, and the DSN held in Secrets Manager. Neon
+# TLS (sslmode=require), a scoped non-owner neon_role, and the DSN held as an SSM SecureString. Neon
 # IP-Allow is a Scale-plan feature (unavailable on the free tier) and egress here is dynamic (CC-web
 # containers + GitHub-hosted runners + Lambda), so no static allow-list is set (REPORT R3 / CD.34).
 #
-# aws_secretsmanager_secret is NOT in the guard's IAM_SENSITIVE_TYPES, so the DSN-secret create also
+# aws_ssm_parameter is NOT in the guard's IAM_SENSITIVE_TYPES, so the DSN-parameter create also
 # returns guard exit 0 and auto-applies.
 #
 # ---------------------------------------------------------------------------
-# PHASE 0 PREREQUISITES (one-time, manual from the admin container, BEFORE Phase 1 merges)
+# PHASE 0 PREREQUISITES (historical; done once, out of band, before Phase 1 merged)
 # ---------------------------------------------------------------------------
-#   1. Create the Neon provider API key secret out-of-band (plaintext; human-run; NOT Terraform-managed
-#      -- Terraform-managing the key the provider reads would create a provider->resource cycle):
-#        aws secretsmanager create-secret --name neon-api-key \
-#          --secret-string '<neon-api-key>' --region "$(tr -d '[:space:]' < config/aws-region)" --profile agent_platform_admin
-#   2. Grant the CI apply role secretsmanager rights on the two secret ARNs (oidc.tf,
-#      aws_iam_role_policy.github_ci_apply) and apply JUST that statement manually (IAM-sensitive ->
-#      the guard fail-closes, so it cannot auto-apply):
-#        terraform apply -target=aws_iam_role_policy.github_ci_apply   # from the admin container
-# After Phase 0, Phase 1 auto-applies cleanly: the neon-api-key secret + the apply-role grant already
-# exist, and the Neon creates + DSN-secret create return guard exit 0.
+# The Neon provider API key is held out of band at the /secret/neon-api-key SSM parameter (Decision 237), never
+# Terraform-managed -- Terraform-managing the key the provider reads would create a provider->resource cycle.
+# The CI apply role reads it through SecretParameterValueRead (terraform/bootstrap/github_ci_apply_reads.tf).
 
 # The neon provider and its pin live in providers.tf (required_providers allows one block per module). Its
 # checksums are committed in .terraform.lock.hcl (supply-chain control).
@@ -89,7 +82,7 @@ resource "neon_database" "ducklake_ops" {
 }
 
 # ---------------------------------------------------------------------------
-# Assembled DSN for the catalog, stored in Secrets Manager
+# Assembled DSN for the catalog, stored as an SSM SecureString parameter
 # (docs/contracts/secret-material-handling.yaml RUNTIME-FETCH pattern, Decision 175 -- rehomed
 # from the Decision 37 precedent).
 # Uses the DIRECT (unpooled) endpoint host -- DuckLake commits are multi-statement transactions, which
@@ -111,16 +104,6 @@ locals {
   )
 }
 
-resource "aws_secretsmanager_secret" "ducklake_neon_catalog_dsn" {
-  name        = "ducklake-neon-catalog-dsn"
-  description = "DuckLake Neon catalog DSN (direct endpoint, sslmode=require). ROTATION: quarterly, calendar-reminded -- the Neon role password does not auto-rotate (CD.34 / Decision 37)."
-
-  tags = {
-    Name    = "DuckLake Neon Catalog DSN"
-    Purpose = "DuckLake catalog T2.16b CD.34 -- Lambda/smoke-test runtime-fetch"
-  }
-}
-
 locals {
   ducklake_neon_dsn_document = jsonencode({
     dsn         = local.ducklake_neon_dsn
@@ -133,9 +116,14 @@ locals {
   })
 }
 
-resource "aws_secretsmanager_secret_version" "ducklake_neon_catalog_dsn" {
-  secret_id     = aws_secretsmanager_secret.ducklake_neon_catalog_dsn.id
-  secret_string = local.ducklake_neon_dsn_document
+# The Secrets Manager version leaves state without an API call (destroy = false); the secret's own removal
+# schedules its deletion with the 30-day recovery window (Decision 157).
+removed {
+  from = aws_secretsmanager_secret_version.ducklake_neon_catalog_dsn
+
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "aws_ssm_parameter" "ducklake_neon_catalog_dsn" {
@@ -152,70 +140,8 @@ resource "aws_ssm_parameter" "ducklake_neon_catalog_dsn" {
 }
 
 # ---------------------------------------------------------------------------
-# Scoped catalog login for the telemetry writer (Decision 213 cl.3) -- the CONTAINER only.
-#
-# There is deliberately no aws_secretsmanager_secret_version here: the role is created by SQL
-# (src/lambdas/ducklake_maintenance/ducklake_telemetry_writer_role.sql), not by the Neon provider, and
-# its password is generated and written out of band by the admin under the SECRET-VALUE-OUT-OF-BAND
-# pattern of docs/contracts/secret-material-handling.yaml, so it never enters Terraform state. The
-# value is {host, dbname, username, password, sslmode}; ducklake_maintenance's provision_telemetry_login
-# reads it to set the role's password (deploy-paths.yaml admin_out_of_band.scoped_login_provisioning).
-# ---------------------------------------------------------------------------
-
-resource "aws_secretsmanager_secret" "ducklake_telemetry_writer_dsn" {
-  name        = "agent-platform-ducklake-telemetry-writer-dsn"
-  description = "DuckLake telemetry writer scoped catalog login (role ducklake_telemetry_writer, DML-only on the smoke metadata schema). Value written out of band by the admin. ROTATION: quarterly, manual, via provision_telemetry_login. Migration: src/lambdas/ducklake_maintenance/ducklake_telemetry_writer_role.sql (Decision 213)."
-
-  tags = {
-    Name    = "DuckLake Telemetry Writer DSN"
-    Purpose = "Decision 213 scoped catalog login - runtime-fetch by the telemetry writer"
-  }
-}
-
-# ---------------------------------------------------------------------------
-# Production telemetry catalog logins (Decision 230) -- CONTAINERS only, no aws_secretsmanager_secret_version,
-# for the same SECRET-VALUE-OUT-OF-BAND reason as the writer secret above. Each value is written by the admin and
-# applied to its role by provision_telemetry_login.
-# ---------------------------------------------------------------------------
-
-resource "aws_secretsmanager_secret" "ducklake_telemetry_writer_prod_dsn" {
-  name        = "agent-platform-ducklake-telemetry-writer-prod-dsn"
-  description = "DuckLake telemetry writer scoped login for the production telemetry catalog (DML-only on the ducklake_telemetry metadata schema). Value written out of band by the admin. ROTATION: quarterly, manual, via provision_telemetry_login."
-
-  tags = {
-    Name    = "DuckLake Telemetry Writer Prod DSN"
-    Purpose = "Decision 230 scoped catalog login - runtime-fetch by the telemetry writer after the flip"
-  }
-}
-
-resource "aws_secretsmanager_secret" "ducklake_telemetry_reader_dsn" {
-  name        = "agent-platform-ducklake-telemetry-reader-dsn"
-  description = "DuckLake telemetry reader scoped login (SELECT-only on the ducklake_telemetry metadata schema). Value written out of band by the admin. ROTATION: quarterly, manual, via provision_telemetry_login."
-
-  tags = {
-    Name    = "DuckLake Telemetry Reader DSN"
-    Purpose = "Decision 230 scoped catalog login - runtime-fetch by the telemetry reader"
-  }
-}
-
-resource "aws_secretsmanager_secret" "ducklake_smoke_maintainer_dsn" {
-  name        = "agent-platform-ducklake-smoke-maintainer-dsn"
-  description = "DuckLake smoke maintainer scoped login (one owner-role grant for the smoke catalog maintenance function). Value written out of band by the admin. ROTATION: quarterly, manual, via provision_telemetry_login."
-
-  tags = {
-    Name    = "DuckLake Smoke Maintainer DSN"
-    Purpose = "Decision 230 scoped catalog login - runtime-fetch by the smoke maintenance function"
-  }
-}
-
-# ---------------------------------------------------------------------------
 # Outputs -- consumed by the T2.16b smoke test + the T2.17 Lambda runtime.
 # ---------------------------------------------------------------------------
-
-output "ducklake_neon_catalog_dsn_secret_arn" {
-  description = "Secrets Manager ARN of the DuckLake Neon catalog DSN JSON. Runtime-fetched (Decision 37) by the smoke test + the T2.17 Lambdas."
-  value       = aws_secretsmanager_secret.ducklake_neon_catalog_dsn.arn
-}
 
 output "ducklake_neon_catalog_host_direct" {
   description = "Neon DIRECT (unpooled) endpoint host for the DuckLake catalog. Catalog writes use this host (multi-statement DuckLake txns vs transaction-mode pooling)."

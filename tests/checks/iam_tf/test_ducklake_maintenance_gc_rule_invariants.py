@@ -193,7 +193,6 @@ class TestProductionGcRuleInvariants:
         sids = re.findall(r'Sid\s*=\s*"(\w+)"', policy_block)
         assert sids == [
             "Logs",
-            "NeonDsnRead",
             "NeonDsnParameterRead",
             "S3DataReadWriteDelete",
             "S3ListDataPrefix",

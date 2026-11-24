@@ -247,3 +247,19 @@ def test_non_warehouse_run_imports_no_mcp(tmp_path):
     proc, document = go(fakes.good_input(), _SCRIPTED.format(root=str(ROOT)), "good")
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout)["outcome"] == "success" and len(document["turns"]) == 2
+
+
+def test_role_flag_reaches_the_backend(tmp_path, monkeypatch):
+    t = _patch(monkeypatch, [fakes.final()])
+    assert run_persona.main([*_args(tmp_path), "--role", "warm_fetched_escape_hatch"]) == 0
+    assert (t.calls[0]["role"], t.calls[0]["fail_over"]) == ("warm_fetched_escape_hatch", False)
+    t = _patch(monkeypatch, [fakes.final()])
+    assert run_persona.main(_args(tmp_path)) == 0
+    assert t.calls[0]["fail_over"] is True
+
+
+def test_unknown_role_exits_two(tmp_path, monkeypatch, capsys):
+    t = _patch(monkeypatch, [])
+    assert run_persona.main([*_args(tmp_path), "--role", "other"]) == 2
+    captured = capsys.readouterr()
+    assert captured.err.startswith("refused:") and captured.out == "" and not t.calls

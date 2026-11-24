@@ -297,8 +297,8 @@ def test_bootstrap_dailyops_without_condition_is_reported() -> None:
 
 
 def test_real_maintenance_role_reads_the_scoped_secret() -> None:
-    raw = _sid_resources(tf_dir_file_texts(_PERSONAL)["ducklake_maintenance.tf"], "NeonDsnRead")
-    assert "aws_secretsmanager_secret.ducklake_telemetry_writer_dsn.arn" in raw
+    raw = _sid_resources(tf_dir_file_texts(_PERSONAL)["ducklake_maintenance.tf"], "NeonDsnParameterRead")
+    assert "parameter/secret/agent-platform-ducklake-telemetry-writer-dsn" in raw
 
 
 _BOUNDARY_TMPL = """

@@ -46,7 +46,7 @@ locals {
 
   # T2.49 c2 hardening item 3 (single-source, DEP-12 / Decision 144): the RESERVED session-name
   # that discriminates the planner role's fail-closed convergence-write path. Referenced at
-  # EXACTLY 6 coupled sites -- changing this value requires updating all six in the same commit:
+  # EXACTLY 5 coupled sites -- changing this value requires updating all five in the same commit:
   #   1. github_ci_planner trust, main-sub statement: sts:RoleSessionName StringEquals
   #      (oidc_pipeline_roles.tf)
   #   2. github_ci_planner trust, pr-sub statement:   sts:RoleSessionName StringNotEquals
@@ -55,9 +55,7 @@ locals {
   #      (oidc_pipeline_roles.tf)
   #   4. .github/workflows/terraform-drift.yml: configure-aws-credentials role-session-name (a
   #      workflow literal outside Terraform's reach -- MUST equal this value verbatim)
-  #   5. github_ci_planner policy, DriftSessionSecretValueRead: aws:userid StringLike "*:<this>"
-  #      (oidc_pipeline_roles.tf)
-  #   6. github_ci_planner policy, DriftSessionSecretParameterRead: aws:userid StringLike "*:<this>"
+  #   5. github_ci_planner policy, DriftSessionSecretParameterRead: aws:userid StringLike "*:<this>"
   #      (oidc_pipeline_roles.tf)
   convergence_writer_session_name = "tf-drift-convergence-writer"
 }
@@ -76,7 +74,7 @@ resource "aws_iam_openid_connect_provider" "github_actions" {
 # composes ci_ssm_refresh_read via source_policy_documents rather than re-declaring the SSM
 # statements inline (validated credential-free by
 # scripts/checks/iam_tf/validate_invoke_implies_resolve.py, T2.34:c2); github_ci_planner
-# additionally composes the shared 19-statement refresh-read surface via
+# additionally composes the shared 17-statement refresh-read surface via
 # ci_full_refresh_read (which itself sources ci_ssm_refresh_read). IAM read statements stay
 # enumerated with literal ARNs (Decision 35/98) -- composition relocates statements, it never
 # collapses them into a wildcard.
@@ -309,25 +307,6 @@ data "aws_iam_policy_document" "ci_full_refresh_read" {
   }
 
   statement {
-    # Tfvars sourcing: plan/drift fetch this secret to materialise terraform.personal.tfvars.
-    # Read-only -- lifecycle is human-owned.
-    sid       = "SecretsManagerTfvarsRead"
-    effect    = "Allow"
-    actions   = ["secretsmanager:Describe*", "secretsmanager:Get*"]
-    resources = ["arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:agent-platform-terraform-personal-tfvars-*"]
-  }
-
-  statement {
-    # DuckLake Neon catalog DSN -- refresh-time metadata only. The DSN name does not match the agent-platform-*
-    # metadata prefix, so this statement keeps validate_ci_refresh_read_coverage green. The value read is held
-    # by DriftSessionSecretValueRead (oidc_pipeline_roles.tf), conditioned on the reserved drift session.
-    sid       = "SecretsManagerDuckLakeNeonDSNRead"
-    effect    = "Allow"
-    actions   = ["secretsmanager:DescribeSecret", "secretsmanager:GetResourcePolicy"]
-    resources = ["arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:ducklake-neon-catalog-dsn-*"]
-  }
-
-  statement {
     # Decision 237: the tfvars SecureString parameter, read by every plan to materialise terraform.personal.tfvars.
     # The one value read of a /secret/ parameter that validate_planner_secret_value_reads allows without a session condition.
     sid       = "SecretParameterTfvarsRead"
@@ -351,14 +330,14 @@ data "aws_iam_policy_document" "ci_full_refresh_read" {
     # asymmetrically: a PR adding a new agent-platform-* secret would be write- and read-covered on
     # the apply role but NOT on this plan-capable role, so the speculative plan (and the hourly
     # drift plan) would AccessDeny on the new secret's DescribeSecret while the merge-time apply
-    # succeeded -- the per-secret Sids above each cover exactly one existing ARN and cover nothing
+    # succeeded -- a per-secret Sid would cover exactly one existing ARN and cover nothing
     # new. The prefix closes that gap for every future agent-platform-* secret with no further
     # grant edit (the rec-2702 resource-axis anti-recurrence).
     # Value-free BY CONSTRUCTION and therefore NOT a widening of Decision 129 pt 2: within Secrets
     # Manager only GetSecretValue returns secret material (AWS named the batch form
     # BatchGetSecretValue, outside the Get* metadata pattern), so Describe*/List*/GetResourcePolicy
-    # cannot read a value. This role's value-capable reads stay in the tfvars Sid above and
-    # DriftSessionSecretValueRead (oidc_pipeline_roles.tf) -- deliberately NOT restated here. hashicorp/aws v5.100.0 grounding:
+    # cannot read a value. This role's value-capable reads stay in SecretParameterTfvarsRead above and
+    # DriftSessionSecretParameterRead (oidc_pipeline_roles.tf) -- deliberately NOT restated here. hashicorp/aws v5.100.0 grounding:
     # aws_secretsmanager_secret refreshes with DescribeSecret + GetResourcePolicy only.
     sid     = "SecretsManagerMetadataRead"
     effect  = "Allow"

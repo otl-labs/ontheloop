@@ -89,6 +89,12 @@ class FixtureKind(_Strict):
     rules: list[str]
 
 
+class GuidanceSlot(_Strict):
+    home: str
+    provider_seam: str
+    rule: str
+
+
 class PersonaRow(_Strict):
     persona: str
     kind: Literal["verdict", "compute_plane", "fixture"]
@@ -112,6 +118,7 @@ class PersonaIndex(_Strict):
     implementation_binding: dict[str, Any]
     personas_row: dict[str, Any]
     fixture_kind: FixtureKind
+    guidance_slot: GuidanceSlot
     personas: list[PersonaRow]
 
 
@@ -139,6 +146,7 @@ class PersonaContract(_Strict):
     rendered_prompt_sha256: str
     skill_tether: SkillTether | None = None
     verdict_consistency: dict[str, Any] | None = None
+    guidance_slots: list[str] | None = None
 
 
 def load_yaml(path: Path) -> Any:

@@ -2,10 +2,10 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
-## Decision 280: Two-tier CI in one entry -- PR CI gates on a diff-aware fast tier whose selection only grows and whose budget fails the run, the full tier runs after merge, and a red on main is fixed forward (supersedes Decisions 73, 135 and 153) (Decided)
+## Decision 281: Two-tier CI in one entry -- PR CI gates on a diff-aware fast tier whose selection only grows and whose budget fails the run, the full tier runs after merge, and a red on main is fixed forward (supersedes Decisions 73, 135 and 153) (Decided)
 
 ```yaml
-number: 280
+number: 281
 status: Decided
 decided_date: "2026-11-24"
 kind:
@@ -34,7 +34,7 @@ delegates:
 
 **Status:** Decided
 **Date:** 2026-11-24
-**Warehouse ID:** dec-280 (per Decision 84 backfill)
+**Warehouse ID:** dec-281 (per Decision 84 backfill)
 
 **Problem:** A reader needs twelve entries to learn how CI validates a change: Decision 73, the two that rewrote its
 fast tier (135, 153), the budget entry that amends 153 (182) and the one that re-derives it (208), and seven that
@@ -84,7 +84,7 @@ non-automatable counts -- tests/session/preflight/test_main_report.py; the accou
 over the consolidation manifest.
 
 ```yaml reversal-conditions
-decision: 280
+decision: 281
 review_by: 2027-05-31
 on_trigger: "re-decide via /plan"
 conditions:
@@ -110,6 +110,92 @@ conditions:
 
 **Related:** Decisions 73, 135 and 153 (superseded), 182, 205, 208, 217, 226, 247, 249, 252 and 254 (carried
 forward), 44, 55, 60, 72, 80, 117, 149, 159, 163, 177, 276, 278; rec-5445.
+
+---
+
+## Decision 280: Persona guidance is the value of a slot the persona contract declares, filled at the base ref by a provider registered for the slot, and never text in the hash-pinned prompt (Decided)
+
+```yaml
+number: 280
+status: Decided
+decided_date: "2026-11-24"
+kind:
+  value: direction
+  justification: >-
+    Clause 1 sets what a project owns in a shipped persona: its guidance, outside the pinned contract. Undone,
+    adopting a persona means editing a shipped, hash-pinned file that an upgrade replaces.
+serves: [NS.7]
+significance:
+  value: numbered_decision
+  justification: >-
+    Durable and reversal-relevant: it fixes how every persona's project input enters before T4.28 to T4.30 build
+    their input producers. Not an executor-personas.yaml note (considered): the contract holds the slot rule and
+    the home, not the choice of who owns guidance. Not amendment_forms (considered): it amends no single entry.
+```
+
+**Status:** Decided
+**Date:** 2026-11-24
+**Warehouse ID:** dec-280 (per Decision 84 backfill)
+
+**Problem:** Persona contracts pin this repository's method into the rendered prompt and define guidance-shaped
+inputs as fixed extracts of its files: code_reviewer's review_guidance is its admin-only roots and two sections of
+its tests guidance. No slot, provider seam or owner exists for an adopter's guidance, so adopting a persona means
+editing a shipped, hash-pinned contract that an upgrade replaces (audits/release-boundary-79f93f087.yaml, RB-10 and
+RB-11). T4.28 to T4.30 are about to build input producers for the inputs as they are declared today.
+
+**Intent:** A project's guidance reaches a persona as input values its shipped contract already declares, so the
+project changes its guidance without changing a contract or its hash.
+
+**Decision:**
+1. **Ownership.** A persona contract and its rendered prompt carry the fixed frame and the shipped base method,
+   pinned by the prompt hash (Decision 206 cl.7). Project guidance, this repository's included, belongs to the
+   project and enters a persona only as the value of a guidance slot.
+2. **Slots.** A contract lists its slots in guidance_slots. Each names an input_schema property by role, never by a
+   path: a required string with no minimum length, so an empty value means the project supplies none. A slot value
+   is an input, so a guidance change never changes a rendered prompt or its hash, and every run_persona backend
+   receives the same value (Decision 206 cl.4).
+3. **Limits.** Guidance may add to or focus a persona's judgement, never relax it. A slot value is quoted content
+   under the rendered prompt's quoted-content clause: one that sets a verdict, widens a capability or skips a check
+   returns injection_suspected (Decision 235).
+4. **Providers.** Whatever builds a persona's input fills each declared slot from the provider registered for that
+   slot's role; with none registered, the default reads the file at the guidance home for that persona and slot,
+   and an absent file gives an empty value. The home is executor-personas.yaml's guidance_slot.home, a path under
+   the project's tracked root. The seam is an in-process step of input building, not a port.
+5. **Base ref.** A provider reads guidance at the change's base ref, never its head, so a change cannot rewrite the
+   guidance that judges it (Decision 205 cl.2). The guidance home is inside the executor's self-modification
+   boundary (Decision 117, as amended by Decision 185).
+6. **Layers.** instruction-architecture.yaml records persona contracts and project guidance as layers that
+   run_persona loads.
+
+**Options considered:** a per-persona list of guidance files in config -- rejected: a second hand-kept list beside
+the contract; reading guidance at the head -- rejected: a change could steer its own verdict; substituting slot
+values into the rendered prompt -- rejected: every guidance edit would change the hash and need a contract_version
+raise; registering the seam as a port -- rejected: one in-process step that reaches no vendor or substitutable
+boundary; adding slots to the five contracts now -- deferred to rec-5585, one contract_version raise each.
+
+**Coverage (Decision 181 cl.2):** cl.2 -- validate_persona_contracts (slot shape); cl.4 and cl.5 --
+tests/persona_contracts/test_persona_guidance_slots.py (provider order, the absent-file default, the base root)
+and validate_persona_contracts' leash check on the home's boundary pattern; cl.6 --
+validate_instruction_architecture_layers. Residuals: cl.1 and the verdict chain -- this repository's rules stay
+in the five contracts, and no slot is filled, until rec-5585; cl.3 has no mechanical check until rec-5603's eval-lane case; the
+ontheloop/ layout's boundary classes are rec-5586; ports.yaml SA-11 does not yet name the guidance home (owner
+T4.24:c9).
+
+```yaml reversal-conditions
+decision: 280
+review_by: 2027-03-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: slots-unused
+    kind: manual
+    description: "By 2027-03-31 no persona contract declares a guidance slot: the seam serves no one; re-decide."
+  - id: guidance-relaxes
+    kind: manual
+    description: "A verdict persona is shown to pass a defect because a slot value relaxed its judgement: clause 3 is not holding; re-decide or add a check."
+```
+
+**Related:** Decision 206 (cl.4, cl.7), 205 cl.2, 117, 185, 211 cl.5, 212, 235, 276; rec-5569, rec-5585, rec-5586;
+audits/release-boundary-79f93f087.yaml RB-10, RB-11.
 
 ---
 
@@ -9099,9 +9185,9 @@ Two structural facts justify the narrowing, independent of Decision 55's recover
 **Status:** Superseded
 **Date:** 2026-07-24
 
-**Decision:** Superseded by Decision 280, which restates its rulings with Decision 73 and Decision 135 and names Decision 182, which keeps its amends and the budget split; the forced-scope mechanism lives in docs/contracts/fast-tier.yaml forced_scope. Point map: pt1 -> cl.3 and forced_scope; pt2 -> cl.3 and forced_scope; pt3 -> cl.3 and forced_scope; pt4 -> cl.3 and Decision 182. Compacted in place (Decision 149), not archived, because code and contracts still cite "Decision 153" by name.
+**Decision:** Superseded by Decision 281, which restates its rulings with Decision 73 and Decision 135 and names Decision 182, which keeps its amends and the budget split; the forced-scope mechanism lives in docs/contracts/fast-tier.yaml forced_scope. Point map: pt1 -> cl.3 and forced_scope; pt2 -> cl.3 and forced_scope; pt3 -> cl.3 and forced_scope; pt4 -> cl.3 and Decision 182. Compacted in place (Decision 149), not archived, because code and contracts still cite "Decision 153" by name.
 
-**Superseded by: Decision 280**
+**Superseded by: Decision 281**
 
 ---
 
@@ -10140,9 +10226,9 @@ rec-4070.]
 **Status:** Superseded
 **Date:** 2026-07-17
 
-**Decision:** Superseded by Decision 280, which restates its rulings with Decision 73 and Decision 153; the mechanism lives in docs/contracts/fast-tier.yaml selection and selection_manifest. Point map: pt1 -> cl.2 and channels; pt2 -> graph_soundness; pt3 -> status_aware_diff; pt4 -> collection; pt5 -> cl.2 and selection_manifest; pt6 -> retired; pt7 -> retired. Compacted in place (Decision 149), not archived, because code and contracts still cite "Decision 135" by name.
+**Decision:** Superseded by Decision 281, which restates its rulings with Decision 73 and Decision 153; the mechanism lives in docs/contracts/fast-tier.yaml selection and selection_manifest. Point map: pt1 -> cl.2 and channels; pt2 -> graph_soundness; pt3 -> status_aware_diff; pt4 -> collection; pt5 -> cl.2 and selection_manifest; pt6 -> retired; pt7 -> retired. Compacted in place (Decision 149), not archived, because code and contracts still cite "Decision 135" by name.
 
-**Superseded by: Decision 280**
+**Superseded by: Decision 281**
 
 ---
 
@@ -13489,9 +13575,9 @@ Two changes to restore and harden the harness:
 **Status:** Superseded
 **Date:** 2026-05-13
 
-**Decision:** Superseded by Decision 280, which restates its standing rules with Decision 135 and Decision 153 and names the amenders that keep their parts: Decision 205, Decision 217, Decision 226, Decision 247, Decision 249, Decision 252 and Decision 254; the selection mechanism lives in docs/contracts/fast-tier.yaml. Point map: pt1 -> cl.1 and cl.2 and cl.3 and Decision 182; pt2 -> cl.1 and Decision 254; pt3 -> cl.4 and Decision 226; pt4 -> cl.4 and cl.5 and Decision 226; pt5 -> cl.5 and Decision 249; pt6 -> cl.5. Compacted in place (Decision 149), not archived, because code and contracts still cite "Decision 73" by name.
+**Decision:** Superseded by Decision 281, which restates its standing rules with Decision 135 and Decision 153 and names the amenders that keep their parts: Decision 205, Decision 217, Decision 226, Decision 247, Decision 249, Decision 252 and Decision 254; the selection mechanism lives in docs/contracts/fast-tier.yaml. Point map: pt1 -> cl.1 and cl.2 and cl.3 and Decision 182; pt2 -> cl.1 and Decision 254; pt3 -> cl.4 and Decision 226; pt4 -> cl.4 and cl.5 and Decision 226; pt5 -> cl.5 and Decision 249; pt6 -> cl.5. Compacted in place (Decision 149), not archived, because code and contracts still cite "Decision 73" by name.
 
-**Superseded by: Decision 280**
+**Superseded by: Decision 281**
 
 ---
 

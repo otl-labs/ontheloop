@@ -76,8 +76,9 @@ def test_apply_writes_exactly_the_dsn_parameter() -> None:
 def test_pat_arn_is_gone_from_both_enumerated_sids() -> None:
     reads, policy = _read("github_ci_apply_reads.tf"), _read("github_ci_apply_policy.tf")
     assert "agent-platform-github-pat" not in reads and "agent-platform-github-pat" not in policy
-    assert len(_statement(reads, "SecretsManagerValueReadEnumerated")["Resource"]) == 4
-    assert len(_statement(policy, "SecretsManagerUpdateEnumerated")["Resource"]) == 2
+    for text, sid in ((reads, "SecretsManagerValueReadEnumerated"), (policy, "SecretsManagerUpdateEnumerated")):
+        assert not re.search(rf'Sid\s*=\s*"{sid}"', text)
+    assert _statement(reads, "SecretParameterValueRead")["Action"] == ["ssm:GetParameter", "ssm:ListTagsForResource"]
 
 
 def test_platform_dev_reads_exactly_the_two_inference_parameters() -> None:
