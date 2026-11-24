@@ -20,6 +20,9 @@ pytestmark = pytest.mark.unit
 _REPO = Path(__file__).resolve().parents[3]
 _HEADING = re.compile(r"^## Decision (\d+): The full tier runs post-merge on batches of main", re.MULTILINE)
 _AMENDS = [72, 73, 159, 163, 201, 203, 205, 226, 244, 245, 249]
+# Compacted by the Decision 73 chain consolidation (rec-5445): the note retired with the body, and the stub names
+# this Decision instead.
+_COMPACTED = frozenset({73})
 _FIRED = {245: "tap-promotion-lands", 249: "canary-model-decided"}
 _CHILD_RECS = {"rec-5106", "rec-5107", "rec-5108", "rec-5109", "rec-5110"}
 
@@ -55,6 +58,9 @@ def test_each_amended_entry_carries_one_dated_note() -> None:
     text = _decisions_text()
     number = _number(text)
     for amended in _AMENDS:
+        if amended in _COMPACTED:
+            assert f"Decision {number}" in decision_entry(text, amended), (amended, "stub must name it")
+            continue
         notes = _paragraphs(decision_entry(text, amended), f"> **Amended by Decision {number} (")
         assert len(notes) == 1, (amended, len(notes))
         if amended in _FIRED:
