@@ -358,6 +358,11 @@ def verify() -> list[tuple[str, bool]]:
     return checks
 
 
+def live_restore_diag() -> str:
+    code, out = sh([base.binary("docker"), "info", "--format", "{{json .LiveRestoreEnabled}}"])
+    return f"EGRESS-FLOOR diag live_restore_json={out.strip()!r} exit={code}"
+
+
 def banner() -> None:
     print("EGRESS-FLOOR docker " + sh([base.binary("docker"), "version", "--format", "{{.Server.Version}}"])[1].strip())
     print("EGRESS-FLOOR iptables " + sh([base.binary("iptables"), "-V"])[1].strip())
@@ -370,6 +375,7 @@ def main(argv: Sequence[str]) -> int:
     applied = apply()
     checks = [("apply", applied), *verify()]
     banner()
+    print(live_restore_diag())
     return 0 if base.report(checks) else 1
 
 

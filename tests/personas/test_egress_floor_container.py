@@ -255,3 +255,8 @@ def test_jump_replaces_an_existing_rule_and_inserts_at_one(monkeypatch: pytest.M
     monkeypatch.setattr(F, "sh", lambda argv, timeout=30: (seen.append(list(argv)), (0, ""))[1])
     assert F._jump_at("iptables", F.bridge_jumps()[0])
     assert any("-D" in c for c in seen) and seen[-1][-6:] == ["INPUT", "1", "-i", "br-persona", "-j", "EGRESS_BRIDGE_IN"]
+
+
+def test_live_restore_diag_carries_raw_value_and_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(F, "sh", lambda argv, timeout=0: (0, "true\n"))
+    assert F.live_restore_diag() == "EGRESS-FLOOR diag live_restore_json='true' exit=0"
