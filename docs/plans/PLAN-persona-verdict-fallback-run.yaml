@@ -1,0 +1,274 @@
+schema_version: 7
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "persona-verdict-fallback-run"
+intent: >-
+  Solves rec-5559 (Decision 173's fallback leg for keyed verdict jobs). When the proxy itself sees the primary
+  provider fail during the run job, a separate run-fallback job runs the same persona once on the
+  warm_fetched_escape_hatch role, with its own one-host egress row, its own key read and its own proxy, and post
+  judges that result and says in the check title that the fallback role served it. So a primary outage stops failing
+  a verdict check before any persona's gating flip, and the role is chosen per run, never mid-run.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-persona-verdict-fallback-run.yaml
+phase: >-
+  T4.32 (persona foundation): c7 EGRESS container leg's escape hatch ("a re-run on the fallback role", approved
+  text docs/plans/approved/persona-verdict-container-egress.yaml); owed before the first verdict persona flip
+  (T4.28-T4.30), not before add or dual-run.
+cites: [dec:173, dec:205, dec:235, dec:263]
+amends: []
+introduces: []
+scope:
+  - file: .github/workflows/persona-verdict.yml
+    action: Modify
+    purpose: >-
+      run gains job outputs {primary_outage: steps.persona.outputs.primary_outage} and its PERSONA step env gains
+      PERSONA_ROLE: primary. New job run-fallback: needs [prepare, keyprep, run]; if the keyed condition, keyprep
+      success and needs.run.outputs.primary_outage == 'true'; environment persona-verdict; permissions exactly
+      {contents: read, id-token: write}; the same closed step list as run (filter with run-fallback's row, checkout,
+      FLOOR, mkdir, self-check, download prepared, PROBE, setup-python, wheels, PIP_INSTALL, PERSONA with
+      PERSONA_ROLE: warm_fetched_escape_hatch, "Upload fallback verdict results" (persona-verdict-results-fallback,
+      1 day), PROBE, final self-check); timeout-minutes 25. post needs [prepare, run, run-fallback, keyprep] and its
+      results download takes pattern persona-verdict-results* (no name), so each artifact lands in its own named
+      directory.
+  - file: config/persona_verdict_egress.yaml
+    action: Modify
+    purpose: >-
+      Row for persona-verdict.yml run-fallback: sts and ssm {aws_region} hosts, the warm_fetched_escape_hatch tier's
+      provider host (api.anthropic.com:443, through provider_hosts) and pkg-containers.githubusercontent.com:443.
+      run's row is unchanged (one provider host each).
+  - file: scripts/personas/keyed_run.py
+    action: Modify
+    purpose: >-
+      request_main reads PERSONA_ROLE (refused unless in (primary, warm_fetched_escape_hatch); a refusal prints
+      nothing to stdout and exits 2 as today) and resolves that role's tier provider prefix and SSM key, replacing
+      the fixed primary; the job is GITHUB_JOB and must pair with the role (run with primary, run-fallback with
+      warm_fetched_escape_hatch), else refused. record_main: the sidecar's host.job is GITHUB_JOB (one of the two);
+      on run only, it appends primary_outage=true to GITHUB_OUTPUT when the written result is not a success-shaped
+      launcher result (a failure, a timeout or launcher_no_result) and the launcher result's upstream field shows
+      at least one outage and no ok response; otherwise it writes primary_outage=false. It never reads the persona's
+      stdout or events for this.
+  - file: scripts/personas/egress_proxy.py
+    action: Modify
+    purpose: >-
+      At exit the proxy writes one JSON file {ok: n, outage: n} into the launcher-owned directory it is given: ok
+      counts relayed upstream 2xx responses; outage counts its own 502 upstream-unreachable answers and relayed
+      upstream 429 or 5xx responses. Nothing else changes; no header value or body is recorded.
+  - file: scripts/personas/egress_launcher.py
+    action: Modify
+    purpose: >-
+      Run mode passes the proxy that directory and adds upstream: {ok, outage} (read O_NOFOLLOW, size-capped; null when
+      absent or malformed) to its stdout result. It derives the run's role from the request's provider prefix
+      through the snapshot (one role per provider, Decision 173 cl.2(b)) and passes it to the container as the role
+      input the image-role child rec defines; the request's key set is unchanged. Its install manifest hash follows.
+  - file: scripts/personas/post_verdict.py
+    action: Modify
+    purpose: >-
+      For each route, judge reads results/persona-verdict-results-fallback/<route>.json when present, else
+      results/persona-verdict-results/<route>.json; a check judged from the fallback result carries " (fallback
+      role)" at the end of its title. Conclusion mapping and check names are unchanged.
+  - file: scripts/checks/ci_guards/_persona_verdict_keyed.py
+    action: Modify
+    new_imports: []
+    purpose: >-
+      KEYED_JOBS gains run-fallback. Its rules are run's rules applied to the second name (one canonical step list
+      parameterised by job: the filter row, PERSONA_ROLE value and upload step name and artifact differ); run's and
+      run-fallback's PERSONA env is exactly PERSONA_REGION, AWS_ACCOUNT_ID, PERSONA_SNAPSHOT and PERSONA_ROLE at that
+      job's literal role (a named Decision 235 planned change to rec-5550's three-key rule); run-fallback's if must
+      contain needs.run.outputs.primary_outage == 'true'; run's outputs are exactly {primary_outage}.
+  - file: scripts/checks/ci_guards/validate_persona_verdict_chain.py
+    action: Modify
+    new_imports: []
+    purpose: >-
+      run-fallback joins KEYED_ENVIRONMENTS, KEYED_ID_TOKEN and JOB_PERMISSIONS ({contents: read, id-token: write})
+      and every rule rec-5550 scoped to run applies to it by name; post's download step admits the pattern form.
+      Size: grows by the tuple entries only; if plan_obligations reports it NEAR_CAP at build time, the relief is a
+      facade decomposition (Decision 128), never a raise.
+  - file: scripts/checks/misc/_persona_verdict_container.py
+    action: Modify
+    new_imports: []
+    purpose: >-
+      Admission gains persona-verdict.yml's run-fallback job on run's terms. The class row rule becomes: a class
+      job's row lists exactly one provider host, the host of the role that job runs (run: primary; run-fallback:
+      warm_fetched_escape_hatch; the probe jobs: primary), plus the blob host and, for the two keyed jobs, the sts
+      and ssm hosts; a second provider host stays refused.
+  - file: docs/contracts/github-actions-evidence.yaml
+    action: Modify
+    purpose: artifact_uploads gains run-fallback's persona-verdict-results-fallback (ephemeral_handoff, 1 day), with one amendment_log row.
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: Rows for run-fallback's inline run bodies.
+  - file: tests/personas/test_execute.py
+    action: Modify
+    purpose: >-
+      Rec acceptance test_request_reads_the_fallback_role_key_on_a_fallback_run (PERSONA_ROLE
+      warm_fetched_escape_hatch in run-fallback reads the anthropic/ key parameter and emits provider anthropic/);
+      a role/job mismatch, an unknown role and a missing role are refused with nothing on stdout; record writes
+      primary_outage=true only on run with a non-success result and an upstream outage and no ok, false otherwise,
+      never on run-fallback; host.job follows GITHUB_JOB.
+  - file: tests/personas/test_egress_proxy.py
+    action: Modify
+    purpose: The counts file after a relayed 200, a relayed 503, a relayed 429 and an own 502.
+  - file: tests/personas/test_egress_launcher.py
+    action: Modify
+    purpose: upstream carried, null when the file is absent or malformed; the role derived from the provider and passed to the container.
+  - file: tests/personas/test_post_verdict.py
+    action: Modify
+    purpose: test_fallback_result_wins_and_is_named; without a fallback result the primary result is judged as today.
+  - file: tests/checks/ci_guards/test__persona_verdict_keyed.py
+    action: Modify
+    purpose: >-
+      The live run-fallback passes; red fixtures: run-fallback without the primary_outage conjunct, with
+      PERSONA_ROLE primary, with run's upload name, with an extra step; run with PERSONA_ROLE
+      warm_fetched_escape_hatch or an extra job output.
+  - file: tests/checks/ci_guards/test_validate_persona_verdict_chain.py
+    action: Modify
+    purpose: run-fallback's live shape passes; red fixtures for its permissions and missing Environment.
+  - file: tests/checks/misc/test__persona_verdict_container.py
+    action: Modify
+    purpose: "run-fallback's live row passes; red fixtures: run-fallback's row with the primary host, run's row with the fallback host, either with both."
+bundled_recommendations: [rec-5559]
+followon_recs: []
+closes_criteria: []
+infrastructure_dependencies:
+  - "No Terraform: the persona-verdict role's trust is the Environment subject plus job_workflow_ref (terraform/personal/oidc_persona_verdict_role.tf), and it already reads both tier keys; run-fallback is in persona-verdict.yml under the same Environment."
+acceptance_criteria:
+  - bin/venv-python -m pytest tests/personas/test_execute.py::test_request_reads_the_fallback_role_key_on_a_fallback_run -q passes (rec-5559's acceptance).
+  - The live tree passes validate_persona_verdict_chain and validate_persona_verdict_egress; each new red fixture fails with its own message.
+  - On a fixture PR run on main where the primary serves, run-fallback is skipped and the check title carries no fallback marker.
+  - "A forced primary outage on main (operator-run, see VP 6) runs run-fallback once, and the canary check is judged from the fallback result with the (fallback role) title, or posts a failure naming the spent credit; it is never skipped."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: Unit tests for the request and record verbs, the proxy counts, the launcher result and post's choice.
+    command: >-
+      bin/venv-python -m pytest tests/personas/test_execute.py tests/personas/test_egress_proxy.py
+      tests/personas/test_egress_launcher.py tests/personas/test_post_verdict.py -q
+    expected: All tests pass.
+    expected_literals: ["passed"]
+    fix_if: A test fails; fix the code inside scope, never the assertion (Decision 235).
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: persona-verdict-fallback-run-units
+  - step: 2
+    phase: pre-deploy
+    action: Guard tests, live tree and red fixtures.
+    command: >-
+      bin/venv-python -m pytest tests/checks/ci_guards/test__persona_verdict_keyed.py
+      tests/checks/ci_guards/test_validate_persona_verdict_chain.py tests/checks/misc/test__persona_verdict_container.py -q
+    expected: All tests pass, each new red fixture failing with its own message.
+    expected_literals: ["passed"]
+    fix_if: A live-tree case fails; fix the workflow or config to the scope row's shape. A red fixture passing is a guard gap; fix the check.
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: persona-verdict-fallback-run-guards
+  - step: 3
+    phase: pre-deploy
+    action: Fast tier.
+    command: bin/venv-python -m scripts.validate --pre
+    expected: All fast-tier checks pass.
+    fix_if: A check fails; fix inside scope or STOP to the plan owner; never loosen a check (Decision 235).
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: is the fast tier itself
+  - step: 4
+    phase: pre-deploy
+    action: Full tier before handoff.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: Full tier passes and --verify-head confirms it for the head (background, 2 h limit, HOME an empty directory).
+    fix_if: A failure in scope is fixed; one outside scope is a STOP to the plan owner.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: is the full tier itself
+  - step: 5
+    phase: post-deploy
+    action: Primary-served run on main - a fixture PR head rewriting proceed.txt (the rec-5550 VP 6 form).
+    command: >-
+      mcp__github__actions_list(method="list_workflow_jobs") for the persona-verdict run on the head SHA, then
+      mcp__github__pull_request_read(method="get_check_runs")
+    expected: run succeeds with primary_outage false; run-fallback is skipped; persona-verdict/canary_persona has no (fallback role) marker.
+    fix_if: Any other shape is a STOP to the plan owner with the run id.
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: post-deploy
+    action: >-
+      Fallback run on main, operator-gated: the operator chooses how a primary outage is produced for one run (for
+      example, making the primary key parameter unusable for one run is an admin step needing his words); the build
+      posts the proposed method and waits.
+    command: >-
+      mcp__github__actions_list(method="list_workflow_jobs") and get_job_logs for run, run-fallback and post on the
+      head SHA; mcp__github__pull_request_read(method="get_check_runs")
+    expected: >-
+      run records primary_outage true; run-fallback runs once with both CONTAINER-PROBE PASS and no key in the log;
+      the canary check concluded from the fallback result with (fallback role) in its title, or failure naming the
+      spent credit; never skipped.
+    fix_if: Any other shape is a STOP to the plan owner with the run id; if the operator declines the forced outage, the step is recorded UNPROVEN and rec-5559 stays open.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: scripts/personas/keyed_run.py
+    behavior: the role chosen per job reads that role's key; primary_outage only from the proxy's counts on run
+    verification_step: 1
+    test_selector: tests/personas/test_execute.py::test_request_reads_the_fallback_role_key_on_a_fallback_run
+    red_green_expectation: red before (request reads only the primary key), green after
+  - source: scripts/personas/egress_proxy.py
+    behavior: the ok and outage counts
+    verification_step: 1
+    test_selector: tests/personas/test_egress_proxy.py::test_counts_file_records_ok_and_outage
+    red_green_expectation: red before (no counts file), green after
+  - source: scripts/personas/egress_launcher.py
+    behavior: upstream carried in the run-mode result; role derived from provider
+    verification_step: 1
+    test_selector: tests/personas/test_egress_launcher.py::test_run_result_carries_upstream_and_derived_role
+    red_green_expectation: red before, green after
+  - source: scripts/personas/post_verdict.py
+    behavior: the fallback result wins and is named in the title
+    verification_step: 1
+    test_selector: tests/personas/test_post_verdict.py::test_fallback_result_wins_and_is_named
+    red_green_expectation: red before, green after
+  - source: scripts/checks/ci_guards/_persona_verdict_keyed.py
+    behavior: run-fallback's closed shape and its outage conjunct
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test__persona_verdict_keyed.py::test_run_fallback_shape_is_closed
+    red_green_expectation: red before, green after
+  - source: scripts/checks/ci_guards/validate_persona_verdict_chain.py
+    behavior: run-fallback's permissions and Environment
+    verification_step: 2
+    test_selector: tests/checks/ci_guards/test_validate_persona_verdict_chain.py::test_run_fallback_permissions_and_environment
+    red_green_expectation: red before, green after
+  - source: scripts/checks/misc/_persona_verdict_container.py
+    behavior: one provider host per class job, the host of that job's role
+    verification_step: 2
+    test_selector: tests/checks/misc/test__persona_verdict_container.py::test_class_row_holds_its_roles_one_provider_host
+    red_green_expectation: red before, green after
+constraints:
+  - One provider host per job row and one upstream per proxy; the role is chosen per job, never mid-run (approved c7 text).
+  - "At most one fallback run per verdict run (Decision 55). Decision 173 cl.4's remaining-allowance assertion is made at the fallback run's cold start by the image's transport (scripts/llm/litellm_transport.py runs ensure_asserted before the first call when the role is warm_fetched_escape_hatch; rec-5615 keeps it), before any persona call spends the credit; a refused assertion (credit spent) posts a failure, never a skip."
+  - "Decision 235 cl.1 planned changes, named here for the operator's confirmation: (p1) rec-5550's PERSONA env set grows from three keys to four (PERSONA_ROLE at a literal per job); (p2) the container class row rule's admitted provider host becomes the host of the role that job runs, so run-fallback's row may hold the fallback host; each row still holds exactly one provider host, pinned by the job's literal role, and a second provider host stays refused."
+  - No secret in a pull_request job (Decision 205); keys stay in SSM under the persona-verdict role (Decision 263).
+  - Never loosen an assertion or check to get green (Decision 235); no rescue loops (Decision 55).
+context:
+  - "Depends on (build order): rec-5549 build (launcher, proxy, container class), rec-5550 build (keyed_run.py, run job), and rec-5615 (the image-role split child) built, published and carried by the operator-merged pin of config/persona_image.yaml carrying it. A conflict with their merged shape is a STOP to the plan owner."
+  - "Design: blind Fable consult 2026-11-24, /mnt/project-files/fallback-role-rerun/advisor-brief/ADVICE.md (separate job D; image split Y)."
+  - "Near files: rec-5605 (guidance seam) also edits keyed_run.py; whoever builds second rebases."
+  - "Graduated shards kept unchanged: persona-verdict-wake-shape and persona-verdict-chain-shape (test_validate_persona_verdict_chain.py); a node id this plan renames in a graduated test is a STOP to the plan owner (Decision 244)."
+  - "red_overlap: clear (no reds), 2026-11-24 16:25 UTC."
+  - "selection_budget: breadth_waived (predicted CI test half 207.5-790.0s of a 790s allowance); declared, not split: the guard tests share one live workflow."
+  - "Decision-scout r1 FLAGS_FOUND (scout_input_fingerprint v1:39e4c47f...; CITE 173, 205, 235, 263; NOTE 173 cl.4 adopted: the remaining-allowance assertion is named at the fallback cold start (constraints); NOTE 235 adopted: the class-row change is named planned change p2). Decisions triaged: 228 of 228. Roadmap items intersected: 3; CONFLICT: 0; RELATED: 2. Serves: NS.1 4/5."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:39e4c47f9329761d971aec4f917fec8e1aedff6730f9bd2b5da05c8174246334"}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - Proxy counts file and launcher upstream field and role pass-through (egress_proxy.py, egress_launcher.py) with tests.
+  - keyed_run.py role and outage output with tests.
+  - post_verdict.py fallback choice with tests.
+  - Workflow run-fallback job, egress row, evidence row, baseline rows; guard modules and tests.
+  - Execute the Verification Plan; loop until pass; on unrecoverable V3 failure stop and RCA (Decision 55).
+  - 'Report: what was implemented, verification results'
