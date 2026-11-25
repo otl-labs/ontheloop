@@ -19,7 +19,7 @@ overseer-dispatched as a fresh sibling, never inline in the author subagent (Des
 
 *Note: For the full methodology (read-nothing router discipline, the Design-B gate-request
 trampoline, division of labor, liveness/watchdog resilience, bounded hand-back schema, ledger
-schema, overlap-matrix procedure, autonomy-boundary policy, the Fable advice-consult protocol, and
+schema, overlap-matrix procedure, autonomy-boundary policy, and
 the Decision 247/229/55/73 guardrails), invoke your `overseer` skill via the Skill tool. This command
 is a thin lifecycle sequence; the skill owns HOW.*
 
@@ -50,13 +50,13 @@ dispatched planning subagents. Identify the candidate slices (one slice = one ev
 
 ## Step 3: Advice (Fable Consult)
 
-Apply the skill's Fable Advice-Consult Protocol: dispatch a fresh-context `model: "fable"` subagent
+Dispatch a consult per `.claude/skills/consult/SKILL.md`: a fresh-context `model: "fable"` subagent
 to review the proposed decomposition and flag settled-consensus vs. contested design points, and any
 best-practice-vs-repo divergence.
 
 ## Step 4: Reconcile
 
-Reconcile each flagged point via adopt / adapt / reject per the skill's protocol. Update the
+Reconcile each flagged point via adopt / adapt / reject per the consult skill. Update the
 proposed decomposition accordingly.
 
 ## Step 5: Decompose (Gate G1)
