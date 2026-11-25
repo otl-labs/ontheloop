@@ -24,16 +24,20 @@ scope:
       Add guidance_slots(root, route_id) -> list[str]: reads docs/contracts/personas/<route_id>.yaml under root (the
       trusted checkout) for any persona kind, not only fixture personas; returns [] when the contract or its
       guidance_slots key is absent; raises ValueError when route_id is off ^[a-z][a-z0-9_]*$, the contract does not
-      parse, or guidance_slots is not a list of strings. Never reads under the snapshot.
+      parse (its own loader: execute._load swallows YAMLError), or guidance_slots is present but not a list of strings
+      (null included). Never reads under the snapshot.
   - file: scripts/personas/materialise.py
     action: Modify
     purpose: >-
-      build_input and materialise take a keyword-only base_root: Path (default execute.ROOT, the main checkout derived
-      from the module path); main passes execute.ROOT explicitly. After the route's provider fields, build_input reads
-      slots = execute.guidance_slots(base_root, route_id) and merges guidance.fill(base_root, route_id, slots); the
-      head snapshot root is never passed to either. A provider field that names a declared slot, or a ValueError from
-      guidance_slots or fill, raises Unusable("input_unusable", detail), so the route gets a failure file and no input.
-      Docstring names the base-root rule.
+      build_input and materialise take a keyword-only base_root: Path | None = None, resolved at call time to
+      execute.ROOT (the main checkout derived from the module path), so a monkeypatched execute.ROOT moves it; main
+      passes execute.ROOT explicitly. The fixture-provider lookup reads execute.fixture_personas(base_root). After the
+      route's provider fields, build_input reads slots = execute.guidance_slots(base_root, route_id) and merges
+      guidance.fill(base_root, route_id, slots); the head snapshot root is never passed to either. A declared slot that
+      names any key already in the input (the shared change_id, head_sha, plan or a provider field), or a ValueError or
+      OSError from guidance_slots or fill, raises Unusable("input_unusable", detail), so the route gets a failure file
+      and no input. Any other exception from a registered provider propagates and fails the prepare job (fail closed:
+      no input, no verdict). Docstring names the base-root rule.
   - file: scripts/personas/keyed_run.py
     action: Modify
     purpose: >-
@@ -41,7 +45,8 @@ scope:
       prepared input-<route>.json for each slot execute.guidance_slots(root, route) declares; the key is omitted when
       the route declares none, so today's records are byte-unchanged. A ValueError from guidance_slots, or a declared
       slot missing from the prepared input, writes {route, failure: input_unusable} instead, so a run whose inputs
-      cannot be replayed is never posted as a verdict.
+      cannot be replayed is never posted as a verdict. The ValueError catch wraps only the guidance_slots call, so an
+      image_pin.load_pin ValueError is never relabelled input_unusable.
   - file: docs/contracts/executor-personas.yaml
     action: Modify
     purpose: >-
@@ -58,8 +63,10 @@ scope:
       focus and ontheloop/guidance/<route>/focus.md with text BASE; the head snapshot holds a different focus.md with
       text HEAD and a second slot file present only at head; the input carries BASE for focus and "" for the head-only
       slot, and HEAD appears nowhere in the written input. test_guidance_collision_and_bad_file_are_unusable: a
-      provider field naming a slot, and a symlinked guidance file at the base root, each give a failure file with
-      input_unusable and no input file.
+      provider field naming a slot, a slot named plan, and a symlinked guidance file at the base root, each give a
+      failure file with input_unusable and no input file. test_main_fills_guidance_from_execute_root_not_the_snapshot:
+      with execute.ROOT monkeypatched to a tmp base root and PERSONA_SNAPSHOT holding a head-only guidance file,
+      main() writes the base value and the head text appears nowhere in the input.
   - file: tests/personas/test_execute.py
     action: Modify
     purpose: >-
@@ -67,7 +74,7 @@ scope:
       raises ValueError. test_record_keeps_guidance_slot_values: a route declaring slots records guidance equal to the
       prepared input's values; a route declaring none has no guidance key; a declared slot missing from the input
       records failure input_unusable.
-bundled_recommendations: []
+bundled_recommendations: [rec-5605]
 followon_recs: []
 infrastructure_dependencies: []
 acceptance_criteria:
@@ -88,14 +95,18 @@ verification_plan:
     graduation_check_id: persona-guidance-chain-fill
   - step: 2
     phase: pre-deploy
-    action: Every new and existing node in the two touched test files passes.
-    command: bin/venv-python -m pytest tests/personas/test_materialise.py tests/personas/test_execute.py -q
-    expected: exit 0 with no failure; collision, bad-file, record capture and the unchanged no-slot record hold
-    fix_if: a node fails; fix the code, never an existing assertion
+    action: The fail-closed and capture nodes pass.
+    command: >-
+      bin/venv-python -m pytest tests/personas/test_materialise.py::test_guidance_collision_and_bad_file_are_unusable
+      tests/personas/test_materialise.py::test_main_fills_guidance_from_execute_root_not_the_snapshot
+      tests/personas/test_execute.py::test_guidance_slots_reads_any_contract
+      tests/personas/test_execute.py::test_record_keeps_guidance_slot_values -q
+    expected: exit 0 with 4 passed; before the change the nodes do not exist
+    fix_if: a node fails; fix the code, never the test's expectation
     hermetic: true
-    expected_literals: ["passed"]
-    graduation: waive
-    graduation_waiver_reason: These files already run in both tiers whenever the persona modules change; step 1 graduates the call-site guard the rec names.
+    expected_literals: ["4 passed"]
+    graduation: graduate
+    graduation_check_id: persona-guidance-chain-guards
   - step: 3
     phase: pre-deploy
     action: The persona contract suites stay green against the edited guidance_slot rule.
@@ -152,7 +163,7 @@ test_obligations:
     behavior: the guidance_slot rule names the chain call-site test and the record capture; the contract checks stay green
     verification_step: 3
     command: bin/venv-python -m pytest tests/persona_contracts tests/checks/contracts/test_validate_persona_contracts.py -q
-    red_green_expectation: green before and after; a malformed amendment_log row turns validate_contract_drift red
+    red_green_expectation: green before and after; the amendment_log hold and decay rule (validate_contract_drift) is proved by step 5's full tier
 constraints:
   - "No persona contract, template, rendered prompt or hash changes; slots on the five contracts are rec-5585."
   - "No workflow change: the prepare job already checks out main at github.sha to $GITHUB_WORKSPACE/main, and run.py derives execute.ROOT from its own path, so base_root is main's checkout without a new input."
@@ -162,16 +173,33 @@ constraints:
 context:
   - "rec-5605 (High, S, follow-on of rec-5569 critique PGS-11); ours per coordinator log #1963 comment 7135399081."
   - "Base ref: workflow_run runs main's definition and the prepare job's checkout is github.sha, main's tip, the trusted tree Decision 205 cl.2 names; materialise reads the head only through snapshot.read_bytes under PERSONA_SNAPSHOT."
-  - "Fork decided with notice: slot values are captured in results/<route>.json (the run job's record) rather than a new record file. The prepared and results artifacts keep 1-day retention, so this is capture, not a durable replay snapshot; durable storage for Decision 231 cl.3 replays is owned by Decision 231's run-record journal (T4.14 c1/c10), not built yet."
-  - "Overlap: PLAN-persona-verdict-fallback-run (rec-5559, build pending, amendment PR #2482) edits keyed_run.py record_main/request_main and tests/personas/test_execute.py. keyed_run.py is 335 of 500 SLOC, so no ordering edge; whichever build lands second rebases."
+  - "Fork decided with notice: slot values are captured in results/<route>.json (the run job's record) rather than a new record file. The prepared and results artifacts keep 1-day retention, so this is capture, not a durable replay snapshot; durable storage for Decision 231 cl.3 replays is owned by Decision 231's run-record journal (T4.14 c1/c10), not built yet. The slot values are input_schema fields of input-<route>.json, so any T4.14 c10 snapshot of a run's input carries them by construction (critique PGC-08)."
+  - "Overlap: PLAN-persona-verdict-fallback-run (rec-5559, build pending, amendment PR #2482) edits keyed_run.py record_main/request_main and tests/personas/test_execute.py. keyed_run.py is 291 of 500 SLOC, so no ordering edge; whichever build lands second rebases."
   - "Graduated shard persona-verdict-fixture-run-units kept: its test_execute.py and test_materialise.py nodes are unchanged; the new nodes are additive."
   - "Decision-scout r1 FLAGS_FOUND (fingerprint v1:8a3d81ebf9915ebd6cd606e61e824c27d7638cbb30fcbf77d7c2b097ff3d4971): WARN 282 cl.1 (amendment_log decay binds, compactable=2) fixed by amendment_compact --write --rows 1 in scope row 4; NOTE 231 cl.3 (1-day artifacts are not a durable snapshot) fixed by toning the intent to capture and naming T4.14's journal as the durable owner. CITE 205, 231, 280. RELATED 117, 185, 206, 187, 271, 235, 181, 132, 244, 212, 275, 279, 221, 55. Decisions triaged: 234 of 234; roadmap items intersected 5, CONFLICT 0."
   - "Decision-scout r2 NO_FLAGS on the written plan (fingerprint v1:27e0b7b568f2d57076229b915a61f0814d97424e2faab5ef5a201c44b6c1dbf1): r1 WARN 282 and NOTE 231 resolved. CITE 205, 231, 280, 282. RELATED 275, 279, 117, 185, 187, 229, 271, 264, 206, 212, 168, 235, 181, 132, 244, 55. Decisions triaged: 234 of 234. Roadmap items intersected: 5; CONFLICT: 0; RELATED: 4."
+  - "closes_criteria is [] by design: T4.32 c1 is an umbrella this plan advances but cannot discharge (critique PGC-05)."
   - "red_overlap: {verdict: clear, slo_hours: 4, reds: []} (2026-11-25 21:19Z)."
   - "Serves: NS.9 4/5 -- guidance read from main's checkout means a change cannot steer the guidance that judges it; capture partly serves NS.6."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:8a3d81ebf9915ebd6cd606e61e824c27d7638cbb30fcbf77d7c2b097ff3d4971"}  # pragma: allowlist secret
   - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: "v1:27e0b7b568f2d57076229b915a61f0814d97424e2faab5ef5a201c44b6c1dbf1"}  # pragma: allowlist secret
+  - gate: plan-critique
+    round: 1
+    verdict: REVISE
+    blocking: 2
+    nits: 7
+    category_consistency: []
+    findings:
+      - {id: PGC-01, severity: blocking, origin: mechanical, anchor: "verification_plan[step 2]", subject: "hermetic step re-ran whole in-scope test files (rule v lint)", disposition: fixed}
+      - {id: PGC-02, severity: blocking, origin: judgement, anchor: "bundled_recommendations", subject: "empty list means no Resolves trailer, rec-5605 stays open", disposition: fixed}
+      - {id: PGC-03, severity: nit, origin: judgement, anchor: "scope[scripts/personas/materialise.py]", subject: "main() hop to execute.ROOT untested; default bound at import", disposition: fixed}
+      - {id: PGC-04, severity: nit, origin: judgement, anchor: "scope[scripts/personas/materialise.py]", subject: "OSError, null slots, shared-field collision, narrow record catch", disposition: fixed}
+      - {id: PGC-05, severity: nit, origin: mechanical, anchor: "closes_criteria", subject: "in_progress T4.32 with closes_criteria []; say why", disposition: fixed}
+      - {id: PGC-06, severity: nit, origin: judgement, anchor: "verification_plan[step 2].graduation_waiver_reason", subject: "thin waiver; graduate the fail-closed nodes", disposition: fixed}
+      - {id: PGC-07, severity: nit, origin: mechanical, anchor: "context[3]", subject: "keyed_run.py is 291 SLOC, not 335", disposition: fixed}
+      - {id: PGC-08, severity: nit, origin: judgement, anchor: "context[2]", subject: "durable replay residual should name guidance values", disposition: fixed}
+      - {id: PGC-09, severity: nit, origin: judgement, anchor: "test_obligations[3]", subject: "step 3 does not run the amendment_log decay check", disposition: fixed}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
