@@ -280,3 +280,91 @@ def test_the_group_exists_together_or_not_at_all() -> None:
     doc = _doc()
     doc["jobs"].pop("smoke")
     assert any("together or not at all" in p for p in k.keyed_problems(doc))
+
+
+def _run_named(d: dict[str, Any], name: str) -> dict[str, Any]:
+    return _named(d["jobs"]["run"], name)
+
+
+RUN_RED = [
+    (
+        "persona-extra-key",
+        "persona step keys are not exactly",
+        lambda d: _run_named(d, "Run the fixture persona").update({"shell": "bash"}),
+    ),
+    (
+        "persona-wd",
+        "persona step keys are not exactly",
+        lambda d: _run_named(d, "Run the fixture persona").update({"working-directory": "/tmp"}),
+    ),
+    (
+        "persona-env",
+        "persona step env is not exactly",
+        lambda d: _run_named(d, "Run the fixture persona")["env"].update({"X": "y"}),
+    ),
+    ("final-no-if", "final self-check must carry", lambda d: d["jobs"]["run"]["steps"][-1].pop("if")),
+    (
+        "drop-step",
+        "are not exactly the 14 canonical steps",
+        lambda d: d["jobs"]["run"]["steps"].remove(_run_named(d, "Set up Python 3.12")),
+    ),
+    (
+        "uses-unpinned",
+        "differs from its canonical mapping",
+        lambda d: _run_named(d, "Check out main").update({"uses": "actions/checkout@v7"}),
+    ),
+    (
+        "uses-other",
+        "differs from its canonical mapping",
+        lambda d: _run_named(d, "Set up Python 3.12").update({"uses": "actions/cache@" + "a" * 40}),
+    ),
+    (
+        "mkdir-run",
+        "differs from its canonical mapping",
+        lambda d: _run_named(d, "Create the work directory").update({"run": "mkdir -p /tmp/x"}),
+    ),
+    (
+        "with-extra",
+        "differs from its canonical mapping",
+        lambda d: _run_named(d, "Download prepared inputs")["with"].update({"run-id": "1"}),
+    ),
+    (
+        "with-value",
+        "differs from its canonical mapping",
+        lambda d: _run_named(d, "Set up Python 3.12")["with"].update({"python-version": "3.11"}),
+    ),
+    (
+        "id-changed",
+        "differs from its canonical mapping",
+        lambda d: _run_named(d, "Create the work directory").update({"id": "zz"}),
+    ),
+    (
+        "floor-extra-key",
+        "keys beyond name, id and run",
+        lambda d: _run_named(d, "Lay the container egress floor").update({"if": "always()"}),
+    ),
+    (
+        "reorder",
+        "differs from its canonical mapping",
+        lambda d: d["jobs"]["run"]["steps"].insert(5, d["jobs"]["run"]["steps"].pop(3)),
+    ),
+    (
+        "extra-run-py-step",
+        "run.py steps are not exactly",
+        lambda d: d["jobs"]["run"]["steps"].insert(
+            3, {"id": "s", "run": v.RUN_PREFIX + "post", "working-directory": v.WORKDIR}
+        ),
+    ),
+    ("top-env", "a top-level env:", lambda d: d.update({"env": {"A": "b"}})),
+    ("top-defaults", "a top-level defaults:", lambda d: d.update({"defaults": {"run": {"shell": "bash"}}})),
+    ("job-env-run", "run sets env", lambda d: d["jobs"]["run"].update({"env": {"BASH_ENV": "x"}})),
+]
+
+
+@pytest.mark.parametrize(("name", "expect", "edit"), RUN_RED, ids=[r[0] for r in RUN_RED])
+def test_each_run_job_mutation_is_refused(name: str, expect: str, edit: Callable[[dict[str, Any]], None]) -> None:
+    assert any(expect in p for p in _problems(edit)), (name, _problems(edit))
+
+
+def test_a_job_outside_the_pip_map_reports_a_problem() -> None:
+    assert k._pip_rules("other", {"steps": []}) == [f"{v.VERDICT}: keyed job other has no pinned pip set"]

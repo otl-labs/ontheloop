@@ -166,3 +166,73 @@ def test_primary_host_reports_a_missing_contract_and_a_missing_primary_row(tmp_p
 def test_write_all_permissions_count_as_id_token_write() -> None:
     job = {"permissions": "write-all", "steps": []}
     assert any("id-token: write" in p for p in c.class_problems("w", c.PROBE, {}, job, [], None))
+
+
+def _run_job() -> tuple[Docs, Docs, list[Any], str | None]:
+    wf = yaml.safe_load((LIVE / c.VERDICT).read_text(encoding="utf-8"))
+    cfg = yaml.safe_load((LIVE / v.LIST_FILE).read_text(encoding="utf-8"))
+    row = cfg["jobs"][c.VERDICT]["run"]
+    return wf, copy.deepcopy(wf["jobs"]["run"]), row, c.primary_host(LIVE, cfg)[0]
+
+
+def _run_problems(edit: Callable[[Docs, list[Any]], None] | None = None, primary: bool = True) -> list[str]:
+    wf, job, row, host = _run_job()
+    if edit:
+        edit(job, row)
+    return c.run_job_problems("w::run", wf, job, row, host if primary else None)
+
+
+def _named(job: Docs, name: str) -> dict[str, Any]:
+    return next(s for s in job["steps"] if s.get("name") == name)
+
+
+RUN_RED: list[tuple[str, str, Callable[[Docs, list[Any]], None]]] = [
+    ("permissions", "permissions must be exactly", lambda j, r: j.update({"permissions": {"contents": "read"}})),
+    ("environment", "persona-verdict Environment", lambda j, r: j.pop("environment")),
+    ("inherit", "inherits secrets", lambda j, r: j.update({"secrets": "inherit"})),
+    ("third-sudo", "only sudo lines", lambda j, r: j["steps"].insert(3, {"id": "x", "run": "sudo id"})),
+    ("one-probe", "needs the floor step", lambda j, r: j["steps"].remove(_named(j, "Probe from the container again"))),
+    (
+        "probe-keys",
+        "probe step's keys",
+        lambda j, r: _named(j, "Probe from the container again").update({"continue-on-error": True}),
+    ),
+    ("persona-env", "persona step's keys", lambda j, r: _named(j, "Run the fixture persona")["env"].update({"X": "y"})),
+    (
+        "secret-elsewhere",
+        "outside the persona step",
+        lambda j, r: _named(j, "Harden the runner").update({"env": {"A": "${{ secrets.X }}"}}),
+    ),
+    (
+        "wrong-secret",
+        "exactly secrets.AWS_ACCOUNT_ID",
+        lambda j, r: _named(j, "Run the fixture persona")["env"].update({"AWS_ACCOUNT_ID": "${{ secrets.OTHER }}"}),
+    ),
+    ("last-step", "final self-check", lambda j, r: j["steps"].pop()),
+    ("row", "run job's row must be exactly", lambda j, r: r.append("evil.example:443")),
+]
+
+
+def test_the_live_run_job_passes_the_class_rules() -> None:
+    assert _run_problems() == []
+    assert _run_problems(primary=False) == []
+
+
+@pytest.mark.parametrize(("name", "message", "edit"), RUN_RED, ids=[r[0] for r in RUN_RED])
+def test_each_run_job_red_fixture_is_refused(name: str, message: str, edit: Callable[[Docs, list[Any]], None]) -> None:
+    assert any(message in p for p in _run_problems(edit)), (name, _run_problems(edit))
+
+
+def test_probe_ordering_around_the_persona_step_is_enforced() -> None:
+    def early(j: Docs, r: list[Any]) -> None:
+        steps = j["steps"]
+        first = next(i for i, s in enumerate(steps) if s.get("name") == "Probe from the container")
+        steps.insert(0, steps.pop(first))
+
+    def late(j: Docs, r: list[Any]) -> None:
+        steps = j["steps"]
+        i = next(i for i, s in enumerate(steps) if s.get("name") == "Probe from the container again")
+        steps.insert(len(steps) - 3, steps.pop(i))
+
+    assert any("must follow the first self-check" in p for p in _run_problems(early))
+    assert any("second probe must be" in p for p in _run_problems(late))
