@@ -96,3 +96,36 @@ def test_no_base_url_means_refused(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_dns_query_shape_and_tcp_refusal() -> None:
     assert P.dns_query("a.b")[12:] == b"\x01a\x01b\x00\x00\x10\x00\x01"
     assert P._connect("127.0.0.1", 1) is False
+
+
+def _report_file(tmp_path: Path, content: str | None) -> str:
+    path = tmp_path / "input.json"
+    if content is not None:
+        path.write_text(content)
+    return str(path)
+
+
+def test_report_mode_reports_unreachable_upstream(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(P, "EVENTS", str(tmp_path / "events.json"))
+    monkeypatch.setattr(P, "INPUT", _report_file(tmp_path, '{"upstream": "report"}'))
+    _fake(monkeypatch, _all("refused", proxy_upstream="upstream-unreachable", proxy_fixed_upstream="upstream-unreachable"))
+    assert P.main([]) == 0
+    out = capsys.readouterr().out
+    assert "case=proxy_upstream expect=reached got=upstream-unreachable REPORT" in out and out.strip().endswith("PASS")
+    _fake(monkeypatch, _all("refused", proxy_upstream="proxy-refused"))
+    assert P.main([]) == 1
+    _fake(monkeypatch, _all("refused", raw_ip_443="reached", proxy_upstream="upstream-unreachable"))
+    assert P.main([]) == 1
+
+
+@pytest.mark.parametrize("content", ["{}", '{"upstream": "other"}', '{"upstream": "report", "x": 1}', "[1]", "nope", None])
+def test_other_inputs_stay_strict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], content: str | None
+) -> None:
+    monkeypatch.setattr(P, "EVENTS", str(tmp_path / "events.json"))
+    monkeypatch.setattr(P, "INPUT", _report_file(tmp_path, content))
+    _fake(monkeypatch, _all("refused", proxy_upstream="upstream-unreachable"))
+    assert P.main([]) == 1
+    assert "REPORT" not in capsys.readouterr().out

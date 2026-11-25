@@ -128,6 +128,11 @@ def overridable_output(root: Path, route_id: str, result: Any) -> tuple[str, lis
     return verdict, sorted(set(ids)), out
 
 
+FALLBACK_RAN = ("success", "failure", "cancelled")
+FALLBACK_MARK = " (fallback role)"
+FALLBACK_NO_RESULT = " (fallback role: no result)"
+
+
 def record_text(route_id: str, head_sha: str, verdict: str, ids: list[str], out: dict[str, Any]) -> str:
     lines = [override.render_record(route_id, head_sha, verdict, ids, os.environ.get("GITHUB_RUN_ID", "0"))]
     titles = {
@@ -188,8 +193,11 @@ def plan_all(root: Path, work: Path, repo: str, read_token: str | None) -> list[
     if resolution.get("override"):
         return [plan_override(resolution, repo, read_token)]
     bodies = []
+    fallback_run = os.environ.get("PERSONA_FALLBACK_RESULT", "") in FALLBACK_RAN
     for route_id in routes_doc.get("routes", []):
-        result = _read(work / "results" / f"{route_id}.json")
+        fallback = _read(work / "results-fallback" / f"{route_id}.json")
+        result = fallback if fallback is not None else _read(work / "results" / f"{route_id}.json")
+        marker = FALLBACK_MARK if fallback is not None else FALLBACK_NO_RESULT if fallback_run else ""
         allowlisted = bool(resolution.get("allowlisted"))
         conclusion, title, summary = judge(root, route_id, result, allowlisted)
         text: str | None = None
@@ -212,7 +220,7 @@ def plan_all(root: Path, work: Path, repo: str, read_token: str | None) -> list[
                 if approved:
                     conclusion = "success"
                     title, summary, text = _override_form(approved, verdict, ids, text)
-        bodies.append(_body(f"persona-verdict/{route_id}", resolution["head_sha"], conclusion, title, summary, text))
+        bodies.append(_body(f"persona-verdict/{route_id}", resolution["head_sha"], conclusion, title + marker, summary, text))
     return bodies
 
 

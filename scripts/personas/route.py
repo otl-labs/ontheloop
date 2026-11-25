@@ -21,6 +21,7 @@ from scripts.session import merge_checks
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_DIR = "tests/fixtures/persona_verdict/fixture_pr/"
+DRILL_PATH = FIXTURE_DIR + "fallback_drill.txt"
 PLAN_PATH = re.compile(r"docs/plans/PLAN-[^/]+\.yaml")
 PLAN_SIZE_CAP = 512 * 1024
 COMPARE_LIMIT = 300
@@ -160,6 +161,13 @@ def fixture_routes(files: list[dict[str, Any]], unknown: bool, root: Path = ROOT
     return execute.fixture_personas(root) if fixture_paths(files, unknown) else []
 
 
+def fallback_drill(files: list[dict[str, Any]], unknown: bool) -> bool:
+    """True only for a fixture-only diff that adds or modifies the drill marker."""
+    if not fixture_paths(files, unknown):
+        return False
+    return any(f.get("filename") == DRILL_PATH and f.get("status") in ("added", "modified") for f in files)
+
+
 def route(
     files: list[dict[str, Any]],
     unknown: bool,
@@ -203,6 +211,7 @@ def main(argv: list[str]) -> int:
     routes: list[str] = []
     plans: list[str] = []
     fixture = False
+    drill = False
     paths: list[str] = []
     if resolution.get("resolved") and not resolution.get("override"):
         files, unknown, merge_base = changed_files(repo, resolution["base_ref"], resolution["head_sha"], token)
@@ -210,10 +219,13 @@ def main(argv: list[str]) -> int:
         plans = [str(f["filename"]) for f in plan_files(files)]
         paths = fixture_paths(files, unknown)
         fixture = bool(fixture_routes(files, unknown))
+        drill = fixture and fallback_drill(files, unknown)
     ROUTES.parent.mkdir(parents=True, exist_ok=True)
     ROUTES.write_text(
         json.dumps({"routes": routes, "plan_paths": plans, "fixture_paths": paths}, sort_keys=True), encoding="utf-8"
     )
     print(f"PERSONA-VERDICT routes={len(routes)} {' '.join(routes)}".rstrip())
-    resolve_pr.write_output(routes=str(len(routes)), fixture="true" if fixture else "false")
+    resolve_pr.write_output(
+        routes=str(len(routes)), fixture="true" if fixture else "false", fallback_drill="true" if drill else "false"
+    )
     return 0

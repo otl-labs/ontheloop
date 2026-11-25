@@ -45,6 +45,10 @@ IN_MOUNT = "/run/persona/in"
 EVENTS_MOUNT = "/run/persona/events"
 MAX_REQUEST = 4 * 1024 * 1024
 MAX_RESULT = 4 * 1024 * 1024
+MAX_COUNTS_LINES = 4096
+MAX_COUNTS_LINE = 256
+COUNT_KEYS = {"ok", "outage", "inflight"}
+SETTLE_SECONDS = 0.3
 BOUNDS = {"probe": 120, "run": 600}
 GONE_SECONDS = 30.0
 GONE_STEP = 0.5
@@ -135,7 +139,37 @@ def proxy_argv(provider: dict[str, Any], directory: Path = INSTALL_DIR) -> list[
     ]  # fmt: skip
 
 
-def container_argv(mode: str, image: str, persona: str, provider: dict[str, Any], in_dir: str, events_dir: str) -> list[str]:
+def counts_line(raw: bytes) -> dict[str, int] | None:
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        return None
+    if not isinstance(value, dict) or set(value) != COUNT_KEYS:
+        return None
+    if any(type(v) is not int or v < 0 for v in value.values()):
+        return None
+    return {k: int(value[k]) for k in sorted(COUNT_KEYS)}
+
+
+def read_counts(session: Session, stream: Any) -> None:
+    for _ in range(MAX_COUNTS_LINES):
+        raw = stream.readline(MAX_COUNTS_LINE)
+        if not raw:
+            return
+        if not raw.endswith(b"\n"):
+            while raw and not raw.endswith(b"\n"):
+                raw = stream.readline(MAX_COUNTS_LINE)
+            continue
+        parsed = counts_line(raw)
+        if parsed is not None:
+            session.upstream = parsed
+    while stream.readline(MAX_COUNTS_LINE):
+        pass
+
+
+def container_argv(
+    mode: str, image: str, persona: str, provider: dict[str, Any], in_dir: str, events_dir: str, role: str | None = None
+) -> list[str]:
     argv = [
         DOCKER, "run", "--rm", "--name", CONTAINER, "--read-only", "--tmpfs", "/tmp", "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges", "--user", f"{CONTAINER_UID}:{CONTAINER_UID}", "--pids-limit", "256",
@@ -149,9 +183,10 @@ def container_argv(mode: str, image: str, persona: str, provider: dict[str, Any]
             *argv, "-e", f"PERSONA_PROBE_CHAT_PATH={provider['chat_path']}", "--entrypoint", "python", image,
             "-I", f"{IN_MOUNT}/egress_container_probe.py",
         ]  # fmt: skip
+    tail = ["--role", role] if role else []
     return [
         *argv, image, "--contract", f"/app/docs/contracts/personas/{persona}.yaml",
-        "--input", f"{IN_MOUNT}/input.json", "--events", f"{EVENTS_MOUNT}/events.json",
+        "--input", f"{IN_MOUNT}/input.json", "--events", f"{EVENTS_MOUNT}/events.json", *tail,
     ]  # fmt: skip
 
 
@@ -234,6 +269,8 @@ class Session:
         self.lock_fd: int | None = None
         self.decoy: socket.socket | None = None
         self.started = False
+        self.upstream: dict[str, int] | None = None
+        self.reader: threading.Thread | None = None
 
     def cleanup(self) -> bool:
         kill_container()
@@ -298,10 +335,9 @@ def make_dirs(session: Session, mode: str, persona_input: dict[str, Any], direct
     if mode == "probe":
         shutil.copyfile(directory / "egress_container_probe.py", os.path.join(in_dir, "egress_container_probe.py"))
         os.chmod(os.path.join(in_dir, "egress_container_probe.py"), 0o644)
-    else:
-        target = os.path.join(in_dir, "input.json")
-        Path(target).write_text(json.dumps(persona_input), encoding="utf-8")
-        os.chmod(target, 0o644)
+    target = os.path.join(in_dir, "input.json")
+    Path(target).write_text(json.dumps(persona_input), encoding="utf-8")
+    os.chmod(target, 0o644)
     return in_dir, events_dir
 
 
@@ -309,11 +345,19 @@ def start_proxy(session: Session, provider: dict[str, Any], key: str | None, dir
     entry = pwd.getpwnam(PROXY_USER)
     session.started = True
     session.proxy = subprocess.Popen(
-        proxy_argv(provider, directory), stdin=subprocess.PIPE, user=entry.pw_uid, group=entry.pw_gid, extra_groups=[]
+        proxy_argv(provider, directory),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        user=entry.pw_uid,
+        group=entry.pw_gid,
+        extra_groups=[],
     )
     assert session.proxy.stdin is not None
     session.proxy.stdin.write((key or "").encode("ascii"))
     session.proxy.stdin.close()
+    assert session.proxy.stdout is not None
+    session.reader = threading.Thread(target=read_counts, args=(session, session.proxy.stdout), daemon=True)
+    session.reader.start()
     for _ in range(50):
         if session.proxy.poll() is not None:
             raise Refused("proxy exited at start")
@@ -373,14 +417,26 @@ def serve(mode: str, session: Session) -> int:
         start_decoy(session)
     session.started = True
     code, stdout = run_container(
-        mode, container_argv(mode, snapshot["image"], request["persona"], provider, in_dir, events_dir)
+        mode,
+        container_argv(
+            mode,
+            snapshot["image"],
+            request["persona"],
+            provider,
+            in_dir,
+            events_dir,
+            provider.get("role") if mode == "run" else None,
+        ),
     )
+    if mode == "run":
+        threading.Event().wait(SETTLE_SECONDS)
     events = read_events(events_dir)
     if mode == "probe":
         print(json.dumps({"exit_code": code, "events": events}))
     else:
         text = stdout.decode("utf-8", errors="replace")
-        print(json.dumps({"exit_code": code, "timed_out": code is None, "stdout": text, "events": events}))
+        result = {"exit_code": code, "timed_out": code is None, "stdout": text, "events": events, "upstream": session.upstream}
+        print(json.dumps(result))
     if code is None:
         return 1
     if mode == "probe":

@@ -501,7 +501,7 @@ def test_red_fixture_is_refused(tmp_path: Path, edit: Callable[[Docs], None], ex
 
 
 def test_the_keyed_jobs_are_part_of_the_seven_job_set() -> None:
-    assert set(v.JOB_PERMISSIONS) == {"prepare", "run", "post", "wake", "keyprep", "smoke", "refusal"}
+    assert set(v.JOB_PERMISSIONS) == {"prepare", "run", "run-fallback", "post", "wake", "keyprep", "smoke", "refusal"}
 
 
 def test_missing_files_are_refused(tmp_path: Path) -> None:

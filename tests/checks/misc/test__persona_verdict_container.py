@@ -107,7 +107,7 @@ def test_launcher_before_the_first_self_check_is_refused(tmp_path: Path) -> None
 
 def test_a_container_job_outside_the_probe_workflow_is_refused() -> None:
     job = copy.deepcopy(_docs()["probe"]["jobs"][JOB])
-    problems = c.class_problems("w::j", ".github/workflows/persona-verdict.yml", {}, job, [], None)
+    problems = c.class_problems("w::j", ".github/workflows/persona-verdict.yml", {}, job, [], {})
     assert any("must be in" in p for p in problems)
 
 
@@ -130,21 +130,26 @@ def test_a_lone_provider_host_in_a_job_outside_the_class_is_refused(tmp_path: Pa
 def test_the_class_row_rule_admits_what_the_ordinary_rule_refuses() -> None:
     job = _docs()["probe"]["jobs"][JOB]
     row = ["api.deepseek.com:443", c.BLOB_HOST]
-    assert c.class_problems("w", c.PROBE, {}, job, row, "api.deepseek.com:443") == []
+    assert c.class_problems("w", c.PROBE, {}, job, row, {"primary": "api.deepseek.com:443"}) == []
     ordinary = v._row_host_problems("w", LIVE, yaml.safe_load((LIVE / v.LIST_FILE).read_text()), row, job["steps"])
     assert ordinary
 
 
 def test_the_class_row_rule_refuses_what_the_ordinary_rule_admits() -> None:
     job = _docs()["probe"]["jobs"][JOB]
-    problems = c.class_problems("w", c.PROBE, {}, job, ["sts.amazonaws.com:443"], "api.deepseek.com:443")
+    problems = c.class_problems("w", c.PROBE, {}, job, ["sts.amazonaws.com:443"], {"primary": "api.deepseek.com:443"})
     assert any("row must be exactly" in p for p in problems)
 
 
-def test_primary_host_is_the_primary_role_tiers_provider() -> None:
+def test_role_hosts_maps_each_committed_role_to_its_provider() -> None:
     data = yaml.safe_load((LIVE / v.LIST_FILE).read_text(encoding="utf-8"))
-    assert c.primary_host(LIVE, data) == ("api.deepseek.com:443", [])
-    assert c.primary_host(LIVE, {"provider_hosts": {}})[0] is None
+    assert c.role_hosts(LIVE, data) == (
+        {"primary": "api.deepseek.com:443", "warm_fetched_escape_hatch": "api.anthropic.com:443"},
+        [],
+    )
+    assert c.role_hosts(LIVE, {"provider_hosts": {}})[1]
+    shared = {"provider_hosts": {"deepseek/": "h:443", "anthropic/": "h:443"}}
+    assert any("share a provider host" in p for p in c.role_hosts(LIVE, shared)[1])
 
 
 def test_container_floor_verb_is_floor_only_in_the_class() -> None:
@@ -153,33 +158,33 @@ def test_container_floor_verb_is_floor_only_in_the_class() -> None:
     assert c.is_container_job(job) and not c.is_container_job({"steps": [{"run": "sudo " + fl.PROBE_PREFIX + "egress-floor"}]})
 
 
-def test_primary_host_reports_a_missing_contract_and_a_missing_primary_row(tmp_path: Path) -> None:
-    host, problems = c.primary_host(tmp_path, {})
-    assert host is None and "does not give the tier models" in problems[0]
+def test_role_hosts_reports_a_missing_contract_and_a_missing_primary_row(tmp_path: Path) -> None:
+    hosts, problems = c.role_hosts(tmp_path, {})
+    assert hosts == {} and "does not give the tier models" in problems[0]
     contract = tmp_path / c.INFERENCE_PROVIDER
     contract.parent.mkdir(parents=True)
     contract.write_text("tier_model: {tiers: [{role: other}]}\nmodel_id_formats: {litellm_tier_models: {}}\n")
-    host, problems = c.primary_host(tmp_path, {})
-    assert host is None and "no primary-role tier row" in problems[0]
+    hosts, problems = c.role_hosts(tmp_path, {})
+    assert hosts == {} and "no primary-role tier row" in problems[0]
 
 
 def test_write_all_permissions_count_as_id_token_write() -> None:
     job = {"permissions": "write-all", "steps": []}
-    assert any("id-token: write" in p for p in c.class_problems("w", c.PROBE, {}, job, [], None))
+    assert any("id-token: write" in p for p in c.class_problems("w", c.PROBE, {}, job, [], {}))
 
 
-def _run_job() -> tuple[Docs, Docs, list[Any], str | None]:
+def _run_job() -> tuple[Docs, Docs, list[Any], dict[str, str]]:
     wf = yaml.safe_load((LIVE / c.VERDICT).read_text(encoding="utf-8"))
     cfg = yaml.safe_load((LIVE / v.LIST_FILE).read_text(encoding="utf-8"))
     row = cfg["jobs"][c.VERDICT]["run"]
-    return wf, copy.deepcopy(wf["jobs"]["run"]), row, c.primary_host(LIVE, cfg)[0]
+    return wf, copy.deepcopy(wf["jobs"]["run"]), row, c.role_hosts(LIVE, cfg)[0]
 
 
 def _run_problems(edit: Callable[[Docs, list[Any]], None] | None = None, primary: bool = True) -> list[str]:
     wf, job, row, host = _run_job()
     if edit:
         edit(job, row)
-    return c.run_job_problems("w::run", wf, job, row, host if primary else None)
+    return c.run_job_problems("w::run", wf, job, row, host if primary else {})
 
 
 def _named(job: Docs, name: str) -> dict[str, Any]:
@@ -236,3 +241,34 @@ def test_probe_ordering_around_the_persona_step_is_enforced() -> None:
 
     assert any("must follow the first self-check" in p for p in _run_problems(early))
     assert any("second probe must be" in p for p in _run_problems(late))
+
+
+def _fallback_problems(row_edit: Callable[[list[Any]], list[Any]] | None = None, job_name: str = "run-fallback") -> list[str]:
+    wf = yaml.safe_load((LIVE / c.VERDICT).read_text(encoding="utf-8"))
+    cfg = yaml.safe_load((LIVE / v.LIST_FILE).read_text(encoding="utf-8"))
+    hosts = c.role_hosts(LIVE, cfg)[0]
+    row = list(cfg["jobs"][c.VERDICT][job_name])
+    if row_edit:
+        row = row_edit(row)
+    return c.run_job_problems(f"{c.VERDICT}::{job_name}", wf, copy.deepcopy(wf["jobs"][job_name]), row, hosts)
+
+
+def test_class_row_holds_its_roles_one_provider_host() -> None:
+    assert _fallback_problems() == [] and _fallback_problems(job_name="run") == []
+    swap = lambda row: ["api.deepseek.com:443" if h == "api.anthropic.com:443" else h for h in row]  # noqa: E731
+    assert any("row must be exactly" in p for p in _fallback_problems(swap))
+    run_with_fallback = lambda row: ["api.anthropic.com:443" if h == "api.deepseek.com:443" else h for h in row]  # noqa: E731
+    assert any("row must be exactly" in p for p in _fallback_problems(run_with_fallback, "run"))
+    both = lambda row: [*row, "api.deepseek.com:443"]  # noqa: E731
+    assert any("row must be exactly" in p for p in _fallback_problems(both))
+    assert any("row must be exactly" in p for p in _fallback_problems(lambda row: [*row, "api.anthropic.com:443"], "run"))
+
+
+def test_the_persona_role_literal_must_match_the_job() -> None:
+    wf = yaml.safe_load((LIVE / c.VERDICT).read_text(encoding="utf-8"))
+    cfg = yaml.safe_load((LIVE / v.LIST_FILE).read_text(encoding="utf-8"))
+    hosts = c.role_hosts(LIVE, cfg)[0]
+    job = copy.deepcopy(wf["jobs"]["run-fallback"])
+    _named(job, "Run the fixture persona")["env"]["PERSONA_ROLE"] = "primary"
+    problems = c.run_job_problems(f"{c.VERDICT}::run-fallback", wf, job, cfg["jobs"][c.VERDICT]["run-fallback"], hosts)
+    assert any("PERSONA_ROLE must be exactly" in p for p in problems)

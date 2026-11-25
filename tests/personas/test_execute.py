@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,8 @@ import pytest
 from scripts.personas import execute, keyed_run
 
 ROOT = Path(__file__).resolve().parents[2]
+ENV_RUN = {"PERSONA_ROLE": "primary", "GITHUB_JOB": "run"}
+ENV_FALLBACK = {"PERSONA_ROLE": "warm_fetched_escape_hatch", "GITHUB_JOB": "run-fallback"}
 
 
 def test_fixture_personas_lists_the_canary() -> None:
@@ -44,7 +47,7 @@ def test_probe_route_is_gone_and_fixture_route_runs_pinned_image(tmp_path: Path)
     (work / "prepared").mkdir(parents=True)
     (work / "prepared" / "routes.json").write_text(json.dumps({"routes": ["canary_persona"], "plan_paths": []}))
     raw = json.dumps({"exit_code": 0, "timed_out": False, "stdout": "{}"}).encode()
-    assert keyed_run.record({}, work, ROOT, raw) == 0
+    assert keyed_run.record({"GITHUB_JOB": "run"}, work, ROOT, raw) == 0
     out = json.loads((work / "results" / "canary_persona.json").read_text())
     assert out["image_digest"] == image_pin.load_pin(ROOT).digest and out["stdout"] == "{}"
 
@@ -57,6 +60,7 @@ def test_record_sidecar_maps(monkeypatch: pytest.MonkeyPatch) -> None:
         "GITHUB_REPOSITORY": "o/r",
         "GITHUB_REF": "refs/heads/main",
         "GITHUB_SHA": "a" * 40,
+        "GITHUB_JOB": "run",
     }
     monkeypatch.setattr(keyed_run, "project_ref", lambda root: "ref")
     body = json.loads(keyed_run.sidecar_bytes(env, ROOT) or b"null")
@@ -70,7 +74,7 @@ def test_request_refusal_keeps_the_key_off_both_streams(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
 ) -> None:
 
-    assert keyed_run.request({}, tmp_path, ROOT) == keyed_run.EXIT_REFUSED
+    assert keyed_run.request(ENV_RUN, tmp_path, ROOT) == keyed_run.EXIT_REFUSED
     captured = capfd.readouterr()
     assert captured.out == "" and "REFUSED" in captured.err
     work = tmp_path / "w"
@@ -85,7 +89,7 @@ def test_request_refusal_keeps_the_key_off_both_streams(
         raise OSError("sentinel path")
 
     monkeypatch.setattr(keyed_run, "_write_all", broken)
-    assert keyed_run.request({"RUNNER_TEMP": str(tmp_path)}, work, ROOT) == keyed_run.EXIT_REFUSED
+    assert keyed_run.request({**ENV_RUN, "RUNNER_TEMP": str(tmp_path)}, work, ROOT) == keyed_run.EXIT_REFUSED
     captured = capfd.readouterr()
     assert captured.out == "" and "SENTINEL-KEY-VALUE" not in captured.err + captured.out
 
@@ -151,3 +155,95 @@ def test_record_carries_a_failure_file(tmp_path: Path) -> None:
     (work / "prepared" / f"failure-{ROUTE}.json").write_text(json.dumps({"failure": "input_incomplete"}))
     keyed_run.record({}, work, ROOT, b"")
     assert json.loads((work / "results" / f"{ROUTE}.json").read_text())["failure"] == "input_incomplete"
+
+
+def test_request_reads_the_fallback_role_key_on_a_fallback_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    work = _work(tmp_path, body=GOOD)
+    asked: list[str] = []
+    monkeypatch.setattr(keyed_run, "assume_role", lambda env: {})
+    monkeypatch.setattr(keyed_run, "_ssm_value", lambda creds, region, parameter: asked.append(parameter) or "KEY-1")
+    out = tmp_path / "stdout"
+    saved = os.dup(1)
+    with out.open("wb") as handle:
+        os.dup2(handle.fileno(), 1)
+        try:
+            code = keyed_run.request({**ENV_FALLBACK, "RUNNER_TEMP": str(tmp_path)}, work, ROOT)
+        finally:
+            os.dup2(saved, 1)
+            os.close(saved)
+    assert code == 0 and asked == ["/secret/agent-platform-anthropic-api-key"]
+    assert json.loads(out.read_text())["provider"] == "anthropic/"
+    err = capfd.readouterr().err
+    assert "PERSONA-REQUEST role=warm_fetched_escape_hatch provider=anthropic/" in err and "KEY-1" not in err
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"PERSONA_ROLE": "primary", "GITHUB_JOB": "run-fallback"},
+        {"PERSONA_ROLE": "warm_fetched_escape_hatch", "GITHUB_JOB": "run"},
+        {"PERSONA_ROLE": "aggregator", "GITHUB_JOB": "run"},
+        {"GITHUB_JOB": "run"},
+        {"PERSONA_ROLE": "primary"},
+        {"PERSONA_ROLE": "primary", "GITHUB_JOB": "probe"},
+    ],
+)
+def test_request_refuses_a_bad_role_pairing_with_nothing_on_stdout(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str], env: dict[str, str]
+) -> None:
+    assert keyed_run.request(env, _work(tmp_path, body=GOOD), ROOT) == keyed_run.EXIT_REFUSED
+    captured = capfd.readouterr()
+    assert captured.out == "" and "REFUSED role" in captured.err
+
+
+def _record(tmp_path: Path, job: str, result: dict[str, object]) -> str | None:
+    work = _work(tmp_path, body=GOOD)
+    out = tmp_path / "gh_output"
+    env = {"GITHUB_JOB": job, "GITHUB_OUTPUT": str(out)}
+    assert keyed_run.record(env, work, ROOT, json.dumps(result).encode()) == 0
+    return out.read_text() if out.exists() else None
+
+
+def _failed(upstream: object) -> dict[str, object]:
+    return {"exit_code": 4, "timed_out": False, "stdout": "", "upstream": upstream}
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        (_failed({"ok": 0, "outage": 1, "inflight": 0}), "true"),
+        (_failed({"ok": 0, "outage": 0, "inflight": 1}), "true"),
+        (_failed({"ok": 1, "outage": 1, "inflight": 0}), "false"),
+        (_failed({"ok": 0, "outage": 0, "inflight": 0}), "false"),
+        (_failed({"ok": 0, "outage": True, "inflight": 0}), "false"),
+        (_failed(None), "false"),
+        ({"exit_code": 0, "timed_out": False, "stdout": "", "upstream": {"ok": 0, "outage": 2, "inflight": 0}}, "false"),
+        ({"exit_code": None, "timed_out": True, "stdout": "", "upstream": {"ok": 0, "outage": 0, "inflight": 1}}, "true"),
+    ],
+)
+def test_primary_outage_only_from_proxy_counts_on_run(tmp_path: Path, result: dict[str, object], expected: str) -> None:
+    assert _record(tmp_path, "run", result) == f"primary_outage={expected}\n"
+
+
+def test_primary_outage_is_false_without_a_launcher_result_and_unwritten_on_the_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    work, out = _work(tmp_path, body=GOOD), tmp_path / "o"
+    assert keyed_run.record({"GITHUB_JOB": "run", "GITHUB_OUTPUT": str(out)}, work, ROOT, b"junk") == 0
+    assert out.read_text() == "primary_outage=false\n"
+    other = tmp_path / "f"
+    assert _record(other, "run-fallback", _failed({"ok": 0, "outage": 5, "inflight": 0})) is None
+    assert keyed_run.record({"GITHUB_JOB": "other", "GITHUB_OUTPUT": str(out)}, work, ROOT, b"{}") == 0
+    assert out.read_text() == "primary_outage=false\n"
+    monkeypatch.setattr(keyed_run, "project_ref", lambda root: "ref")
+    assert keyed_run.sidecar_bytes({"GITHUB_JOB": "other", "GITHUB_SHA": "a" * 40}, ROOT) is None
+
+
+def test_host_job_follows_github_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    env = {"GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "1", "GITHUB_REPOSITORY": "o/r", "GITHUB_REF": "refs/heads/main"}
+    monkeypatch.setattr(keyed_run, "project_ref", lambda root: "ref")
+    for job in ("run", "run-fallback"):
+        body = json.loads(keyed_run.sidecar_bytes({**env, "GITHUB_SHA": "a" * 40, "GITHUB_JOB": job}, ROOT) or b"null")
+        assert body["host"]["job"] == job

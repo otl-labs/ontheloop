@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import subprocess
@@ -299,6 +300,7 @@ def test_the_key_goes_only_to_the_proxys_stdin(monkeypatch: pytest.MonkeyPatch) 
 
     class Proc:
         stdin = Stdin()
+        stdout = io.BytesIO(b"")
 
         def poll(self) -> None:
             return None
@@ -309,7 +311,12 @@ def test_the_key_goes_only_to_the_proxys_stdin(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(L, "port_in_use", lambda p: True)
     L.start_proxy(L.Session(), PROVIDER, "k3y", Path("/i"))
     assert written == [b"k3y"] and "k3y" not in " ".join(captured["argv"])
-    assert captured["user"] == 999 and captured["extra_groups"] == [] and captured["stdin"] == subprocess.PIPE
+    assert (
+        captured["user"] == 999
+        and captured["extra_groups"] == []
+        and captured["stdin"] == subprocess.PIPE
+        and captured["stdout"] == subprocess.PIPE
+    )
 
 
 def test_sigterm_and_sigint_kill_the_container_and_proxy_then_exit_one(
@@ -397,3 +404,41 @@ def test_run_mode_result_carries_stdout_and_events(
     assert _drive(monkeypatch, tmp_path, "run", 0, events, _req())[0] == 0
     result = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert result["stdout"] == '{"verdict": "x"}' and result["events"] == events
+
+
+def test_run_result_carries_upstream_and_role_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    anthropic = PROVIDERS["anthropic/"]
+    argv = L.container_argv("run", IMAGE, "code_reviewer", anthropic, "/in", "/ev", anthropic["role"])
+    theirs = adapter.run_argv(
+        IMAGE, "code_reviewer", "/in", "/ev", key_variable=None, network=L.NETWORK, docker=L.DOCKER, role=anthropic["role"]
+    )
+    assert argv[-2:] == theirs[-2:] == ["--role", "warm_fetched_escape_hatch"]
+    assert "--role" not in L.container_argv("run", IMAGE, "x", PROVIDER, "/in", "/ev")
+    assert "--role" not in L.container_argv("probe", IMAGE, "x", PROVIDER, "/in", "/ev", "primary")
+    session = L.Session()
+    stream = io.BytesIO(
+        b'{"ok": 0, "outage": 0, "inflight": 1}\nnot json\n{"ok": true, "outage": 0, "inflight": 0}\n'
+        b'{"ok": 0, "outage": -1, "inflight": 0}\n{"ok": 0, "outage": 1}\n{"ok": 0, "outage": 2, "inflight": 1}\n'
+        + b"x" * 1000
+        + b"\n"
+    )
+    L.read_counts(session, stream)
+    assert session.upstream == {"inflight": 1, "ok": 0, "outage": 2}
+    empty = L.Session()
+    L.read_counts(empty, io.BytesIO(b"junk\n"))
+    assert empty.upstream is None
+    monkeypatch.setattr(L, "SETTLE_SECONDS", 0.0)
+    code, _ = _drive(monkeypatch, tmp_path, "run", 0, {"a": 1}, _req())
+    assert code == 0
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["upstream"] is None
+
+
+def test_probe_mode_writes_the_input_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(L, "RUN_DIR", tmp_path)
+    monkeypatch.setattr(L.os, "chown", lambda *a: None)
+    install = _install(_sub(tmp_path, "i"))
+    in_dir, _ = L.make_dirs(L.Session(), "probe", {"upstream": "report"}, install)
+    target = Path(in_dir, "input.json")
+    assert json.loads(target.read_text()) == {"upstream": "report"} and oct(os.stat(target).st_mode & 0o777) == "0o644"

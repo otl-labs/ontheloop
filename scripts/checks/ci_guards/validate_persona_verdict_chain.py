@@ -28,6 +28,7 @@ from scripts.checks.ci_guards._persona_verdict_keyed import (
     PERSONA,
     PROBE,
     REGION_ENV,
+    RUN_JOBS,
     SELF_CHECK,
     WHEELS,
     keyed_problems,
@@ -44,14 +45,15 @@ MKDIR = 'mkdir -p "$RUNNER_TEMP/work"'
 RUN_PREFIX = 'python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" '
 VERBS = frozenset({"resolve", "route", "fetch", "materialise", "post", "wake", "inference-smoke", "key-refusal"})
 REGION_ACTION = "./.github/actions/aws-region"
-KEYED_ENVIRONMENTS = frozenset({"smoke", "run", "post"})
-KEYED_ID_TOKEN = frozenset({"smoke", "refusal", "run", "post"})
+KEYED_ENVIRONMENTS = frozenset({"smoke", "run", "run-fallback", "post"})
+KEYED_ID_TOKEN = frozenset({"smoke", "refusal", "run", "run-fallback", "post"})
 SNAPSHOT = "${{ runner.temp }}/snapshot"
 WORKDIR = "${{ runner.temp }}/work"
 PIP_SETS = {"prepare": "pyyaml", "wake": "pyyaml"}
 JOB_PERMISSIONS: dict[str, dict[str, str]] = {
     "prepare": {"contents": "read", "pull-requests": "read", "actions": "read"},
     "run": {"contents": "read", "id-token": "write"},
+    "run-fallback": {"contents": "read", "id-token": "write"},
     "post": {"checks": "read", "contents": "read", "actions": "read", "id-token": "write"},
     "wake": {"contents": "read", "actions": "read", "checks": "read", "pull-requests": "write"},
     "keyprep": {"contents": "read"},
@@ -67,8 +69,10 @@ WAKE_NEEDS = ["prepare", "post"]
 ARTIFACT_DIRS = {
     "persona-verdict-prepared": "prepared",
     "persona-verdict-results": "results",
+    "persona-verdict-results-fallback": "results-fallback",
     "persona-verdict-wheels": "wheels",
 }
+UPLOAD_DIRS = {"persona-verdict-results-fallback": "results"}
 RUN_CONDITION = KEYED_CONDITION
 UPSTREAMS = ["persona-verdict-trigger", "persona-verdict-override"]
 VERDICT_RUN_NAME = "persona-verdict ${{ github.event.workflow_run.event }} ${{ github.event.workflow_run.head_sha }}"
@@ -202,12 +206,17 @@ def _python_steps(job: dict[str, Any]) -> list[dict[str, Any]]:
 def _python_step_problems(name: str, step: dict[str, Any]) -> list[str]:
     out: list[str] = []
     run = str(step.get("run", "")).strip()
-    exempt = (SELF_CHECK, FLOOR) + ((FLOOR_CONTAINER, PROBE) if name == "run" else ())
+    exempt = (SELF_CHECK, FLOOR) + ((FLOOR_CONTAINER, PROBE) if name in RUN_JOBS else ())
     if (name in KEYED_JOBS or name == "post") and run in exempt:
         env_keys = {"env", "working-directory"} & set(step)
         return [f"{VERDICT}: job {name} step {run!r} has {sorted(env_keys)}"] if env_keys else out
-    if name == "run" and run == PERSONA:
-        want = {"AWS_ACCOUNT_ID": ACCOUNT_ENV, "PERSONA_AWS_REGION": REGION_ENV, "PERSONA_SNAPSHOT": SNAPSHOT}
+    if name in RUN_JOBS and run == PERSONA:
+        want = {
+            "AWS_ACCOUNT_ID": ACCOUNT_ENV,
+            "PERSONA_AWS_REGION": REGION_ENV,
+            "PERSONA_SNAPSHOT": SNAPSHOT,
+            "PERSONA_ROLE": RUN_JOBS[name],
+        }
         if _map(step.get("env")) != want or step.get("working-directory") != WORKDIR:
             out.append(f"{VERDICT}: the run persona step env is not exactly {sorted(want)} or its working directory is off")
         if TOKEN_REF.search(_text(step)):
@@ -223,8 +232,8 @@ def _python_step_problems(name: str, step: dict[str, Any]) -> list[str]:
         out.append(f"{VERDICT}: job {name} python step {run!r} working-directory is not {WORKDIR}")
     if verb in ("inference-smoke", "key-refusal") and name not in KEYED_JOBS:
         out.append(f"{VERDICT}: the {verb} verb runs in job {name}, not only in a keyed job")
-    if name == "run":
-        out.append(f"{VERDICT}: the run job python step {run!r} is not one of the pinned lines")
+    if name in RUN_JOBS:
+        out.append(f"{VERDICT}: the {name} job python step {run!r} is not one of the pinned lines")
     return out + _wake_step_problems(name, run, verb, env, step)
 
 
@@ -286,7 +295,7 @@ def _artifact_problems(jobs: dict[str, Any], evidence: dict[str, Any] | None) ->
                 seen.add((name, str(step.get("name", "")), artifact))
                 if with_.get("retention-days") != 1 or isinstance(with_.get("retention-days"), bool):
                     out.append(f"{VERDICT}: upload {artifact} retention-days is not exactly 1")
-                if with_.get("path") != f"{WORKDIR}/{ARTIFACT_DIRS.get(artifact, '?')}":
+                if with_.get("path") != f"{WORKDIR}/{UPLOAD_DIRS.get(artifact, ARTIFACT_DIRS.get(artifact, '?'))}":
                     out.append(f"{VERDICT}: upload {artifact} path is not its work directory")
             if action == "actions/download-artifact":
                 if with_.get("path") != f"{WORKDIR}/{ARTIFACT_DIRS.get(artifact, '?')}":
@@ -323,7 +332,7 @@ def verdict_problems(
         out.append(f"{VERDICT}: the concurrency group is not {VERDICT_GROUP!r}")
     jobs = _jobs(doc)
     if set(jobs) != set(JOB_PERMISSIONS):
-        out.append(f"{VERDICT}: jobs are not exactly prepare, run, keyprep, smoke, refusal, post and wake")
+        out.append(f"{VERDICT}: jobs are not exactly prepare, run, run-fallback, keyprep, smoke, refusal, post and wake")
     for name in sorted(set(jobs) & set(JOB_PERMISSIONS)):
         out.extend(_job_problems(name, jobs[name]))
     for name, job in jobs.items():

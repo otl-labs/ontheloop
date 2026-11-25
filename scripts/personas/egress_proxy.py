@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
+import json
 import socket
 import ssl
 import sys
@@ -137,6 +138,24 @@ class Proxy:
             connect,
         )
         self.slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        self.counts = {"ok": 0, "outage": 0, "inflight": 0}
+        self.count_lock = threading.Lock()
+
+    def tally(self, ok: int = 0, outage: int = 0, inflight: int = 0) -> None:
+        with self.count_lock:
+            self.counts["ok"] += ok
+            self.counts["outage"] += outage
+            self.counts["inflight"] += inflight
+            sys.stdout.write(json.dumps(self.counts) + "\n")
+            sys.stdout.flush()
+
+    def answered(self, status: int) -> None:
+        if 200 <= status < 300:
+            self.tally(ok=1, inflight=-1)
+        elif status in (408, 429) or status >= 500:
+            self.tally(outage=1, inflight=-1)
+        else:
+            self.tally(inflight=-1)
 
     def auth_header(self) -> str | None:
         if self.key is None:
@@ -203,6 +222,7 @@ class Proxy:
     def serve_connection(self, conn: Any) -> int:
         if not self.slots.acquire(blocking=False):
             conn.sendall(_own(502, "upstream-unreachable"))
+            self.tally(outage=1)
             return 502
         try:
             return self._serve(conn)
@@ -220,20 +240,26 @@ class Proxy:
             return 0
         if self.address is None:
             conn.sendall(_own(502, "upstream-unreachable"))
+            self.tally(outage=1)
             return 502
+        self.tally(inflight=1)
         try:
             upstream = self.connect(self.address, self.host)
         except (OSError, ssl.SSLError):
             conn.sendall(_own(502, "upstream-unreachable"))
+            self.tally(outage=1, inflight=-1)
             return 502
         try:
             upstream.sendall(self.request_head(len(body), headers) + body)
-            return self.relay(conn, upstream)
+            status = self.relay(conn, upstream)
+            self.answered(status)
+            return status
         except (OSError, ssl.SSLError):
             try:
                 conn.sendall(_own(502, "upstream-unreachable"))
             except OSError:
                 pass
+            self.tally(outage=1, inflight=-1)
             return 502
         finally:
             upstream.close()
