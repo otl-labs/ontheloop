@@ -32,7 +32,8 @@ ENV_SUFFIX = ":environment:persona-verdict"
 WORKFLOW_REF = "/.github/workflows/persona-verdict.yml@refs/heads/main"
 INFERENCE_PROVIDER = "docs/contracts/inference-provider.yaml"
 PROJECT_CONFIGURATION = "docs/contracts/project-configuration.yaml"
-KEY_ROW = "ports.run_persona.litellm.api_key.primary"  # pragma: allowlist secret
+KEY_ROW_PREFIX = "ports.run_persona.litellm.api_key."  # pragma: allowlist secret
+JOB_ROLES = {"run": "primary", "run-fallback": "warm_fetched_escape_hatch"}
 SETTINGS = Path(".claude") / "settings.json"
 MAX_STDIN = 8 * 1024 * 1024
 ROUTE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -61,13 +62,13 @@ def _json(path: Path) -> Any:
         return None
 
 
-def primary_provider(root: Path) -> str:
-    """The primary role's LiteLLM prefix with its slash, read from inference-provider.yaml (the sole provider home)."""
+def role_provider(root: Path, role: str) -> str:
+    """The role's LiteLLM prefix with its slash, read from inference-provider.yaml (the sole provider home)."""
     doc = _load_yaml(root / INFERENCE_PROVIDER)
     try:
         tiers = doc["tier_model"]["tiers"]
         models = doc["model_id_formats"]["litellm_tier_models"]
-        tier = next(t for t in tiers if isinstance(t, dict) and t.get("role") == "primary")
+        tier = next(t for t in tiers if isinstance(t, dict) and t.get("role") == role)
         name = str(tier["selection_ref"]).rsplit(".", 1)[-1]
         default = str(models[name]["default_model"])
     except (KeyError, TypeError, StopIteration):
@@ -77,11 +78,11 @@ def primary_provider(root: Path) -> str:
     return default.split("/", 1)[0] + "/"
 
 
-def key_parameter(root: Path) -> str:
+def key_parameter(root: Path, role: str) -> str:
     doc = _load_yaml(root / PROJECT_CONFIGURATION)
     rows = doc.get("settings") if isinstance(doc, dict) else None
     for row in rows or []:
-        if isinstance(row, dict) and row.get("id") == KEY_ROW:
+        if isinstance(row, dict) and row.get("id") == KEY_ROW_PREFIX + role:
             home = (row.get("this_repository") or {}).get("current_home")
             if isinstance(home, str) and home:
                 return home
@@ -152,14 +153,24 @@ def _write_all(fd: int, data: bytes) -> None:
         view = view[os.write(fd, view) :]
 
 
+def job_role(env: Mapping[str, str]) -> str:
+    """The role this job runs: PERSONA_ROLE must be a known role and pair with GITHUB_JOB, else a refusal."""
+    role, job = env.get("PERSONA_ROLE", ""), env.get("GITHUB_JOB", "")
+    if role not in JOB_ROLES.values() or JOB_ROLES.get(job) != role:
+        raise Refusal("role")
+    return role
+
+
 def request(env: Mapping[str, str], work: Path, root: Path) -> int:
     """Return 0 after writing exactly one request object to fd 1, else 2 with nothing on stdout and one marker on stderr."""
     try:
+        role = job_role(env)
         route, body = prepared_request(work, root)
-        provider = primary_provider(root)
+        provider = role_provider(root, role)
     except Refusal as exc:
         print(f"PERSONA-REQUEST REFUSED {exc}", file=sys.stderr, flush=True)
         return EXIT_REFUSED
+    print(f"PERSONA-REQUEST role={role} provider={provider}", file=sys.stderr, flush=True)
     sys.stdout.flush()
     sys.stderr.flush()
     saved, saved_err = os.dup(1), os.dup(2)
@@ -167,7 +178,7 @@ def request(env: Mapping[str, str], work: Path, root: Path) -> int:
     failure: str | None = None
     try:
         try:
-            parameter = key_parameter(root)
+            parameter = key_parameter(root, role)
             creds = assume_role(env)
             os.dup2(scratch.fileno(), 1)
             os.dup2(scratch.fileno(), 2)
@@ -221,11 +232,13 @@ def checked_out_sha(root: Path) -> str | None:
 
 def sidecar_bytes(env: Mapping[str, str], root: Path) -> bytes | None:
     ref = project_ref(root)
+    if env.get("GITHUB_JOB", "") not in JOB_ROLES:
+        return None
     host: dict[str, Any] = {
         "kind": "gha",
         "run_id": env.get("GITHUB_RUN_ID", ""),
         "run_attempt": env.get("GITHUB_RUN_ATTEMPT", ""),
-        "job": "run",
+        "job": env.get("GITHUB_JOB", ""),
         "retry_ordinal": 1,
         "event_name": "workflow_run",
         "repository": env.get("GITHUB_REPOSITORY", ""),
@@ -293,7 +306,31 @@ def _telemetry(env: Mapping[str, str], work: Path, results: Path, route: str, ev
         status.write_text(f"exit {code} {STATUS_LABELS.get(code, 'ERROR')}\n", encoding="utf-8")
 
 
+def _count(value: Any) -> bool:
+    return type(value) is int and value >= 0
+
+
+def primary_outage(result: dict[str, Any] | None) -> bool:
+    """True only for a non-success result whose proxy counts show no 2xx and an outage or a request left in flight."""
+    if result is None or (result["exit_code"] == 0 and result["timed_out"] is False):
+        return False
+    upstream = result.get("upstream")
+    if not isinstance(upstream, dict) or not all(_count(upstream.get(k)) for k in ("ok", "outage", "inflight")):
+        return False
+    return upstream["ok"] == 0 and (upstream["outage"] >= 1 or upstream["inflight"] >= 1)
+
+
 def record(env: Mapping[str, str], work: Path, root: Path, raw: bytes) -> int:
+    job = env.get("GITHUB_JOB", "")
+    result = launcher_result(raw)
+    code = _record(env, work, root, result)
+    if job == "run" and code == 0:
+        with open(env.get("GITHUB_OUTPUT", os.devnull), "a", encoding="utf-8") as handle:
+            handle.write(f"primary_outage={'true' if primary_outage(result) else 'false'}\n")
+    return code
+
+
+def _record(env: Mapping[str, str], work: Path, root: Path, result: dict[str, Any] | None) -> int:
     doc = _json(work / "prepared" / "routes.json")
     routes = [r for r in (doc.get("routes") if isinstance(doc, dict) else None) or [] if isinstance(r, str) and ROUTE.match(r)]
     results = work / "results"
@@ -312,7 +349,6 @@ def record(env: Mapping[str, str], work: Path, root: Path, raw: bytes) -> int:
         failure = failure_file.get("failure") if isinstance(failure_file, dict) else None
         put(route, {"route": route, "failure": failure if isinstance(failure, str) and failure else "input_unusable"})
         return 0
-    result = launcher_result(raw)
     if result is None:
         put(route, {"route": route, "failure": "launcher_no_result"})
         return 0

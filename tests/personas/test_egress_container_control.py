@@ -11,7 +11,10 @@ import pytest
 from scripts.personas import egress_container_control as C
 
 
-def test_request_verb_prints_the_fixed_probe_request(capsys: pytest.CaptureFixture[str]) -> None:
+def test_request_verb_prints_the_fixed_probe_request(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("GITHUB_JOB", raising=False)
     assert C.request_main([]) == 0
     assert json.loads(capsys.readouterr().out) == {"persona": "fixture_probe", "provider": "deepseek/", "input": {}}
 
@@ -41,3 +44,24 @@ def test_pass_and_fail_exit_codes(monkeypatch: pytest.MonkeyPatch, capsys: pytes
     assert _run(monkeypatch, 0, good) == 0 and "CONTAINER-CONTROL PASS" in capsys.readouterr().out
     assert _run(monkeypatch, 0, "") == 1 and "CONTAINER-CONTROL FAIL raw_ip_443" in capsys.readouterr().out
     assert _run(monkeypatch, 1, good) == 1 and "FAIL pull" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("job", "provider", "upstream"),
+    [
+        ("run", "deepseek/", "report"),
+        ("run-fallback", "anthropic/", "report"),
+        ("probe", "deepseek/", None),
+        (None, "deepseek/", None),
+    ],
+)
+def test_probe_request_follows_the_job_role(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], job: str | None, provider: str, upstream: str | None
+) -> None:
+    if job is None:
+        monkeypatch.delenv("GITHUB_JOB", raising=False)
+    else:
+        monkeypatch.setenv("GITHUB_JOB", job)
+    assert C.request_main([]) == 0
+    got = json.loads(capsys.readouterr().out)
+    assert got["provider"] == provider and got["input"] == ({"upstream": upstream} if upstream else {})

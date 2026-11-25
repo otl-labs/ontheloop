@@ -26,13 +26,11 @@ jobs:
   prepare:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: read
-      pull-requests: read
-      actions: read
+    permissions: {contents: read, pull-requests: read, actions: read}
     outputs:
       allowlisted: ${{ steps.resolve.outputs.allowlisted }}
       fixture: ${{ steps.route.outputs.fixture }}
+      fallback_drill: ${{ steps.route.outputs.fallback_drill }}
     steps:
       - name: Check out main
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -96,9 +94,9 @@ jobs:
     environment: persona-verdict
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    permissions:
-      contents: read
-      id-token: write
+    outputs:
+      primary_outage: ${{ steps.run-persona.outputs.primary_outage }}
+    permissions: {contents: read, id-token: write}
     steps:
       - name: Harden the runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
@@ -163,6 +161,7 @@ jobs:
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
           PERSONA_AWS_REGION: ${{ needs.keyprep.outputs.aws_region }}
           PERSONA_SNAPSHOT: ${{ runner.temp }}/snapshot
+          PERSONA_ROLE: primary
         working-directory: ${{ runner.temp }}/work
         run: python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" persona-request | sudo /usr/bin/python3 -I -S /usr/local/lib/persona-egress/egress_launcher.py run | python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" persona-record
 
@@ -183,13 +182,104 @@ jobs:
         if: always()
         run: python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" egress-self-check
 
+  run-fallback:
+    needs: [prepare, keyprep, run]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && github.event.workflow_run.event == 'pull_request' && needs.prepare.outputs.allowlisted == 'true' && needs.prepare.outputs.fixture == 'true' && needs.keyprep.result == 'success' && (needs.run.outputs.primary_outage == 'true' || needs.prepare.outputs.fallback_drill == 'true') }}
+    environment: persona-verdict
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions: {contents: read, id-token: write}
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: block
+          allowed-endpoints: >-
+            sts.${{ needs.keyprep.outputs.aws_region }}.amazonaws.com:443
+            ssm.${{ needs.keyprep.outputs.aws_region }}.amazonaws.com:443
+            api.anthropic.com:443
+            pkg-containers.githubusercontent.com:443
+          disable-telemetry: true
+          disable-sudo-and-containers: false
+
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: main
+          persist-credentials: false
+
+      - name: Lay the container egress floor
+        id: run-fallback-floor
+        run: sudo python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" egress-floor-container
+
+      - name: Create the work directory
+        id: run-fallback-mkdir
+        run: mkdir -p "$RUNNER_TEMP/work"
+
+      - name: Check the egress filter
+        id: run-fallback-self-check
+        run: python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" egress-self-check
+
+      - name: Download prepared inputs
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: persona-verdict-prepared
+          path: ${{ runner.temp }}/work/prepared
+
+      - name: Probe from the container
+        id: run-fallback-probe
+        run: python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" egress-container-request | sudo /usr/bin/python3 -I -S /usr/local/lib/persona-egress/egress_launcher.py probe
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - name: Download the wheelhouse
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: persona-verdict-wheels
+          path: ${{ runner.temp }}/work/wheels
+
+      - name: Install the wheelhouse offline
+        id: run-fallback-install
+        run: |
+          pip install --no-index --find-links "$RUNNER_TEMP/work/wheels" --require-hashes --no-deps --only-binary :all: -r "$GITHUB_WORKSPACE/main/docker/persona/requirements-persona.txt"
+
+      - name: Run the fixture persona
+        id: run-fallback-persona
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          PERSONA_AWS_REGION: ${{ needs.keyprep.outputs.aws_region }}
+          PERSONA_SNAPSHOT: ${{ runner.temp }}/snapshot
+          PERSONA_ROLE: warm_fetched_escape_hatch
+        working-directory: ${{ runner.temp }}/work
+        run: python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" persona-request | sudo /usr/bin/python3 -I -S /usr/local/lib/persona-egress/egress_launcher.py run | python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" persona-record
+
+      - name: Upload fallback verdict results
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: persona-verdict-results-fallback
+          path: ${{ runner.temp }}/work/results
+          retention-days: 1
+          if-no-files-found: ignore
+
+      - name: Probe from the container again
+        id: run-fallback-probe-final
+        run: python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" egress-container-request | sudo /usr/bin/python3 -I -S /usr/local/lib/persona-egress/egress_launcher.py probe
+
+      - name: Check the egress filter again
+        id: run-fallback-final-check
+        if: always()
+        run: python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" egress-self-check
+
   keyprep:
     needs: prepare
     if: ${{ !cancelled() && needs.prepare.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: read
+    permissions: {contents: read}
     outputs:
       aws_region: ${{ steps.region.outputs.aws_region }}
     steps:
@@ -226,9 +316,7 @@ jobs:
     environment: persona-verdict
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions:
-      contents: read
-      id-token: write
+    permissions: {contents: read, id-token: write}
     steps:
       - name: Harden the runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
@@ -307,9 +395,7 @@ jobs:
     if: ${{ !cancelled() && needs.prepare.result == 'success' && github.event.workflow_run.event == 'pull_request' && needs.prepare.outputs.allowlisted == 'true' && needs.prepare.outputs.fixture == 'true' && needs.keyprep.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: read
-      id-token: write
+    permissions: {contents: read, id-token: write}
     steps:
       - name: Harden the runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
@@ -354,16 +440,12 @@ jobs:
         run: python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" egress-self-check
 
   post:
-    needs: [prepare, run, keyprep]
+    needs: [prepare, run, run-fallback, keyprep]
     if: ${{ !cancelled() }}
     environment: persona-verdict-app
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      checks: read
-      contents: read
-      actions: read
-      id-token: write
+    permissions: {checks: read, contents: read, actions: read, id-token: write}
     steps:
       - name: Harden the runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
@@ -424,6 +506,13 @@ jobs:
           name: persona-verdict-results
           path: ${{ runner.temp }}/work/results
 
+      - name: Download fallback verdict results
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: persona-verdict-results-fallback
+          path: ${{ runner.temp }}/work/results-fallback
+
       - name: Post the check runs
         id: post-post
         env:
@@ -431,6 +520,7 @@ jobs:
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
           PERSONA_AWS_REGION: ${{ needs.keyprep.outputs.aws_region }}
           PERSONA_SNAPSHOT: ${{ runner.temp }}/snapshot
+          PERSONA_FALLBACK_RESULT: ${{ needs.run-fallback.result }}
         working-directory: ${{ runner.temp }}/work
         run: python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" post
 
@@ -444,11 +534,7 @@ jobs:
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions:
-      contents: read
-      actions: read
-      checks: read
-      pull-requests: write
+    permissions: {contents: read, actions: read, checks: read, pull-requests: write}
     steps:
       - name: Check out main
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

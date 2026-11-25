@@ -18,7 +18,7 @@ import yaml
 
 PROBE = ".github/workflows/persona-verdict-egress-probe.yml"
 VERDICT = ".github/workflows/persona-verdict.yml"
-RUN_JOB = f"{VERDICT}::run"
+RUN_ROLES = {f"{VERDICT}::run": "primary", f"{VERDICT}::run-fallback": "warm_fetched_escape_hatch"}
 PROBE_PREFIX = "python3 -I scripts/personas/run.py "
 RUN_PREFIX = 'python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" '
 CONTAINER_VERB = "egress-floor-container"
@@ -30,12 +30,13 @@ RUN_PROBE_LINE = RUN_PREFIX + "egress-container-request | sudo " + LAUNCHER
 RUN_PERSONA_LINE = RUN_PREFIX + "persona-request | sudo " + LAUNCHER_RUN + " | " + RUN_PREFIX + "persona-record"
 LAUNCHER_KEYS = {"name", "id", "run"}
 PERSONA_KEYS = {"name", "id", "run", "env", "working-directory"}
-PERSONA_ENV = {"AWS_ACCOUNT_ID", "PERSONA_AWS_REGION", "PERSONA_SNAPSHOT"}
+PERSONA_ENV = {"AWS_ACCOUNT_ID", "PERSONA_AWS_REGION", "PERSONA_SNAPSHOT", "PERSONA_ROLE"}
 SELF_CHECK = PROBE_PREFIX + "egress-self-check"
 RUN_SELF_CHECK = RUN_PREFIX + "egress-self-check"
 RUN_FLOOR = f"sudo {RUN_PREFIX}{CONTAINER_VERB}"
 AWS_HOSTS = ("sts.{aws_region}.amazonaws.com:443", "ssm.{aws_region}.amazonaws.com:443")
 INFERENCE_PROVIDER = "docs/contracts/inference-provider.yaml"
+LIST_FILE = "config/persona_verdict_egress.yaml"
 SECRET_REF = re.compile(r"(?<![\w.])secrets\b(?!\.GITHUB_TOKEN\b)", re.I)
 SECRET_NAME = re.compile(r"secrets\s*\.\s*([A-Za-z0-9_]+)", re.I)
 EXPRESSION = re.compile(r"\$\{\{(.*?)\}\}", re.S)
@@ -54,25 +55,37 @@ def is_launcher_line(run: str) -> bool:
     return run.strip() in (LAUNCHER_LINE, RUN_PROBE_LINE, RUN_PERSONA_LINE)
 
 
-def primary_host(root: Path, data: dict[str, Any]) -> tuple[str | None, list[str]]:
+def role_hosts(root: Path, data: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
+    """Role -> provider host for each committed tier, read from inference-provider.yaml; no two roles share a host."""
     try:
         doc = yaml.safe_load((root / INFERENCE_PROVIDER).read_text(encoding="utf-8"))
         tiers = doc["tier_model"]["tiers"]
         models = doc["model_id_formats"]["litellm_tier_models"]
     except (OSError, yaml.YAMLError, KeyError, TypeError) as exc:
-        return None, [f"{INFERENCE_PROVIDER} does not give the tier models: {type(exc).__name__}"]
+        return {}, [f"{INFERENCE_PROVIDER} does not give the tier models: {type(exc).__name__}"]
+    hosts: dict[str, str] = {}
+    out: list[str] = []
     for tier in tiers:
-        if isinstance(tier, dict) and tier.get("role") == "primary":
-            name = str(tier.get("selection_ref", "")).rsplit(".", 1)[-1]
-            default = str((models.get(name) or {}).get("default_model", ""))
-            prefix = default.split("/", 1)[0] + "/" if "/" in default else ""
-            host = (data.get("provider_hosts") or {}).get(prefix)
-            if host is None:
-                return None, [
-                    f"config/persona_verdict_egress.yaml: provider_hosts has no entry for the primary prefix {prefix!r}"
-                ]
-            return str(host), []
-    return None, [f"{INFERENCE_PROVIDER}: no primary-role tier row"]
+        if not isinstance(tier, dict) or str(tier.get("state", "")).startswith("Deferred"):
+            continue
+        name = str(tier.get("selection_ref", "")).rsplit(".", 1)[-1]
+        default = str((models.get(name) or {}).get("default_model", ""))
+        prefix = default.split("/", 1)[0] + "/" if "/" in default else ""
+        host = (data.get("provider_hosts") or {}).get(prefix)
+        if host is None:
+            out.append(f"{LIST_FILE}: provider_hosts has no entry for the LiteLLM prefix {prefix!r} of tier row {name}")
+        else:
+            hosts[str(tier.get("role"))] = str(host)
+    if "primary" not in hosts and not any(tier.get("role") == "primary" for tier in tiers if isinstance(tier, dict)):
+        out.insert(0, f"{INFERENCE_PROVIDER}: no primary-role tier row")
+    if len(set(hosts.values())) != len(hosts):
+        out.append(f"{INFERENCE_PROVIDER}: two tier roles share a provider host")
+    return hosts, out
+
+
+def job_role(where: str) -> str:
+    """The role a class job runs, from its name: run-fallback the escape hatch, every other job the primary."""
+    return RUN_ROLES.get(where, "primary")
 
 
 def _id_token_write(perms: Any) -> bool:
@@ -105,7 +118,7 @@ def _persona_secret_ok(steps: list[dict[str, Any]], persona: int) -> list[str]:
 
 
 def run_job_problems(
-    where: str, workflow: dict[str, Any], job: dict[str, Any], row: list[Any], primary: str | None
+    where: str, workflow: dict[str, Any], job: dict[str, Any], row: list[Any], hosts: dict[str, str]
 ) -> list[str]:
     """The run job's class rules: credentials only in the persona step, two probes around it, the AWS hosts in its row."""
     out: list[str] = []
@@ -131,8 +144,11 @@ def run_job_problems(
         out.append(
             f"{where}: the persona step's keys must be exactly {sorted(PERSONA_KEYS)} with env exactly {sorted(PERSONA_ENV)}"
         )
+    role = job_role(where)
+    if (steps[persona[0]].get("env") or {}).get("PERSONA_ROLE") != role:
+        out.append(f"{where}: the persona step's PERSONA_ROLE must be exactly {role}")
     out.extend(f"{where}: {m}" for m in _persona_secret_ok(steps, persona[0]))
-    return out + _run_order_problems(where, steps, runs, probes, persona[0], row, primary)
+    return out + _run_order_problems(where, steps, runs, probes, persona[0], row, hosts.get(role))
 
 
 def _run_order_problems(
@@ -142,7 +158,7 @@ def _run_order_problems(
     probes: list[int],
     persona: int,
     row: list[Any],
-    primary: str | None,
+    host: str | None,
 ) -> list[str]:
     out: list[str] = []
     first_check = next((i for i, r in enumerate(runs) if r == RUN_SELF_CHECK), None)
@@ -152,19 +168,19 @@ def _run_order_problems(
         out.append(f"{where}: the second probe must be the step before the final self-check and follow the persona step")
     if not steps or runs[-1] != RUN_SELF_CHECK:
         out.append(f"{where}: the last step of a container job must be the final self-check")
-    want = sorted([*(AWS_HOSTS), BLOB_HOST, *([primary] if primary else [])])
-    if primary is not None and sorted(map(str, row)) != want:
+    want = sorted([*(AWS_HOSTS), BLOB_HOST, *([host] if host else [])])
+    if host is not None and sorted(map(str, row)) != want:
         out.append(
-            f"{where}: the run job's row must be exactly the routed provider host {primary}, {BLOB_HOST} and the AWS hosts"
+            f"{where}: the run job's row must be exactly the role's provider host {host}, {BLOB_HOST} and the AWS hosts"
         )
     return out
 
 
 def class_problems(
-    where: str, rel: str, workflow: dict[str, Any], job: dict[str, Any], row: list[Any], primary: str | None
+    where: str, rel: str, workflow: dict[str, Any], job: dict[str, Any], row: list[Any], hosts: dict[str, str]
 ) -> list[str]:
-    if where == RUN_JOB and rel == VERDICT:
-        return run_job_problems(where, workflow, job, row, primary)
+    if where in RUN_ROLES and rel == VERDICT:
+        return run_job_problems(where, workflow, job, row, hosts)
     out: list[str] = []
     if rel != PROBE:
         out.append(f"{where}: a container job must be in {PROBE}")
@@ -193,6 +209,7 @@ def class_problems(
             out.append(f"{where}: the launcher step comes before the first self-check")
     if not steps or str(steps[-1].get("run", "")).strip() != SELF_CHECK:
         out.append(f"{where}: the last step of a container job must be the final self-check")
-    if primary is not None and sorted(map(str, row)) != sorted([primary, BLOB_HOST]):
-        out.append(f"{where}: a container job's row must be exactly the routed provider host {primary} and {BLOB_HOST}")
+    host = hosts.get(job_role(where))
+    if host is not None and sorted(map(str, row)) != sorted([host, BLOB_HOST]):
+        out.append(f"{where}: a container job's row must be exactly the role's provider host {host} and {BLOB_HOST}")
     return out

@@ -72,6 +72,7 @@ PROVIDERS = {
         "base_variable": "DEEPSEEK_API_BASE",
         "auth": "bearer",
         "chat_path": "/chat/completions",
+        "role": "primary",
     },
     "anthropic/": {
         "host": "api.anthropic.com:443",
@@ -79,6 +80,7 @@ PROVIDERS = {
         "base_variable": "ANTHROPIC_API_BASE",
         "auth": "x-api-key",
         "chat_path": "/v1/messages",
+        "role": "warm_fetched_escape_hatch",
     },
 }
 
@@ -179,8 +181,12 @@ def read_image_ref(root: Path = ROOT) -> tuple[str, str]:
     return values["image"], values["digest"]
 
 
-def snapshot_text(image: str, digest: str) -> str:
-    return json.dumps({"image": f"{image}@{digest}", "providers": PROVIDERS}, sort_keys=True) + "\n"
+def snapshot_text(image: str, digest: str, providers: dict[str, dict[str, str]] | None = None) -> str:
+    rows = PROVIDERS if providers is None else providers
+    roles = [row["role"] for row in rows.values()]
+    if len(roles) != len(set(roles)):
+        raise ValueError("two provider prefixes share a role")
+    return json.dumps({"image": f"{image}@{digest}", "providers": rows}, sort_keys=True) + "\n"
 
 
 def sha256_text(data: bytes) -> str:

@@ -526,3 +526,15 @@ def test_the_check_is_registered() -> None:
 def test_the_endpoint_split_never_raises(raw: str) -> None:
     listed, problems = v._tokenised_endpoints("w", raw, {"jobs": {}}, {})
     assert isinstance(listed, set) and isinstance(problems, list)
+
+
+def test_role_host_map_passed_to_container(monkeypatch: pytest.MonkeyPatch) -> None:
+    root = Path(__file__).resolve().parents[3]
+    data = yaml.safe_load((root / v.LIST_FILE).read_text(encoding="utf-8"))
+    hosts, problems = v._provider_hosts_expected(root, data)
+    assert problems == [] and hosts == {
+        "primary": "api.deepseek.com:443",
+        "warm_fetched_escape_hatch": "api.anthropic.com:443",
+    }
+    shared = {**data, "provider_hosts": {"deepseek/": "h:443", "anthropic/": "h:443"}}
+    assert any("share a provider host" in p for p in v._provider_hosts_expected(root, shared)[1])

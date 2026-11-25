@@ -31,6 +31,18 @@ def test_exact_argv() -> None:
     ]  # fmt: skip
 
 
+def test_run_argv_role_appends_flag() -> None:
+    base = run_argv(REF, "p", "/i", "/e", key_variable=None)
+    assert run_argv(REF, "p", "/i", "/e", key_variable=None, role=None) == base
+    assert run_argv(REF, "p", "/i", "/e", key_variable=None, role="warm_fetched_escape_hatch")[-2:] == [
+        "--role",
+        "warm_fetched_escape_hatch",
+    ]
+    for bad in ("", "Primary", "a b", "primary;x"):
+        with pytest.raises(ValueError):
+            run_argv(REF, "p", "/i", "/e", key_variable=None, role=bad)
+
+
 def test_entrypoint_split() -> None:
     argv = run_argv(REF, "plan_critic", "/in", "/ev", key_variable=None, entrypoint=["python", "-c", "print(1)"])
     assert argv[-5:] == ["--entrypoint", "python", REF, "-c", "print(1)"]
