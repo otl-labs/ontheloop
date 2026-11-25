@@ -14,7 +14,7 @@ blocks:
   after: |+
     The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
-    ## Decision {{N}}: The DuckLake ops runtime in one entry -- functions split by access pattern behind a closed read/write boundary, idempotent concurrent writes onto an append-only history, and agent-free maintenance whose garbage collection fails closed (supersedes Decisions 81 and 188) (Decided)
+    ## Decision {{N}}: The DuckLake ops runtime in one entry -- a closed read/write boundary, idempotent writes onto an append-only history, and agent-free maintenance whose garbage collection fails closed (supersedes Decisions 81 and 188) (Decided)
 
     ```yaml
     number: {{N}}
@@ -47,19 +47,18 @@ blocks:
 
     **Problem:** A reader needs eleven entries to learn the DuckLake ops runtime's current rules: Decision 81, the entry
     that re-decided its garbage collection (188) and nine that amend it in part, mostly to add a function or an admin
-    verb (rec-5447). Several of Decision 81's numbers and its circuit breaker no longer hold.
+    verb (rec-5447). Some of Decision 81's numbers no longer hold.
 
     **Intent:** One entry states the runtime's standing rules, so Decisions 81 and 188 compact to stubs; rules that live
     in an amender stay there.
 
     **Decision:**
-    1. **Functions by access pattern, one closed boundary.** The runtime splits into functions by access pattern (a
-       principal that writes the catalog, one that only reads it, one that runs maintenance DDL) to isolate IAM, scaling
-       and deploy blast radius, never for concurrency; Decision 143 scopes each identity by the worst verb it can reach,
-       and docs/contracts/build-lambda.yaml deploy_targets and deploy_channels list the functions. The verb surface
-       behind them stays open. Every read goes through a reader and every write through a writer, with no
-       external-query path outside the carve-outs carried-forward entries name; break-glass is the audited PlatformAdmin
-       principal, and catalog DR is a scheduled export (cadence per Decision 88 cl.3) with a tested restore.
+    1. **Functions by access pattern, one closed boundary.** The runtime splits into functions by access pattern (a catalog
+       writer, a read-only reader, a maintenance-DDL principal) to isolate IAM, scaling and deploy blast radius, never for
+       concurrency; Decision 143 scopes each identity by the worst verb it can reach, and build-lambda.yaml deploy_targets
+       and deploy_channels list the functions. The verb surface behind them stays open. Every read goes through a reader and
+       every write through a writer, save the carve-outs carried-forward entries name; break-glass is the audited
+       PlatformAdmin principal, and catalog DR is a scheduled export (cadence per Decision 88 cl.3) with a tested restore.
     2. **Concurrent, idempotent writes through one chokepoint.** Writers run concurrently with bounded OCC retry
        (backoff and jitter, a fixed ceiling, loud failure when exhausted); a write ULID minted once and reused across
        retries keys the history append, so a retry de-duplicates. Each table's writer is its one write chokepoint and
@@ -70,21 +69,22 @@ blocks:
        history ordered by last_updated_timestamp then ULID. rec_id is the natural key; the current MERGE on it keeps one
        current row per key, and no engine key is enforced. History partitions by year, month and day of
        created_timestamp, and current by bucket(N, id).
-    4. **Agent-free maintenance; garbage collection fails closed.** Maintenance is a singleton per function on
-       deterministic schedules with no LLM or agent: a non-destructive merge on its own cadence and a guarded destructive
-       GC weekly, never a scheduled cleanup_all. GC is safe by reachability, not volume: G1 reachability, G2 retention
-       floor and G3 catalog sanity raise and delete nothing, every guard-path read raises on failure (only the merge_ops
-       isolation sites of Decision 191 cl.3 and Decision 266 cl.3 degrade loudly instead), and G4's absolute per-pass
-       bound limits deletion (Decision 193). A forced-trip probe proves G1, the smoke gates assert response shape, never
-       deletion volume, and both alarms fire on MaintenanceBreakerTrip. Snapshots are retained 30 days catalog-wide, never
-       fewer than the last 2; the deletion grace, at least 7 days, exceeds the longest in-flight read or write. Inlining is
-       off for governance tables. An operational verb runs only when a human invokes it; the admin verbs carried-forward
-       entries name are run as Decision 283 cl.3 states.
+    4. **Agent-free maintenance; garbage collection fails closed.** Maintenance is a singleton per function on deterministic
+       schedules with no LLM or agent: a non-destructive merge on its own cadence and a guarded destructive GC weekly, never
+       a scheduled cleanup_all. GC is safe by reachability, not volume: G1 reachability, G2 retention floor and G3 catalog
+       sanity raise and delete nothing, every guard-path read raises on failure (only the merge_ops isolation sites of
+       Decision 191 cl.3 and Decision 266 cl.3 degrade loudly instead), and G4's absolute per-pass bound limits deletion
+       (Decision 193). A forced-trip probe (an internal constant, never an event field) proves G1, the smoke gates assert
+       response shape, never deletion volume, and both alarms fire on MaintenanceBreakerTrip. Retention is catalog-wide,
+       never below the last 2 snapshots; the grace, at least 7 days, exceeds the longest in-flight read or write;
+       ducklake_maintenance.py's constants hold the values. Inlining is off for governance tables. An operational verb runs
+       only when a human invokes it; the admin verbs carried-forward entries name are run as Decision 283 cl.3 states.
     5. **Carried forward.** Decision 143 keeps the identity rule and the smoke split; Decision 210 keeps the write-time
        data rules; Decision 204, Decision 213, Decision 230, Decision 236, Decision 239 and Decision 251 each keep the
        function, carve-out or admin verb they add; Decision 193 and Decision 266 keep their parts of Decision 188;
-       Decision 191 keeps its merge_ops isolation site and Decision 207 the history-MERGE residual (rec-4121). A value
-       change goes to the delegated keys; a ruling change is a new entry superseding this one.
+       Decision 191 keeps its merge_ops isolation site and Decision 207 the history-MERGE residual. A value
+       change goes to the delegated keys or, inside cl.4's floors, those constants; a ruling change is a new entry
+       superseding this one.
 
     **Options considered:** taking 143 and 210 as victims (rejected: each holds a general rule beyond DuckLake, the
     operator's 2026-11-25 choice); restating the function list (rejected: six amenders changed it, so it is a value);
@@ -92,11 +92,11 @@ blocks:
 
     **Coverage (Decision 181 cl.2):** cl.1 -- validate_recs_read_topology and the reader and writer contract
     evaluators; cl.2 -- the writer's OCC and idempotency tests and validate_write_time_enforcement_conformance; cl.3 --
-    src/common/ducklake_partition_spec.py's tests; cl.4 -- the G1-G4 guard tests, the breaker_probe and gc smoke gates;
+    ducklake_partition_spec.py's tests; cl.4 -- the G1-G4 guard tests, the breaker_probe and gc smoke gates;
     the accounting -- validate_delegated_key_changes over the consolidation manifest.
 
     **Related:** Decisions 81 and 188 (superseded), 143, 193, 204, 207, 210, 213, 230, 236, 239, 251 and 266 (carried
-    forward), 55, 69, 78, 79, 84, 88, 149, 177, 191, 192, 278, 283; CD.33, CD.10; rec-5447, rec-4068, rec-4121.
+    forward), 55, 69, 78, 79, 84, 88, 149, 177, 191, 192, 278, 283; CD.33, CD.10; rec-4068, rec-4121.
 
     ---
 
