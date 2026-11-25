@@ -152,3 +152,20 @@ def test_the_plain_floor_verb_is_refused_in_a_class_job() -> None:
     job = _container_job()
     job["steps"][2]["run"] = FLOOR
     assert any("must run exactly" in p or "runs sudo" in p for p in f.floor_problems(f.PROBE, "egress-container", job))
+
+
+PERSONA_LINE = (
+    f.RUN_PREFIX
+    + "persona-request | sudo /usr/bin/python3 -I -S /usr/local/lib/persona-egress/egress_launcher.py run | "
+    + f.RUN_PREFIX
+    + "persona-record"
+)
+
+
+def test_the_run_job_persona_line_is_accepted_only_in_a_container_class_job() -> None:
+    job = _container_job()
+    job["steps"][4]["run"] = PERSONA_LINE
+    assert f.floor_problems(f.PROBE, "egress-container", job) == []
+    plain = _job()
+    plain["steps"][4]["run"] = PERSONA_LINE
+    assert any("runs sudo" in p for p in f.floor_problems(REL, NAME, plain))
