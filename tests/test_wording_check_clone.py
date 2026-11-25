@@ -360,3 +360,39 @@ def test_an_untracked_plan_in_the_tree_is_replaced_by_the_loaded_plan(tree: Path
     with wcc.rehearsal_clone(tree, base, _SLUG, "s: 1\n", text) as clone:
         assert (clone / _PLAN_REL).read_text(encoding="utf-8") == text
         assert _git(clone, "diff", "--name-status", "--no-renames", "origin/main") == f"M\t{_PLAN_REL}"
+
+
+def test_the_clone_index_mirrors_the_tree_index(tree: Path) -> None:
+    _write(tree, "docs/bin.dat", "x")
+    _write(tree, "docs/run.sh", "echo\n")
+    _write(tree, "docs/gone.md", "gone\n")
+    _write(tree, "docs/partial.md", "p1\n")
+    _write(tree, "docs/unstaged-gone.md", "u\n")
+    _git(tree, "add", "-A")
+    _git(tree, "commit", "-q", "-m", "more")
+    _git(tree, "update-ref", "refs/remotes/origin/main", "HEAD")
+    base = _git(tree, "rev-parse", "HEAD")
+    _git(tree, "rm", "-q", "docs/gone.md")
+    _write(tree, "docs/added.md", "added\n")
+    _git(tree, "add", "docs/added.md")
+    (tree / "docs/unstaged-gone.md").unlink()
+    _write(tree, _DOC, "one TWO\n")
+    _write(tree, "docs/partial.md", "p1\np2\n")
+    _git(tree, "add", "docs/partial.md")
+    _write(tree, "docs/partial.md", "p1\np2\np3\n")
+    (tree / "docs/bin.dat").write_bytes(b"\x00\x01\x02")
+    _git(tree, "add", "docs/bin.dat")
+    _git(tree, "update-index", "--chmod=+x", "docs/run.sh")
+    _write(tree, "docs/untracked.md", "u\n")
+    status = sorted(_git(tree, "status", "--porcelain", "--untracked-files=all").splitlines())
+    tree_stage = dict(line.split("\t")[::-1] for line in _git(tree, "ls-files", "-s").splitlines())
+    with wcc.rehearsal_clone(tree, base, _SLUG, "s: 1\n", None) as clone:
+        assert sorted(_git(clone, "status", "--porcelain", "--untracked-files=all").splitlines()) == status
+        clone_stage = dict(line.split("\t")[::-1] for line in _git(clone, "ls-files", "-s").splitlines())
+        for rel in ("docs/bin.dat", "docs/run.sh"):
+            assert clone_stage[rel] == tree_stage[rel]
+        assert clone_stage["docs/run.sh"].startswith("100755")
+        listed = _git(clone, "ls-files").splitlines()
+        assert "docs/gone.md" not in listed and "docs/added.md" in listed and "docs/unstaged-gone.md" in listed
+        cached = _git(clone, "diff", "--cached", "origin/main", "--", "docs/partial.md")
+        assert "+p2" in cached and "p3" not in cached

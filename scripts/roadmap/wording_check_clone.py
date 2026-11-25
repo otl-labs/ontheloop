@@ -121,9 +121,11 @@ def stale_hint(output: str) -> str:
 
 def _carry(tree: Path, clone: Path, slug: str) -> None:
     plan_rel = _PLAN.format(slug=slug)
-    diff = _git(tree, "diff", "--binary", "--no-renames", "HEAD", "--", ".", f":(exclude){plan_rel}")
-    if diff.strip():
-        _git(clone, "apply", "--binary", "--whitespace=nowarn", data=diff)
+    spec = ("--binary", "--no-renames", "--", ".", f":(exclude){plan_rel}")
+    for diff_args, apply_args in ((("--cached", "HEAD"), ("--index",)), ((), ())):
+        diff = _git(tree, "diff", *diff_args, *spec)
+        if diff.strip():
+            _git(clone, "apply", *apply_args, "--binary", "--whitespace=nowarn", data=diff)
     others = _git(tree, "ls-files", "--others", "--exclude-standard", "-z").decode("utf-8").split("\0")
     for rel in filter(None, others):
         if rel == plan_rel or rel == _VENV or rel.startswith(f"{_VENV}/"):
