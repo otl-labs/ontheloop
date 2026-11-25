@@ -120,6 +120,8 @@ def test_wrapped_group_filter_is_counted() -> None:
     )
     sites, gate = ad_hoc_sites(REAL + loop)
     assert gate and [shape for _, shape in sites] == ["sections"]
+    plain = "    for m in matches:\n        assert m.group(1) == '72'\n"
+    assert ad_hoc_sites(REAL + READ + plain)[0] == []
     comp = "    x = [b for m, b in _iter_decision_sections(text) if m.group(1) in ('1', '2')]\n"
     dict_comp = "    y = {int(m.group(1)): b for m, b in iter_decision_sections(text)}\n"
     sites, _ = ad_hoc_sites(REAL + READ + comp + dict_comp)
@@ -134,6 +136,7 @@ def test_module_constant_path_is_a_real_read() -> None:
         'LOG: str = "docs/DECISIONS.md"\nfrom pathlib import Path\nX = Path(LOG)\n',
     ):
         assert ad_hoc_sites(src)[1] is True, src
+    assert ad_hoc_sites('def foo():\n    pass\nX = foo() / "docs" / "DECISIONS.md"\n')[1] is False
     assert ad_hoc_sites('def f(root):\n    return root / "docs" / "DECISIONS.md"\n')[1] is False
 
 
@@ -185,6 +188,7 @@ def test_new_file_with_ad_hoc_read_fails(tmp_path: Path) -> None:
     _commit(root, "branch")
     assert len(_run(root)[0]) == 1
     (root / "tests" / "test_new.py").write_text(REAL + ONE, encoding="utf-8")
+    (root / "tests" / "test_plain.py").write_text("X = 1\n", encoding="utf-8")
     assert len(_run(root)[0]) == 2
 
 
@@ -256,5 +260,6 @@ def test_non_python_test_data_is_ignored(tmp_path: Path) -> None:
 def test_manifest_runs_on_any_test_change() -> None:
     entry = registry._ALL_ENTRIES["validate_decision_reads_through_fixture"]
     assert entry.pre is True and entry.full_segment == "full_after_lint"
+    assert entry.pre_globs is not None
     for path in ("tests/test_x.py", "tests/a/test_x.py"):
         assert any(registry._pre_glob_match(path, g) for g in entry.pre_globs), path

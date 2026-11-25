@@ -20,6 +20,7 @@ from __future__ import annotations
 import ast
 import re
 import subprocess
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from scripts.checks import _common, registry
@@ -41,7 +42,7 @@ _ESCAPE = re.compile(r"\\.")
 _GROUP_SYNTAX = re.compile(r"\(\?P?<[^>]*>|\(\?:")
 
 
-def _str_const(node: ast.AST, pred) -> bool:
+def _str_const(node: ast.AST, pred: Callable[[str], bool]) -> bool:
     return isinstance(node, ast.Constant) and isinstance(node.value, str) and pred(node.value)
 
 
@@ -60,7 +61,7 @@ def _interpolates(node: ast.AST) -> bool:
 
 def _has_entry_marker(node: ast.AST) -> bool:
     for sub in ast.walk(node):
-        if _str_const(sub, lambda v: MARKER in v) and _names_one_entry(sub.value):
+        if isinstance(sub, ast.Constant) and _str_const(sub, lambda v: MARKER in v) and _names_one_entry(str(sub.value)):
             return True
         if _interpolates(sub) and any(_str_const(c, lambda v: MARKER in v) for c in ast.walk(sub)):
             return True
@@ -145,7 +146,7 @@ def _has_group_call(node: ast.AST) -> bool:
     )
 
 
-def _filters_one_entry(nodes: list[ast.AST]) -> bool:
+def _filters_one_entry(nodes: Sequence[ast.AST]) -> bool:
     return any(
         isinstance(s, ast.Compare) and any(isinstance(o, (ast.Eq, ast.In)) for o in s.ops) and _has_group_call(s)
         for root in nodes
@@ -192,18 +193,16 @@ def ad_hoc_sites(text: str) -> tuple[list[tuple[int, str]], bool]:
                 out.append((node.iter.lineno, "sections"))
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
             func = node.func
-            recv_is_name = isinstance(func.value, ast.Name)
-            if func.attr in RE_FUNCS and recv_is_name and func.value.id == "re" and node.args and hit(node.args[0]):
+            recv = func.value.id if isinstance(func.value, ast.Name) else None
+            if func.attr in RE_FUNCS and recv == "re" and node.args and hit(node.args[0]):
                 out.append((node.lineno, "regex"))
-            elif func.attr in STR_METHODS and not (recv_is_name and func.value.id in mod.imported):
+            elif func.attr in STR_METHODS and recv not in mod.imported:
                 if any(hit(a) for a in node.args):
                     out.append((node.lineno, "strmethod"))
     return sorted(out), mod.reads_real_log()
 
 
-def _safe_sites(text: str | None) -> tuple[list[tuple[int, str]], bool] | None:
-    if text is None:
-        return None
+def _safe_sites(text: str) -> tuple[list[tuple[int, str]], bool] | None:
     try:
         return ad_hoc_sites(text)
     except (SyntaxError, ValueError):
@@ -264,12 +263,7 @@ def validate_decision_reads_through_fixture(failed: list[str], root: Path | None
         return
     for old, new in pairs:
         path = tree / new
-        try:
-            head_text = _decode(path.read_bytes())
-        except OSError as exc:
-            failed.append(f"decision-reads ratchet: cannot read {new}: {exc}")
-            continue
-        head = _safe_sites(head_text)
+        head = _safe_sites(_decode(path.read_bytes()))
         if head is None:
             failed.append(f"decision-reads ratchet: {new} does not parse; fix its syntax")
             continue
