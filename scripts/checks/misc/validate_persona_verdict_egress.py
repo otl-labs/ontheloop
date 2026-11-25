@@ -25,7 +25,7 @@ import yaml
 
 from scripts.checks import _common, registry
 from scripts.checks.ci_guards.validate_project_region import job_outputs_aws_region_via_action
-from scripts.checks.misc._persona_verdict_container import LAUNCHER, class_problems, is_container_job, primary_host
+from scripts.checks.misc._persona_verdict_container import LAUNCHER, class_problems, is_container_job, role_hosts
 from scripts.checks.misc._persona_verdict_floor import PROBE_PREFIX, floor_problems, is_floor_line
 
 LIST_FILE = "config/persona_verdict_egress.yaml"
@@ -246,27 +246,9 @@ def _tokenised_endpoints(where: str, raw: str, workflow: dict[str, Any], job: di
     return set(tokens), out
 
 
-def _provider_hosts_expected(root: Path, data: dict[str, Any]) -> tuple[set[str], list[str]]:
-    try:
-        doc = yaml.safe_load((root / INFERENCE_PROVIDER).read_text(encoding="utf-8"))
-        tiers = doc["tier_model"]["tiers"]
-        models = doc["model_id_formats"]["litellm_tier_models"]
-    except (OSError, yaml.YAMLError, KeyError, TypeError) as exc:
-        return set(), [f"{INFERENCE_PROVIDER} does not give the tier models: {type(exc).__name__}"]
-    out: list[str] = []
-    hosts: set[str] = set()
-    for tier in tiers:
-        if not isinstance(tier, dict) or str(tier.get("state", "")).startswith("Deferred"):
-            continue
-        name = str(tier.get("selection_ref", "")).rsplit(".", 1)[-1]
-        default = str((models.get(name) or {}).get("default_model", ""))
-        prefix = default.split("/", 1)[0] + "/" if "/" in default else ""
-        host = data.get("provider_hosts", {}).get(prefix)
-        if host is None:
-            out.append(f"{LIST_FILE}: provider_hosts has no entry for the LiteLLM prefix {prefix!r} of tier row {name}")
-        else:
-            hosts.add(host)
-    return hosts, out
+def _provider_hosts_expected(root: Path, data: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
+    """Role -> provider host for each committed tier row."""
+    return role_hosts(root, data)
 
 
 def _row_host_problems(where: str, root: Path, data: dict[str, Any], row: list[Any], steps: list[Any]) -> list[str]:
@@ -277,7 +259,8 @@ def _row_host_problems(where: str, root: Path, data: dict[str, Any], row: list[A
     smoke = any(isinstance(s, dict) and INFERENCE_SMOKE_RUN.search(str(s.get("run", ""))) for s in steps)
     if not smoke:
         return [f"{where}: host {e} is outside sts and ssm for a job that runs no inference-smoke verb" for e in sorted(rest)]
-    want, out = _provider_hosts_expected(root, data)
+    hosts, out = _provider_hosts_expected(root, data)
+    want = set(hosts.values())
     if rest != want:
         out.append(f"{where}: provider hosts {sorted(rest)} differ from the committed tier models' {sorted(want)}")
     return out
@@ -391,9 +374,9 @@ def _job_problems(rel: str, name: str, workflow: dict[str, Any], data: dict[str,
         return [*out, f"{where}: no steps"]
     out.extend(_step0_problems(where, steps[0], data["filter"], row, text, workflow, job))
     if is_container_job(job):
-        primary, found = primary_host(root, data)
+        hosts, found = _provider_hosts_expected(root, data)
         out.extend(found)
-        out.extend(class_problems(where, rel, workflow, job, row, primary))
+        out.extend(class_problems(where, rel, workflow, job, row, hosts))
     else:
         out.extend(_row_host_problems(where, root, data, row, steps))
     out.extend(_order_problems(where, steps, probe))
