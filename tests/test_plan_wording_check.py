@@ -121,6 +121,8 @@ class FakeRunner:
             manifest: Any = {"sha": _git(cwd, "rev-parse", "HEAD"), "capped": False, "deferred": []}
         else:
             manifest = self.manifest
+        if isinstance(manifest, dict) and manifest.get("sha") == "SELF":
+            manifest = {**manifest, "sha": _git(cwd, "rev-parse", "HEAD")}
         if manifest is not None:
             _write(cwd, "logs/debug/selection-manifest.json", json.dumps(manifest))
         return subprocess.CompletedProcess(cmd, self.pre_rc, self.pre_out, "")
@@ -222,7 +224,10 @@ class TestFastTier:
         assert result.verdict == "PASS" and result.selection == "complete" and len(result.digest) == 64
         assert result.base == _git(tree, "rev-parse", "HEAD")
         assert runner.commands[-1] == ["bin/venv-python", "-m", "scripts.validate", "--pre"]
-        assert all(cwd == tree for _, cwd in runner.calls)
+        measured = [cwd for cmd, cwd in runner.calls if "scripts.validate" not in cmd]
+        assert measured and all(cwd == tree for cwd in measured)
+        fast = [cwd for cmd, cwd in runner.calls if "scripts.validate" in cmd]
+        assert len(fast) == 1 and fast[0] != tree and not fast[0].exists()
 
     def test_red_fast_tier_echoes_the_failing_lines(self, tmp_path: Path, tree: Path) -> None:
         _place(tree)
@@ -252,8 +257,6 @@ class TestFastTier:
     )
     def test_selection_is_degraded(self, tmp_path: Path, tree: Path, manifest: Any) -> None:
         _place(tree)
-        if isinstance(manifest, dict) and manifest.get("sha") == "SELF":
-            manifest = {**manifest, "sha": _git(tree, "rev-parse", "HEAD")}
         result = _run(tmp_path, tree, FakeRunner(surfaces=_surfaces(), manifest=manifest))
         assert result.verdict == "PASS" and result.selection == "degraded"
 
