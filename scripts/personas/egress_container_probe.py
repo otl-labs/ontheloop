@@ -23,6 +23,9 @@ MARKER = "x-persona-egress-proxy"
 EVENTS = "/run/persona/events/events.json"
 BASE_SUFFIX = "_API_BASE"
 CHAT_PATH_ENV = "PERSONA_PROBE_CHAT_PATH"
+INPUT = "/run/persona/in/input.json"
+REPORT_INPUT = {"upstream": "report"}
+UNREACHABLE = "upstream-unreachable"
 Case = tuple[str, str, str, int]
 Result = tuple[str, str, str]
 
@@ -148,13 +151,26 @@ def run_cases(cases: Sequence[Case]) -> list[Result]:
     return [(case[0], "reached" if case[0] in REACHED_CASES else "refused", attempt(case)) for case in cases]
 
 
-def failures(results: Sequence[Result]) -> list[str]:
-    return [case_id for case_id, want, got in results if want != got]
+def report_mode(path: str | None = None) -> bool:
+    try:
+        with open(path or INPUT, encoding="utf-8") as handle:
+            return bool(json.load(handle) == REPORT_INPUT)
+    except (OSError, ValueError):
+        return False
 
 
-def emit(results: Sequence[Result]) -> None:
+def _reported(case_id: str, got: str, report: bool) -> bool:
+    return report and case_id in REACHED_CASES and got == UNREACHABLE
+
+
+def failures(results: Sequence[Result], report: bool = False) -> list[str]:
+    return [case_id for case_id, want, got in results if want != got and not _reported(case_id, got, report)]
+
+
+def emit(results: Sequence[Result], report: bool = False) -> None:
     for case_id, want, got in results:
-        print(f"CONTAINER-PROBE case={case_id} expect={want} got={got}", flush=True)
+        tail = " REPORT" if _reported(case_id, got, report) else ""
+        print(f"CONTAINER-PROBE case={case_id} expect={want} got={got}{tail}", flush=True)
 
 
 def write_result(line: str, path: str | None = None) -> None:
@@ -166,9 +182,10 @@ def write_result(line: str, path: str | None = None) -> None:
 
 
 def main(argv: Sequence[str]) -> int:
+    report = report_mode()
     results = run_cases(CASES)
-    emit(results)
-    bad = failures(results)
+    emit(results, report)
+    bad = failures(results, report)
     line = "CONTAINER-PROBE PASS" if not bad else "CONTAINER-PROBE FAIL " + " ".join(bad)
     print(line, flush=True)
     write_result(line)

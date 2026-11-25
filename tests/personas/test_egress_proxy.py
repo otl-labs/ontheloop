@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import socket
 import threading
 from typing import Any
@@ -187,3 +188,28 @@ def test_logs_carry_no_header_value_or_body(capsys: pytest.CaptureFixture[str]) 
     P.handle(proxy, server)
     err = capsys.readouterr().err
     assert "topsecret" not in err and "secret" not in err and "k3y" not in err and err.strip().endswith("200")
+
+
+def _counts(capsys: pytest.CaptureFixture[str]) -> list[dict[str, int]]:
+    return [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+
+
+def _reply(status: str) -> bytes:
+    return f"HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n".encode()
+
+
+def test_counts_line_records_ok_outage_and_inflight(capsys: pytest.CaptureFixture[str]) -> None:
+    proxy, _ = _proxy()
+    for status in ("200 OK", "503 Unavailable", "408 Timeout", "429 Slow", "402 Payment"):
+        proxy.connect = lambda a, h, status=status: FakeUpstream(_reply(status))  # type: ignore[assignment]
+        _exchange(proxy, _post())
+    assert _counts(capsys)[-1] == {"ok": 1, "outage": 3, "inflight": 0}
+    dead, _ = _proxy(address=None)
+    _exchange(dead, _post())
+    assert _counts(capsys)[-1] == {"ok": 0, "outage": 1, "inflight": 0}
+    hang, _ = _proxy(upstream=OSError("boom"))
+    _exchange(hang, _post())
+    assert _counts(capsys)[-1] == {"ok": 0, "outage": 1, "inflight": 0}
+    stuck, _ = _proxy()
+    stuck.tally(inflight=1)
+    assert _counts(capsys)[-1] == {"ok": 0, "outage": 0, "inflight": 1}

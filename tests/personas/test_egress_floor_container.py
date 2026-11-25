@@ -383,3 +383,25 @@ def test_jump_replaces_an_existing_rule_and_inserts_at_one(monkeypatch: pytest.M
     monkeypatch.setattr(F, "sh", lambda argv, timeout=30: (seen.append(list(argv)), (0, ""))[1])
     assert F._jump_at("iptables", F.bridge_jumps()[0])
     assert any("-D" in c for c in seen) and seen[-1][-6:] == ["INPUT", "1", "-i", "br-persona", "-j", "EGRESS_BRIDGE_IN"]
+
+
+def _tier_roles() -> dict[str, str]:
+    doc = yaml.safe_load((ROOT / "docs/contracts/inference-provider.yaml").read_text(encoding="utf-8"))
+    models = doc["model_id_formats"]["litellm_tier_models"]
+    roles: dict[str, str] = {}
+    for tier in doc["tier_model"]["tiers"]:
+        if str(tier.get("state", "")).startswith("Deferred"):
+            continue
+        row = models[str(tier["selection_ref"]).rsplit(".", 1)[-1]]
+        roles[str(row["default_model"]).split("/", 1)[0] + "/"] = str(tier["role"])
+    return roles
+
+
+def test_snapshot_role_matches_tier_models() -> None:
+    assert {prefix: row["role"] for prefix, row in F.PROVIDERS.items()} == _tier_roles()
+
+
+def test_a_shared_role_is_refused() -> None:
+    shared = {prefix: {**row, "role": "primary"} for prefix, row in F.PROVIDERS.items()}
+    with pytest.raises(ValueError):
+        F.snapshot_text("registry.example/img", "sha256:" + "a" * 64, shared)

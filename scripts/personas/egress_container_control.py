@@ -24,12 +24,25 @@ PROBE_FILE = ROOT / "scripts" / "personas" / "egress_container_probe.py"
 PULL_TIMEOUT = 300
 RUN_TIMEOUT = 120
 EXPECT_REACHED = ("raw_ip_443", "unlisted_name", "dns_txt_system")
-REQUEST = {"persona": "fixture_probe", "provider": "deepseek/", "input": {}}
+PERSONA = "fixture_probe"
+KEYED_JOB_ROLES = {"run": "primary", "run-fallback": "warm_fetched_escape_hatch"}
+REPORT_INPUT = {"upstream": "report"}
 LINE = "CONTAINER-PROBE case="
 
 
+def provider_for(role: str) -> str:
+    return next(prefix for prefix, row in floor.PROVIDERS.items() if row["role"] == role)
+
+
 def request_main(argv: Sequence[str] = ()) -> int:
-    print(json.dumps(REQUEST))
+    job = os.environ.get("GITHUB_JOB", "")
+    role = KEYED_JOB_ROLES.get(job, "primary")
+    request = {
+        "persona": PERSONA,
+        "provider": provider_for(role),
+        "input": dict(REPORT_INPUT) if job in KEYED_JOB_ROLES else {},
+    }
+    print(json.dumps(request))
     return 0
 
 

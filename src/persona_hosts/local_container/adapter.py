@@ -60,6 +60,9 @@ def _base_url_variables() -> set[str]:
     return names
 
 
+_ROLE = re.compile(r"^[a-z_]+$")
+
+
 def run_argv(
     image_ref: str,
     persona: str,
@@ -71,7 +74,10 @@ def run_argv(
     network: str = "bridge",
     docker: str = "docker",
     entrypoint: list[str] | None = None,
+    role: str | None = None,
 ) -> list[str]:
+    if role is not None and not _ROLE.match(role):
+        raise ValueError(f"role {role!r} does not match {_ROLE.pattern}")
     if not _IMAGE_REF.match(image_ref):
         raise ValueError(f"image_ref must be <name>@sha256:<64 hex> or a sha256 image id, not a tag: {image_ref!r}")
     if not _PERSONA.match(persona):
@@ -93,6 +99,7 @@ def run_argv(
     return [
         *argv, image_ref, "--contract", f"/app/docs/contracts/personas/{persona}.yaml",
         "--input", f"{_IN_MOUNT}/input.json", "--events", f"{_EVENTS_MOUNT}/events.json",
+        *(["--role", role] if role else []),
     ]  # fmt: skip
 
 
