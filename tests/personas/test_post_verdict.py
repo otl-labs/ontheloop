@@ -291,3 +291,48 @@ def test_failure_value_posts_its_failure_id() -> None:
     conclusion, title, _ = post_verdict.judge(ROOT, route, _result(route, listed), True)
     assert conclusion == "failure" and title == "failed: injection_suspected"
     assert post_verdict.judge(ROOT, route, _result(route, unlisted), True)[1] == "output failed its schema"
+
+
+def _fallback_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, primary: str, fallback: str | None
+) -> tuple[Path, list[Any]]:
+    work, bodies = _post_setup(tmp_path, monkeypatch, BLOCK, primary)
+    if fallback is not None:
+        (work / "results-fallback").mkdir()
+        (work / "results-fallback" / f"{BLOCK}.json").write_text(json.dumps(_result(BLOCK, fallback)))
+    return work, bodies
+
+
+def test_fallback_result_wins_and_is_named(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PERSONA_FALLBACK_RESULT", "success")
+    work, bodies = _fallback_setup(tmp_path, monkeypatch, _out("PROCEED"), BLOCK_OUT)
+    post_verdict.post_all(ROOT, work, "o/r", "t")
+    body = bodies[0][1]
+    assert body["conclusion"] == "failure" and body["output"]["title"].endswith(" (fallback role)")
+    assert post_verdict.override.parse_record(body["output"]["text"].split("\n")[0])
+    work, bodies = _fallback_setup(tmp_path / "o", monkeypatch, _out("PROCEED"), BLOCK_OUT)
+    monkeypatch.setattr(post_verdict.override, "lookup", lambda *a: APPROVED)
+    post_verdict.post_all(ROOT, work, "o/r", "t")
+    title = bodies[0][1]["output"]["title"]
+    assert "overridden by op" in title and title.endswith(" (fallback role)")
+
+
+@pytest.mark.parametrize(
+    ("status", "marked"), [("success", True), ("failure", True), ("cancelled", True), ("skipped", False), ("", False)]
+)
+def test_the_no_result_marker_follows_the_fallback_job_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str, marked: bool
+) -> None:
+    monkeypatch.setenv("PERSONA_FALLBACK_RESULT", status)
+    work, bodies = _fallback_setup(tmp_path, monkeypatch, _out("PROCEED"), None)
+    post_verdict.post_all(ROOT, work, "o/r", "t")
+    title = bodies[0][1]["output"]["title"]
+    assert title.endswith(" (fallback role: no result)") is marked
+    assert bodies[0][1]["conclusion"] == "success"
+
+
+def test_without_a_fallback_result_the_primary_is_judged_as_today(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PERSONA_FALLBACK_RESULT", raising=False)
+    work, bodies = _fallback_setup(tmp_path, monkeypatch, _out("PROCEED"), None)
+    post_verdict.post_all(ROOT, work, "o/r", "t")
+    assert "fallback" not in bodies[0][1]["output"]["title"]
