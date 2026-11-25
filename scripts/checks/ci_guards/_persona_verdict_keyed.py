@@ -14,11 +14,13 @@ import json
 import re
 from typing import Any
 
+from scripts.checks.ci_guards._persona_verdict_fallback import ROLES as RUN_JOBS
+from scripts.checks.ci_guards._persona_verdict_fallback import fallback_problems, run_fallback_condition
 from scripts.checks.ci_guards._shared import is_sha_pinned
 from scripts.checks.misc.validate_persona_verdict_egress import DOCKER_TOKEN, _logical_lines
 
 VERDICT = ".github/workflows/persona-verdict.yml"
-KEYED_JOBS = ("keyprep", "smoke", "refusal", "run")
+KEYED_JOBS = ("keyprep", "smoke", "refusal", "run", "run-fallback")
 TIER_ROLES = ("primary", "warm_fetched_escape_hatch")
 KEYED_IF = (
     "!cancelled() && needs.prepare.result == 'success' && github.event.workflow_run.event == 'pull_request' && "
@@ -27,20 +29,28 @@ KEYED_IF = (
 KEYPREP_OK = "needs.keyprep.result == 'success'"
 KEYPREP_IF = "!cancelled() && needs.prepare.result == 'success'"
 KEYED_CONDITION = f"{KEYED_IF} && {KEYPREP_OK}"
-CONDITIONS = {"keyprep": KEYPREP_IF, "smoke": KEYED_CONDITION, "refusal": KEYED_CONDITION, "run": KEYED_CONDITION}
+CONDITIONS = {
+    "keyprep": KEYPREP_IF,
+    "smoke": KEYED_CONDITION,
+    "refusal": KEYED_CONDITION,
+    "run": KEYED_CONDITION,
+    "run-fallback": run_fallback_condition(KEYED_IF, KEYPREP_OK),
+}
 NEEDS = {
     "keyprep": ["prepare"],
     "smoke": ["prepare", "keyprep"],
     "refusal": ["prepare", "keyprep"],
     "run": ["prepare", "keyprep"],
+    "run-fallback": ["prepare", "keyprep", "run"],
 }
 PERMISSIONS = {
     "keyprep": {"contents": "read"},
     "smoke": {"contents": "read", "id-token": "write"},
     "refusal": {"contents": "read", "id-token": "write"},
     "run": {"contents": "read", "id-token": "write"},
+    "run-fallback": {"contents": "read", "id-token": "write"},
 }
-ENVIRONMENT_JOBS = ("smoke", "run")
+ENVIRONMENT_JOBS = ("smoke", "run", "run-fallback")
 RUN_PREFIX = 'python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" '
 SELF_CHECK = RUN_PREFIX + "egress-self-check"
 FLOOR = "sudo " + RUN_PREFIX + "egress-floor"
@@ -70,6 +80,8 @@ WHEELS = "persona-verdict-wheels"
 PREPARED = "persona-verdict-prepared"
 RESULTS = "persona-verdict-results"
 UPLOAD_NAME = "Upload verdict results"
+RESULTS_FALLBACK = "persona-verdict-results-fallback"
+UPLOAD_NAME_FALLBACK = "Upload fallback verdict results"
 WORKDIR = "${{ runner.temp }}/work"
 SNAPSHOT_ENV = "${{ runner.temp }}/snapshot"
 SECRETS = re.compile(r"secrets\s*(?:\.|\[)", re.IGNORECASE)
@@ -140,7 +152,13 @@ def _step_rules(name: str, job: dict[str, Any]) -> list[str]:
 
 def _pip_rules(name: str, job: dict[str, Any]) -> list[str]:
     pips = [_run(s) for s in _steps(job) if "pip " in str(s.get("run", ""))]
-    want = {"keyprep": [PIP_DOWNLOAD], "smoke": [PIP_INSTALL], "refusal": [], "run": [PIP_INSTALL]}.get(name)
+    want = {
+        "keyprep": [PIP_DOWNLOAD],
+        "smoke": [PIP_INSTALL],
+        "refusal": [],
+        "run": [PIP_INSTALL],
+        "run-fallback": [PIP_INSTALL],
+    }.get(name)
     if want is None:
         return [f"{VERDICT}: keyed job {name} has no pinned pip set"]
     if pips != want:
@@ -148,8 +166,12 @@ def _pip_rules(name: str, job: dict[str, Any]) -> list[str]:
     return []
 
 
-DOWNLOADS = {"smoke": [WHEELS], "run": [PREPARED, WHEELS]}
-UPLOADS = {"keyprep": [(WHEELS, None)], "run": [(RESULTS, UPLOAD_NAME)]}
+DOWNLOADS = {"smoke": [WHEELS], "run": [PREPARED, WHEELS], "run-fallback": [PREPARED, WHEELS]}
+UPLOADS = {
+    "keyprep": [(WHEELS, None)],
+    "run": [(RESULTS, UPLOAD_NAME)],
+    "run-fallback": [(RESULTS_FALLBACK, UPLOAD_NAME_FALLBACK)],
+}
 
 
 def _artifact_rules(name: str, job: dict[str, Any]) -> list[str]:
@@ -159,7 +181,7 @@ def _artifact_rules(name: str, job: dict[str, Any]) -> list[str]:
         uses = str(step.get("uses", "")).split("@", 1)[0]
         artifact = str(_map(step.get("with")).get("name"))
         if uses == "actions/upload-artifact":
-            ups.append((artifact, step.get("name") if name == "run" else None))
+            ups.append((artifact, step.get("name") if name in RUN_JOBS else None))
         if uses == "actions/download-artifact":
             downs.append(artifact)
     out: list[str] = []
@@ -184,8 +206,8 @@ def _run_py_rules(name: str, job: dict[str, Any]) -> list[str]:
                 if set(with_) != {"persist-credentials"} or str(with_.get("persist-credentials")).lower() != "false":
                     out.append(f"{w} checkout is not exactly persist-credentials: false (no ref, no path)")
         return out
-    if name == "run":
-        return _run_job_rules(w, steps, run_py)
+    if name in RUN_JOBS:
+        return _run_job_rules(name, w, steps, run_py)
     want = ["egress-floor", "egress-self-check"] + (
         ["inference-smoke"] * len(TIER_ROLES) if name == "smoke" else ["key-refusal"]
     )
@@ -216,8 +238,11 @@ CHECKOUT_WITH = {"ref": "${{ github.sha }}", "path": "main", "persist-credential
 PIN_ENDPOINTS = "allowed-endpoints"
 
 
-def _canonical_run_steps() -> list[dict[str, Any]]:
-    """The run job's steps in order; uses steps list their action and with inputs, run steps their whole mapping."""
+def _canonical_run_steps(job: str = "run") -> list[dict[str, Any]]:
+    """The run job's steps in order (run-fallback's differ in step ids and the upload); uses steps list their action and with
+    inputs, run steps their whole mapping."""
+    pre = "run-" if job == "run" else "run-fallback-"
+    upload = (UPLOAD_NAME, RESULTS) if job == "run" else (UPLOAD_NAME_FALLBACK, RESULTS_FALLBACK)
 
     def run(name: str, id_: str, text: str, **extra: Any) -> dict[str, Any]:
         return {"name": name, "id": id_, "run": text, **extra}
@@ -234,30 +259,30 @@ def _canonical_run_steps() -> list[dict[str, Any]]:
             },
         },
         {"name": "Check out main", "uses": "actions/checkout", "with": CHECKOUT_WITH},
-        run("Lay the container egress floor", "run-floor", FLOOR_CONTAINER),
-        run("Create the work directory", "run-mkdir", MKDIR),
-        run("Check the egress filter", "run-self-check", SELF_CHECK),
+        run("Lay the container egress floor", pre + "floor", FLOOR_CONTAINER),
+        run("Create the work directory", pre + "mkdir", MKDIR),
+        run("Check the egress filter", pre + "self-check", SELF_CHECK),
         {
             "name": "Download prepared inputs",
             "uses": "actions/download-artifact",
             "with": {"name": PREPARED, "path": WORKDIR + "/prepared"},
         },
-        run("Probe from the container", "run-probe", PROBE),
+        run("Probe from the container", pre + "probe", PROBE),
         {"name": "Set up Python 3.12", "uses": "actions/setup-python", "with": {"python-version": "3.12"}},
         {
             "name": "Download the wheelhouse",
             "uses": "actions/download-artifact",
             "with": {"name": WHEELS, "path": WORKDIR + "/wheels"},
         },
-        run("Install the wheelhouse offline", "run-install", PIP_INSTALL),
-        run("Run the fixture persona", "run-persona", PERSONA, env=None, **{"working-directory": WORKDIR}),
+        run("Install the wheelhouse offline", pre + "install", PIP_INSTALL),
+        run("Run the fixture persona", pre + "persona", PERSONA, env=None, **{"working-directory": WORKDIR}),
         {
-            "name": UPLOAD_NAME,
+            "name": upload[0],
             "uses": "actions/upload-artifact",
-            "with": {"name": RESULTS, "path": WORKDIR + "/results", "retention-days": 1, "if-no-files-found": "ignore"},
+            "with": {"name": upload[1], "path": WORKDIR + "/results", "retention-days": 1, "if-no-files-found": "ignore"},
         },
-        run("Probe from the container again", "run-probe-final", PROBE),
-        run("Check the egress filter again", "run-final-check", SELF_CHECK, **{"if": "always()"}),
+        run("Probe from the container again", pre + "probe-final", PROBE),
+        run("Check the egress filter again", pre + "final-check", SELF_CHECK, **{"if": "always()"}),
     ]
 
 
@@ -286,7 +311,7 @@ def _step_matches(step: dict[str, Any], canon: dict[str, Any]) -> bool:
     return True
 
 
-def _run_job_rules(w: str, steps: list[dict[str, Any]], run_py: list[dict[str, Any]]) -> list[str]:
+def _run_job_rules(job_name: str, w: str, steps: list[dict[str, Any]], run_py: list[dict[str, Any]]) -> list[str]:
     """The run job's run.py sequence (k3) and its closed step list: every step equals its canonical mapping."""
     out: list[str] = []
     want = [
@@ -306,12 +331,18 @@ def _run_job_rules(w: str, steps: list[dict[str, Any]], run_py: list[dict[str, A
     env = _map(persona.get("env"))
     if set(persona) != {"name", "id", "run", "env", "working-directory"} or persona.get("working-directory") != WORKDIR:
         out.append(f"{w} persona step keys are not exactly name, id, run, env and working-directory in the work directory")
-    if env != {"PERSONA_AWS_REGION": REGION_ENV, "AWS_ACCOUNT_ID": ACCOUNT_ENV, "PERSONA_SNAPSHOT": SNAPSHOT_ENV}:
-        out.append(f"{w} persona step env is not exactly PERSONA_AWS_REGION, AWS_ACCOUNT_ID and PERSONA_SNAPSHOT, pinned")
+    want_env = {
+        "PERSONA_AWS_REGION": REGION_ENV,
+        "AWS_ACCOUNT_ID": ACCOUNT_ENV,
+        "PERSONA_SNAPSHOT": SNAPSHOT_ENV,
+        "PERSONA_ROLE": RUN_JOBS[job_name],
+    }
+    if env != want_env:
+        out.append(f"{w} persona step env is not exactly {sorted(want_env)}, pinned (PERSONA_ROLE {RUN_JOBS[job_name]})")
     final = run_py[-1]
     if str(final.get("if", "")).strip() != "always()" or set(final) - {"name", "id", "if", "run"}:
         out.append(f"{w} final self-check must carry if: always() and no env, shell or working-directory")
-    expected = _canonical_run_steps()
+    expected = _canonical_run_steps(job_name)
     if len(steps) != len(expected):
         return out + [f"{w} steps are not exactly the {len(expected)} canonical steps in order"]
     for index, (step, canon) in enumerate(zip(steps, expected, strict=True)):
@@ -326,12 +357,12 @@ def _secret_rules(jobs: dict[str, Any], doc_text: str) -> list[str]:
     In run it is the persona step only, after the first self-check and after the first container probe.
     """
     allowed = 0
-    for name in ("smoke", "refusal", "post", "run"):
+    for name in ("smoke", "refusal", "post", "run", "run-fallback"):
         steps = _steps(_map(jobs.get(name)))
         check = next((i for i, s in enumerate(steps) if _run(s) == SELF_CHECK), None)
         probe = next((i for i, s in enumerate(steps) if _run(s) == PROBE), None)
-        verbs = ("persona-run",) if name == "run" else ("inference-smoke", "key-refusal", "post")
-        after = check if name != "run" else (None if check is None or probe is None else max(check, probe))
+        verbs = ("persona-run",) if name in RUN_JOBS else ("inference-smoke", "key-refusal", "post")
+        after = check if name not in RUN_JOBS else (None if check is None or probe is None else max(check, probe))
         for i, step in enumerate(steps):
             if _verb(step) in verbs and after is not None and i > after:
                 allowed += json.dumps(step, default=str).count("secrets.AWS_ACCOUNT_ID")
@@ -354,7 +385,7 @@ def keyed_problems(doc: dict[str, Any]) -> list[str]:
     if not present:
         return []
     if len(present) != len(KEYED_JOBS):
-        return [f"{VERDICT}: keyprep, smoke, refusal and run exist together or not at all (found {present})"]
+        return [f"{VERDICT}: keyprep, smoke, refusal, run and run-fallback exist together or not at all (found {present})"]
     out: list[str] = []
     for key in ("env", "defaults"):
         if key in doc:
@@ -364,4 +395,4 @@ def keyed_problems(doc: dict[str, Any]) -> list[str]:
         out.extend(_job_shape(name, job) + _step_rules(name, job) + _pip_rules(name, job))
         out.extend(_artifact_rules(name, job) + _run_py_rules(name, job))
     out.extend(_secret_rules(jobs, json.dumps(doc, default=str)))
-    return out
+    return out + fallback_problems(jobs)

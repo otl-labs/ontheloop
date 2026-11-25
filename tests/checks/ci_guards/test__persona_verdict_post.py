@@ -188,3 +188,27 @@ def test_no_post_job_is_no_problem_here() -> None:
     doc = _doc()
     del doc["jobs"]["post"]
     assert p.post_problems(doc, _workflows()) == []
+
+
+def test_post_fallback_download_is_optional_and_ordered() -> None:
+    assert _problems(None) == []
+    name = "Download fallback verdict results"
+
+    def drop_coe(d: dict[str, Any]) -> None:
+        del _named(d, name)["continue-on-error"]
+
+    def before_results(d: dict[str, Any]) -> None:
+        steps = _post(d)["steps"]
+        step = _named(d, name)
+        steps.remove(step)
+        steps.insert(steps.index(_named(d, "Download verdict results")), step)
+
+    assert any("lacks continue-on-error" in m for m in _problems(drop_coe))
+    assert any("steps are not exactly" in m for m in _problems(before_results))
+    assert any(
+        "needs are not exactly" in m for m in _problems(lambda d: _post(d).update({"needs": ["prepare", "run", "keyprep"]}))
+    )
+    assert any(
+        "post step env" in m
+        for m in _problems(lambda d: _named(d, "Post the check runs")["env"].pop("PERSONA_FALLBACK_RESULT"))
+    )

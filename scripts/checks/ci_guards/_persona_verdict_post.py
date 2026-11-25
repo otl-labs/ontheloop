@@ -35,7 +35,7 @@ ENVIRONMENT = "persona-verdict-app"
 APP_ROLE = "agent-platform-github-ci-persona-verdict-app"
 W = f"{VERDICT}: post job"
 CONDITION = "!cancelled()"
-NEEDS = ["prepare", "run", "keyprep"]
+NEEDS = ["prepare", "run", "run-fallback", "keyprep"]
 PERMISSIONS = {"checks": "read", "contents": "read", "actions": "read", "id-token": "write"}
 VERBS = ["egress-floor", "egress-self-check", "post", "egress-self-check"]
 SEQUENCE = (
@@ -49,12 +49,19 @@ SEQUENCE = (
     "install",
     "prepared",
     "results",
+    "results-fallback",
     "post",
     "final-check",
 )
-ARTIFACTS = {"persona-verdict-prepared", "persona-verdict-results", WHEELS}
-OPTIONAL = {"persona-verdict-prepared", "persona-verdict-results"}
-POST_ENV = {"GH_TOKEN": "${{ github.token }}", "AWS_ACCOUNT_ID": ACCOUNT_ENV, "PERSONA_AWS_REGION": REGION_ENV}
+FALLBACK_RESULTS = "persona-verdict-results-fallback"
+ARTIFACTS = {"persona-verdict-prepared", "persona-verdict-results", FALLBACK_RESULTS, WHEELS}
+OPTIONAL = {"persona-verdict-prepared", "persona-verdict-results", FALLBACK_RESULTS}
+POST_ENV = {
+    "GH_TOKEN": "${{ github.token }}",
+    "AWS_ACCOUNT_ID": ACCOUNT_ENV,
+    "PERSONA_AWS_REGION": REGION_ENV,
+    "PERSONA_FALLBACK_RESULT": "${{ needs.run-fallback.result }}",
+}
 MKDIR = 'mkdir -p "$RUNNER_TEMP/work"'
 
 
@@ -68,9 +75,13 @@ def _kind(step: dict[str, Any]) -> str:
         return "setup-python"
     if uses.startswith("actions/download-artifact@"):
         name = _map(step.get("with")).get("name")
-        return {WHEELS: "wheels", "persona-verdict-prepared": "prepared", "persona-verdict-results": "results"}.get(
-            str(name), "download?"
-        )
+        kinds = {
+            WHEELS: "wheels",
+            "persona-verdict-prepared": "prepared",
+            "persona-verdict-results": "results",
+            FALLBACK_RESULTS: "results-fallback",
+        }
+        return kinds.get(str(name), "download?")
     if run == FLOOR:
         return "floor"
     if run == MKDIR:
@@ -123,7 +134,9 @@ def _step_problems(job: dict[str, Any]) -> list[str]:
             out.append(f"{W} downloads {artifact!r}")
         coe = "continue-on-error" in step
         if coe and not (action == "actions/download-artifact" and artifact in OPTIONAL and step["continue-on-error"] is True):
-            out.append(f"{W} has a step with continue-on-error other than the prepared and results downloads")
+            out.append(
+                f"{W} has a step with continue-on-error other than the prepared, results and fallback results downloads"
+            )
         if not coe and artifact in OPTIONAL:
             out.append(f"{W} download of {artifact} lacks continue-on-error: true")
     pips = [_run(s) for s in steps if "pip " in str(s.get("run", ""))]

@@ -368,3 +368,38 @@ def test_each_run_job_mutation_is_refused(name: str, expect: str, edit: Callable
 
 def test_a_job_outside_the_pip_map_reports_a_problem() -> None:
     assert k._pip_rules("other", {"steps": []}) == [f"{v.VERDICT}: keyed job other has no pinned pip set"]
+
+
+def _fb(edit: Callable[[dict[str, Any]], None]) -> Callable[[dict[str, Any]], None]:
+    return lambda d: edit(d["jobs"]["run-fallback"])
+
+
+RED_FALLBACK = [
+    (
+        "run-upload-name",
+        "uploads",
+        _fb(lambda j: _named(j, "Upload fallback verdict results")["with"].update({"name": k.RESULTS})),
+    ),
+    (
+        "extra-step",
+        "steps are not exactly",
+        _fb(lambda j: j["steps"].append({"name": "x", "id": "run-fallback-x", "run": "true"})),
+    ),
+    (
+        "step-id-prefix",
+        "differs from its canonical mapping",
+        _fb(lambda j: _named(j, "Create the work directory").update({"id": "run-mkdir"})),
+    ),
+    (
+        "run-role-literal",
+        "persona step env",
+        lambda d: _named(d["jobs"]["run"], "Run the fixture persona")["env"].update({"PERSONA_ROLE": "x"}),
+    ),
+]
+
+
+def test_run_fallback_step_list_is_run_s() -> None:
+    assert _problems(None) == []
+    assert k._canonical_run_steps("run-fallback")[2]["id"] == "run-fallback-floor"
+    for _name, message, edit in RED_FALLBACK:
+        assert any(message in p for p in _problems(edit)), (_name, _problems(edit))
