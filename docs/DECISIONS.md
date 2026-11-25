@@ -2,6 +2,92 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 284: The DuckLake ops runtime in one entry -- a closed read/write boundary, idempotent writes onto an append-only history, and agent-free maintenance whose garbage collection fails closed (supersedes Decisions 81 and 188) (Decided)
+
+```yaml
+number: 284
+status: Decided
+decided_date: "2026-11-25"
+kind:
+  value: direction
+  justification: >-
+    Clause 1 keeps every read and write behind the closed boundary, a commitment on what data is exposed and to whom,
+    and clause 4 keeps scheduled maintenance agent-free and operational verbs human-invoked, a human gate.
+supersedes: [81, 188]
+significance:
+  value: numbered_decision
+  justification: >-
+    It restates the current rule of Decision 81 and its whole amender 188 as one entry so both can compact (Decisions
+    149 and 278); dated notes (considered) cannot retire a chain, and docs/contracts/read-engine.yaml and
+    ducklake_maintenance.yaml (considered) hold the surfaces and verbs, not the boundary and gates behind them.
+delegates:
+  - key: docs/contracts/read-engine.yaml#single_backend.escape_hatch
+    change_rule: operator_approval
+    bounds: {text: "No read or write bypasses the named readers and writers outside a carve-out a carried-forward entry names; non-routine inspection and repair use the audited PlatformAdmin principal."}
+  - key: docs/contracts/ducklake_maintenance.yaml#contract.governance.human_initiated_value
+    change_rule: operator_approval
+    bounds: {text: "Scheduled maintenance runs no LLM or agent; an operational verb is human-invoked, or run as Decision 283 cl.3 states where a carried-forward entry names it; no-argument invokes are refused."}
+```
+
+**Status:** Decided
+**Date:** 2026-11-25
+**Warehouse ID:** dec-284 (per Decision 84 backfill)
+
+**Problem:** A reader needs twelve entries to learn the DuckLake ops runtime's current rules: Decision 81, its nine
+amenders (188 among them, which re-decided its garbage collection) and the two that amend 188, mostly to add a function
+or an admin verb (rec-5447). Some of Decision 81's numbers no longer hold.
+
+**Intent:** One entry states the runtime's standing rules, so Decisions 81 and 188 compact to stubs; rules that live
+in an amender stay there.
+
+**Decision:**
+1. **Functions by access pattern, one closed boundary.** The runtime splits into functions by access pattern (a catalog
+   writer, a read-only reader, a maintenance-DDL principal) to isolate IAM, scaling and deploy blast radius, never for
+   concurrency; Decision 143 scopes each identity by the worst verb it can reach, and build-lambda.yaml deploy_targets
+   and deploy_channels list the functions. The verb surface behind them stays open. Every read goes through a reader and
+   every write through a writer, save the carve-outs carried-forward entries name; break-glass is the audited
+   PlatformAdmin principal, and catalog DR is a scheduled export (cadence per Decision 88 cl.3) with a tested restore.
+2. **Concurrent, idempotent writes through one chokepoint.** Writers run concurrently with bounded OCC retry
+   (backoff and jitter, a fixed ceiling, loud failure when exhausted); a write ULID minted once and reused across
+   retries keys the history append, so a retry de-duplicates. Each table's writer is its one write chokepoint and
+   enforces every rule a write can decide (Decision 210). The portal has read and write categories only, and every
+   ops write transits scripts/ops_data_portal.py (Decision 84).
+3. **History is the source of truth.** History is append-only and keyed by a monotonic ULID; current is a
+   materialised Type-1 projection written in the same DuckLake transaction as its history row, and rebuildable from
+   history ordered by last_updated_timestamp then ULID. rec_id is the natural key; the current MERGE on it keeps one
+   current row per key, and no engine key is enforced. History partitions by year, month and day of
+   created_timestamp, and current by bucket(N, id).
+4. **Agent-free maintenance; garbage collection fails closed.** Maintenance is a singleton per function on deterministic
+   schedules with no LLM or agent: a non-destructive merge on its own cadence and a guarded destructive GC weekly, never
+   a scheduled cleanup_all. GC is safe by reachability, not volume: G1 reachability, G2 retention floor and G3 catalog
+   sanity raise and delete nothing, every guard-path read raises on failure (only the merge_ops isolation sites of
+   Decision 191 cl.3 and Decision 266 cl.3 degrade loudly instead), and G4's absolute per-pass bound limits deletion
+   (Decision 193). A forced-trip probe (an internal constant, never an event field) proves G1, the smoke gates assert
+   response shape, never deletion volume, and both alarms fire on MaintenanceBreakerTrip. Retention is catalog-wide,
+   never below the last 2 snapshots or the window Decision 266 cl.2's proof relies on; the grace, at least 7 days,
+   exceeds the longest in-flight read or write; ducklake_maintenance.py's constants hold the values. Inlining is off for
+   governance tables. An operational verb runs only when a human invokes it; the admin verbs carried-forward entries
+   name are run as Decision 283 cl.3 states.
+5. **Carried forward.** Decision 143 keeps the identity rule and the smoke split; Decision 210 keeps the write-time data
+   rules; Decision 204, Decision 213, Decision 230, Decision 236, Decision 239 and Decision 251 each keep the function,
+   carve-out or admin verb they add; Decision 193 and Decision 266 keep their parts of Decision 188; Decision 191 keeps
+   its merge_ops isolation site and Decision 207 the history-MERGE residual. A value change goes to the delegated keys;
+   a ruling change is a new entry superseding this one.
+
+**Options considered:** taking 143 and 210 as victims (rejected: each holds a general rule beyond DuckLake, the
+operator's 2026-11-25 choice); restating the function list (rejected: six amenders changed it, so it is a value);
+keeping Decision 81 cl.6's file-fraction breaker as a backstop (rejected: Decision 188 retired it as fail-open).
+
+**Coverage (Decision 181 cl.2):** cl.1 -- validate_recs_read_topology and the reader and writer contract
+evaluators; cl.2 -- the writer's OCC and idempotency tests and validate_write_time_enforcement_conformance; cl.3 --
+ducklake_partition_spec.py's tests; cl.4 -- the G1-G4 guard tests, the breaker_probe and gc smoke gates;
+the accounting -- validate_delegated_key_changes over the consolidation manifest.
+
+**Related:** Decisions 81 and 188 (superseded), 143, 193, 204, 207, 210, 213, 230, 236, 239, 251 and 266 (carried
+forward), 55, 69, 78, 79, 84, 88, 149, 177, 191, 192, 278, 283; CD.33, CD.10; rec-4068, rec-4121.
+
+---
+
 ## Decision 283: The deployment model in one entry -- three agent intents with one trigger each, two heal verbs under one routing rule, and an admin tier where agents prepare and the operator runs (supersedes Decisions 126 and 183) (Decided)
 
 ```yaml
@@ -6955,84 +7041,12 @@ Resolves trailer); rec-3776 / rec-3777 (follow-on, not discharged here).
 
 ## Decision 188: Retire the GC file-fraction breaker for fail-closed structural guards; the lakehouse GC safety property is reachability, not volume (amends Decision 81 clause 6) (Decided)
 
-```yaml
-number: 188
-status: Decided
-decided_date: "2026-09-13"
-amends: [81]
-significance:
-  value: numbered_decision
-  justification: >-
-    A durable reversal of Decision 81 clause 6's safety mechanism -- the verb contract carries no
-    authority to retire a ratified clause on its own (rec-3015), and amendment_forms annotates
-    rather than negates a prior Decision's substance (rec-3016, Decision 180), so the replacement
-    of the circuit-breaker safety property itself needs a numbered entry, not a contract edit.
-```
-
-**Status:** Decided
+**Status:** Superseded
 **Date:** 2026-09-13
-**Warehouse ID:** dec-188
 
-> **Amended by Decision 193 (2026-09-15):** G4's byte source (clause 2) is replaced -- it now
-> sizes strictly from the caller's declared size source, never a prelude-relative live inventory,
-> and bounds the POST-expiry candidate set; an over-budget pass drains partially before deferring
-> wholesale. G1-G3 and the rest of clause 2 (reachability before/after, retention floor, catalog
-> sanity) are unchanged.
+**Decision:** Superseded by Decision 284, which restates its guard set with Decision 81 and names Decision 193 and Decision 266, which keep their amends; the guard mechanism lives in src/common/ducklake_maintenance_ops.py and docs/contracts/ducklake_maintenance.yaml. Point map: pt1 -> cl.4; pt2 -> cl.4 and Decision 193; pt3 -> cl.4 and Decision 191; pt4 -> cl.4; pt5 -> cl.4; pt6 -> cl.4. Compacted in place (Decision 149), not archived, because code and contracts still cite "Decision 188" by name.
 
-> **Amended by Decision 266 (2026-11-16):** a failed rewrite_current_deletes proof aborts the merge_ops pass as a breaker trip, and pt 3's carve-out reaches a fourth site, that step's rewrite and catalog-level reads, through Decision 191 cl.3.
-
-**Problem:**
-Decision 81 clause 6's GC circuit breaker aborts a pass that would delete >20% of tracked files or
->10 GiB. Measured 2026-09-12: every catalog-introspection helper it depends on swallows its
-connection exception and returns an empty default, so a raising connection collapses the
-denominator to 0 and yields `breaker_tripped: False` -- fail-OPEN on exactly the failure it exists
-to guard against, silently. Separately (rec-3761 / now rec-3773), the byte-budget half sums a
-live-file inventory taken AFTER `merge_adjacent_files` already superseded the candidates, so
-`delete_bytes` is always 0 regardless of real volume. Both share a root cause: the safety property
-is a VOLUME threshold computed from data the mechanism can silently fail to produce, not a
-structural invariant. A third defect (rec-3759 / now rec-3774) left both CI smoke gates unable to
-detect either: the gc gate only checked `breaker_tripped is not True` against a fresh empty
-catalog (vacuous every push), and the breaker gate early-returned OK on an untripped probe -- five
-consecutive green CD runs certified a fail-open, byte-blind, unfalsifiable mechanism.
-
-**Decision:**
-1. RETIRE the file-fraction/byte-budget breaker (`check_gc_breaker`, `GC_BREAKER_FILE_FRACTION`,
-   `GC_BREAKER_BYTES`, the `>20% files`/`>10 GiB` language) in full -- a retirement, not a
-   re-baseline: a volume threshold over optionally-absent data can never be a safety property.
-2. REPLACE it with four fail-closed guards (`src/common/ducklake_maintenance_ops.py`): **G1
-   reachability** (would-delete and live sets disjoint, checked before and after any destructive
-   call -- the actual property GC needs, independent of volume); **G2 retention floor**
-   (re-asserts, from a fresh post-expiry read, that the engine honoured the computed cutoff); **G3
-   catalog sanity** (aborts on an empty live set or a live-byte drop past an absolute bound); **G4
-   deletion bound** (an absolute per-pass file/byte cap, sized from a live inventory captured
-   BEFORE merge can supersede a candidate -- closing rec-3773's dead byte budget). A G1/G2/G3
-   violation raises; an over-budget G4 pass defers the WHOLE pass instead (a backlog is safe to
-   leave for next run; catalog distrust is not) -- G4 is the retired byte budget's filed successor
-   (Decision 187 pt 2: no property is left silently unreplaced).
-3. Every guard-path introspection helper RAISES on failure (rec-3772); no permissive default
-   remains. The sole exception is `action_merge_ops`'s two `_count_files` sites: that is the
-   every-6h non-destructive production cadence (Decision 88 cl.1(iii)), so a transient failure
-   there degrades LOUDLY (null counts, `count_unavailable: true`) rather than aborting it.
-4. `breaker_probe` is re-homed onto a named internal forcing constant (`G1_PROBE_FORCE_CONFLICT`,
-   never an event field) that trips G1 independently of the smoke catalog's real contents -- the
-   retired probe only tripped when a deletable file existed, so an empty catalog silently no-op'd it.
-5. Both CI smoke gates now discriminate on RESPONSE SHAPE, not deletion volume or an untripped-
-   probe early return: the gc gate asserts the `guard_stats` shape and the absence of
-   `file_fraction`/`breaker_stats`; the breaker gate's early-return-OK branch is gone entirely.
-6. Amends clause 6's safety MECHANISM only -- `GC_TABLE_SCOPE`, the two cadences, and the
-   retention-floor/grace-period concepts are unchanged; `MaintenanceBreakerTrip` is retained as
-   the metric both alarms fire on. Per Decision 177, this lands as a dated append to Decision 81.
-
-**Rationale:**
-A breaker whose trip condition depends on successfully reading the exact data whose absence is its
-own failure mode is not a safety mechanism. The fix reframes the property away from a volume
-threshold and onto structural invariants that either hold or raise, keeping an absolute bound only
-where volume still matters (G4), sized from data that cannot silently vanish out from under it.
-
-**Related:** Decision 81 (clause 6 amended), Decision 88 (cl.1(iii) merge_ops split; cl.4
-`GC_TABLE_SCOPE` untouched), Decision 55 (the fail-open defect this closes), Decision 128 (guard
-set lands in a new module), Decision 177 (append-only amendment), Decision 187 pt 2 (G4 is the
-byte budget's filed successor), Decision 181 (retires a metric that cannot pass, never raises one).
+**Superseded by: Decision 284**
 
 ---
 
@@ -13099,147 +13113,12 @@ authority: CD.34 (Neon), not Decision 78 clause 3.
 
 ## Decision 81: Ratify the DuckLake ops runtime architecture (CD.33); resolve OQ.7 / OQ.10 / OQ.11 (Decided)
 
-**Status:** Decided
+**Status:** Superseded
 **Date:** 2026-06-04
-**Warehouse ID:** dec-081 (canonical; retired writer-era id reconciled per Decision 105)
 
-**Problem:**
-Decision 78 adopted DuckLake for the operational lakehouse but deferred the runtime architecture and four
-open questions to T2.16-T2.19. T2.16 (RDS catalog) is complete; T2.17-T2.19 cannot proceed without a
-ratified answer to: how the ops Lambdas are decomposed, how writer concurrency is enforced against
-DuckLake's OCC (OQ.10), how inlining is flushed and where durability lives (OQ.11), whether an external-query
-escape hatch survives DuckLake's lack of an external reader (OQ.7), how current-state reads avoid full
-scans, and what the agent-facing portal surface is. CD.10's earlier six-Lambda enumeration was
-illustrative, not a settled architecture.
+**Decision:** Superseded by Decision 284, which restates its standing rules with Decision 188 and names the amenders that keep their parts: Decision 143, Decision 204, Decision 210, Decision 213, Decision 230, Decision 236, Decision 239 and Decision 251; the escape-hatch and maintenance-invocation keys live in docs/contracts/read-engine.yaml and ducklake_maintenance.yaml. Point map: pt1 -> cl.1; pt2 -> cl.1; pt3 -> cl.2 and cl.4; pt4 -> cl.2; pt5 -> cl.2 and Decision 210; pt6 -> cl.4 and human_initiated_value and Decision 266; pt7 -> cl.1 and cl.3 and escape_hatch and Decision 88; pt8 -> cl.3 and Decision 210; pt9 -> retired. Compacted in place (Decision 149), not archived, because code and contracts still cite "Decision 81" by name.
 
-**Decision:**
-Ratify CD.33 as the authoritative DuckLake ops runtime architecture:
-1. Three-artifact runtime split -- ducklake_writer / ducklake_reader / ducklake_maintenance -- partitioned
-   by access pattern for IAM-principal, scaling, and deploy/blast-radius isolation, NOT for concurrency.
-2. Supersede CD.10's six-Lambda enumeration. CD.10's verbs were illustrative; this decision commits only
-   to the writer/reader/maintenance path split and the closed read/write boundary. The verb/tool surface
-   behind writer and reader is deliberately left extensible and is NOT frozen by this decision.
-3. Concurrency (OQ.10): concurrent writers + bounded application-level OCC retry (backoff+jitter, fixed
-   ceiling, loud-fail on exhaustion) in ducklake_writer. Idempotency is grounded by the write-id mechanism
-   (below): a monotonic ULID minted once and reused across retries is the history logical key (DuckLake has
-   no engine PKs), and the append is `MERGE ... WHEN NOT MATCHED THEN INSERT` on it, so retries de-duplicate.
-   ducklake_maintenance runs as a singleton; the writer-vs-expire_snapshots race is closed by a GC older_than
-   grace exceeding max in-flight write duration. Reserved-concurrency=1 and SQS FIFO are rejected as
-   over-serialising.
-4. Portal surface = read + write categories; the sync category is eliminated because DuckLake's atomic
-   catalog-snapshot commit removes the outbox/drain step. Writes are atomic at the catalog commit (no
-   external sequencing); aborted commits leave orphan Parquet reclaimed by delete_orphaned_files. The
-   Decision 69 Single-Portal invariant -- as carried forward by Decision 78 (which already superseded
-   Decision 69) -- is PRESERVED: all writes transit scripts/ops_data_portal.py; only the transport changes.
-5. ducklake_writer owns the schema-enforcement gate -- the single, un-bypassable write chokepoint; schema
-   rejection and OCC-retry exhaustion fail loudly.
-6. ducklake_maintenance is two deterministic scheduled cadences with no LLM / agent invocation: a daily
-   non-destructive merge_adjacent_files (compaction; self-correcting) and a separately-cadenced GUARDED
-   destructive GC (expire_snapshots -> cleanup_old_files -> delete_orphaned_files) behind a retention floor
-   (expire 30d history / 7d current, never below the last 2 snapshots), an older_than deletion grace (>=7d),
-   and a circuit breaker (abort+page at >20% files or >10GB; weekly cadence; no scheduled cleanup_all).
-   OQ.11 resolved to option (c): inlining DISABLED (ducklake_default_data_inlining_row_limit=0) for
-   governance tables so writes land in S3 immediately, eliminating the catalog-only durability window;
-   per-table, telemetry may retain inlining.
-7. Closed read/write boundary. OQ.7 resolved: no external-query escape hatch -- every read via the reader, every
-   write via the writer, nothing out-of-band. Break-glass = the audited PlatformAdmin principal expanded to
-   catalog+S3 read for non-routine inspect/repair; catalog DR = a daily PITR export to a dedicated S3 bucket
-   with a tested restore runbook. History partitions by day(created_timestamp), current by bucket(N, id)
-   (CD.9 ALTER at creation); a partition-prune smoke test gates T2.17/T2.19.
-8. current write-through projection: reads come from a materialised Type-1 current table; each write is one
-   DuckLake transaction (INSERT history + MERGE current from the in-hand delta). history is the append-only
-   source of truth; current is rebuildable from history for DR (deterministically, ordering by
-   last_updated_timestamp then ULID). Keys (no engine-enforced PK/FK): history PK = auto-generated monotonic
-   ULID; rec_id is the natural key; last_updated_timestamp is high-precision, stable-per-write, ordering-only.
-   DQ enforces ULID PK uniqueness, current-version uniqueness (structural via the current MERGE key on
-   rec_id), and update_rec in-transaction referential existence.
-9. OQ.12 (version/upgrade policy) remains a T2.17 implementation detail (clone-rehearsal default), not
-   pre-empted here.
-
-**Capability basis:** clauses 4(atomicity)/6(partition prune)/7(single-txn multi-table + MERGE)/8 were
-VERIFIED against the official DuckLake documentation (ducklake.select) before ratification: multi-table
-single-snapshot ACID transaction, MERGE INTO, no engine PK/FK (ULID is a logical key enforced by MERGE+DQ),
-OCC + application retry, `ducklake_default_data_inlining_row_limit=0` + `ducklake_flush_inlined_data`,
-`expire_snapshots`/`cleanup_old_files`/`delete_orphaned_files`/`merge_adjacent_files` semantics, and
-`ALTER ... SET PARTITIONED BY` (post-ALTER-only) with `day()`/`bucket(N,col)` transforms and pruning. The
-one verified caveat encoded into the design: DuckLake GC deletion safety is a soft time-based deferral, so
-the `older_than` grace must exceed the max in-flight reader/writer duration. The write-id is RESOLVED
-(ULID logical PK + stable high-precision timestamp); the only T2.17 code task is moving the `_prepare_record`
-`now()` re-stamp out of the OCC-retry loop.
-
-**Rationale:**
-The split is by access pattern because that is what differs operationally -- a write principal that can
-mutate the catalog, a read principal that cannot, and a maintenance principal that runs DDL -- so isolating
-them isolates IAM blast radius and deploy risk; concurrency is handled by DuckLake's OCC, not by collapsing
-the Lambdas. OCC retry beats reserved-concurrency=1 / SQS FIFO because ops writes are idempotent id-keyed
-SCD2 appends, so a conflicted snapshot is safe to retry without serialising the whole write path. Inlining
-is disabled for governance tables because the catalog-only durability window is an unacceptable data-loss
-exposure for irreplaceable records; the resulting small files are a cheap, self-correcting cost paid down by
-daily compaction, while destructive GC is decoupled onto a slower guarded cadence so it can never race a
-slow reader or runaway a delete. current is materialised as a write-through Type-1 projection because
-"latest per id" is unprunable, so deriving it at read time forces a full scan; a single atomic DuckLake
-transaction across history+current keeps them from drifting without external orchestration. The closed
-boundary (no external-query escape hatch) is not a limitation we tolerate but the design goal: a lakehouse where
-every read and write is mediated and authorised, with one audited break-glass path for DR. The agent verb
-surface is left open precisely to avoid re-committing CD.10's mistake of enumerating a "final" surface
-prematurely.
-
-**Related:** CD.33 (ratified here), CD.10 (six-Lambda enumeration superseded; the six are status:stub mocks,
-confirming illustrative; two-principal allow-list retained; state:pending),
-Decision 78 (adopted DuckLake; deferred this runtime architecture; superseded Decision 69), Decision 79
-(per-Lambda deploy gating -- the DuckLake Lambdas deploy + smoke-test per CD.16), Decision 69 (Single-Portal
-invariant preserved as carried forward by Decision 78),
-CD.15 (typed query reader -- refined), CD.8 (DuckDB engine -- unchanged), CD.9 (partitioning via ALTER),
-CD.24 (per-Lambda manifests), OQ.7 / OQ.10 / OQ.11 (resolved), OQ.12 (left to T2.17).
-
-> **Amended by Decision 188 (2026-09-13):** clause 6's circuit breaker (the `>20% files or >10 GiB`
-> file-fraction/byte-budget abort) is retired and replaced by four fail-closed structural guards
-> (G1 reachability, G2 retention floor, G3 catalog sanity, G4 an absolute per-pass deletion bound;
-> `src/common/ducklake_maintenance_ops.py`). Clause 6's other content -- the two scheduled cadences,
-> `GC_TABLE_SCOPE`, the retention floor and cleanup grace period as concepts -- is unchanged, and
-> `MaintenanceBreakerTrip` is retained as the metric both alarms fire on.
-
-> **Amended by rec-4068 (2026-09-25):** clause 7's "History partitions by day(created_timestamp)"
-> and the Capability-basis paragraph's "day() ... transforms and pruning" were verified only on
-> single-month data. On duckdb 1.5.4 + ducklake, day() alone is DAY-OF-MONTH, not the Iceberg-v2
-> days-since-epoch semantics the spelling was carried over from (Decision 137's own CD.9 prose
-> shares this origin) -- a 2026-09-25 probe put 2026-09-24 and 2026-10-24 rows in the same day=24
-> partition. The DuckLake realization is the calendar-prefix triple
-> year(created_timestamp), month(created_timestamp), day(created_timestamp), enforced at
-> generation and resolution by src/common/ducklake_partition_spec.py. Clause 7's other content
-> (closed read/write boundary, current by bucket(N, id), break-glass, catalog DR) is unchanged.
-> Live remediation (the physical ALTER + legacy day-of-month file rewrite) is rec-4070.
-
-[Amendment 2026-09-26: Decision 204 opens a narrow carve-out in clause 6's "no LLM / agent
-invocation anywhere in this path": an ADMIN-container agent may invoke the two partition-layout
-verbs (reconcile_partitions, rewrite_partition_layout) under explicit human direction. Clause 8's
-"current is rebuildable from history for DR" is the basis for Decision 204 cl.3's rule that a
-current projection is never re-laid, only rebuilt.]
-
-[Amendment 2026-09-28, Decision 207 (grain enforced at the write boundary): clause 3's
-"the append is `MERGE ... WHEN NOT MATCHED THEN INSERT`" on the write ULID is a named residual
-under Decision 207 -- it is insert-only anti-join, not the reject-on-conflict grain enforcement
-Decision 207 requires of insert-grain tables, so a re-write under the same write ULID with
-differing content is not rejected loudly. Fixed by rec-4121 (ops-writer idempotency replay and
-history MERGE on the write ULID).]
-
-[Amendment 2026-09-29, Decision 210: clause 5's schema-enforcement chokepoint is widened to every write-decidable data rule, not only types (ops-writer
-residual owned by rec-4158); clause 8's in-transaction referential existence check is write-owned under Decision 210,
-while uniqueness under the concurrent-append race stays DQ.]
-
-[Amendment 2026-10-09, Decision 213: clause 1's runtime artifacts are writer, reader, maintenance,
-maintenance_smoke, catalog_dr and telemetry_writer (catalog_dr was never listed here); clauses 5 and 7 read
-as one write-time enforcement chokepoint per table, the closed boundary covering both the shared writer and
-the telemetry writer; clause 6's "no LLM / agent invocation" carve-out gains a third maintenance verb,
-provision_telemetry_login, invocable by an ADMIN-container agent only under explicit human direction.]
-
-[Amendment 2026-10-20, Decision 230: cl.6's agent carve-outs gain provision_catalog_owner and provision_telemetry_catalog under explicit human direction.]
-
-[Amendment 2026-10-25, PLAN-telemetry-reader-and-smoke-twin (Decision 236 cl.6): runtime artifacts add the smoke telemetry writer twin and the telemetry reader; the closed read boundary is two readers.]
-
-[Amendment 2026-10-29, Decision 239: runtime artifacts add the telemetry content reader; the closed read boundary is three readers.]
-
-[Amendment 2026-11-09, Decision 251: cl.6's agent carve-outs gain the restore_rehearsal verb, on ephemeral functions only, under explicit human direction; cl.7's closed read boundary admits, for a sitting only, its ephemeral checksum reader, a server-side copy of ducklake/ into the smoke scratch prefix, one dump read through a presigned URL and the restore function's reads of the restored copy.]
+**Superseded by: Decision 284**
 
 ---
 
