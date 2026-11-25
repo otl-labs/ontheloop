@@ -240,3 +240,49 @@ def test_repeat_order_places_null_ordinal_first() -> None:
         assert _counts(_row(con, "RepOrd", attribution_mcp_server="early"))[0] == 0
         assert _counts(_row(con, "RepOrd", attribution_mcp_server="late"))[0] == 1
         _agrees(con)
+
+
+_EARLY = datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc)
+_LATE = datetime(2026, 1, 1, 0, 2, tzinfo=timezone.utc)
+
+
+def _attributed_open(con: Any, *, version: int, created: datetime, meta: dict[str, str]) -> None:
+    """One stored copy of the call's open row at *version* and *created*, one grain key per version."""
+    replace = {
+        "event_id": "01ARZ3NDEKTSV4RRFFQ69G8F40",
+        "observation_id": "01ARZ3NDEKTSV4RRFFQ69G7F40",
+        "name": _MCP,
+        "metadata": json.dumps(meta),
+        "parser_version": version,
+        "created_timestamp": created,
+    }
+    chain.clone_row(con, "telemetry_observations", PROJECT, replace, where=f"{_TOOL} AND event_kind = 'open'")
+
+
+def test_attribution_follows_the_retained_parser_version() -> None:
+    with chain.loaded(_SUBAGENT_TREE, True) as (con, _, _):
+        _attributed_open(con, version=10, created=_EARLY, meta={"attribution_mcp_server": "old"})
+        _attributed_open(con, version=12, created=_LATE, meta={"attribution_mcp_server": "new"})
+        con.execute(
+            f"INSERT INTO {chain.db.ALIAS}.telemetry_sessions SELECT * REPLACE (12 AS parser_version) "
+            f"FROM {chain.db.ALIAS}.telemetry_sessions WHERE project_id = ? AND event_kind = 'open'",
+            [PROJECT],
+        )
+        (row,) = (r for r in _verb(con) if r["tool_name"] == _MCP)
+        assert row["attribution_mcp_server"] == "new"
+        _agrees(con)
+
+
+def test_conflicted_open_keeps_the_earliest_created_attribution() -> None:
+    with chain.loaded(_SUBAGENT_TREE, True) as (con, _, _):
+        _attributed_open(con, version=11, created=_EARLY, meta={"attribution_mcp_server": "first"})
+        _attributed_open(con, version=11, created=_LATE, meta={"attribution_mcp_server": "second"})
+        (row,) = (r for r in _verb(con) if r["tool_name"] == _MCP)
+        assert (row["derivation_conflicted"], row["attribution_mcp_server"]) == (True, "first")
+        _agrees(con)
+        con.execute(f"DELETE FROM {chain.db.ALIAS}.telemetry_observations WHERE name = ?", [_MCP])
+        _attributed_open(con, version=11, created=_EARLY, meta={"caller_type": "direct"})
+        _attributed_open(con, version=11, created=_LATE, meta={"attribution_mcp_server": "second"})
+        (row,) = (r for r in _verb(con) if r["tool_name"] == _MCP)
+        assert (row["derivation_conflicted"], row["attribution_mcp_server"]) == (True, None)
+        _agrees(con)
