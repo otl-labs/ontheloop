@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import subprocess
 from pathlib import Path
@@ -10,12 +11,18 @@ from typing import Any
 import pytest
 import yaml
 
-from scripts.checks import _common
-from scripts.checks.roadmap import _plan_rescout_barrier as barrier
-from scripts.checks.verification import validate_weakening_dispositions as weakening
-from scripts.roadmap import plan_wording_check as pwc
 from scripts.roadmap import wording_check_clone as wcc
 
+
+def _gate(name: str) -> Any:
+    """Load a real gate module by name; a dynamic load keeps the heavy check modules out of this file's import closure."""
+    return importlib.import_module(name)
+
+
+_common = _gate("scripts.checks._common")
+pwc = _gate("scripts.roadmap.plan_wording_check")
+barrier = _gate("scripts.checks.roadmap._plan_rescout_barrier")
+weakening = _gate("scripts.checks.verification.validate_weakening_dispositions")
 ROOT = Path(__file__).resolve().parents[1]
 _SLUG = "demo"
 _PLAN_REL = f"docs/plans/PLAN-{_SLUG}.yaml"
@@ -203,7 +210,7 @@ class _Runner:
     def __call__(self, cmd: list[str], cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
         if cmd[1] == "-c":
             return subprocess.CompletedProcess(cmd, 0, "{}", "")
-        if "scripts.validate" in cmd:
+        if cmd[-1] == "--pre":
             self.cwds.append(cwd)
             diff = _common.get_status_aware_diff(cwd)
             base = _common.status_diff_base(cwd)
