@@ -53,12 +53,10 @@ SUDOERS_MAIN = Path("/etc/sudoers")
 SUDOERS_D = Path("/etc/sudoers.d")
 SUDO_CONF = Path("/etc/sudo.conf")
 NSSWITCH = Path("/etc/nsswitch.conf")
-NOLOG = "NOPASSWD: NOLOG_INPUT: NOLOG_OUTPUT:"
 SUDOERS_LINES = (
-    "Defaults:runner " + ", ".join(f"!{flag}" for flag in IO_FLAGS) + "\n"
     "runner ALL=(ALL) !ALL\n"
-    f"runner ALL=(root) {NOLOG} {PYTHON} -I -S {LAUNCHER} probe\n"
-    f"runner ALL=(root) {NOLOG} {PYTHON} -I -S {LAUNCHER} run\n"
+    f"runner ALL=(root) NOPASSWD: {PYTHON} -I -S {LAUNCHER} probe\n"
+    f"runner ALL=(root) NOPASSWD: {PYTHON} -I -S {LAUNCHER} run\n"
 )
 CONTAINER = "persona-egress-run"
 TEARDOWN_UNIT = "persona-egress-teardown.service"

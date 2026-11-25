@@ -47,12 +47,18 @@ def test_dropin_leaves_the_services_running_with_a_root_only_socket_and_never_to
 
 def test_sudoers_denies_first_then_allows_exactly_two_launcher_lines_with_no_wildcard() -> None:
     lines = F.SUDOERS_LINES.splitlines()
-    assert lines[0].startswith("Defaults:runner !log_input, !log_output, !log_stdin") and lines[0].endswith("!log_ttyout")
-    assert lines[1] == "runner ALL=(ALL) !ALL" and len(lines) == 4
-    assert lines[2].endswith("egress_launcher.py probe") and lines[3].endswith("egress_launcher.py run")
-    allow = "runner ALL=(root) NOPASSWD: NOLOG_INPUT: NOLOG_OUTPUT: /usr/bin/python3 -I -S /usr/local/lib/persona-egress/"
-    assert all(line.startswith(allow) for line in lines[2:])
+    assert lines[0] == "runner ALL=(ALL) !ALL" and len(lines) == 3
+    assert lines[1].endswith("egress_launcher.py probe") and lines[2].endswith("egress_launcher.py run")
+    allow = "runner ALL=(root) NOPASSWD: /usr/bin/python3 -I -S /usr/local/lib/persona-egress/"
+    assert all(line.startswith(allow) for line in lines[1:])
     assert "*" not in F.SUDOERS_LINES and "SETENV" not in F.SUDOERS_LINES
+
+
+def test_sudoers_lines_use_only_syntax_sudo_rs_parses() -> None:
+    lines = F.SUDOERS_LINES.splitlines()
+    assert not any(line.startswith("Defaults") for line in lines)
+    assert all(line.count(":") == 1 and "NOPASSWD:" in line for line in lines[1:])
+    assert "NOLOG" not in F.SUDOERS_LINES
 
 
 def _tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
