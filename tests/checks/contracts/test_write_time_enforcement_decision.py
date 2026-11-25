@@ -10,6 +10,8 @@ from pathlib import Path
 
 import yaml
 
+from tests.fixtures.decision_entry import live_block
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _STANDARD = _REPO_ROOT / "docs" / "contracts" / "data-modeling-standard.yaml"
 _DECISIONS = _REPO_ROOT / "docs" / "DECISIONS.md"
@@ -69,8 +71,8 @@ def test_decision_entry_and_victim_annotation() -> None:
     for clause in ("monotone", "arrival order", "single source", "fix at the source", "defence in depth"):
         assert clause in section, f"Decision {number} must keep its {clause!r} clause"
 
-    victim = _section(decisions_text, "81")
-    assert re.search(rf"^\[Amendment \d{{4}}-\d{{2}}-\d{{2}}, Decision {number}:", victim, re.MULTILINE), (
+    victim = live_block(decisions_text, 81, naming=(int(number),))
+    assert victim is None or re.search(rf"^\[Amendment \d{{4}}-\d{{2}}-\d{{2}}, Decision {number}:", victim, re.MULTILINE), (
         f"Decision 81 must carry a dated annotation naming Decision {number}"
     )
 
@@ -122,5 +124,6 @@ def test_dependency_lookup_names_its_amending_decision() -> None:
     assert number != _decision_number(rule["statement"])
     section = _section(decisions_text, number)
     assert re.search(r"^amends: \[210\]$", section, re.MULTILINE), f"Decision {number} must amend Decision 210"
-    assert f"Amended by Decision {number} (" in _section(decisions_text, "210")
+    ruling = live_block(decisions_text, 210, naming=(int(number),))
+    assert ruling is None or f"Amended by Decision {number} (" in ruling
     assert "ops_recommendations dependencies existence lookup" in statement

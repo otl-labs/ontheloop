@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tests.fixtures.decision_entry import authored_bytes, cap_bytes, decision_entry
+from tests.fixtures.decision_entry import authored_bytes, cap_bytes, decision_entry, live_block
 
 pytestmark = pytest.mark.unit
 
@@ -50,6 +50,8 @@ def test_decision_entry_and_annotations() -> None:
     assert entry.rstrip().endswith("---")
 
     for amended in (101, 213, 230):
-        body = decision_entry(text, amended)
+        body = live_block(text, amended, naming=(n,))
+        if body is None:
+            continue
         assert re.search(rf"^\[Amendment \d{{4}}-\d{{2}}-\d{{2}}, Decision {n}:", body, re.MULTILINE), amended
         assert body.rstrip().endswith("---")

@@ -24,6 +24,7 @@ from scripts.checks.decisions.consolidation_inventory._model import (
     Inventory,
     with_probe,
 )
+from scripts.checks.decisions.validate_supersession_annotations import extract_supersession_edges
 
 NODE_TIMEOUT_S = 900
 GIT_TIMEOUT_S = 120
@@ -61,8 +62,8 @@ def _git(cwd: Path, *args: str) -> str:
     return done.stdout
 
 
-def _run_group(cmd: list[str], cwd: Path, env: dict[str, str], timeout: float) -> tuple[bool, str, str]:
-    """Run cmd in its own session; (timed_out, stdout, stderr). A timeout kills and reaps the whole process group."""
+def _run_group(cmd: list[str], cwd: Path, env: dict[str, str], timeout: float) -> tuple[bool, str, str, int | None]:
+    """Run cmd in its own session; (timed_out, stdout, stderr, returncode). A timeout kills and reaps the process group."""
     proc = subprocess.Popen(
         cmd,
         cwd=str(cwd),
@@ -78,8 +79,8 @@ def _run_group(cmd: list[str], cwd: Path, env: dict[str, str], timeout: float) -
         out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         out, err = _process_group.kill_and_reap(proc)
-        return True, out or "", err or ""
-    return False, out or "", err or ""
+        return True, out or "", err or "", None
+    return False, out or "", err or "", proc.returncode
 
 
 def _env(extra_path: str | None = None) -> dict[str, str]:
@@ -89,8 +90,18 @@ def _env(extra_path: str | None = None) -> dict[str, str]:
     return env
 
 
+def _amenders(wt: Path, victims: tuple[int, ...]) -> dict[int, list[int]]:
+    """Each victim's superseders: the numbers a real stub must name (point_map, validate_supersession_annotations)."""
+    found: dict[int, set[int]] = {v: set() for v in victims}
+    for superseder, victim, _ in extract_supersession_edges(wt):
+        if victim in found:
+            found[victim].add(superseder)
+    return {v: sorted(found[v]) for v in victims}
+
+
 def _stub_victims(wt: Path, victims: tuple[int, ...]) -> tuple[set[int], int]:
     """Replace each victim's live section with STUB_TEMPLATE and add a placeholder successor; (stubbed, successor)."""
+    amenders = _amenders(wt, victims)
     path = wt / "docs" / "DECISIONS.md"
     text = path.read_text(encoding="utf-8")
     paths = [p for p in (path, wt / "docs" / "DECISIONS_ARCHIVE.md") if p.exists()]
@@ -109,7 +120,9 @@ def _stub_victims(wt: Path, victims: tuple[int, ...]) -> tuple[set[int], int]:
             when = date.group(1) if date else str(envelope.get("decided_date", "2026-01-01"))
             header = block.split("\n", 1)[0]
             separator = "---\n\n" if _SEPARATOR.search(block) else ""
-            pieces.append(STUB_TEMPLATE.format(header=header, date=when, successor=successor) + separator)
+            named = ", ".join(f"Decision {n}" for n in amenders[number])
+            clause = f" and names its amenders: {named}" if named else ""
+            pieces.append(STUB_TEMPLATE.format(header=header, date=when, successor=successor, amenders=clause) + separator)
             stubbed.add(number)
         else:
             pieces.append(block)
@@ -134,9 +147,11 @@ def _regenerate_index(wt: Path, info: dict[str, Any]) -> None:
     if not (wt / "scripts" / "decisions_index.py").exists():
         info["notes"].append("worktree has no scripts/decisions_index.py: index regeneration skipped")
         return
-    timed_out, _, err = _run_group([sys.executable, "-m", "scripts.decisions_index", "--write"], wt, _env(), GIT_TIMEOUT_S)
+    timed_out, _, err, rc = _run_group([sys.executable, "-m", "scripts.decisions_index", "--write"], wt, _env(), GIT_TIMEOUT_S)
     if timed_out:
         raise ProbeError("scripts.decisions_index --write timed out")
+    if rc != 0:
+        raise ProbeError(f"scripts.decisions_index --write failed: {err.strip()[:200]}")
 
 
 def _node_key(classname: str, name: str, wt: Path) -> str:
@@ -150,33 +165,39 @@ def _node_key(classname: str, name: str, wt: Path) -> str:
     return f"{classname}::{base}"
 
 
-def _run_nodes(wt: Path, nodes: list[str], scratch: Path, tag: str) -> set[str]:
-    """The set of node ids that are red (any parametrized case failing, or absent from the report)."""
-    if not nodes:
-        return set()
+def _junit(wt: Path, targets: list[str], scratch: Path, tag: str) -> dict[str, bool]:
+    """Run pytest on the targets (files or node ids): node key -> red. A missing or unparseable report is a ProbeError."""
+    if not targets:
+        return {}
     report = scratch / f"{tag}.xml"
     cmd = [
         sys.executable,
         "-m",
         "pytest",
-        *nodes,
+        *targets,
         "-q",
         f"--junitxml={report}",
         "-o",
         f"cache_dir={scratch / (tag + '-cache')}",
     ]
-    timed_out, _, _ = _run_group(cmd, wt, _env(), NODE_TIMEOUT_S)
+    timed_out, _, _, _ = _run_group(cmd, wt, _env(), NODE_TIMEOUT_S)
     if timed_out:
         raise ProbeError(f"the test-node pytest run timed out after {NODE_TIMEOUT_S} s")
     try:
         tree = ET.parse(report)
-    except (OSError, ET.ParseError):
-        return set(nodes)
+    except (OSError, ET.ParseError) as exc:
+        raise ProbeError(f"the {tag} pytest run left no readable junit report: {exc}") from exc
     seen: dict[str, bool] = {}
     for case in tree.iter("testcase"):
         key = _node_key(case.get("classname", ""), case.get("name", ""), wt)
         red = case.find("failure") is not None or case.find("error") is not None
         seen[key] = seen.get(key, False) or red
+    return seen
+
+
+def _run_nodes(wt: Path, nodes: list[str], scratch: Path, tag: str) -> set[str]:
+    """The set of node ids that are red (any parametrized case failing, or absent from the report)."""
+    seen = _junit(wt, nodes, scratch, tag)
     return {n for n in nodes if seen.get(n, True)}
 
 
@@ -184,13 +205,13 @@ def _run_record(wt: Path, check_id: str, stub_dir: str) -> bool:
     from scripts.checks.verification import validate_graduated_rerun as rerun
 
     cmd = [sys.executable, "-m", _RERUN_MODULE, "--check-id", check_id, "--root", str(wt)]
-    timed_out, out, _ = _run_group(cmd, rerun.HEAD_ROOT, _env(stub_dir), rerun.RECORD_TIMEOUT_S)
+    timed_out, out, _, _ = _run_group(cmd, rerun.HEAD_ROOT, _env(stub_dir), rerun.RECORD_TIMEOUT_S)
     if timed_out:
         raise ProbeError(f"record {check_id} timed out after {rerun.RECORD_TIMEOUT_S} s")
     try:
         return bool(json.loads(out.strip().splitlines()[-1])["passed"])
-    except (IndexError, ValueError, KeyError):
-        return False
+    except (IndexError, ValueError, KeyError) as exc:
+        raise ProbeError(f"record {check_id} printed no parseable verdict") from exc
 
 
 def _run_records(wt: Path, ids: list[str], stub_dir: str) -> set[str]:
@@ -222,6 +243,7 @@ def probe(root: Path, inv: Inventory) -> Inventory:
         "note": FIXED_NOTE,
         "notes": [],
         "reasons": {},
+        "extra_breaks": [],
     }
     inv.probe_info = info
     scratch = Path(tempfile.mkdtemp(prefix="consolidation-probe-"))
@@ -240,11 +262,19 @@ def probe(root: Path, inv: Inventory) -> Inventory:
         rg.write_text(_RG_STUB, encoding="utf-8")
         rg.chmod(0o755)
         nodes, records = _candidates(inv)
-        red_nodes_before = _run_nodes(wt, nodes, scratch, "before")
+        files = sorted({n.split("::", 1)[0] for n in nodes})
+        seen_before = _junit(wt, files, scratch, "before")
+        red_nodes_before = {n for n in nodes if seen_before.get(n, True)}
         red_records_before = _run_records(wt, records, stub_dir)
         stubbed, _ = _stub_victims(wt, inv.victims)
         _regenerate_index(wt, info)
-        red_nodes_after = _run_nodes(wt, nodes, scratch, "after")
+        seen_after = _junit(wt, files, scratch, "after")
+        red_nodes_after = {n for n in nodes if seen_after.get(n, True)}
+        fresh = sorted(n for n in red_nodes_after if n not in red_nodes_before)
+        extras = sorted(k for k, red in seen_after.items() if red and not seen_before.get(k, False) and k not in nodes)
+        red_again = _run_nodes(wt, fresh + extras, scratch, "again")
+        red_nodes_after -= set(fresh) - red_again
+        info["extra_breaks"] = [k for k in extras if k in red_again]
         red_records_after = _run_records(wt, records, stub_dir)
         again = sorted(r for r in red_records_after if r not in red_records_before)
         red_records_after = (red_records_after - set(again)) | _run_records(wt, again, stub_dir)

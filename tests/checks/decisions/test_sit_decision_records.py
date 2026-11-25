@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tests.fixtures.decision_entry import authored_bytes, cap_bytes, decision_entry
+from tests.fixtures.decision_entry import authored_bytes, cap_bytes, decision_entry, live_block
 
 pytestmark = pytest.mark.unit
 
@@ -20,9 +20,6 @@ _SIT_HEADING = re.compile(r"^## Decision (\d+): SIT is stood up now", re.MULTILI
 _RDS_HEADING = re.compile(r"^## Decision (\d+): The DuckLake catalog moves to RDS", re.MULTILINE)
 _SIT_NOTED = (24, 73, 77, 126, 144, 202, 237, 242)
 _RDS_NOTED = (107, 214)
-# Compacted by the Decision 73 and Decision 126 chain consolidations (rec-5445, rec-5446): each note retired with its
-# body, and each stub names the SIT Decision instead (docs/decision-migration/consolidations/).
-_COMPACTED = frozenset({73, 126})
 
 
 def _decisions_text() -> str:
@@ -83,12 +80,14 @@ def test_sit_and_rds_decisions_and_notes() -> None:
         assert envelope["amends"] == amends and envelope["kind"]["value"] == kind
 
     expected = {214: f"Amended by Decision {rds} (", 107: f"Amended by Decision {rds} (", 84: f"Decision {rds} moves"}
-    expected |= dict.fromkeys(set(_SIT_NOTED) - _COMPACTED, f"Amended by Decision {sit} (")
-    for number in _COMPACTED:
-        assert f"Decision {sit}" in decision_entry(text, number), (number, "compacted stub must name the SIT Decision")
+    expected |= dict.fromkeys(_SIT_NOTED, f"Amended by Decision {sit} (")
     expected[249] = f"Decision {sit} fires"
     for number, phrase in expected.items():
-        note = _noting_paragraph(decision_entry(text, number), phrase)
+        naming = (rds,) if number in _RDS_NOTED else (sit,) if number in _SIT_NOTED else ()
+        block = live_block(text, number, naming=naming)
+        if block is None:
+            continue
+        note = _noting_paragraph(block, phrase)
         other = sit if str(rds) in phrase else rds
         assert not re.search(rf"Decision {other}\b", note), (number, "cites the other new Decision")
 

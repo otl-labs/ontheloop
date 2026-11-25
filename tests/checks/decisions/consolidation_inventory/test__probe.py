@@ -95,7 +95,7 @@ def test_probe_output_states_head_template_and_note(probed) -> None:
     root, inv, _ = probed
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True).stdout.strip()
     assert inv.probe_info["head"] == head
-    assert inv.probe_info["stub_template"] == "compacted-stub-v1"
+    assert inv.probe_info["stub_template"] == "compacted-stub-v2"
     assert "not probed" in inv.probe_info["note"]
     assert inv.probe_info["dirty"] is False
 
@@ -158,7 +158,11 @@ def test_git_that_cannot_run_is_a_probe_failure(tmp_path: Path, monkeypatch: pyt
 
 
 def test_a_worktree_without_the_index_module_skips_regeneration(tmp_path: Path) -> None:
-    root = build_repo(tmp_path)
+    root = build_repo(tmp_path, with_tools=True)
+    subprocess.run(["git", "rm", "-q", "scripts/decisions_index.py"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-qm", "rm"], cwd=root, check=True
+    )
     inv = probe(root, inventory(root, [9002]))
     assert inv.probe_failed == "" and any("index regeneration skipped" in n for n in inv.probe_info["notes"])
 
@@ -168,7 +172,7 @@ def test_an_index_regeneration_timeout_is_a_probe_failure(tmp_path: Path, monkey
     real = _probe._run_group
 
     def slow_index(cmd, cwd, env, timeout):
-        return (True, "", "") if "scripts.decisions_index" in cmd else real(cmd, cwd, env, timeout)
+        return (True, "", "", None) if "scripts.decisions_index" in cmd else real(cmd, cwd, env, timeout)
 
     monkeypatch.setattr(_probe, "_run_group", slow_index)
     assert "decisions_index --write timed out" in probe(root, inventory(root, [9002])).probe_failed
@@ -177,14 +181,91 @@ def test_an_index_regeneration_timeout_is_a_probe_failure(tmp_path: Path, monkey
 def test_node_keys_and_missing_reports(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert _probe._node_key("weird.mod", "test_x[1]", tmp_path) == "weird.mod::test_x"
     assert _probe._run_nodes(tmp_path, [], tmp_path, "none") == set()
-    monkeypatch.setattr(_probe, "_run_group", lambda *a, **k: (False, "", ""))
-    assert _probe._run_nodes(tmp_path, ["a.py::t"], tmp_path, "no-report") == {"a.py::t"}
+    monkeypatch.setattr(_probe, "_run_group", lambda *a, **k: (False, "", "", 0))
+    with pytest.raises(_probe.ProbeError, match="no readable junit report"):
+        _probe._run_nodes(tmp_path, ["a.py::t"], tmp_path, "no-report")
 
 
 def test_record_children_that_time_out_or_print_garbage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_probe, "_run_group", lambda *a, **k: (False, "garbage", ""))
-    assert _probe._run_record(tmp_path, "any", "") is False
+    monkeypatch.setattr(_probe, "_run_group", lambda *a, **k: (False, "garbage", "", 0))
+    with pytest.raises(_probe.ProbeError, match="no parseable verdict"):
+        _probe._run_record(tmp_path, "any", "")
     assert _probe._run_records(tmp_path, [], "") == set()
-    monkeypatch.setattr(_probe, "_run_group", lambda *a, **k: (True, "", ""))
+    monkeypatch.setattr(_probe, "_run_group", lambda *a, **k: (True, "", "", None))
     with pytest.raises(_probe.ProbeError, match="timed out"):
         _probe._run_record(tmp_path, "any", "")
+
+
+RUNTIME_PIN_TESTS = """import os
+from pathlib import Path
+
+LOG = Path(__file__).resolve().parents[1] / "docs" / "DECISIONS.md"
+
+
+def _entry(number):
+    return LOG.read_text(encoding="utf-8").split(f"## Decision {number}:")[1].split("## Decision")[0]
+
+
+def test_literal_pin():
+    assert "ZZZ-BODY-PIN" in _entry(9002)
+
+
+def test_runtime_pin():
+    assert "ZZZ-BODY-PIN" in _entry(int("90" + "02"))
+
+
+def test_flaky_after_stubbing():
+    state = Path(os.environ["FLAKE_STATE"])
+    if "ZZZ-BODY-PIN" in _entry(9002):
+        return
+    assert state.exists(), state.write_text("seen")
+"""
+
+
+def test_crashed_runs_never_label_breaks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = build_repo(tmp_path, with_tools=True)
+    real = _probe._run_group
+
+    def crash_pytest(cmd, cwd, env, timeout):
+        return (False, "", "boom", 2) if "pytest" in cmd else real(cmd, cwd, env, timeout)
+
+    monkeypatch.setattr(_probe, "_run_group", crash_pytest)
+    inv = probe(root, inventory(root, [9002]))
+    assert "no readable junit report" in inv.probe_failed
+    assert not [h for h in inv.hits if h.probe == "breaks"]
+
+    def crash_index(cmd, cwd, env, timeout):
+        return (False, "", "index boom", 1) if "scripts.decisions_index" in cmd else real(cmd, cwd, env, timeout)
+
+    monkeypatch.setattr(_probe, "_run_group", crash_index)
+    inv = probe(root, inventory(root, [9002]))
+    assert "decisions_index --write failed" in inv.probe_failed
+    assert not [h for h in inv.hits if h.probe == "breaks"]
+
+
+def test_stub_names_every_amender_edge(tmp_path: Path) -> None:
+    root = build_repo(tmp_path)
+    stubbed, _ = _probe._stub_victims(root, (9001,))
+    text = (root / "docs" / "DECISIONS.md").read_text(encoding="utf-8")
+    stub = text.split("## Decision 9001:")[1].split("## Decision")[0]
+    assert stubbed == {9001} and "names its amenders: Decision 9003" in stub
+    plain = _probe._stub_victims(build_repo(tmp_path / "again"), (9002,))
+    assert plain[0] == {9002}
+
+
+def test_runtime_resolved_pin_is_an_extra_break(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FLAKE_STATE", str(tmp_path / "flake-state"))
+    root = build_repo(tmp_path / "repo", {"tests/test_runtime.py": RUNTIME_PIN_TESTS}, with_tools=True)
+    inv = probe(root, inventory(root, [9002]))
+    assert inv.probe_failed == ""
+    assert inv.probe_info["extra_breaks"] == ["tests/test_runtime.py::test_runtime_pin"]
+    assert next(h for h in inv.hits if h.locator.endswith("test_runtime.py::test_literal_pin")).probe == "breaks"
+
+
+def test_single_rerun_clears_a_flaky_break(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FLAKE_STATE", str(tmp_path / "flake-state"))
+    root = build_repo(tmp_path / "repo", {"tests/test_runtime.py": RUNTIME_PIN_TESTS}, with_tools=True)
+    inv = probe(root, inventory(root, [9002]))
+    flaky = [h for h in inv.hits if h.locator.endswith("test_flaky_after_stubbing")]
+    assert flaky and flaky[0].probe == "survives"
+    assert "tests/test_runtime.py::test_flaky_after_stubbing" not in inv.probe_info["extra_breaks"]

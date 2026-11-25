@@ -12,9 +12,10 @@ from pathlib import Path
 import yaml
 
 from scripts.checks.decisions.entry_measure import authored, authored_bytes
+from scripts.checks.decisions.entry_resolution import live_block, resolve_entry
 from scripts.decisions_md import iter_decision_sections
 
-__all__ = ["authored", "authored_bytes", "cap_bytes", "decision_entry"]
+__all__ = ["authored", "authored_bytes", "cap_bytes", "decision_entry", "live_block", "resolve_entry"]
 
 _REPO = Path(__file__).resolve().parents[2]
 
