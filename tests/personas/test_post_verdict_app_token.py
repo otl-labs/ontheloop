@@ -23,7 +23,7 @@ APP_TOKEN = "ghs_" + "B" * 36
 SUB = "repo:o/r:environment:persona-verdict-app"
 REF = f"{REPO}/.github/workflows/persona-verdict.yml@refs/heads/main"
 BLOCK = "canary_persona"
-OTHER = "decision_scout"
+OTHER = "route_other"
 BLOCK_OUT = json.dumps(
     {
         "outcome": "success",

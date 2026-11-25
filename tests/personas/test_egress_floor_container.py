@@ -47,11 +47,61 @@ def test_dropin_leaves_the_services_running_with_a_root_only_socket_and_never_to
 
 def test_sudoers_denies_first_then_allows_exactly_two_launcher_lines_with_no_wildcard() -> None:
     lines = F.SUDOERS_LINES.splitlines()
-    assert lines[0] == "runner ALL=(ALL) !ALL" and len(lines) == 3
-    assert lines[1].endswith("egress_launcher.py probe") and lines[2].endswith("egress_launcher.py run")
-    allow = "runner ALL=(root) NOPASSWD: /usr/bin/python3 -I -S /usr/local/lib/persona-egress/"
-    assert all(line.startswith(allow) for line in lines[1:])
+    assert lines[0].startswith("Defaults:runner !log_input, !log_output, !log_stdin") and lines[0].endswith("!log_ttyout")
+    assert lines[1] == "runner ALL=(ALL) !ALL" and len(lines) == 4
+    assert lines[2].endswith("egress_launcher.py probe") and lines[3].endswith("egress_launcher.py run")
+    allow = "runner ALL=(root) NOPASSWD: NOLOG_INPUT: NOLOG_OUTPUT: /usr/bin/python3 -I -S /usr/local/lib/persona-egress/"
+    assert all(line.startswith(allow) for line in lines[2:])
     assert "*" not in F.SUDOERS_LINES and "SETENV" not in F.SUDOERS_LINES
+
+
+def _tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    d = tmp_path / "sudoers.d"
+    d.mkdir()
+    main = tmp_path / "sudoers"
+    main.write_text("Defaults use_pty\n# log_input is only a comment\n@includedir /etc/sudoers.d\n", encoding="utf-8")
+    (d / "runner").write_text("runner ALL=(ALL) NOPASSWD:ALL\n", encoding="utf-8")
+    (d / base.SUDOERS.name).write_text(F.SUDOERS_LINES, encoding="utf-8")
+    conf = tmp_path / "sudo.conf"
+    conf.write_text("Plugin sudoers_policy  sudoers.so\n# Plugin evil evil.so\n", encoding="utf-8")
+    ns = tmp_path / "nsswitch.conf"
+    ns.write_text("passwd: files\nsudoers: files\n", encoding="utf-8")
+    for name, value in (("SUDOERS_MAIN", main), ("SUDOERS_D", d), ("SUDO_CONF", conf), ("NSSWITCH", ns)):
+        monkeypatch.setattr(F, name, value)
+    return tmp_path
+
+
+def test_sudo_io_logging_check_refuses_logging_defaults_and_foreign_io_plugins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _tree(tmp_path, monkeypatch)
+    assert F.sudo_io_logging_off() is True
+    (root / "sudo.conf").unlink()
+    assert F.sudo_io_logging_off() is True
+    (root / "nsswitch.conf").write_text("passwd: files\n", encoding="utf-8")
+    assert F.sudo_io_logging_off() is True
+    (root / "nsswitch.conf").unlink()
+    assert F.sudo_io_logging_off() is True
+
+    def fails(edit: object) -> None:
+        sub = tmp_path / f"case{len(list(tmp_path.glob('case*')))}"
+        sub.mkdir()
+        _tree(sub, monkeypatch)
+        edit(sub)  # type: ignore[operator]
+        assert F.sudo_io_logging_off() is False
+
+    fails(lambda r: (r / "sudoers").write_text("Defaults log_input\n@includedir /etc/sudoers.d\n"))
+    fails(lambda r: (r / "sudoers.d" / "x").write_text("Defaults iolog_dir=/var/x\n"))
+    fails(lambda r: (r / "sudoers.d" / "x").write_text("Defaults>root log_stdin\n"))
+    fails(lambda r: (r / "sudoers.d" / "x").write_text("runner ALL=(ALL) LOG_INPUT: ALL\n"))
+    fails(lambda r: (r / "sudoers.d" / "x").write_bytes(b"\xff\xfe"))
+    fails(lambda r: (r / "sudoers").write_text("@includedir /etc/other.d\n"))
+    fails(lambda r: (r / "sudoers.d" / "x").write_text("#include /tmp/x\n"))
+    fails(lambda r: (r / "sudo.conf").write_text("Plugin sudoers_io evil.so\n"))
+    fails(lambda r: (r / "sudo.conf").write_text("Plugin sudoers_policy sudoers.so sudoers_file=/tmp/s\n"))
+    fails(lambda r: (r / "nsswitch.conf").write_text("sudoers: files sss\n"))
+    monkeypatch.setattr(F, "SUDOERS_D", tmp_path / "missing")
+    assert F.sudo_io_logging_off() is False
 
 
 def test_network_argv_is_internal_without_ipv6_on_the_fixed_bridge() -> None:
@@ -212,6 +262,7 @@ def test_verify_reports_docker_below_26_and_never_gates_on_live_restore(monkeypa
     assert {
         "install_hashes",
         "sudoers",
+        "sudo_io_logging_off",
         "socket_dropin",
         "network",
         "image_digest",
