@@ -152,3 +152,41 @@ def test_the_inference_smoke_verb_and_the_smoke_module_are_llm_steps() -> None:
     assert not _llm({"run": f"{run_py} egress-self-check"})
     assert not _llm({"run": 'pip download -r docker/persona/requirements-persona.txt -d "$RUNNER_TEMP/work/wheels"'})
     assert not _llm({"run": "# run.py inference-smoke is only named in a comment"})
+
+
+L = "/usr/local/lib/persona-egress/egress_launcher.py"
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        f"sudo /usr/bin/python3 -I -S {L} run",
+        f'sudo python3 "{L}" run',
+        f"sudo python3 {L} 'run'",
+        f"sudo python3 -I -S \\\n  {L} \\\n  run",
+        f"bash -c 'sudo python3 {L} run'",
+        f'sh -c "sudo python3 {L} run"',
+        f"x=$(sudo python3 {L} run)",
+        f"{{ sudo python3 {L} run; }}",
+        f"env A=b sudo python3 {L} run",
+        f"exec sudo python3 {L} run",
+        f"sudo python3 {L} run  # trailing comment",
+        'python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" persona-request',
+        f'python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" persona-request | sudo python3 {L} run',
+    ],
+)
+def test_the_launcher_run_line_and_persona_request_are_llm_steps(run: str) -> None:
+    assert _llm({"run": run})
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        f"sudo /usr/bin/python3 -I -S {L} probe",
+        'python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" egress-container-request',
+        f"# sudo python3 {L} run\necho hi",
+        f'L={L}; sudo python3 "$L" run',
+    ],
+)
+def test_the_probe_line_and_the_variable_path_residual_are_not_matched(run: str) -> None:
+    assert not _llm({"run": run})

@@ -37,7 +37,9 @@ def bound_root(tmp_path: Path) -> Path:
     rows = [
         {"persona": p, "kind": "verdict", "implementation": {"status": "implemented"}} for p in merge_checks.PERSONA_CLASSES
     ]
-    (tmp_path / route.PERSONAS_CONTRACT).write_text(yaml.safe_dump({"personas": rows}))
+    (tmp_path / route.PERSONAS_CONTRACT).write_text(
+        yaml.safe_dump({"personas": rows, "fixture_kind": {"personas": ["canary_persona"]}})
+    )
     return tmp_path
 
 
@@ -137,15 +139,18 @@ def test_scalar_resembling_an_alias_is_not_an_alias() -> None:
     assert route.parse_plan("a: PLAN-*.yaml\n") == {"a": "PLAN-*.yaml"}
 
 
-def test_probe_routes_only_on_fixture_only_diffs(bound_root: Path) -> None:
-    base = route.PROBE_DIR
-    four = [_f(f"{base}{s}.txt") for s in ("malformed", "proceed", "fail", "revise", "block", "flags")]
-    assert _route(four, ROOT) == [f"verdict_probe.{s}" for s in route.PROBE_STEMS]
-    assert _route(four[:1], ROOT) == ["verdict_probe.malformed"]
-    assert _route([*four, _f("scripts/x.py")], ROOT) == []
-    assert _route([_f(f"{base}other.txt"), _f(f"{base}sub/proceed.txt")], ROOT) == []
-    assert _route(four, ROOT, unknown=True) == []
-    assert _route(four, bound_root) == ["code_reviewer", *[f"verdict_probe.{s}" for s in route.PROBE_STEMS]]
+def test_fixture_only_diff_routes_the_fixture_personas(bound_root: Path) -> None:
+    base = route.FIXTURE_DIR
+    names = ("proceed", "revise")
+    files = [_f(f"{base}{s}.txt") for s in names]
+    assert _route(files, ROOT) == ["canary_persona"]
+    assert route.fixture_paths(files, False) == [f"{base}{s}.txt" for s in names]
+    assert _route(files[:1], ROOT) == ["canary_persona"]
+    assert _route([*files, _f("scripts/x.py")], ROOT) == []
+    assert _route([_f(f"{base}notes.md")], ROOT) == []
+    assert _route([_f(f"{base}proceed.txt", "removed")], ROOT) == []
+    assert _route(files, ROOT, unknown=True) == []
+    assert _route(files, bound_root) == ["canary_persona"]
 
 
 def test_class_and_head_rule_come_from_merge_checks(bound_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -179,13 +184,14 @@ def test_main_logs_routes_and_writes_the_routes_file(
     (tmp_path / "prepared" / "resolution.json").write_text(json.dumps(resolution))
     monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
     monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "out"))
-    files = [_f(f"{route.PROBE_DIR}proceed.txt")]
+    files = [_f(f"{route.FIXTURE_DIR}proceed.txt")]
     monkeypatch.setattr(route, "changed_files", lambda *a: (files, False, "m"))
     assert route.main([]) == 0
-    assert capsys.readouterr().out.strip() == "PERSONA-VERDICT routes=1 verdict_probe.proceed"
+    assert capsys.readouterr().out.strip() == "PERSONA-VERDICT routes=1 canary_persona"
     assert json.loads((tmp_path / "prepared" / "routes.json").read_text()) == {
-        "routes": ["verdict_probe.proceed"],
+        "routes": ["canary_persona"],
         "plan_paths": [],
+        "fixture_paths": [f"{route.FIXTURE_DIR}proceed.txt"],
     }
     assert (tmp_path / "out").read_text() == "routes=1\nfixture=true\n"
 
@@ -216,10 +222,10 @@ def _main_fixture_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resolu
 @pytest.mark.parametrize(
     ("names", "expected"),
     [
-        ([f"{route.PROBE_DIR}proceed.txt"], "true"),
-        ([f"{route.PROBE_DIR}proceed.txt", "README.md"], "false"),
+        ([f"{route.FIXTURE_DIR}proceed.txt"], "true"),
+        ([f"{route.FIXTURE_DIR}proceed.txt", "README.md"], "false"),
         (["README.md"], "false"),
-        ([f"{route.PROBE_DIR}notes.md"], "false"),
+        ([f"{route.FIXTURE_DIR}notes.md"], "false"),
     ],
 )
 def test_fixture_output_is_true_only_for_a_probe_only_diff(

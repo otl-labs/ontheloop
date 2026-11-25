@@ -26,12 +26,12 @@ speculative-plan + apply-the-saved-plan pipeline, alarm-only drift detection, th
 before touching `terraform/personal/`. This stub carries only what the ROUTINE (non-admin) loop
 needs unaided.
 
-**Agents never run terraform apply as a self-directed, routine action; operators may always invoke
-it directly. The sole agent exception is the human-gated break-glass admin tier in
-`docs/contracts/terraform-cc-web-operations.yaml` -- an agent may execute `terraform apply` there
-only after a human has reviewed the plan and explicitly directed it (Decision 126).**
+**Agents never run terraform apply; operators may always invoke
+it directly. In the human-gated break-glass admin tier in
+`docs/contracts/terraform-cc-web-operations.yaml` an agent may prepare the plan, and the operator
+reviews it and runs the apply (Decision 283 cl.3, Decision 256 cl.3).**
 
-**Deployment model (Decision 126):** the PR -> CI apply pipeline below is the default, ambient
+**Deployment model (Decision 283):** the PR -> CI apply pipeline below is the default, ambient
 path. Local/manual apply is operator-only break-glass, not a routine agent action -- see
 `docs/contracts/terraform-cc-web-operations.yaml`'s operator-only / break-glass section. Full
 intent -> trigger -> recovery wayfinding: `docs/contracts/deploy-paths.yaml`. Guard classification

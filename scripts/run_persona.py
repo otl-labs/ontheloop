@@ -1,6 +1,7 @@
 """Entry point for the litellm run_persona backend: input JSON in, the result JSON alone on stdout, events to a file.
 
-Usage: <python> [-I] scripts/run_persona.py --contract <path> --input <json path> --events <path> [--max-tokens N]
+Usage: <python> [-I] scripts/run_persona.py --contract <path> --input <json path> --events <path> [--max-tokens N] [--role R]
+A given --role (primary or warm_fetched_escape_hatch) starts the run on it and turns in-process fail-over off.
 Exit 0: a result (success or failure value) was produced. 2: refused or unreadable arguments. 4: the run aborted
 (transport outage or exception, tool_server_unavailable, tool_server_error).
 """
@@ -81,6 +82,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--events", required=True, type=Path)
     parser.add_argument("--max-tokens", type=int, default=32000)
+    parser.add_argument("--role", default=None)
     args = parser.parse_args(argv)
     try:
         materialised = json.loads(args.input.read_text(encoding="utf-8"))
@@ -102,6 +104,7 @@ def main(argv: list[str] | None = None) -> int:
                 on_event=sink,
                 max_tokens=args.max_tokens,
                 mcp_server=server_parameters,
+                role=args.role,
             )
         )
     except RunRefused as exc:

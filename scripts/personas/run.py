@@ -19,7 +19,8 @@ VERBS = {
     "route": "route",
     "fetch": "snapshot",
     "materialise": "materialise",
-    "execute": "execute",
+    "persona-request": "keyed_run:request_main",
+    "persona-record": "keyed_run:record_main",
     "post": "post_verdict",
     "override-render": "override",
     "wake": "wake",
@@ -27,6 +28,9 @@ VERBS = {
     "egress-self-check": "egress_self_check",
     "egress-control": "egress_control",
     "egress-floor": "egress_floor",
+    "egress-floor-container": "egress_floor_container",
+    "egress-container-request": "egress_container_control:request_main",
+    "egress-container-control": "egress_container_control",
     "egress-revert-drill": "egress_revert_drill",
     "egress-revert-drill-control": "egress_revert_drill_control",
     "egress-fail-closed": "egress_fail_closed",
@@ -58,8 +62,9 @@ def main(argv: Sequence[str]) -> int:
     if offender is not None:
         print(f"PERSONA_SNAPSHOT_ON_PATH {offender}", file=sys.stderr)
         return EXIT_SNAPSHOT_ON_PATH
-    module = importlib.import_module(f"scripts.personas.{VERBS[argv[0]]}")
-    return int(module.main([]))
+    name, _, function = VERBS[argv[0]].partition(":")
+    module = importlib.import_module(f"scripts.personas.{name}")
+    return int(getattr(module, function or "main")([]))
 
 
 if __name__ == "__main__":

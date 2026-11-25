@@ -138,7 +138,7 @@ def workflow_problems(workflows: dict[str, dict[str, Any]]) -> list[str]:
             if fname != _ENV_WORKFLOW and _assumes_role(job):
                 problems.append(f"{fname}:{jname} assumes the persona-verdict role")
             blob = json.dumps(job, default=str)
-            for needle in (_ROLE_NAME, "inference-smoke", "key-refusal"):
+            for needle in (_ROLE_NAME, "inference-smoke", "key-refusal", "persona-request"):
                 if fname != _ENV_WORKFLOW and needle in blob:
                     problems.append(f"{fname}:{jname} names {needle}")
     if _ENV_WORKFLOW in workflows:
@@ -207,7 +207,7 @@ def test_red_workflow_fence() -> None:
         ]
     }
     assert workflow_problems({"other.yml": {"on": "push", "jobs": {"j": assume}}})
-    for needle in (_ROLE_NAME, "inference-smoke", "key-refusal"):
+    for needle in (_ROLE_NAME, "inference-smoke", "key-refusal", "persona-request"):
         named = {"runs-on": "ubuntu-latest", "steps": [{"run": f"echo {needle}"}]}
         assert any(needle in p for p in workflow_problems({"other.yml": {"on": "push", "jobs": {"j": named}}}))
         assert workflow_problems({_ENV_WORKFLOW: {"on": {"workflow_run": {}}, "jobs": {"j": named}}}) == []

@@ -12,10 +12,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from scripts.personas import resolve_pr, snapshot
+from scripts.personas import execute, resolve_pr, snapshot
 from scripts.personas import route as route_mod
 
-PROBE_MARKER_DIR = "tests/fixtures/persona_verdict/fixture_pr/"
 Provider = Callable[[Path, dict[str, Any]], dict[str, Any]]
 PROVIDERS: dict[str, Provider] = {}
 
@@ -44,34 +43,54 @@ def shared_fields(root: Path, resolution: dict[str, Any], plan_paths: list[str])
     return {"change_id": resolution["change_id"], "head_sha": resolution["head_sha"], "plan": plan}
 
 
-def _probe(root: Path, ctx: dict[str, Any]) -> dict[str, Any]:
-    stem = ctx["route"][len(route_mod.PROBE_PREFIX) :]
-    marker = _read_text(root, f"{PROBE_MARKER_DIR}{stem}.txt")
-    if marker is None:
-        raise Unusable("input_unusable", f"marker file for {stem} is absent at head")
-    return {"marker": marker}
+def _fixture(root: Path, ctx: dict[str, Any]) -> dict[str, Any]:
+    texts: list[str] = []
+    for relpath in ctx["fixture_paths"]:
+        if not str(relpath).startswith(route_mod.FIXTURE_DIR):
+            raise Unusable("input_unusable", "a fixture path is outside the fixture directory")
+        text = _read_text(root, relpath)
+        if text is None:
+            raise Unusable("input_unusable", f"fixture file {relpath} is absent at head")
+        texts.append(text.rstrip("\n"))
+    resolution = ctx["resolution"]
+    if resolution.get("body_oversized"):
+        raise Unusable("input_unusable", "the pull request body is over the size cap")
+    body = str(resolution.get("body") or "")
+    if body:
+        texts.append(body)
+    notes = "\n".join(texts)
+    if not notes.strip():
+        raise Unusable("input_unusable", "the fixture notes are empty")
+    return {"notes": notes}
 
 
-def build_input(root: Path, route_id: str, resolution: dict[str, Any], plan_paths: list[str]) -> dict[str, Any]:
+def build_input(
+    root: Path, route_id: str, resolution: dict[str, Any], plan_paths: list[str], fixture_paths: list[str] | None = None
+) -> dict[str, Any]:
     fields = shared_fields(root, resolution, plan_paths)
-    if route_id.startswith(route_mod.PROBE_PREFIX):
-        provider: Provider | None = _probe
-    else:
-        provider = PROVIDERS.get(route_id)
+    provider = PROVIDERS.get(route_id)
+    if provider is None and route_id in execute.fixture_personas(execute.ROOT):
+        provider = _fixture
     if provider is None:
         raise Unusable("input_incomplete", f"no input provider is registered for {route_id}")
-    fields.update(provider(root, {"route": route_id, "resolution": resolution}))
+    fields.update(provider(root, {"route": route_id, "resolution": resolution, "fixture_paths": fixture_paths or []}))
     return fields
 
 
 def materialise(
-    root: Path, out: Path, resolution: dict[str, Any], routes: list[str], plan_paths: list[str], usable: bool
+    root: Path,
+    out: Path,
+    resolution: dict[str, Any],
+    routes: list[str],
+    plan_paths: list[str],
+    usable: bool,
+    fixture_paths: list[str] | None = None,
 ) -> None:
     for route_id in routes:
         try:
             if not usable:
                 raise Unusable("input_unusable", "the head snapshot was refused")
-            body = build_input(root, route_id, resolution, plan_paths)
+            body = build_input(root, route_id, resolution, plan_paths, fixture_paths)
             (out / f"input-{route_id}.json").write_text(json.dumps(body, sort_keys=True), encoding="utf-8")
         except (Unusable, snapshot.SnapshotRefused) as exc:
             failure = exc.failure if isinstance(exc, Unusable) else "input_unusable"
@@ -84,5 +103,13 @@ def main(argv: list[str]) -> int:
     routes_doc = json.loads(route_mod.ROUTES.read_text(encoding="utf-8"))
     state_file = snapshot.STATE
     usable = state_file.exists() and bool(json.loads(state_file.read_text(encoding="utf-8")).get("ok"))
-    materialise(snapshot.snapshot_dir(), Path("prepared"), resolution, routes_doc["routes"], routes_doc["plan_paths"], usable)
+    materialise(
+        snapshot.snapshot_dir(),
+        Path("prepared"),
+        resolution,
+        routes_doc["routes"],
+        routes_doc["plan_paths"],
+        usable,
+        routes_doc.get("fixture_paths", []),
+    )
     return 0

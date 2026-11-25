@@ -2,7 +2,8 @@
 
 The planner places the sidecar's words in a scratch copy T of main (a git worktree) and runs this tool. It verifies
 the placed words against the sidecar, settles the companions the build would commit with them (budget ratchets, the
-decisions index), runs `scripts.validate --pre` in T and prints one verdict, its digest/base/selection facts and the
+decisions index), runs `scripts.validate --pre` in a throwaway clone of T whose main holds the plan PR
+(scripts.roadmap.wording_check_clone) and prints one verdict, its digest/base/selection facts and the
 gate_rounds row to paste. The row is recorded for the plan-PR check and the critic to read, never re-run.
 
 CLI: python -m scripts.roadmap.plan_wording_check --slug S --tree T [--sidecar P] [--plan P]
@@ -20,7 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from scripts.roadmap import approved_text, plan_document, wording_check_baseline, wording_check_pending
+from scripts.roadmap import approved_text, plan_document, wording_check_baseline, wording_check_clone, wording_check_pending
 
 ROOT = Path(__file__).resolve().parents[2]
 PRE_TIMEOUT_S = 900
@@ -59,6 +60,7 @@ class Result:
     echo: str = ""
     round: int = 1
     pairs: tuple[wording_check_pending.Pair, ...] = ()
+    plan: str = ""
 
 
 def default_runner(cmd: list[str], cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
@@ -96,8 +98,8 @@ def _changed_paths(tree: Path) -> set[str]:
     return {p for p in paths if p != _VENV and not p.startswith(f"{_VENV}/")}
 
 
-def _check_scope(tree: Path, sidecar_files: set[str]) -> None:
-    stray = sorted(_changed_paths(tree) - sidecar_files - set(_COMPANIONS))
+def _check_scope(tree: Path, sidecar_files: set[str], admitted: frozenset[str] | set[str] = frozenset()) -> None:
+    stray = sorted(_changed_paths(tree) - sidecar_files - set(_COMPANIONS) - admitted)
     if stray:
         raise CheckFailure(f"the scratch tree changes files outside the sidecar and its companions: {', '.join(stray)}")
 
@@ -174,14 +176,14 @@ def _link_venv(tree: Path) -> None:
         link.symlink_to(ROOT / _VENV, target_is_directory=True)
 
 
-def _selection_status(tree: Path, base: str) -> str:
+def _selection_status(tree: Path, head: str) -> str:
     try:
         manifest = json.loads((tree / _MANIFEST).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return "degraded"
     complete = (
         isinstance(manifest, dict)
-        and manifest.get("sha") == base
+        and manifest.get("sha") == head
         and not manifest.get("fallback")
         and manifest.get("capped") is False
         and not manifest.get("deferred")
@@ -228,7 +230,8 @@ def run(
 ) -> Result:
     """Rehearse the sidecar's words in `tree`; a Result with verdict PASS or FAIL (reason set when FAIL)."""
     digest = base = ""
-    plan = _load_plan(plan_path or ROOT / "docs" / "plans" / f"PLAN-{slug}.yaml")
+    plan_file = plan_path or ROOT / "docs" / "plans" / f"PLAN-{slug}.yaml"
+    plan = _load_plan(plan_file)
     round_ = _round_of(plan)
     try:
         sidecar_file = sidecar_path or ROOT / approved_text.sidecar_rel(slug)
@@ -239,7 +242,8 @@ def run(
         digest = approved_text.digest(sidecar)
         sidecar_files = {block.file for block in sidecar.blocks}
         base = _check_base(tree)
-        _check_scope(tree, sidecar_files)
+        plan_text = wording_check_clone.plan_text_for(plan_file, slug, plan is not None)
+        _check_scope(tree, sidecar_files, wording_check_clone.admitted_plan(tree, slug, plan_text, _changed_paths(tree)))
         mismatches = approved_text.verify(sidecar, tree, base)
         if mismatches:
             raise CheckFailure("approved text does not verify in the scratch tree: " + "; ".join(mismatches))
@@ -252,20 +256,26 @@ def run(
             raise CheckFailure(reason)
         pairs = tuple(wording_check_pending.pending_pairs(tree, sidecar_files, plan))
         (tree / _MANIFEST).unlink(missing_ok=True)
-        proc = _run(runner, ["bin/venv-python", "-m", "scripts.validate", "--pre"], tree, PRE_TIMEOUT_S)
-    except CheckFailure as exc:
+        sidecar_text = sidecar_file.read_text(encoding="utf-8")
+        with wording_check_clone.rehearsal_clone(tree, base, slug, sidecar_text, plan_text) as clone:
+            proc = _run(runner, ["bin/venv-python", "-m", "scripts.validate", "--pre"], clone, PRE_TIMEOUT_S)
+            output = (proc.stdout or "") + (proc.stderr or "")
+            selection = _selection_status(clone, _git(clone, "rev-parse", "HEAD").stdout.strip())
+            plan_note = wording_check_clone.plan_line(slug, plan_text)
+            if proc.returncode == 0:
+                return Result("PASS", digest=digest, base=base, selection=selection, round=round_, plan=plan_note)
+            reason = "the fast tier (scripts.validate --pre) failed"
+            if pairs:
+                why = wording_check_pending.attribute(clone, output, list(pairs), runner, ATTRIBUTION_TIMEOUT_S)
+                if why is None:
+                    return Result(
+                        "PASS", digest=digest, base=base, selection=selection, round=round_, pairs=pairs, plan=plan_note
+                    )
+                reason = f"{reason}; {why}"
+            reason += wording_check_clone.stale_hint(output)
+            return Result("FAIL", reason, digest, base, selection, _failing_lines(output), round_, plan=plan_note)
+    except (CheckFailure, wording_check_clone.WordingCloneError) as exc:
         return Result("FAIL", reason=str(exc), digest=digest, base=base, round=round_)
-    output = (proc.stdout or "") + (proc.stderr or "")
-    selection = _selection_status(tree, base)
-    if proc.returncode == 0:
-        return Result("PASS", digest=digest, base=base, selection=selection, round=round_)
-    reason = "the fast tier (scripts.validate --pre) failed"
-    if pairs:
-        why = wording_check_pending.attribute(tree, output, list(pairs), runner, ATTRIBUTION_TIMEOUT_S)
-        if why is None:
-            return Result("PASS", "", digest, base, selection, "", round_, pairs)
-        reason = f"{reason}; {why}"
-    return Result("FAIL", reason, digest, base, selection, _failing_lines(output), round_)
 
 
 def _render(slug: str, result: Result) -> str:
@@ -281,6 +291,8 @@ def _render(slug: str, result: Result) -> str:
             f"pending: docs/contracts/{name} evaluator {check} (the plan {_VERBS[action]} {module})"
             for name, check, module, action in result.pairs
         ]
+    if result.plan:
+        lines.append(result.plan)
     if result.reason:
         lines.append(f"reason: {result.reason}")
     if result.echo:

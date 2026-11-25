@@ -8,8 +8,9 @@ Each command reads one telemetry reader window verb (model_usage_rollup, tool_us
 session_tree_rollup, friction_signature_counts), which
 answers at most seven UTC days of per-tree rows and never sums across trees (Decision 199 cl.1). The range is split into
 consecutive windows of at most seven days and the rows are summed here: exact, because every tree row carries its root's
-partition pin and so lands in exactly one window. A window the reader refuses as too large (413) or too slow (504) is halved
-down to one day. Any other failed window prints no total and exits 1 naming the window and error_type (Decision 215); the
+partition pin and so lands in exactly one window. A window the reader refuses as too large (413), too slow (504) or
+out of memory (500 unmapped OutOfMemoryException) is halved down to one day, for every window command.
+Any other failed window prints no total and exits 1 naming the window and error_type (Decision 215); the
 call count is bounded and printed (Decision 88). One JSON object goes to stdout; windows and calls go to stderr. friction
 answers by_classifier_version in place of rows: per classifier_version, the process_event facts, the generic ones, their
 share (null without process_event facts) and every signature ranked by fact_count;
@@ -28,7 +29,7 @@ from typing import Any, Callable, Iterable, TextIO
 
 from scripts.aws_profile import resolve_aws_profile
 from scripts.telemetry_verify import session_presence
-from src.common.ducklake_reader_client import ReadDeadlineExceededError, ResponseTooLargeError
+from src.common.ducklake_reader_client import ReadDeadlineExceededError, ReaderInvokeError, ResponseTooLargeError
 
 WINDOW_DAYS = 7
 DEFAULT_MAX_WINDOWS = 9
@@ -87,8 +88,23 @@ def _error_type(exc: Exception) -> str:
     return kind if isinstance(kind, str) and kind else type(exc).__name__
 
 
+def _reader_out_of_memory(exc: Exception) -> bool:
+    """The reader's typed answer for a DuckDB out-of-memory: ducklake_handler_errors.unmapped (status 500, error_class).
+
+    A later typed out-of-memory error row must update this match and its acceptance test.
+    """
+    body = exc.body if isinstance(exc, ReaderInvokeError) else None
+    return (
+        isinstance(exc, ReaderInvokeError)
+        and exc.status == 500
+        and isinstance(body, dict)
+        and body.get("error_type") == "unmapped"
+        and body.get("error_class") == "OutOfMemoryException"
+    )
+
+
 class _Reads:
-    """The windowed reads of one invocation: halving on 413/504 and a fixed call cap."""
+    """The windowed reads of one invocation: halving on 413/504 and a reader out-of-memory 500, and a fixed call cap."""
 
     def __init__(self, reader: Any, verb: str, err: TextIO) -> None:
         self.reader, self.verb, self.err, self.calls = reader, verb, err, 0
@@ -101,15 +117,15 @@ class _Reads:
         print(f"window {first}..{last}", file=self.err)
         try:
             self.rows += self.reader.named(self.verb, day_from=first.isoformat(), day_to=last.isoformat())
-        except (ResponseTooLargeError, ReadDeadlineExceededError) as exc:
+        except Exception as exc:  # noqa: BLE001 -- any failed window fails closed, naming its type only
+            if not (isinstance(exc, (ResponseTooLargeError, ReadDeadlineExceededError)) or _reader_out_of_memory(exc)):
+                raise WindowFailed(first, last, _error_type(exc)) from None
             days = (last - first).days + 1
             if days == 1:
                 raise WindowFailed(first, last, _error_type(exc)) from None
             middle = first + timedelta(days=(days + 1) // 2 - 1)
             self.read(first, middle)
             self.read(middle + timedelta(days=1), last)
-        except Exception as exc:  # noqa: BLE001 -- any failed window fails closed, naming its type only
-            raise WindowFailed(first, last, _error_type(exc)) from None
 
 
 def _sum(values: Iterable[Any]) -> int | None:

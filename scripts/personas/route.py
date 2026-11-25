@@ -16,13 +16,11 @@ from typing import Any
 
 import yaml
 
-from scripts.personas import resolve_pr
+from scripts.personas import execute, resolve_pr
 from scripts.session import merge_checks
 
 ROOT = Path(__file__).resolve().parents[2]
-PROBE_DIR = "tests/fixtures/persona_verdict/fixture_pr/"
-PROBE_STEMS = ("proceed", "revise", "fail", "malformed", "block", "flags")
-PROBE_PREFIX = "verdict_probe."
+FIXTURE_DIR = "tests/fixtures/persona_verdict/fixture_pr/"
 PLAN_PATH = re.compile(r"docs/plans/PLAN-[^/]+\.yaml")
 PLAN_SIZE_CAP = 512 * 1024
 COMPARE_LIMIT = 300
@@ -144,18 +142,22 @@ def plan_files(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-def probe_routes(files: list[dict[str, Any]], unknown: bool) -> list[str]:
+def fixture_paths(files: list[dict[str, Any]], unknown: bool) -> list[str]:
+    """The added or modified .txt paths of a diff that touches only the fixture directory, sorted; else []."""
     if unknown or not files:
         return []
-    paths = path_set(files)
-    if not all(p.startswith(PROBE_DIR) for p in paths):
+    if not all(p.startswith(FIXTURE_DIR) for p in path_set(files)):
         return []
-    stems = {
-        p[len(PROBE_DIR) : -len(".txt")]
-        for p in (str(f.get("filename")) for f in files if f.get("status") != "removed")
-        if p.endswith(".txt") and "/" not in p[len(PROBE_DIR) :]
-    }
-    return [PROBE_PREFIX + s for s in PROBE_STEMS if s in stems]
+    return sorted(
+        str(f.get("filename"))
+        for f in files
+        if f.get("status") in ("added", "modified", "renamed", "changed") and str(f.get("filename")).endswith(".txt")
+    )
+
+
+def fixture_routes(files: list[dict[str, Any]], unknown: bool, root: Path = ROOT) -> list[str]:
+    """The index's fixture_kind personas when the diff is fixture-only with a .txt to read, else []."""
+    return execute.fixture_personas(root) if fixture_paths(files, unknown) else []
 
 
 def route(
@@ -188,8 +190,10 @@ def route(
             sets |= _persona_set("plan", draft)
         if klass == "plan" and plans and len(plans) == len(files) and not any(revised(f) for f in plans):
             sets |= _persona_set("code", draft)
-    bound = bound_personas(root)
-    return sorted(sets & bound) + probe_routes(files, unknown)
+    fixtures = fixture_routes(files, unknown, root)
+    if fixtures:
+        return fixtures
+    return sorted(sets & bound_personas(root))
 
 
 def main(argv: list[str]) -> int:
@@ -199,13 +203,17 @@ def main(argv: list[str]) -> int:
     routes: list[str] = []
     plans: list[str] = []
     fixture = False
+    paths: list[str] = []
     if resolution.get("resolved") and not resolution.get("override"):
         files, unknown, merge_base = changed_files(repo, resolution["base_ref"], resolution["head_sha"], token)
         routes = route(files, unknown, bool(resolution["draft"]), repo, resolution["head_sha"], merge_base, token)
         plans = [str(f["filename"]) for f in plan_files(files)]
-        fixture = bool(probe_routes(files, unknown))
+        paths = fixture_paths(files, unknown)
+        fixture = bool(fixture_routes(files, unknown))
     ROUTES.parent.mkdir(parents=True, exist_ok=True)
-    ROUTES.write_text(json.dumps({"routes": routes, "plan_paths": plans}, sort_keys=True), encoding="utf-8")
+    ROUTES.write_text(
+        json.dumps({"routes": routes, "plan_paths": plans, "fixture_paths": paths}, sort_keys=True), encoding="utf-8"
+    )
     print(f"PERSONA-VERDICT routes={len(routes)} {' '.join(routes)}".rstrip())
     resolve_pr.write_output(routes=str(len(routes)), fixture="true" if fixture else "false")
     return 0

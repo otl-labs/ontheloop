@@ -20,7 +20,8 @@ ALLOWED = {
     "snapshot": {"yaml"},
     "override": {"yaml"},
     "materialise": {"yaml"},
-    "execute": {"jsonschema"},
+    "execute": {"yaml"},
+    "keyed_run": {"boto3", "botocore", "jsonschema", "yaml", "src"},
     "post_verdict": {"yaml", "jsonschema", *APP_TOKEN_ALLOWED},
     "app_token": APP_TOKEN_ALLOWED,
     "wake": {"yaml"},
@@ -28,6 +29,8 @@ ALLOWED = {
     "egress_self_check": set(),
     "egress_control": {"yaml"},
     "egress_floor": set(),
+    "egress_floor_container": set(),
+    "egress_container_control": set(),
     "egress_revert_drill": set(),
     "egress_revert_drill_control": set(),
     "egress_fail_closed": set(),
@@ -121,6 +124,8 @@ def test_run_itself_is_stdlib_only_at_import() -> None:
         ("egress-self-check", "egress_self_check"),
         ("egress-control", "egress_control"),
         ("egress-floor", "egress_floor"),
+        ("egress-floor-container", "egress_floor_container"),
+        ("egress-container-control", "egress_container_control"),
         ("egress-revert-drill", "egress_revert_drill"),
         ("egress-revert-drill-control", "egress_revert_drill_control"),
         ("egress-fail-closed", "egress_fail_closed"),
@@ -147,3 +152,20 @@ def test_inference_smoke_imports_come_from_the_pinned_persona_distributions() ->
     dist = {"boto3": "boto3", "botocore": "botocore", "litellm": "litellm", "yaml": "pyyaml"}
     for name in INFERENCE_SMOKE_ALLOWED - {"src"}:
         assert dist[name] in pins, name
+
+
+def test_a_verb_may_name_a_function_other_than_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    called: list[str] = []
+    module = type(
+        "M", (), {"main": staticmethod(lambda a: 9), "request_main": staticmethod(lambda a: called.append("request") or 0)}
+    )
+    monkeypatch.setattr(run.importlib, "import_module", lambda name: module)
+    assert run.VERBS["egress-container-request"] == "egress_container_control:request_main"
+    assert run.main(["egress-container-request"]) == 0 and called == ["request"]
+
+
+def test_verbs_name_the_keyed_run_and_not_execute() -> None:
+    assert run.VERBS["persona-request"] == "keyed_run:request_main"
+    assert run.VERBS["persona-record"] == "keyed_run:record_main"
+    assert "execute" not in run.VERBS

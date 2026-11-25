@@ -33,6 +33,8 @@ def test_pc12_records_decision_263_clause_4() -> None:
     assert (_REPO / row["location"]).is_file()
     assert "Decision 263 clause 4" in row["description"]
     assert "assumes no AWS identity" in row["description"]
+    assert "key-adding proxy keeps the key out of the persona process" in row["description"]
+    assert "scripts/personas/egress_launcher.py" in row["description"]
 
 
 def test_sa14_names_app_installation_tokens() -> None:
@@ -56,3 +58,15 @@ def test_sa11_and_sa13_keep_their_pinned_phrases_and_cite_their_plans() -> None:
     assert "docs/plans/approved/inference-tier-selection.yaml" in rows["SA-13"]["assumption"]
     for plan in ("persona-contracts-verdict-slice", "persona-run-identity-contract", "inference-tier-selection"):
         assert (_REPO / f"docs/plans/approved/{plan}.yaml").is_file()
+
+
+def test_sa15_names_the_container_floor_variant_assumptions() -> None:
+    (row,) = [r for r in _ports()["structural_assumptions"] if r["id"] == "SA-15"]
+    for token in (
+        "egress_floor_container.py",
+        "LiveRestore observed and not gated",
+        "GHCR's blob host",
+        "--pids-limit",
+        "--dns",
+    ):
+        assert token in row["assumption"], token

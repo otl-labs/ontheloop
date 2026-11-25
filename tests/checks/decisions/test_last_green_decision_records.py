@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tests.fixtures.decision_entry import authored_bytes, cap_bytes, decision_entry
+from tests.fixtures.decision_entry import authored_bytes, cap_bytes, decision_entry, live_block
 
 pytestmark = pytest.mark.unit
 
@@ -55,12 +55,17 @@ def test_each_amended_entry_carries_one_dated_note() -> None:
     text = _decisions_text()
     number = _number(text)
     for amended in _AMENDS:
-        notes = _paragraphs(decision_entry(text, amended), f"> **Amended by Decision {number} (")
+        block = live_block(text, amended, naming=(number,))
+        if block is None:
+            continue
+        notes = _paragraphs(block, f"> **Amended by Decision {number} (")
         assert len(notes) == 1, (amended, len(notes))
         if amended in _FIRED:
             assert _FIRED[amended] in notes[0], amended
-    sit = [p for p in _paragraphs(decision_entry(text, 252), "> **Update (") if f"Decision {number} " in p]
-    assert len(sit) == 1 and "necessary condition" in sit[0] and "rec-5033" in sit[0]
+    update = live_block(text, 252, naming=())
+    if update is not None:
+        sit = [p for p in _paragraphs(update, "> **Update (") if f"Decision {number} " in p]
+        assert len(sit) == 1 and "necessary condition" in sit[0] and "rec-5033" in sit[0]
 
 
 def test_taxonomy_reserves_last_green_ref_apart_from_promotion() -> None:
