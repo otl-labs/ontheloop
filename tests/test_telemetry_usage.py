@@ -1,6 +1,7 @@
 """CONCERN: scripts/telemetry_usage.py and the registration of the usage verbs (PLAN-telemetry-usage-reader-verbs).
 
-The CLI runs over a fake reader (no duckdb, no network): chunking, exact sums, halving on 413/504, the fail-closed paths and
+The CLI runs over a fake reader (no duckdb, no network): chunking, exact sums, halving on 413/504 and a reader
+out-of-memory 500, the fail-closed paths and
 the call bounds. The registration nodes pin the three verbs as agent-facing seven-day window verbs declared by the serving
 contract.
 """
@@ -129,14 +130,32 @@ def test_chunk_sums_equal_a_single_window_sum() -> None:
 def test_a_failed_chunk_prints_no_total_and_exits_1() -> None:
     floor = ReadDeadlineExceededError("named_read", "slow", {"error_type": "read_deadline_exceeded"})
     gone = ReaderInvokeError("named_read", 503, "gone", {"error_type": "catalog_unavailable"})
+    oom = ReaderInvokeError("named_read", 500, "oom", {"error_type": "unmapped", "error_class": "OutOfMemoryException"})
+    other = ReaderInvokeError("named_read", 500, "bug", {"error_type": "unmapped", "error_class": "RuntimeError"})
+    day, week = ["--from", "2026-10-01", "--to", "2026-10-01"], ["--from", "2026-10-01", "--to", "2026-10-07"]
     cases = (
         (["--from", "2026-10-08", "--to", "2026-10-08"], ("2026-10-08", "2026-10-08"), floor, "read_deadline_exceeded"),
         (["--from", "2026-10-01", "--to", "2026-10-14"], ("2026-10-08", "2026-10-14"), gone, "catalog_unavailable"),
+        (day, ("2026-10-01", "2026-10-01"), oom, "unmapped"),
+        (week, ("2026-10-01", "2026-10-07"), other, "unmapped"),
     )
     for argv, window, error, error_type in cases:
         code, result, err = _run(["models", *argv], FakeReader(_rows(), {window: error}))
         assert code == 1 and result is None and "calls=" not in err
         assert f"telemetry_usage FAIL window={window[0]}..{window[1]} error_type={error_type}" in err
+
+
+def test_a_reader_out_of_memory_500_halves_the_window() -> None:
+    oom = ReaderInvokeError("named_read", 500, "oom", {"error_type": "unmapped", "error_class": "OutOfMemoryException"})
+    reader = FakeReader(_rows(), {("2026-10-01", "2026-10-07"): oom})
+    code, result, _ = _run(["models", "--from", "2026-10-01", "--to", "2026-10-07"], reader)
+    assert code == 0 and result is not None
+    assert [(c[1], c[2]) for c in reader.calls] == [
+        ("2026-10-01", "2026-10-07"),
+        ("2026-10-01", "2026-10-04"),
+        ("2026-10-05", "2026-10-07"),
+    ]
+    assert sum(r["model_call_count"] for r in result["rows"]) == 21
 
 
 def test_413_and_504_halve_the_window() -> None:

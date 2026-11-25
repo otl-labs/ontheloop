@@ -1,4 +1,4 @@
-"""The 7-day root-sessions read fits the telemetry reader's own memory and spill limits (rec-5491, Decision 207).
+"""The 7-day root-sessions and tool-use reads fit the telemetry reader's own memory and spill limits (rec-5491, rec-5490).
 
 Module-level importorskip: the fast tier installs no duckdb, so these nodes run in the full tier. The four journals are written
 as Parquet files and viewed under the reader's alias, so render_sql's output runs unchanged with no ducklake extension.
@@ -136,3 +136,90 @@ def test_root_sessions_week_fits_the_reader_memory(reader_con: Any) -> None:
 
 def _session(i: int) -> str:
     return f"s{i % _ROOTS:05d}"
+
+
+_TOOL_OBS = 450_000
+_TOOL_THIRD = _TOOL_OBS // 3
+_TOOL_NAMES = ("srv-a", "srv-b", "srv-c", "srv-d", "srv-e")
+
+
+@pytest.fixture(scope="module")
+def tool_con(tmp_path_factory: pytest.TempPathFactory) -> Any:
+    root = tmp_path_factory.mktemp("tool_memory")
+    writer = duckdb_connect.connect()
+    writer.execute("SET TimeZone='UTC'")
+    writer.execute(f"SET memory_limit='{ev.TELEMETRY_MEMORY_LIMIT}'")
+    writer.execute(f"SET temp_directory='{root / 'write-spill'}'")
+    files = {t: root / f"{t}.parquet" for t in db.TABLES}
+
+    sessions = {**_common("ses"), "event_kind": "'open'"}
+    _write(writer, "telemetry_sessions", [_select("telemetry_sessions", _ROOTS, sessions)], files["telemetry_sessions"])
+
+    names = ", ".join(f"'{n}'" for n in _TOOL_NAMES)
+    pick = f"list_value({names})[n % 5 + 1]"
+    meta = f"'{{\"attribution_mcp_server\": \"' || {pick} || '\", \"pad\": \"' || repeat('x', 720) || '\"}}'"
+    obs = {**_common("obs"), "metadata": meta, "name": "'Bash'"}
+    opens = {
+        **obs,
+        "observation_type": "'tool_call'",
+        "event_kind": "'open'",
+        "observation_id": "'o' || CAST(n AS VARCHAR)",
+        "external_ref": "'x' || CAST(n AS VARCHAR) || '/tool_call_open'",
+    }
+    closes = {
+        **obs,
+        "observation_type": "'tool_call'",
+        "event_kind": "'close'",
+        "observation_id": "'o' || CAST(n - 150000 AS VARCHAR)",
+        "outcome": "'ok'",
+        "output_bytes": "10",
+        "output_sha256": "'h' || CAST(n AS VARCHAR)",
+    }
+    models = {**obs, "observation_type": "'model_call'", "event_kind": "'open'", "observation_id": "'m' || CAST(n AS VARCHAR)"}
+    _write(
+        writer,
+        "telemetry_observations",
+        [
+            _select("telemetry_observations", _TOOL_OBS, opens, f"WHERE n < {_TOOL_THIRD}"),
+            _select("telemetry_observations", _TOOL_OBS, closes, f"WHERE n >= {_TOOL_THIRD} AND n < {2 * _TOOL_THIRD}"),
+            _select("telemetry_observations", _TOOL_OBS, models, f"WHERE n >= {2 * _TOOL_THIRD}"),
+        ],
+        files["telemetry_observations"],
+    )
+    trans = {
+        **_common("trn"),
+        "purpose": "'tool_input'",
+        "transcript_id": "'t' || CAST(n AS VARCHAR)",
+        "external_ref": "'x' || CAST(n AS VARCHAR)",
+        "content_sha256": "'h' || CAST(n AS VARCHAR)",
+    }
+    _write(
+        writer,
+        "telemetry_transcripts",
+        [_select("telemetry_transcripts", _TRANSCRIPTS, trans)],
+        files["telemetry_transcripts"],
+    )
+    agents = {**_common("agt"), "agent_run_id": "'r' || CAST(n AS VARCHAR)", "host_run_ref": "'run-' || CAST(n AS VARCHAR)"}
+    _write(writer, "telemetry_agents", [_select("telemetry_agents", _AGENTS, agents)], files["telemetry_agents"])
+    writer.close()
+
+    con = duckdb_connect.connect()
+    con.execute("SET TimeZone='UTC'")
+    con.execute(f"ATTACH ':memory:' AS {rt.TELEMETRY_CATALOG_ALIAS}")
+    for table, path in files.items():
+        con.execute(f"CREATE VIEW {rt.TELEMETRY_CATALOG_ALIAS}.{table} AS SELECT * FROM read_parquet('{path}')")
+    projects = rt.resolve_table_spec("ops_projects").current_table
+    ddl = ", ".join(f"{name} {sql_type}" for name, sql_type in db.projects_columns())
+    con.execute(f"CREATE TABLE {rt.TELEMETRY_CATALOG_ALIAS}.{projects} ({ddl})")
+    db.insert_projects(con, [{"ulid": "p1", "project_id": _PROJECT, "tenant_id": _TENANT, "purpose": "real"}])
+    con.execute(f"SET memory_limit='{ev.TELEMETRY_MEMORY_LIMIT}'")
+    con.execute(f"SET temp_directory='{root / 'spill'}'")
+    con.execute(f"SET max_temp_directory_size='{ev.TELEMETRY_MAX_TEMP_SIZE}'")
+    yield con
+    con.close()
+
+
+def test_tool_use_week_fits_the_reader_memory(tool_con: Any) -> None:
+    rows = ev.execute(tool_con, verb="tool_use_rollup", params={"day_from": "2026-01-01", "day_to": "2026-01-07"})
+    assert sum(r["call_count"] for r in rows) == _TOOL_THIRD
+    assert {r["attribution_mcp_server"] for r in rows} == set(_TOOL_NAMES)
