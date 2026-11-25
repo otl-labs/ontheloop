@@ -396,3 +396,23 @@ def test_the_clone_index_mirrors_the_tree_index(tree: Path) -> None:
         assert "docs/gone.md" not in listed and "docs/added.md" in listed and "docs/unstaged-gone.md" in listed
         cached = _git(clone, "diff", "--cached", "origin/main", "--", "docs/partial.md")
         assert "+p2" in cached and "p3" not in cached
+
+
+def test_the_clone_links_the_root_venv_when_present(tree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    host = tmp_path / "host"
+    (host / ".venv").mkdir(parents=True)
+    monkeypatch.setattr(wcc, "ROOT", host)
+    base = _git(tree, "rev-parse", "HEAD")
+    with wcc.rehearsal_clone(tree, base, _SLUG, "sidecar: text\n", None) as clone:
+        link = clone / ".venv"
+        assert link.is_symlink() and link.resolve() == (host / ".venv").resolve()
+        assert ".venv" not in _git(clone, "status", "--porcelain", "--untracked-files=all")
+
+
+def test_the_clone_skips_the_venv_link_when_root_has_none(tree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    host = tmp_path / "host"
+    host.mkdir()
+    monkeypatch.setattr(wcc, "ROOT", host)
+    base = _git(tree, "rev-parse", "HEAD")
+    with wcc.rehearsal_clone(tree, base, _SLUG, "sidecar: text\n", None) as clone:
+        assert not (clone / ".venv").exists() and not (clone / ".venv").is_symlink()
