@@ -8,6 +8,7 @@ approval pointer and an amendment_log row naming the key, so each node fails for
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,8 @@ _POINTER = "approval: ref 2026-11-03"
 _ID4 = "  - id: NS.4\n"
 _EDIT4 = ("Why: maintaining anything", "Why: probe. Maintaining anything")
 _CARRIED4 = ("carried_by: [86, 127, 128, 211]", "carried_by: [86, 127, 128, 211, 244]")
+# The real file's own markers cite Decisions the fixture corpus lacks; the guard's real-tree run checks them.
+_REAL_MARKER = re.compile(r"^ *# tier-a-amendment-approved: .*\n", re.M)
 _LOG = 'amendment_log:\n  - date: "2026-11-03"\n    semantic_break: false\n    change_class: prose_improvement\n'
 
 
@@ -73,7 +76,7 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
     monkeypatch.setattr(_common, "ROOT", tmp_path)
     _git(tmp_path, "init", "-q", "-b", "main")
-    _put(tmp_path, _NS, _get(_REPO))
+    _put(tmp_path, _NS, _REAL_MARKER.sub("", _get(_REPO)))
     for rel in (".github/CODEOWNERS", "config/agent/executor/capabilities.yaml"):
         _put(tmp_path, rel, _get(_REPO, rel))
     _put(tmp_path, _DEC, _CORPUS)

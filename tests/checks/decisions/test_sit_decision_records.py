@@ -20,9 +20,9 @@ _SIT_HEADING = re.compile(r"^## Decision (\d+): SIT is stood up now", re.MULTILI
 _RDS_HEADING = re.compile(r"^## Decision (\d+): The DuckLake catalog moves to RDS", re.MULTILINE)
 _SIT_NOTED = (24, 73, 77, 126, 144, 202, 237, 242)
 _RDS_NOTED = (107, 214)
-# Compacted by the Decision 73 chain consolidation (rec-5445): its note retired with its body, and its stub names
-# the SIT Decision instead (docs/decision-migration/consolidations/consolidate-decision-73-chain.yaml).
-_COMPACTED = frozenset({73})
+# Compacted by the Decision 73 and Decision 126 chain consolidations (rec-5445, rec-5446): each note retired with its
+# body, and each stub names the SIT Decision instead (docs/decision-migration/consolidations/).
+_COMPACTED = frozenset({73, 126})
 
 
 def _decisions_text() -> str:

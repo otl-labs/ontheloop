@@ -63,7 +63,10 @@ def test_decision_entry_and_annotations() -> None:
     assert conditions["decision"] == n and [c["id"] for c in conditions["conditions"]] == list(_REVERSAL_IDS)
     assert entry.rstrip().endswith("---")
 
-    for amended in (216, 213, 126, 81):
+    for amended in (216, 213, 81):
         body = decision_entry(text, amended)
         assert re.search(rf"^\[Amendment \d{{4}}-\d{{2}}-\d{{2}}, Decision {n}:", body, re.MULTILINE), amended
         assert body.rstrip().endswith("---")
+    # Decision 126 compacted (rec-5446): its note retired with its body, and its stub names this Decision instead.
+    stub = decision_entry(text, 126)
+    assert "**Status:** Superseded" in stub and f"Decision {n}" in stub
