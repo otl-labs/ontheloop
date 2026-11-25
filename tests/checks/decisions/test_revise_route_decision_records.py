@@ -1,4 +1,4 @@
-"""The sandbox REVISE-route Decision (rec-5205): entry, envelope, reversal conditions, 183's note, 154's stub, taxonomy text.
+"""The sandbox REVISE-route Decision (rec-5205): entry, envelope, reversal conditions, 183's and 154's stubs, taxonomy text.
 
 Scoped to the new Decision's own block, found by its header text; the number comes from the heading so later Decisions
 never turn this red.
@@ -48,10 +48,10 @@ def test_decision_entry_envelope_and_reversal_conditions() -> None:
 
 @pytest.mark.parametrize("amended", [183])
 def test_amended_entries_carry_a_note_naming_the_plan(amended: int) -> None:
+    # Decision 183 compacted (rec-5446): its note retired with its body, and its stub names this Decision instead.
     text = _decisions_text()
-    number = _number(text)
-    notes = [p for p in decision_entry(text, amended).split("\n\n") if _PLAN in p]
-    assert len(notes) == 1 and f"Decision {number}" in notes[0]
+    stub = decision_entry(text, amended)
+    assert "**Status:** Superseded" in stub and f"Decision {_number(text)}" in stub
 
 
 def test_compacted_154_stub_names_the_revise_route_decision() -> None:

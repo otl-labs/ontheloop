@@ -394,9 +394,10 @@ class TestCategoryTagsIntegration:
     mechanical shortlist step can find them without relying on per-entry judgment."""
 
     def test_decision_126_carries_deploy_tag(self) -> None:
+        # Decision 126 compacted (rec-5446): the deployment model's live entry is its successor.
         idx = build_index()
         d = {x["number"]: x for x in idx["decisions"]}
-        assert "deploy" in d[126]["category_tags"]
+        assert "deploy" in d[d[126]["superseded_by"]]["category_tags"]
 
     def test_decision_157_carries_secrets_tag(self) -> None:
         idx = build_index()
