@@ -66,7 +66,8 @@ def test_inventory_filters_by_tier_and_serializes_sorted() -> None:
     assert [h.kind for h in inv.sorted_hits()] == ["census_row", "test_node"]
     assert [h.kind for h in inv.sorted_hits("confirmed")] == ["census_row"]
     data = inv.as_dict()
-    assert data["schema_version"] == 1 and data["stub_template"] == "compacted-stub-v1" and data["probe"] is None
+    assert data["schema_version"] == 1 and data["stub_template"] == "compacted-stub-v2" and data["probe"] is None
+    assert "{amenders}" in STUB_TEMPLATE
     assert "{successor}" in STUB_TEMPLATE
 
 

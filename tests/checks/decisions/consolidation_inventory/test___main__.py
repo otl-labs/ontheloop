@@ -30,7 +30,7 @@ def test_text_and_json_are_deterministic(repo: Path, capsys: pytest.CaptureFixtu
     _, raw = _run(capsys, "9001", "--root", str(repo), "--json")
     _, again = _run(capsys, "9001", "--root", str(repo), "--json")
     data = json.loads(raw)
-    assert raw == again and data["schema_version"] == 1 and data["stub_template"] == "compacted-stub-v1"
+    assert raw == again and data["schema_version"] == 1 and data["stub_template"] == "compacted-stub-v2"
     assert data["hits"] == sorted(data["hits"], key=lambda h: (h["kind"], h["victim"], h["locator"]))
 
 
@@ -75,7 +75,7 @@ def test_real_repo_smoke_invariants(capsys: pytest.CaptureFixture[str]) -> None:
 def test_probe_flag_runs_the_probe(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     root = build_repo(tmp_path, with_tools=True)
     code, out = _run(capsys, "9002", "--root", str(root), "--probe")
-    assert code == 0 and "stub_template: compacted-stub-v1" in out and "probe=breaks" in out
+    assert code == 0 and "stub_template: compacted-stub-v2" in out and "probe=breaks" in out
 
 
 def test_notes_are_printed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

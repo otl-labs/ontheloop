@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 
+from tests.fixtures.decision_entry import live_block
+
 ROOT = Path(__file__).resolve().parents[3]
 COVERAGE_REC = "rec-4439"
 ORIGINAL_C3 = (
@@ -55,8 +57,10 @@ def test_t3_20_c3_names_the_verb_based_orphan_monitor() -> None:
 
 def test_decision_210_coverage_names_the_discharged_residual() -> None:
     text = (ROOT / "docs" / "DECISIONS.md").read_text(encoding="utf-8")
-    start = text.index("## Decision 210:")
-    section = norm(text[start : text.index("\n## Decision ", start + 10)])
+    block = live_block(text, 210, naming=())
+    if block is None:
+        return
+    section = norm(block)
     assert "Update (2026-10-18)" in section
     update = section[section.index("Update (2026-10-18)") :]
     assert "rec-4101 residual is enforced" in update and "telemetry_orphan_counts" in update

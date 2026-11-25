@@ -14,10 +14,10 @@ from typing import Any
 import yaml
 
 SCHEMA_VERSION = 1
-STUB_TEMPLATE_ID = "compacted-stub-v1"
+STUB_TEMPLATE_ID = "compacted-stub-v2"
 STUB_TEMPLATE = (
     "{header}\n\n**Status:** Superseded\n**Date:** {date}\n\n"
-    "**Decision:** Superseded by Decision {successor}, which restates its rulings "
+    "**Decision:** Superseded by Decision {successor}, which restates its rulings{amenders} "
     "(consolidation inventory probe stub).\n\n**Superseded by: Decision {successor}**\n\n"
 )
 
