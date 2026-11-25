@@ -19,6 +19,7 @@ API = "https://api.github.com"
 ALLOWED_ROLES = frozenset({"admin", "maintain"})
 OVERRIDE_WORKFLOW = ".github/workflows/persona-verdict-override.yml"
 RESOLUTION = Path("prepared") / "resolution.json"
+BODY_CAP = 64 * 1024
 
 
 def request(
@@ -140,11 +141,16 @@ def resolve(event: dict[str, Any], repo: str, token: str | None) -> dict[str, An
     ]
     if len(match) != 1:
         return _unresolved(head_sha, f"{len(match)} open pull requests match the head")
-    row = match[0]
+    return _resolved_row(match[0], repo, head_sha, token)
+
+
+def _resolved_row(row: dict[str, Any], repo: str, head_sha: str, token: str | None) -> dict[str, Any]:
     author = row.get("user") or {}
     login = str(author.get("login") or "")
     allowed = bool(login) and is_allowlisted(repo, login, token)
     number = int(row["number"])
+    body = str(row.get("body") or "")
+    oversized = len(body.encode("utf-8")) > BODY_CAP
     return {
         "resolved": True,
         "change_id": f"{repo}#{number}",
@@ -157,6 +163,8 @@ def resolve(event: dict[str, Any], repo: str, token: str | None) -> dict[str, An
         "author_id": int(author.get("id") or 0),
         "allowlisted": allowed,
         "reason": "allowlisted" if allowed else "author is not an admin or maintainer",
+        "body": "" if oversized else body,
+        "body_oversized": oversized,
     }
 
 

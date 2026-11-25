@@ -13,7 +13,7 @@ from scripts.session import merge_checks
 
 REPO = "o/r"
 HEAD = "a" * 40
-ROUTE = "verdict_probe.block"
+ROUTE = "canary_persona"
 IDS = ["probe:block-1", "probe:block-2"]
 DIGEST = override.ids_digest(IDS)
 TITLE = f"persona-verdict-override 7 {HEAD} {ROUTE} 55 {DIGEST}"
@@ -111,12 +111,15 @@ def test_digest_is_order_independent() -> None:
     assert override.ids_digest(["b", "a"]) == override.ids_digest(["a", "b"]) != override.ids_digest(["a"])
 
 
-def test_probe_extractor_and_registry() -> None:
+def test_fixture_extractor_and_registry() -> None:
     fn = override.extractor_for(ROUTE)
     assert fn is not None and override.extractor_for("code_reviewer") is None
-    out = {"verdict": "REVISE", "findings": [{"id": "x", "blocking": True}, {"id": "y", "blocking": False}]}
-    assert fn(out) == ("REVISE", ["x"])
-    assert fn({**out, "verdict": "FLAGS_FOUND"}) == ("FLAGS_FOUND", ["x", "y"])
+    out = {
+        "verdict": "REVISE",
+        "findings": [{"id": "line:1", "severity": "blocking"}, {"id": "line:2", "severity": "nit"}],
+    }
+    assert fn(out) == ("REVISE", ["line:1"])
+    assert fn({**out, "verdict": "PROCEED"}) == ("PROCEED", [])
     override.register_extractor("zz_persona", lambda o: ("BLOCK", ["q"]))
     try:
         assert override.extractor_for("zz_persona") is not None
@@ -301,3 +304,9 @@ def test_render_escapes_a_fence_breaking_finding_id(api: Api, tmp_path: Path, mo
     )
     assert override.main([]) == 0
     assert summary.read_text().count("```") == 2
+
+
+def test_fixture_route_extractor_and_overridable() -> None:
+    assert override.overridable("canary_persona") and override.extractor_for("canary_persona") is not None
+    out = {"verdict": "REVISE", "findings": [{"id": "line:2", "severity": "blocking"}, {"id": "line:3", "severity": "nit"}]}
+    assert override.extractor_for("canary_persona")(out) == ("REVISE", ["line:2"])  # type: ignore[misc]

@@ -27,7 +27,8 @@ PLANTED = (
     "scripts/personas/__init__.py",
     "planted.pth",
 )
-ROUTE = "verdict_probe.proceed"
+ROUTE = "canary_persona"
+FIXTURE = "tests/fixtures/persona_verdict/fixture_pr/one.txt"
 SHA = "a" * 40
 
 
@@ -47,18 +48,20 @@ def _layout(tmp_path: Path) -> dict[str, Path]:
         shutil.copy(src, main / "scripts/personas" / src.name)
     for rel in ("scripts/session/__init__.py", "scripts/session/merge_checks.py", "scripts/ci/push_scope.py"):
         shutil.copy(ROOT / rel, main / rel)
+    for rel in ("docs/contracts/executor-personas.yaml", "docs/contracts/personas/canary_persona.yaml"):
+        (main / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(ROOT / rel, main / rel)
     temp = tmp_path / "runner_temp"
     prepared = temp / "work" / "prepared"
     prepared.mkdir(parents=True)
     (prepared / "resolution.json").write_text(json.dumps({"change_id": "o/r#1", "head_sha": SHA}))
-    (prepared / "routes.json").write_text(json.dumps({"routes": [ROUTE], "plan_paths": []}))
+    (prepared / "routes.json").write_text(json.dumps({"routes": [ROUTE], "plan_paths": [], "fixture_paths": [FIXTURE]}))
     (prepared / "snapshot.json").write_text(json.dumps({"ok": True}))
     snap = temp / "snapshot"
     sentinels = tmp_path / "sentinels"
     sentinels.mkdir()
-    marker = snap / "tests/fixtures/persona_verdict/fixture_pr"
-    marker.mkdir(parents=True)
-    (marker / "proceed.txt").write_text("proceed")
+    (snap / FIXTURE).parent.mkdir(parents=True)
+    (snap / FIXTURE).write_text("NIT: x")
     for rel in PLANTED:
         target = snap / rel
         target.parent.mkdir(parents=True, exist_ok=True)

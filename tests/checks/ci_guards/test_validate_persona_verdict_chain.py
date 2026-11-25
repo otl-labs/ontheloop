@@ -77,7 +77,7 @@ def _token_in_materialise(value: str) -> Callable[[Docs], None]:
 
 def _token_in_execute(value: str) -> Callable[[Docs], None]:
     def edit(d: Docs) -> None:
-        _step(_jobs(d)["run"], "execute")["env"]["X"] = value
+        _named(_jobs(d)["run"], "Run the fixture persona")["env"]["X"] = value
 
     return edit
 
@@ -119,7 +119,11 @@ RED = [
     _red("local-uses", "not pinned", lambda d: _jobs(d)["prepare"]["steps"][0].update({"uses": "./.github/actions/x"})),
     _red("checks-write-on-run", "holds checks: write", lambda d: _jobs(d)["run"]["permissions"].update({"checks": "write"})),
     _red("id-token", "id-token: write", lambda d: _jobs(d)["prepare"]["permissions"].update({"id-token": "write"})),
-    _red("environment-on-run", "names an Environment", lambda d: _jobs(d)["run"].update({"environment": "persona-verdict"})),
+    _red(
+        "environment-on-keyprep",
+        "names an Environment",
+        lambda d: _jobs(d)["keyprep"].update({"environment": "persona-verdict"}),
+    ),
     _red(
         "environment-on-wake",
         "names an Environment",
@@ -186,7 +190,7 @@ RED = [
     _red(
         "pip-no-constraint",
         "pip line",
-        lambda d: _set_run(_named(_jobs(d)["run"], "Install dependencies"), "pip install jsonschema"),
+        lambda d: _set_run(_named(_jobs(d)["run"], "Install the wheelhouse offline"), "pip install jsonschema"),
     ),
     _red("run-condition", "run job condition", lambda d: _jobs(d)["run"].update({"if": "${{ always() }}"})),
     _red("post-condition", "post job condition", lambda d: _jobs(d)["post"].update({"if": "${{ always() }}"})),
@@ -238,8 +242,8 @@ RED = [
     _red("materialise-indexed-token", "materialise step env holds a token", _token_in_materialise("${{ github['token'] }}")),
     _red("materialise-tojson", "materialise step env holds a token", _token_in_materialise("${{ toJSON(github) }}")),
     _red("materialise-mixed-case", "materialise step env holds a token", _token_in_materialise("${{ GitHub.Token }}")),
-    _red("execute-github-token", "execute step env holds a token", _token_in_execute("${{ github.token }}")),
-    _red("execute-tojson-secrets", "execute step env holds a token", _token_in_execute("${{ toJSON(secrets) }}")),
+    _red("execute-github-token", "persona step holds a token reference", _token_in_execute("${{ github.token }}")),
+    _red("execute-tojson-secrets", "persona step holds a token reference", _token_in_execute("${{ toJSON(secrets) }}")),
     _red("workflow-level-env", "workflow-level env", lambda d: d[1].update({"env": {"GH_TOKEN": "${{ github.token }}"}})),
     _red("job-level-env", "job-level env", lambda d: _jobs(d)["run"].update({"env": {"T": "${{ secrets.GITHUB_TOKEN }}"}})),
     _red(
@@ -254,8 +258,8 @@ RED = [
     ),
     _red(
         "run-job-other-verb",
-        "not only the execute verb",
-        lambda d: _set_run(_step(_jobs(d)["run"], "execute"), v.RUN_PREFIX + "post"),
+        "not one of the pinned lines",
+        lambda d: _set_run(_named(_jobs(d)["run"], "Run the fixture persona"), v.RUN_PREFIX + "post"),
     ),
     _red(
         "bare-working-directory",
@@ -418,9 +422,11 @@ RED = [
         lambda d: _jobs(d)["smoke"]["steps"].insert(1, {"id": "r", "uses": "./.github/actions/aws-region"}),
     ),
     _red(
-        "self-check-in-the-run-job",
-        "not the pinned run.py argv",
-        lambda d: _jobs(d)["run"]["steps"].insert(3, {"id": "s", "run": v.SELF_CHECK, "working-directory": v.WORKDIR}),
+        "extra-verb-in-the-run-job",
+        "not one of the pinned lines",
+        lambda d: _jobs(d)["run"]["steps"].insert(
+            3, {"id": "s", "run": v.RUN_PREFIX + "post", "working-directory": v.WORKDIR}
+        ),
     ),
     _red(
         "self-check-with-extra-words",
@@ -429,15 +435,25 @@ RED = [
     ),
     _red(
         "smoke-verb-in-the-run-job",
+        "not one of the pinned lines",
+        lambda d: _set_run(_named(_jobs(d)["run"], "Run the fixture persona"), v.RUN_PREFIX + "inference-smoke"),
+    ),
+    _red(
+        "smoke-verb-in-the-prepare-job",
         "not only in a keyed job",
-        lambda d: _set_run(_step(_jobs(d)["run"], "execute"), v.RUN_PREFIX + "inference-smoke"),
+        lambda d: _jobs(d)["prepare"]["steps"].append(
+            {
+                "id": "z",
+                "run": v.RUN_PREFIX + "inference-smoke",
+                "working-directory": v.WORKDIR,
+                "env": {"PERSONA_SNAPSHOT": v.SNAPSHOT},
+            }
+        ),
     ),
     _red(
         "keyprep-id-token", "holds id-token: write", lambda d: _jobs(d)["keyprep"]["permissions"].update({"id-token": "write"})
     ),
-    _red(
-        "third-id-token-job", "holds id-token: write", lambda d: _jobs(d)["run"]["permissions"].update({"id-token": "write"})
-    ),
+    _red("wake-id-token", "holds id-token: write", lambda d: _jobs(d)["wake"]["permissions"].update({"id-token": "write"})),
     _red(
         "refusal-environment", "names an Environment", lambda d: _jobs(d)["refusal"].update({"environment": "persona-verdict"})
     ),

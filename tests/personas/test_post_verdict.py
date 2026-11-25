@@ -33,7 +33,7 @@ def _app_token(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 
 def _out(verdict: str | None = None, **over: Any) -> str:
-    body: dict[str, Any] = {"outcome": "success", "verdict": verdict} if verdict else {}
+    body: dict[str, Any] = {"outcome": "success", "verdict": verdict, "findings": []} if verdict else {}
     body.update(over)
     return json.dumps(body)
 
@@ -51,18 +51,18 @@ def _result(route: str, stdout: str, **over: Any) -> dict[str, Any]:
         (_out("REVISE"), "failure"),
         (json.dumps({"outcome": "failure", "failure": "input_unusable", "detail": "d"}), "failure"),
         ("not json {", "failure"),
-        (json.dumps({"outcome": "success", "verdict": "BLOCK"}), "failure"),
+        (json.dumps({"outcome": "success", "verdict": "BLOCK", "findings": []}), "failure"),
         (json.dumps({"outcome": "success"}), "failure"),
         (json.dumps({"outcome": "maybe"}), "failure"),
     ],
 )
-def test_conclusion_mapping_for_the_probe(stdout: str, conclusion: str) -> None:
-    route = "verdict_probe.proceed"
+def test_conclusion_mapping_for_the_fixture(stdout: str, conclusion: str) -> None:
+    route = "canary_persona"
     assert post_verdict.judge(ROOT, route, _result(route, stdout), True)[0] == conclusion
 
 
 def test_other_failure_shapes_are_failures() -> None:
-    route = "verdict_probe.revise"
+    route = "canary_persona"
     good = _out("PROCEED")
     assert post_verdict.judge(ROOT, route, None, True)[1] == "no result"
     assert post_verdict.judge(ROOT, route, _result("other", good), True)[1] == "no result"
@@ -97,9 +97,9 @@ def _prepare(tmp_path: Path, routes: list[str], allowlisted: bool = True, resolv
 
 
 def test_one_completed_check_per_route_on_the_resolved_head(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    routes = ["verdict_probe.proceed", "verdict_probe.revise"]
+    routes = ["canary_persona", "other_fixture"]
     work = _prepare(tmp_path, routes)
-    (work / "results" / "verdict_probe.proceed.json").write_text(json.dumps(_result(routes[0], _out("PROCEED"))))
+    (work / "results" / "canary_persona.json").write_text(json.dumps(_result(routes[0], _out("PROCEED"))))
     calls: list[tuple[str, str, Any]] = []
     monkeypatch.setenv("GITHUB_SHA", "f" * 40)
 
@@ -113,13 +113,13 @@ def test_one_completed_check_per_route_on_the_resolved_head(tmp_path: Path, monk
     assert [c[1] for c in calls] == ["/repos/o/r/check-runs"] * 2
     first, second = (c[2] for c in calls)
     assert first["head_sha"] == SHA and first["status"] == "completed" and first["conclusion"] == "success"
-    assert first["name"] == "persona-verdict/verdict_probe.proceed"
+    assert first["name"] == "persona-verdict/canary_persona"
     assert second["conclusion"] == "failure" and second["output"]["title"] == "no result"
     assert len(first["output"]["summary"]) < 65535
 
 
 def test_not_allowlisted_posts_a_failure_per_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    work = _prepare(tmp_path, ["verdict_probe.fail"], allowlisted=False)
+    work = _prepare(tmp_path, ["canary_persona"], allowlisted=False)
     bodies: list[Any] = []
     monkeypatch.setattr(resolve_pr, "request", lambda m, u, t, b=None, accept="": bodies.append(b) or (201, CREATED))
     post_verdict.post_all(ROOT, work, "o/r", "t")
@@ -154,14 +154,14 @@ def test_post_retries_then_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     post_verdict.post_check("o/r", "t", SHA, "n", "success", "t", "s", sleep=lambda s: None)
 
 
-BLOCK = "verdict_probe.block"
+BLOCK = "canary_persona"
 BLOCK_OUT = json.dumps(
     {
         "outcome": "success",
-        "verdict": "BLOCK",
+        "verdict": "REVISE",
         "findings": [
-            {"id": "probe:block-1", "title": "one <!-- forged", "blocking": True},
-            {"id": "probe:block-2", "title": "two", "blocking": True},
+            {"id": "line:1", "severity": "blocking", "origin": "mechanical", "anchor": "a", "summary": "one <!-- forged"},
+            {"id": "line:2", "severity": "blocking", "origin": "mechanical", "anchor": "b", "summary": "two"},
         ],
     }
 )
@@ -188,7 +188,7 @@ def test_record_line_on_block_revise_and_flags_for_an_overridable_route(
     body = bodies[0][1]
     first = body["output"]["text"].split("\n")[0]
     rec = post_verdict.override.parse_record(first)
-    assert body["conclusion"] == "failure" and rec and rec["blocking_ids"] == ["probe:block-1", "probe:block-2"]
+    assert body["conclusion"] == "failure" and rec and rec["blocking_ids"] == ["line:1", "line:2"]
     assert rec["run_id"] == "900" and "&lt;!-- forged" in body["output"]["text"]
     assert body["output"]["text"].count("<!--") == 1
 
@@ -201,7 +201,7 @@ def test_no_record_for_proceed_or_a_failure_output(tmp_path: Path, monkeypatch: 
 
 
 def test_a_route_with_no_extractor_gets_no_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(post_verdict.override, "EXTRACTORS", {})
+    monkeypatch.setattr(post_verdict.override, "extractor_for", lambda route: None)
     work, bodies = _post_setup(tmp_path, monkeypatch, BLOCK, BLOCK_OUT)
     post_verdict.post_all(ROOT, work, "o/r", "t")
     assert "text" not in bodies[0][1]["output"]
@@ -234,7 +234,7 @@ def _override_resolution(tmp_path: Path) -> Path:
     work = tmp_path / "work"
     (work / "prepared").mkdir(parents=True)
     ov = {"run_id": 70, "pr": 7, "head_sha": SHA, "route": BLOCK, "check_run_id": 55, "ids_digest": "", **APPROVED}
-    ov["ids_digest"] = post_verdict.override.ids_digest(["probe:block-1", "probe:block-2"])
+    ov["ids_digest"] = post_verdict.override.ids_digest(["line:1", "line:2"])
     res = {"resolved": True, "head_sha": SHA, "allowlisted": False, "override": ov}
     (work / "prepared" / "resolution.json").write_text(json.dumps(res))
     (work / "prepared" / "routes.json").write_text(json.dumps({"routes": [], "plan_paths": []}))
@@ -249,7 +249,7 @@ def test_the_override_resolution_posts_one_new_success_run_and_never_patches(
         "route": BLOCK,
         "head_sha": SHA,
         "verdict": "BLOCK",
-        "blocking_ids": ["probe:block-1", "probe:block-2"],
+        "blocking_ids": ["line:1", "line:2"],
         "run_id": "9",
     }
     monkeypatch.setattr(post_verdict.override, "origin", lambda *a: (rec, ""))
@@ -259,9 +259,7 @@ def test_the_override_resolution_posts_one_new_success_run_and_never_patches(
     assert [c[0] for c in calls] == ["POST"] and calls[0][1] == "/repos/o/r/check-runs"
     body = calls[0][2]
     assert body["conclusion"] == "success" and body["name"] == f"persona-verdict/{BLOCK}" and body["head_sha"] == SHA
-    assert (
-        "op" in body["output"]["title"] and "probe:block-1" in body["output"]["summary"] and "/70" in body["output"]["summary"]
-    )
+    assert "op" in body["output"]["title"] and "line:1" in body["output"]["summary"] and "/70" in body["output"]["summary"]
 
 
 def test_a_failed_recheck_posts_nothing_and_is_a_shell_fault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -284,3 +282,12 @@ def test_a_failed_recheck_posts_nothing_and_is_a_shell_fault(tmp_path: Path, mon
     )
     with pytest.raises(RuntimeError):
         post_verdict.post_all(ROOT, work, "o/r", "t")
+
+
+def test_failure_value_posts_its_failure_id() -> None:
+    route = "canary_persona"
+    listed = json.dumps({"outcome": "failure", "failure": "injection_suspected", "detail": "d"})
+    unlisted = json.dumps({"outcome": "failure", "failure": "not_a_listed_id", "detail": "d"})
+    conclusion, title, _ = post_verdict.judge(ROOT, route, _result(route, listed), True)
+    assert conclusion == "failure" and title == "failed: injection_suspected"
+    assert post_verdict.judge(ROOT, route, _result(route, unlisted), True)[1] == "output failed its schema"

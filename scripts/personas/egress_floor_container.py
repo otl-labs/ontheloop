@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import pwd
+import re
 import shlex
 import shutil
 import subprocess
@@ -43,6 +44,15 @@ DOCKER_SOCKET = "/var/run/docker.sock"
 CONTAINERD_SOCKET = "/run/containerd/containerd.sock"
 PYTHON = "/usr/bin/python3"
 LAUNCHER = f"{INSTALL_DIR}/egress_launcher.py"
+IO_FLAGS = ("log_input", "log_output", "log_stdin", "log_ttyin", "log_stdout", "log_stderr", "log_ttyout")
+IO_NAMES = re.compile("|".join((*IO_FLAGS, "iolog_dir", "iolog_file", "log_servers")), re.IGNORECASE)
+INCLUDE = re.compile(r"^\s*(@include|@includedir|#include|#includedir)\b", re.IGNORECASE)
+STOCK_INCLUDES = ("@includedir /etc/sudoers.d", "#includedir /etc/sudoers.d")
+STOCK_PLUGINS = ("Plugin sudoers_policy sudoers.so", "Plugin sudoers_io sudoers.so", "Plugin sudoers_audit sudoers.so")
+SUDOERS_MAIN = Path("/etc/sudoers")
+SUDOERS_D = Path("/etc/sudoers.d")
+SUDO_CONF = Path("/etc/sudo.conf")
+NSSWITCH = Path("/etc/nsswitch.conf")
 SUDOERS_LINES = (
     "runner ALL=(ALL) !ALL\n"
     f"runner ALL=(root) NOPASSWD: {PYTHON} -I -S {LAUNCHER} probe\n"
@@ -357,6 +367,64 @@ def _text_is(path: Path, want: str) -> bool:
         return False
 
 
+def _directives(path: Path) -> list[str] | None:
+    """The file's lines without whole-line comments (#include and #includedir stay), or None when it cannot be read."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, ValueError):
+        return None
+    return [ln for ln in lines if not ln.lstrip().startswith("#") or INCLUDE.match(ln)]
+
+
+def _sudoers_file_ok(path: Path, main: bool) -> bool:
+    lines = _directives(path)
+    if lines is None:
+        return False
+    for line in lines:
+        if INCLUDE.match(line) and not (main and " ".join(line.split()) in STOCK_INCLUDES):
+            return False
+        if IO_NAMES.search(line):
+            return False
+    return True
+
+
+def _sudo_conf_ok() -> bool:
+    try:
+        SUDO_CONF.stat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    lines = _directives(SUDO_CONF)
+    if lines is None:
+        return False
+    return all(" ".join(ln.split()) in STOCK_PLUGINS for ln in lines if ln.split()[:1] and ln.split()[0].lower() == "plugin")
+
+
+def _nsswitch_ok() -> bool:
+    try:
+        text = NSSWITCH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError):
+        return False
+    for line in text.splitlines():
+        name, sep, value = line.split("#", 1)[0].partition(":")
+        if sep and name.strip().lower() == "sudoers" and value.split() != ["files"]:
+            return False
+    return True
+
+
+def sudo_io_logging_off() -> bool:
+    """No sudoers file but the drop-in names an I/O logging setting, no include beyond the stock one, no foreign plugin."""
+    try:
+        others = [e for e in sorted(SUDOERS_D.iterdir()) if e.name != base.SUDOERS.name]
+        files = [(SUDOERS_MAIN, True), *((e, False) for e in others)]
+        return all(_sudoers_file_ok(path, main) for path, main in files) and _sudo_conf_ok() and _nsswitch_ok()
+    except Exception:  # noqa: BLE001 - the check never raises; any read problem is a refusal
+        return False
+
+
 def verify() -> list[tuple[str, bool]]:
     uid = proxy_uid()
     want = floor_rules(uid) if uid is not None else []
@@ -388,6 +456,7 @@ def verify() -> list[tuple[str, bool]]:
         ("image_digest", _image_ok()),
         ("install_hashes", _install_ok()),
         ("sudoers", _text_is(base.SUDOERS, SUDOERS_LINES)),
+        ("sudo_io_logging_off", sudo_io_logging_off()),
         ("teardown_unit", teardown_unit_ok()),
         (
             "docker_version",

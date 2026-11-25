@@ -1,91 +1,62 @@
-"""The execute verb (run job): run each route's persona on its materialised input and record the result as data.
+"""Schema helpers for the verdict chain's fixture persona (post_verdict and keyed_run read them).
 
-Inputs are read from prepared/, validated against the route's input schema (jsonschema) before anything runs, and the
-persona runs in a subprocess with a minimal environment that holds no token. Results are written to results/<route>.json
-as {route, exit_code, timed_out, stdout} and never parsed here; output validation is post's job. Later add plans
-register their schemas in SCHEMAS.
+The contracts and the index are read as YAML. Only a route named in executor-personas.yaml's fixture_kind.personas has a
+schema here; any other route gets None, so a result for it is never judged against a schema it does not have.
 """
 
 from __future__ import annotations
 
-import json
-import os
-import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
-import jsonschema
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
-PROBE_PREFIX = "verdict_probe."
-PROBE_SCHEMA = "tests/fixtures/persona_verdict/probe_schema.json"
-PROBE_SCRIPT = "tests/fixtures/persona_verdict/probe.py"
-SCHEMAS: dict[str, dict[str, Any]] = {}
-DEFAULT_TIMEOUT = 180.0
+INDEX = "docs/contracts/executor-personas.yaml"
+CONTRACTS = "docs/contracts/personas"
+KINDS = {"input": "input_schema", "output": "output_schema"}
+
+
+def _load(path: Path) -> Any:
+    try:
+        return yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return None
+
+
+def fixture_personas(root: Path) -> list[str]:
+    doc = _load(root / INDEX)
+    block = doc.get("fixture_kind") if isinstance(doc, dict) else None
+    names = block.get("personas") if isinstance(block, dict) else None
+    return [str(n) for n in names] if isinstance(names, list) else []
+
+
+def _contract(root: Path, route_id: str) -> dict[str, Any] | None:
+    if route_id not in fixture_personas(root):
+        return None
+    doc = _load(root / CONTRACTS / f"{route_id}.yaml")
+    return doc if isinstance(doc, dict) else None
 
 
 def schema_for(root: Path, route_id: str, kind: str) -> dict[str, Any] | None:
-    if route_id.startswith(PROBE_PREFIX):
-        return json.loads((root / PROBE_SCHEMA).read_text(encoding="utf-8"))[kind]
-    registered = SCHEMAS.get(route_id)
-    return registered[kind] if registered else None
+    contract = _contract(root, route_id)
+    schema = contract.get(KINDS[kind]) if contract else None
+    return schema if isinstance(schema, dict) else None
 
 
-def _env() -> dict[str, str]:
-    return {k: os.environ[k] for k in ("PATH", "LANG", "LC_ALL") if k in os.environ}
-
-
-def _command(root: Path, route_id: str, input_path: Path) -> list[str]:
-    if route_id.startswith(PROBE_PREFIX):
-        return [sys.executable, "-I", str(root / PROBE_SCRIPT), str(input_path)]
-    raise ValueError(f"no runner for {route_id}")
-
-
-def run_route(root: Path, work: Path, route_id: str, timeout: float) -> dict[str, Any]:
-    prepared = work / "prepared"
-    failure_file = prepared / f"failure-{route_id}.json"
-    if failure_file.exists():
-        data = json.loads(failure_file.read_text(encoding="utf-8"))
-        return {"route": route_id, "failure": data.get("failure", "input_unusable")}
-    input_path = prepared / f"input-{route_id}.json"
-    schema = schema_for(root, route_id, "input")
-    try:
-        body = json.loads(input_path.read_text(encoding="utf-8"))
-        if schema is None:
-            raise ValueError("no input schema")
-        jsonschema.validate(body, schema)
-    except (OSError, ValueError, jsonschema.ValidationError):
-        return {"route": route_id, "failure": "input_unusable"}
-    try:
-        done = subprocess.run(  # noqa: S603 - fixed argv, no shell
-            _command(root, route_id, input_path),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=_env(),
-            timeout=timeout,
-            cwd=str(work),
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return {"route": route_id, "exit_code": None, "timed_out": True, "stdout": ""}
-    return {"route": route_id, "exit_code": done.returncode, "timed_out": False, "stdout": done.stdout}
-
-
-def execute(root: Path, work: Path, timeout: float = DEFAULT_TIMEOUT) -> list[dict[str, Any]]:
-    routes = json.loads((work / "prepared" / "routes.json").read_text(encoding="utf-8"))["routes"]
-    results_dir = work / "results"
-    results_dir.mkdir(parents=True, exist_ok=True)
-    results = []
-    for route_id in routes:
-        result = run_route(root, work, route_id, timeout)
-        (results_dir / f"{route_id}.json").write_text(json.dumps(result, sort_keys=True), encoding="utf-8")
-        results.append(result)
-    return results
-
-
-def main(argv: list[str]) -> int:
-    execute(ROOT, Path.cwd())
-    return 0
+def failure_schema_for(root: Path, route_id: str) -> dict[str, Any] | None:
+    contract = _contract(root, route_id)
+    rows = contract.get("failure_outputs") if contract else None
+    ids = [str(r["id"]) for r in rows or [] if isinstance(r, dict) and "id" in r]
+    if not ids:
+        return None
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["outcome", "failure", "detail"],
+        "properties": {
+            "outcome": {"const": "failure"},
+            "failure": {"type": "string", "enum": ids},
+            "detail": {"type": "string"},
+        },
+    }

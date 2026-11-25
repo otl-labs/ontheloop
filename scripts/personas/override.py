@@ -17,7 +17,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from scripts.personas import resolve_pr
+from scripts.personas import execute, resolve_pr
 from scripts.session import merge_checks
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,7 +30,6 @@ OVERRIDE_WORKFLOW = ".github/workflows/persona-verdict-override.yml"
 OVERRIDE_FILE = "persona-verdict-override.yml"
 ENVIRONMENT = "persona-verdict-override"
 APPROVE_JOB = "approve"
-PROBE_PREFIX = "verdict_probe."
 OVERRIDABLE_VERDICTS = frozenset({"BLOCK", "REVISE", "FLAGS_FOUND"})
 RUN_PAGES = 2
 TITLE_LIMIT = 200
@@ -86,16 +85,18 @@ def ids_digest(ids: list[str]) -> str:
     return hashlib.sha256("\n".join(sorted(ids)).encode("utf-8")).hexdigest()
 
 
-def _probe_extract(out: Any) -> tuple[str, list[str]]:
+def _fixture_extract(out: Any) -> tuple[str, list[str]]:
     verdict = str(out.get("verdict", "")) if isinstance(out, dict) else ""
     findings = out.get("findings") if isinstance(out, dict) else None
     rows = [f for f in findings if isinstance(f, dict) and isinstance(f.get("id"), str)] if isinstance(findings, list) else []
-    if verdict == "FLAGS_FOUND":
-        return verdict, [f["id"] for f in rows]
-    return verdict, [f["id"] for f in rows if f.get("blocking") is True]
+    return verdict, [f["id"] for f in rows if f.get("severity") == "blocking"] if verdict == "REVISE" else []
 
 
-EXTRACTORS: dict[str, Extractor] = {PROBE_PREFIX: _probe_extract}
+def _fixture_ids() -> list[str]:
+    return execute.fixture_personas(ROOT)
+
+
+EXTRACTORS: dict[str, Extractor] = {}
 
 
 def register_extractor(prefix: str, fn: Extractor) -> None:
@@ -103,6 +104,8 @@ def register_extractor(prefix: str, fn: Extractor) -> None:
 
 
 def extractor_for(route: str) -> Extractor | None:
+    if route in _fixture_ids():
+        return _fixture_extract
     for prefix, fn in EXTRACTORS.items():
         if route == prefix or route.startswith(prefix if prefix.endswith(".") else prefix + "."):
             return fn
@@ -110,7 +113,7 @@ def extractor_for(route: str) -> Extractor | None:
 
 
 def overridable(route: str) -> bool:
-    if route.startswith(PROBE_PREFIX):
+    if route in _fixture_ids():
         return True
     return merge_checks.PERSONA_CLASSES.get(route) == "plan"
 

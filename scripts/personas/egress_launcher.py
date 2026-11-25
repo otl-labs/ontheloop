@@ -340,18 +340,24 @@ def start_decoy(session: Session) -> None:
     threading.Thread(target=accept, daemon=True).start()
 
 
-def run_container(mode: str, argv: list[str]) -> int | None:
-    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+def run_container(mode: str, argv: list[str]) -> tuple[int | None, bytes]:
+    """Run the container; return (exit code or None on timeout, stdout bytes).
+
+    Probe mode merges stderr into stdout and relays it all to stderr, so its stdout result is empty. Run mode keeps the
+    container's stdout as data for the result object (never relayed) and relays only its stderr.
+    """
+    merged = mode == "probe"
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT if merged else subprocess.PIPE)
     try:
-        out, _ = proc.communicate(timeout=BOUNDS[mode])
+        out, err = proc.communicate(timeout=BOUNDS[mode])
     except subprocess.TimeoutExpired:
         kill_container()
         proc.kill()
         proc.communicate()
-        return None
-    sys.stderr.write(out.decode("utf-8", errors="replace"))
+        return None, b""
+    sys.stderr.write((out if merged else (err or b"")[:MAX_RESULT]).decode("utf-8", errors="replace"))
     sys.stderr.flush()
-    return proc.returncode
+    return proc.returncode, b"" if merged else out[:MAX_RESULT]
 
 
 def serve(mode: str, session: Session) -> int:
@@ -366,9 +372,15 @@ def serve(mode: str, session: Session) -> int:
     if mode == "probe":
         start_decoy(session)
     session.started = True
-    code = run_container(mode, container_argv(mode, snapshot["image"], request["persona"], provider, in_dir, events_dir))
+    code, stdout = run_container(
+        mode, container_argv(mode, snapshot["image"], request["persona"], provider, in_dir, events_dir)
+    )
     events = read_events(events_dir)
-    print(json.dumps({"exit_code": code, "events": events}))
+    if mode == "probe":
+        print(json.dumps({"exit_code": code, "events": events}))
+    else:
+        text = stdout.decode("utf-8", errors="replace")
+        print(json.dumps({"exit_code": code, "timed_out": code is None, "stdout": text, "events": events}))
     if code is None:
         return 1
     if mode == "probe":

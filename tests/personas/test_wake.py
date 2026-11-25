@@ -15,7 +15,7 @@ from scripts.personas import wake
 ROOT = Path(__file__).resolve().parents[2]
 SHA = "a" * 40
 REPO = "o/r"
-ROUTES = ["verdict_probe.proceed", "verdict_probe.revise", "verdict_probe.fail", "verdict_probe.malformed"]
+ROUTES = ["route_a", "route_b", "route_c", "route_d"]
 FORBIDDEN = ("success", "failure", "PROCEED", "REVISE", "BLOCK", "NO_FLAGS", "FLAGS_FOUND")
 ENV = {
     "GITHUB_REPOSITORY": REPO,
@@ -101,12 +101,10 @@ def test_a_marker_by_another_author_does_not_suppress(tmp_path: Path, fake: Fake
 
 
 def test_a_marker_that_only_prefixes_a_longer_one_does_not_count(tmp_path: Path, fake: Fake) -> None:
-    _prepare(tmp_path, routes=["verdict_probe.fail"])
-    fake.landed = ["verdict_probe.fail"]
-    longer = f"<!-- persona-verdict-wake:{SHA}:verdict_probe.fail_extra -->"
-    fake.comments = [
-        {"user": {"login": wake.BOT_LOGIN, "type": "Bot"}, "body": longer + "\n" + _marker("verdict_probe.fail") + "x"}
-    ]
+    _prepare(tmp_path, routes=["route_c"])
+    fake.landed = ["route_c"]
+    longer = f"<!-- persona-verdict-wake:{SHA}:route_c_extra -->"
+    fake.comments = [{"user": {"login": wake.BOT_LOGIN, "type": "Bot"}, "body": longer + "\n" + _marker("route_c") + "x"}]
     _run(tmp_path)
     assert len(fake.posts) == 1
 
