@@ -439,6 +439,18 @@ RED = [
         lambda d: _set_run(_named(_jobs(d)["run"], "Run the fixture persona"), v.RUN_PREFIX + "inference-smoke"),
     ),
     _red(
+        "smoke-verb-in-the-prepare-job",
+        "not only in a keyed job",
+        lambda d: _jobs(d)["prepare"]["steps"].append(
+            {
+                "id": "z",
+                "run": v.RUN_PREFIX + "inference-smoke",
+                "working-directory": v.WORKDIR,
+                "env": {"PERSONA_SNAPSHOT": v.SNAPSHOT},
+            }
+        ),
+    ),
+    _red(
         "keyprep-id-token", "holds id-token: write", lambda d: _jobs(d)["keyprep"]["permissions"].update({"id-token": "write"})
     ),
     _red("wake-id-token", "holds id-token: write", lambda d: _jobs(d)["wake"]["permissions"].update({"id-token": "write"})),
