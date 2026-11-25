@@ -193,7 +193,7 @@ def test_main_logs_routes_and_writes_the_routes_file(
         "plan_paths": [],
         "fixture_paths": [f"{route.FIXTURE_DIR}proceed.txt"],
     }
-    assert (tmp_path / "out").read_text() == "routes=1\nfixture=true\n"
+    assert (tmp_path / "out").read_text() == "routes=1\nfixture=true\nfallback_drill=false\n"
 
 
 def test_an_override_resolution_yields_no_routes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -247,3 +247,22 @@ def test_fixture_is_false_when_unresolved_or_an_override(tmp_path: Path, monkeyp
         (tmp_path / "out").write_text("")
         assert route.main([]) == 0
         assert "fixture=false\n" in (tmp_path / "out").read_text()
+
+
+@pytest.mark.parametrize(
+    ("files", "expected"),
+    [
+        ([_f(route.DRILL_PATH, "added")], "true"),
+        ([_f(route.DRILL_PATH), _f(f"{route.FIXTURE_DIR}proceed.txt")], "true"),
+        ([_f(route.DRILL_PATH), _f("README.md")], "false"),
+        ([_f(route.DRILL_PATH, "removed")], "false"),
+        ([_f(route.DRILL_PATH, "renamed", f"{route.FIXTURE_DIR}old.txt")], "false"),
+        ([_f(f"{route.FIXTURE_DIR}proceed.txt")], "false"),
+    ],
+)
+def test_fallback_drill_only_on_fixture_diffs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, files: list[dict[str, Any]], expected: str
+) -> None:
+    resolution = {"resolved": True, "head_sha": "h", "base_ref": "main", "draft": False}
+    out = _main_fixture_output(tmp_path, monkeypatch, resolution, files)
+    assert f"fallback_drill={expected}\n" in out

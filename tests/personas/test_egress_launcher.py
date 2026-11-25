@@ -311,7 +311,12 @@ def test_the_key_goes_only_to_the_proxys_stdin(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(L, "port_in_use", lambda p: True)
     L.start_proxy(L.Session(), PROVIDER, "k3y", Path("/i"))
     assert written == [b"k3y"] and "k3y" not in " ".join(captured["argv"])
-    assert captured["user"] == 999 and captured["extra_groups"] == [] and captured["stdin"] == subprocess.PIPE and captured["stdout"] == subprocess.PIPE
+    assert (
+        captured["user"] == 999
+        and captured["extra_groups"] == []
+        and captured["stdin"] == subprocess.PIPE
+        and captured["stdout"] == subprocess.PIPE
+    )
 
 
 def test_sigterm_and_sigint_kill_the_container_and_proxy_then_exit_one(
