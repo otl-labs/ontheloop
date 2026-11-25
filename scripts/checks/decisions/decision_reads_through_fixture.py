@@ -250,7 +250,7 @@ def validate_decision_reads_through_fixture(failed: list[str], root: Path | None
     """Fail when a changed test file that reads the real DECISIONS.md gains ad-hoc single-entry reads over the base."""
     tree = Path(root) if root is not None else _common.ROOT
     try:
-        base = _common.status_diff_base(tree)
+        base = _common.status_diff_base(root)
     except RuntimeError as exc:
         failed.append(f"decision-reads ratchet: no usable base: {exc}")
         registry.examined(0, unit="test_files")

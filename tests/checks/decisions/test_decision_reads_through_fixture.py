@@ -254,9 +254,7 @@ def test_non_python_test_data_is_ignored(tmp_path: Path) -> None:
 
 
 def test_manifest_runs_on_any_test_change() -> None:
-    from scripts.checks.decisions._manifest import ENTRIES
-
-    entry = next(e for e in ENTRIES if e.name == "validate_decision_reads_through_fixture")
+    entry = registry._ALL_ENTRIES["validate_decision_reads_through_fixture"]
     assert entry.pre is True and entry.full_segment == "full_after_lint"
     for path in ("tests/test_x.py", "tests/a/test_x.py"):
         assert any(registry._pre_glob_match(path, g) for g in entry.pre_globs), path

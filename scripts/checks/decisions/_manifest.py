@@ -121,7 +121,8 @@ ENTRIES: tuple[Entry, ...] = (
         attr="validate_decision_reads_through_fixture",
         pre=True,
         pre_globs=(
-            "tests/**",
+            "tests/*.py",
+            "tests/**/*.py",
             "scripts/checks/decisions/decision_reads_through_fixture.py",
             "scripts/checks/_common.py",
             "scripts/checks/registry.py",
