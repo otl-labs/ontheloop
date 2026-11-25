@@ -48,15 +48,16 @@ def judge(root: Path, route_id: str, result: Any, allowlisted: bool) -> tuple[st
         out = json.loads(str(result.get("stdout") or ""))
     except ValueError:
         return "failure", "unparseable output", "The persona output is not JSON."
-    schema = execute.schema_for(root, route_id, "output")
+    failed = isinstance(out, dict) and out.get("outcome") == "failure"
+    schema = execute.failure_schema_for(root, route_id) if failed else execute.schema_for(root, route_id, "output")
     try:
         if schema is None:
             raise ValueError("no output schema")
         jsonschema.validate(out, schema)
     except (ValueError, jsonschema.ValidationError):
         return "failure", "output failed its schema", "The persona output does not match its output schema."
-    if out.get("outcome") != "success":
-        failure = str(out.get("failure") or "unknown")
+    if failed:
+        failure = str(out["failure"])
         return "failure", f"failed: {failure}", str(out.get("detail") or failure)[:TEXT_LIMIT]
     verdict = str(out.get("verdict"))
     if verdict in SUCCESS_VERDICTS:
@@ -130,7 +131,7 @@ def overridable_output(root: Path, route_id: str, result: Any) -> tuple[str, lis
 def record_text(route_id: str, head_sha: str, verdict: str, ids: list[str], out: dict[str, Any]) -> str:
     lines = [override.render_record(route_id, head_sha, verdict, ids, os.environ.get("GITHUB_RUN_ID", "0"))]
     titles = {
-        str(f.get("id")): str(f.get("title") or "")
+        str(f.get("id")): str(f.get("title") or f.get("summary") or "")
         for f in out.get("findings") or []
         if isinstance(f, dict) and isinstance(f.get("id"), str)
     }

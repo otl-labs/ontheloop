@@ -121,7 +121,7 @@ PROVEN = {
     "run_id": 70,
     "pr": 7,
     "head_sha": SHA,
-    "route": "verdict_probe.block",
+    "route": "route_a",
     "check_run_id": 55,
     "ids_digest": "f" * 64,
     "approver": "op",
@@ -172,3 +172,14 @@ def test_override_path_unproven_run_is_unresolved(monkeypatch: pytest.MonkeyPatc
 def test_a_dispatch_run_of_another_path_keeps_the_no_routes_rule() -> None:
     other = {**OVERRIDE_RUN, "path": ".github/workflows/other.yml"}
     assert not resolve_pr.resolve({"workflow_run": other}, REPO, "t")["resolved"]
+
+
+def test_resolution_carries_the_pr_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    row = {**_row(), "body": "BLOCKING: x"}
+    monkeypatch.setattr(resolve_pr, "request", _fake([row]))
+    out = resolve_pr.resolve(_event(), REPO, "t")
+    assert out["body"] == "BLOCKING: x" and out["body_oversized"] is False
+    big = {**_row(), "body": "x" * (resolve_pr.BODY_CAP + 1)}
+    monkeypatch.setattr(resolve_pr, "request", _fake([big]))
+    out = resolve_pr.resolve(_event(), REPO, "t")
+    assert out["body"] == "" and out["body_oversized"] is True
