@@ -20,7 +20,8 @@ ALLOWED = {
     "snapshot": {"yaml"},
     "override": {"yaml"},
     "materialise": {"yaml"},
-    "execute": {"jsonschema"},
+    "execute": {"yaml"},
+    "keyed_run": {"boto3", "botocore", "jsonschema", "yaml", "src"},
     "post_verdict": {"yaml", "jsonschema", *APP_TOKEN_ALLOWED},
     "app_token": APP_TOKEN_ALLOWED,
     "wake": {"yaml"},
@@ -162,3 +163,9 @@ def test_a_verb_may_name_a_function_other_than_main(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(run.importlib, "import_module", lambda name: module)
     assert run.VERBS["egress-container-request"] == "egress_container_control:request_main"
     assert run.main(["egress-container-request"]) == 0 and called == ["request"]
+
+
+def test_verbs_name_the_keyed_run_and_not_execute() -> None:
+    assert run.VERBS["persona-request"] == "keyed_run:request_main"
+    assert run.VERBS["persona-record"] == "keyed_run:record_main"
+    assert "execute" not in run.VERBS

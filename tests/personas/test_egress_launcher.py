@@ -201,7 +201,7 @@ def _drive(
     monkeypatch.setattr(L, "start_proxy", lambda *a: None)
     monkeypatch.setattr(L, "start_decoy", lambda s: None)
     seen: list[str] = []
-    monkeypatch.setattr(L, "run_container", lambda m, argv: (seen.extend(argv), code)[1])
+    monkeypatch.setattr(L, "run_container", lambda m, argv: (seen.extend(argv), (code, b'{"verdict": "x"}'))[1])
     monkeypatch.setattr(L, "read_events", lambda d: events)
     monkeypatch.setattr(L, "kill_container", lambda: seen.append("killed"))
     monkeypatch.setattr(L, "container_listed", lambda: listed() if callable(listed) else listed)
@@ -249,7 +249,7 @@ def test_run_container_kills_by_name_on_timeout(monkeypatch: pytest.MonkeyPatch)
     killed: list[str] = []
     monkeypatch.setattr(L.subprocess, "Popen", lambda *a, **k: Proc())
     monkeypatch.setattr(L, "kill_container", lambda: killed.append("name"))
-    assert L.run_container("probe", ["x"]) is None and killed == ["name", "proc"]
+    assert L.run_container("probe", ["x"]) == (None, b"") and killed == ["name", "proc"]
 
 
 def test_run_container_relays_output_to_stderr(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -260,7 +260,31 @@ def test_run_container_relays_output_to_stderr(monkeypatch: pytest.MonkeyPatch, 
             return b"CONTAINER-PROBE PASS\n", None
 
     monkeypatch.setattr(L.subprocess, "Popen", lambda *a, **k: Proc())
-    assert L.run_container("probe", ["x"]) == 3 and "CONTAINER-PROBE PASS" in capsys.readouterr().err
+    assert L.run_container("probe", ["x"]) == (3, b"") and "CONTAINER-PROBE PASS" in capsys.readouterr().err
+
+
+def test_run_mode_keeps_stdout_as_data_and_relays_only_stderr(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class Proc:
+        returncode = 0
+
+        def communicate(self, timeout: int | None = None) -> tuple[bytes, bytes]:
+            return b'{"verdict": "PROCEED"}', b"diag"
+
+    monkeypatch.setattr(L.subprocess, "Popen", lambda *a, **k: Proc())
+    assert L.run_container("run", ["x"]) == (0, b'{"verdict": "PROCEED"}')
+    err = capsys.readouterr().err
+    assert "diag" in err and "PROCEED" not in err
+
+
+def test_run_mode_result_carries_the_container_stdout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _drive(monkeypatch, tmp_path, "run", 0, {"a": 1}, _req())[0] == 0
+    result = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert result["exit_code"] == 0 and result["timed_out"] is False and result["stdout"] == '{"verdict": "x"}'
+    assert _drive(monkeypatch, tmp_path / "t", "run", None, {"a": 1}, _req())[0] == 1
 
 
 def test_the_key_goes_only_to_the_proxys_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -364,3 +388,12 @@ def test_wait_until_polls_then_gives_up(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(L, "GONE_SECONDS", 1.0)
     monkeypatch.setattr(L, "GONE_STEP", 0.0)
     assert L.wait_until(lambda: next(calls)) is True
+
+
+def test_run_mode_result_carries_stdout_and_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    events = {"a": 1}
+    assert _drive(monkeypatch, tmp_path, "run", 0, events, _req())[0] == 0
+    result = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert result["stdout"] == '{"verdict": "x"}' and result["events"] == events

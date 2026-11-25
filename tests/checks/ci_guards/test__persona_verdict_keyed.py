@@ -75,7 +75,7 @@ RED = [
         "names an Environment",
         lambda d: d["jobs"]["keyprep"].update({"environment": "persona-verdict"}),
     ),
-    ("third-id-token-job", "holds id-token: write", lambda d: d["jobs"]["run"]["permissions"].update({"id-token": "write"})),
+    ("wake-id-token", "holds id-token: write", lambda d: d["jobs"]["wake"]["permissions"].update({"id-token": "write"})),
     ("keyprep-id-token", "holds id-token: write", lambda d: d["jobs"]["keyprep"]["permissions"].update({"id-token": "write"})),
     ("no-keyprep-conjunct-smoke", "condition is not", _if("smoke", "${{ " + k.KEYED_IF + " }}")),
     ("no-keyprep-conjunct-refusal", "condition is not", _if("refusal", "${{ " + k.KEYED_IF + " }}")),

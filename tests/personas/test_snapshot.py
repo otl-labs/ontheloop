@@ -63,10 +63,8 @@ def test_refusal_makes_every_route_input_unusable(tmp_path: Path) -> None:
     out = tmp_path / "prepared"
     out.mkdir()
     resolution = {"change_id": "o/r#1", "head_sha": "a" * 40}
-    materialise.materialise(
-        tmp_path / "snap", out, resolution, ["verdict_probe.proceed", "verdict_probe.revise"], [], usable=False
-    )
-    for route in ("verdict_probe.proceed", "verdict_probe.revise"):
+    materialise.materialise(tmp_path / "snap", out, resolution, ["route_a", "route_b"], [], usable=False)
+    for route in ("route_a", "route_b"):
         assert json.loads((out / f"failure-{route}.json").read_text())["failure"] == "input_unusable"
         assert not (out / f"input-{route}.json").exists()
 

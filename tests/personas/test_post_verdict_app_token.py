@@ -22,9 +22,14 @@ GH_TOKEN = "gh-read-token"  # pragma: allowlist secret
 APP_TOKEN = "ghs_" + "B" * 36
 SUB = "repo:o/r:environment:persona-verdict-app"
 REF = f"{REPO}/.github/workflows/persona-verdict.yml@refs/heads/main"
-BLOCK = "verdict_probe.block"
+BLOCK = "canary_persona"
+OTHER = "decision_scout"
 BLOCK_OUT = json.dumps(
-    {"outcome": "success", "verdict": "BLOCK", "findings": [{"id": "probe:block-1", "title": "one", "blocking": True}]}
+    {
+        "outcome": "success",
+        "verdict": "REVISE",
+        "findings": [{"id": "line:1", "severity": "blocking", "origin": "mechanical", "anchor": "a", "summary": "one"}],
+    }
 )
 PROCEED_OUT = json.dumps({"outcome": "success", "verdict": "PROCEED"})
 
@@ -101,10 +106,10 @@ def wired(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 
 def test_every_gh_token_read_happens_before_the_first_oidc_request(wired: dict[str, Any], tmp_path: Path) -> None:
-    work = _prepare(tmp_path, {BLOCK: BLOCK_OUT, "verdict_probe.proceed": PROCEED_OUT})
+    work = _prepare(tmp_path, {BLOCK: BLOCK_OUT, OTHER: PROCEED_OUT})
     assert post_verdict.post_all(ROOT, work, REPO, GH_TOKEN) == [
         f"persona-verdict/{BLOCK}",
-        "persona-verdict/verdict_probe.proceed",
+        f"persona-verdict/{OTHER}",
     ]
     log = wired["log"]
     first_oidc = next(i for i, e in enumerate(log) if e[0] == "oidc")
@@ -130,7 +135,7 @@ def test_a_created_run_from_another_app_stops_before_the_second_post_and_revokes
     wired: dict[str, Any], tmp_path: Path
 ) -> None:
     wired["app"] = 15368
-    work = _prepare(tmp_path, {BLOCK: BLOCK_OUT, "verdict_probe.proceed": PROCEED_OUT})
+    work = _prepare(tmp_path, {BLOCK: BLOCK_OUT, OTHER: PROCEED_OUT})
     with pytest.raises(RuntimeError, match="not from the verdict App"):
         post_verdict.post_all(ROOT, work, REPO, GH_TOKEN)
     assert len([e for e in wired["log"] if e[0] == "POST"]) == 1
@@ -139,7 +144,7 @@ def test_a_created_run_from_another_app_stops_before_the_second_post_and_revokes
 
 def test_an_exception_mid_post_revokes(wired: dict[str, Any], tmp_path: Path) -> None:
     wired["post_error"] = OSError("network")
-    work = _prepare(tmp_path, {BLOCK: BLOCK_OUT, "verdict_probe.proceed": PROCEED_OUT})
+    work = _prepare(tmp_path, {BLOCK: BLOCK_OUT, OTHER: PROCEED_OUT})
     with pytest.raises(OSError):
         post_verdict.post_all(ROOT, work, REPO, GH_TOKEN)
     assert [c[0] for c in FakeApi.instances[0].calls][-1] == "DELETE"
@@ -164,12 +169,12 @@ def test_a_revoke_that_raises_makes_main_exit_non_zero(
 
 
 def test_a_hostile_results_file_changes_only_its_own_route_body(wired: dict[str, Any], tmp_path: Path) -> None:
-    work = _prepare(tmp_path, {"verdict_probe.proceed": PROCEED_OUT})
+    work = _prepare(tmp_path, {OTHER: PROCEED_OUT})
     (work / "results" / "other.json").write_text(json.dumps({"route": "other", "stdout": PROCEED_OUT}))
-    (work / "results" / "verdict_probe.proceed.json").unlink()
-    (work / "results" / "verdict_probe.proceed.json").symlink_to(work / "results" / "other.json")
+    (work / "results" / f"{OTHER}.json").unlink()
+    (work / "results" / f"{OTHER}.json").symlink_to(work / "results" / "other.json")
     hostile = {
-        "route": "verdict_probe.proceed",
+        "route": OTHER,
         "exit_code": 0,
         "stdout": "../../etc/x",
         "env": {"GH_TOKEN": "x"},
@@ -177,7 +182,7 @@ def test_a_hostile_results_file_changes_only_its_own_route_body(wired: dict[str,
     }
     (work / "results" / "other.json").write_text(json.dumps(hostile))
     bodies = post_verdict.plan_all(ROOT, work, REPO, GH_TOKEN)
-    assert [b["name"] for b in bodies] == ["persona-verdict/verdict_probe.proceed"]
+    assert [b["name"] for b in bodies] == [f"persona-verdict/{OTHER}"]
     assert bodies[0]["conclusion"] == "failure" and bodies[0]["head_sha"] == SHA
     assert not [e for e in wired["log"] if e[0] == "oidc"]
 
