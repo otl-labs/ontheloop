@@ -260,3 +260,28 @@ def test_instruction_architecture_records_persona_layers() -> None:
     assert 7 in layers
     assert data["consumers"]["run_persona"]["consumes_layers"] == [6, 7]
     assert copy.deepcopy(layers[7]["consumers"]) == ["run_persona"]
+
+
+def test_case_provider_reads_the_named_case_at_base_root(tmp_path: Path) -> None:
+    import os
+
+    case_dir = tmp_path / "tests/fixtures/persona_verdict/guidance_cases/p_one"
+    case_dir.mkdir(parents=True)
+    (case_dir / "c_one.md").write_text("CASE", encoding="utf-8")
+    assert guidance.fill(tmp_path, "p_one", [guidance.FIXTURE_CASE_SLOT]) == {guidance.FIXTURE_CASE_SLOT: ""}
+    assert guidance.fill(tmp_path, "p_one", [guidance.FIXTURE_CASE_SLOT], "c_one") == {guidance.FIXTURE_CASE_SLOT: "CASE"}
+    other = tmp_path / "other"
+    other.mkdir()
+    with pytest.raises(ValueError):
+        guidance.fill(other, "p_one", [guidance.FIXTURE_CASE_SLOT], "c_one")
+    with pytest.raises(ValueError):
+        guidance.case_file(tmp_path, "p_one", "s", "Bad-Case")
+    os.symlink(case_dir / "c_one.md", case_dir / "c_link.md")
+    with pytest.raises(ValueError):
+        guidance.case_file(tmp_path, "p_one", "s", "c_link")
+    with pytest.raises(ValueError):
+        guidance.register("fixture_guidance", lambda *a: "")
+    guidance.register("plain", lambda *a: "")
+    with pytest.raises(ValueError):
+        guidance.register_case("plain", lambda *a: "")
+    assert guidance.has_case_provider(guidance.FIXTURE_CASE_SLOT)

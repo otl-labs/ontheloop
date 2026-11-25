@@ -247,3 +247,58 @@ def test_host_job_follows_github_job(monkeypatch: pytest.MonkeyPatch) -> None:
     for job in ("run", "run-fallback"):
         body = json.loads(keyed_run.sidecar_bytes({**env, "GITHUB_SHA": "a" * 40, "GITHUB_JOB": job}, ROOT) or b"null")
         assert body["host"]["job"] == job
+
+
+def _contract_root(tmp_path: Path, text: str | None, route: str = "r_one") -> Path:
+    root = tmp_path / "croot"
+    (root / "docs/contracts/personas").mkdir(parents=True)
+    if text is not None:
+        (root / f"docs/contracts/personas/{route}.yaml").write_text(text, encoding="utf-8")
+    return root
+
+
+def test_guidance_slots_reads_any_contract(tmp_path: Path) -> None:
+    assert execute.guidance_slots(_contract_root(tmp_path / "a", None), "r_one") == []
+    assert execute.guidance_slots(_contract_root(tmp_path / "b", "persona: r_one\n"), "r_one") == []
+    assert execute.guidance_slots(_contract_root(tmp_path / "c", "guidance_slots: [a, b]\n"), "r_one") == ["a", "b"]
+    for name, text in (
+        ("bad", "guidance_slots: [unclosed\n"),
+        ("null", "guidance_slots:\n"),
+        ("str", "guidance_slots: a\n"),
+        ("elem", "guidance_slots: [1]\n"),
+        ("map", "- x\n"),
+    ):
+        with pytest.raises(ValueError):
+            execute.guidance_slots(_contract_root(tmp_path / name, text), "r_one")
+    with pytest.raises(ValueError):
+        execute.guidance_slots(_contract_root(tmp_path / "off", None), "../x")
+
+
+def test_record_keeps_guidance_slot_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    raw = json.dumps({"exit_code": 0, "timed_out": False, "stdout": "{}"}).encode()
+
+    def run(sub: str, slots: list[str] | Exception, body: dict[str, str]) -> dict:
+        work = _work(tmp_path / sub, body=body)
+
+        def fake(root: Path, route: str) -> list[str]:
+            if isinstance(slots, Exception):
+                raise slots
+            return slots
+
+        monkeypatch.setattr(execute, "guidance_slots", fake)
+        keyed_run.record({}, work, ROOT, raw)
+        return json.loads((work / "results" / f"{ROUTE}.json").read_text())
+
+    assert run("a", ["focus"], {**GOOD, "focus": "V"})["guidance"] == {"focus": "V"}
+    assert "guidance" not in run("b", [], GOOD)
+    assert run("c", ["focus"], GOOD) == {"route": ROUTE, "failure": "input_unusable"}
+    assert run("d", ValueError("x"), GOOD) == {"route": ROUTE, "failure": "input_unusable"}
+    work = _work(tmp_path / "e", body=GOOD)
+    monkeypatch.setattr(execute, "guidance_slots", lambda root, route: [])
+
+    def boom(root: Path) -> None:
+        raise ValueError("pin")
+
+    monkeypatch.setattr(keyed_run.image_pin, "load_pin", boom)
+    with pytest.raises(ValueError, match="pin"):
+        keyed_run.record({}, work, ROOT, raw)
