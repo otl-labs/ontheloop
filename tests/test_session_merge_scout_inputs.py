@@ -13,7 +13,7 @@ from scripts.checks import _common
 from scripts.checks.roadmap import _plan_rescout_barrier, _plan_rescout_wiring
 from scripts.roadmap import plan_fingerprint
 from scripts.session import merge_scout_inputs as msi
-from tests.fixtures import scout_inputs_repos as fx
+from tests.fixtures import merge_overlap_repos as fx
 from tests.fixtures.merge_overlap_repos import REAL_ROOT, git
 
 PLAN = "docs/plans/PLAN-demo.yaml"
@@ -30,7 +30,7 @@ sys.addaudithook(_audit)
 
 
 def _judge(repo: Path, **kwargs: object) -> msi.Verdict:
-    return msi.judge(repo, "pr", "main", fx.merge_base(repo), **kwargs)  # type: ignore[arg-type]
+    return msi.judge(repo, "pr", "main", fx.scout_merge_base(repo), **kwargs)  # type: ignore[arg-type]
 
 
 def _decisions(repo: Path, old: str, new: str) -> None:
@@ -39,17 +39,17 @@ def _decisions(repo: Path, old: str, new: str) -> None:
 
 
 def _main_moves(repo: Path, old: str = "body one", new: str = "body 1") -> None:
-    fx.on_main(repo)
+    fx.scout_on_main(repo)
     _decisions(repo, old, new)
-    fx.commit(repo, "main moves a decision")
+    fx.scout_commit(repo, "main moves a decision")
     git(repo, "checkout", "-q", "pr")
 
 
 def _plan_pr(tmp_path: Path, **overrides: object) -> Path:
-    repo = fx.make_repo(tmp_path)
-    fx.pr_branch(repo)
-    fx.write(repo, PLAN, fx.plan_text(**overrides))
-    fx.commit(repo, "add plan")
+    repo = fx.scout_make_repo(tmp_path)
+    fx.scout_pr_branch(repo)
+    fx.scout_write(repo, PLAN, fx.scout_plan_text(**overrides))
+    fx.scout_commit(repo, "add plan")
     return repo
 
 
@@ -68,32 +68,32 @@ def test_plan_pr_is_clear_when_main_moved_an_uncited_decision(tmp_path: Path) ->
 
 
 def test_code_pr_is_clear_when_main_moved_a_cited_decision(tmp_path: Path) -> None:
-    repo = fx.make_repo(tmp_path)
-    fx.pr_branch(repo)
-    fx.write(repo, "src/b.py", "y = 2\n")
-    fx.commit(repo, "code")
+    repo = fx.scout_make_repo(tmp_path)
+    fx.scout_pr_branch(repo)
+    fx.scout_write(repo, "src/b.py", "y = 2\n")
+    fx.scout_commit(repo, "code")
     _main_moves(repo)
     verdict = _judge(repo, timeout=0.0)
     assert (verdict.kind, verdict.path) == (msi.CLEAR, "no-plan")
 
 
 def test_build_pr_with_unchanged_plan_inputs_is_clear(tmp_path: Path) -> None:
-    repo = fx.make_repo(tmp_path)
-    fx.write(repo, PLAN, fx.plan_text())
-    fx.commit(repo, "plan on main")
-    fx.pr_branch(repo)
-    fx.write(repo, PLAN, fx.plan_text(context=["bookkeeping edit"]))
-    fx.commit(repo, "build edits the plan")
+    repo = fx.scout_make_repo(tmp_path)
+    fx.scout_write(repo, PLAN, fx.scout_plan_text())
+    fx.scout_commit(repo, "plan on main")
+    fx.scout_pr_branch(repo)
+    fx.scout_write(repo, PLAN, fx.scout_plan_text(context=["bookkeeping edit"]))
+    fx.scout_commit(repo, "build edits the plan")
     _main_moves(repo)
     verdict = _judge(repo)
     assert (verdict.kind, verdict.path, verdict.candidates) == (msi.CLEAR, "computed", 1)
 
 
 def test_sidecar_only_change_is_not_a_candidate(tmp_path: Path) -> None:
-    repo = fx.make_repo(tmp_path)
-    fx.pr_branch(repo)
-    fx.write(repo, SIDECAR, "schema_version: 1\n")
-    fx.commit(repo, "sidecar only")
+    repo = fx.scout_make_repo(tmp_path)
+    fx.scout_pr_branch(repo)
+    fx.scout_write(repo, SIDECAR, "schema_version: 1\n")
+    fx.scout_commit(repo, "sidecar only")
     _main_moves(repo)
     assert (_judge(repo).kind, _judge(repo).path) == (msi.CLEAR, "no-plan")
 
@@ -106,69 +106,69 @@ def test_plan_below_schema_six_is_not_a_candidate(tmp_path: Path) -> None:
 
 
 def test_deleted_plan_is_skipped(tmp_path: Path) -> None:
-    repo = fx.make_repo(tmp_path)
-    fx.write(repo, PLAN, fx.plan_text())
-    fx.commit(repo, "plan on main")
-    fx.pr_branch(repo)
+    repo = fx.scout_make_repo(tmp_path)
+    fx.scout_write(repo, PLAN, fx.scout_plan_text())
+    fx.scout_commit(repo, "plan on main")
+    fx.scout_pr_branch(repo)
     git(repo, "rm", "-q", PLAN)
-    fx.commit(repo, "delete")
+    fx.scout_commit(repo, "delete")
     _main_moves(repo)
     assert _judge(repo).path == "no-plan"
 
 
 def test_type_changed_plan_is_skipped(tmp_path: Path) -> None:
-    repo = fx.make_repo(tmp_path)
-    fx.write(repo, PLAN, fx.plan_text())
-    fx.commit(repo, "plan on main")
-    fx.pr_branch(repo)
+    repo = fx.scout_make_repo(tmp_path)
+    fx.scout_write(repo, PLAN, fx.scout_plan_text())
+    fx.scout_commit(repo, "plan on main")
+    fx.scout_pr_branch(repo)
     (repo / PLAN).unlink()
     (repo / PLAN).symlink_to("../../src/a.py")
-    fx.commit(repo, "type change")
+    fx.scout_commit(repo, "type change")
     _main_moves(repo)
     assert _judge(repo).path == "no-plan"
 
 
 def test_quoted_plan_path_is_skipped(tmp_path: Path) -> None:
-    repo = fx.make_repo(tmp_path)
-    fx.pr_branch(repo)
-    fx.write(repo, "docs/plans/PLAN-café.yaml", fx.plan_text(slug="cafe"))
-    fx.commit(repo, "non-ascii plan")
+    repo = fx.scout_make_repo(tmp_path)
+    fx.scout_pr_branch(repo)
+    fx.scout_write(repo, "docs/plans/PLAN-café.yaml", fx.scout_plan_text(slug="cafe"))
+    fx.scout_commit(repo, "non-ascii plan")
     _main_moves(repo)
     assert _judge(repo).path == "no-plan"
 
 
 def test_candidates_equal_the_barrier_selection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    repo = fx.make_repo(tmp_path)
+    repo = fx.scout_make_repo(tmp_path)
     for name in ("m", "d", "t"):
-        fx.write(repo, f"docs/plans/PLAN-{name}.yaml", fx.plan_text(slug=name))
-    fx.commit(repo, "plans on main")
+        fx.scout_write(repo, f"docs/plans/PLAN-{name}.yaml", fx.scout_plan_text(slug=name))
+    fx.scout_commit(repo, "plans on main")
     git(repo, "update-ref", "refs/remotes/origin/main", "main")
-    fx.pr_branch(repo)
-    fx.write(repo, "docs/plans/PLAN-m.yaml", fx.plan_text(slug="m", context=["x"]))
-    fx.write(repo, "docs/plans/PLAN-a.yaml", fx.plan_text(slug="a"))
-    fx.write(repo, "docs/plans/PLAN-café.yaml", fx.plan_text(slug="cafe"))
+    fx.scout_pr_branch(repo)
+    fx.scout_write(repo, "docs/plans/PLAN-m.yaml", fx.scout_plan_text(slug="m", context=["x"]))
+    fx.scout_write(repo, "docs/plans/PLAN-a.yaml", fx.scout_plan_text(slug="a"))
+    fx.scout_write(repo, "docs/plans/PLAN-café.yaml", fx.scout_plan_text(slug="cafe"))
     git(repo, "rm", "-q", "docs/plans/PLAN-d.yaml")
     (repo / "docs/plans/PLAN-t.yaml").unlink()
     (repo / "docs/plans/PLAN-t.yaml").symlink_to("../../src/a.py")
-    fx.commit(repo, "mixed")
+    fx.scout_commit(repo, "mixed")
     for var in ("GITHUB_EVENT_NAME", "GITHUB_BASE_REF", "GITHUB_EVENT_BEFORE"):
         monkeypatch.delenv(var, raising=False)
     barrier = {
         (s, p) for s, p in _common.get_status_aware_diff(repo) if s in ("A", "M", "??") and _common.PLAN_PATH_RE.match(p)
     }
-    mine = {(s, p) for s, p in msi._plan_candidates(repo, fx.merge_base(repo), "pr")}
+    mine = {(s, p) for s, p in msi._plan_candidates(repo, fx.scout_merge_base(repo), "pr")}
     assert mine == barrier == {("M", "docs/plans/PLAN-m.yaml"), ("A", "docs/plans/PLAN-a.yaml")}
     assert callable(_plan_rescout_wiring.run)
 
 
 def test_non_plan_content_at_a_plan_path_clears_when_main_is_unchanged(tmp_path: Path) -> None:
-    repo = fx.make_repo(tmp_path)
-    fx.pr_branch(repo)
-    fx.write(repo, "docs/plans/PLAN-x.yaml", "not: [a plan\n")
-    fx.commit(repo, "not a plan")
-    fx.on_main(repo)
-    fx.write(repo, "src/other.py", "z = 1\n")
-    fx.commit(repo, "main moves code only")
+    repo = fx.scout_make_repo(tmp_path)
+    fx.scout_pr_branch(repo)
+    fx.scout_write(repo, "docs/plans/PLAN-x.yaml", "not: [a plan\n")
+    fx.scout_commit(repo, "not a plan")
+    fx.scout_on_main(repo)
+    fx.scout_write(repo, "src/other.py", "z = 1\n")
+    fx.scout_commit(repo, "main moves code only")
     git(repo, "checkout", "-q", "pr")
     verdict = _judge(repo)
     assert (verdict.kind, verdict.path) == (msi.CLEAR, "main-unchanged")
@@ -183,46 +183,46 @@ def test_branch_updated_with_main_is_clear(tmp_path: Path) -> None:
 
 
 def test_scout_input_changed_on_both_sides_is_judged_merged(tmp_path: Path) -> None:
-    repo = fx.make_repo(tmp_path)
-    fx.pr_branch(repo)
+    repo = fx.scout_make_repo(tmp_path)
+    fx.scout_pr_branch(repo)
     _decisions(repo, "body two", "body 2")
-    fx.write(repo, PLAN, fx.plan_text())
-    fx.commit(repo, "pr edits an uncited decision and adds a plan")
+    fx.scout_write(repo, PLAN, fx.scout_plan_text())
+    fx.scout_commit(repo, "pr edits an uncited decision and adds a plan")
     _main_moves(repo)
     verdict = _judge(repo)
     assert verdict.kind == msi.STALE and "decisions" in verdict.reason
 
 
 def test_conflicting_scout_input_is_unavailable(tmp_path: Path) -> None:
-    repo = fx.make_repo(tmp_path)
-    fx.pr_branch(repo)
+    repo = fx.scout_make_repo(tmp_path)
+    fx.scout_pr_branch(repo)
     _decisions(repo, "body one", "body PR")
-    fx.write(repo, PLAN, fx.plan_text())
-    fx.commit(repo, "pr")
+    fx.scout_write(repo, PLAN, fx.scout_plan_text())
+    fx.scout_commit(repo, "pr")
     _main_moves(repo)
     verdict = _judge(repo)
     assert verdict.kind == msi.UNAVAILABLE and "rebase_resolve" in verdict.reason and "docs/DECISIONS.md" in verdict.reason
 
 
 def test_conflict_elsewhere_is_ignored(tmp_path: Path) -> None:
-    repo = fx.make_repo(tmp_path)
-    fx.pr_branch(repo)
-    fx.write(repo, "src/a.py", "x = 'pr'\n")
-    fx.write(repo, PLAN, fx.plan_text())
-    fx.commit(repo, "pr")
-    fx.on_main(repo)
-    fx.write(repo, "src/a.py", "x = 'main'\n")
+    repo = fx.scout_make_repo(tmp_path)
+    fx.scout_pr_branch(repo)
+    fx.scout_write(repo, "src/a.py", "x = 'pr'\n")
+    fx.scout_write(repo, PLAN, fx.scout_plan_text())
+    fx.scout_commit(repo, "pr")
+    fx.scout_on_main(repo)
+    fx.scout_write(repo, "src/a.py", "x = 'main'\n")
     _decisions(repo, "body one", "body 1")
-    fx.commit(repo, "main")
+    fx.scout_commit(repo, "main")
     git(repo, "checkout", "-q", "pr")
     assert _judge(repo).kind == msi.STALE
 
 
 def test_unparsable_plan_is_unavailable(tmp_path: Path) -> None:
-    repo = fx.make_repo(tmp_path)
-    fx.pr_branch(repo)
-    fx.write(repo, PLAN, "not: [a plan\n")
-    fx.commit(repo, "bad plan")
+    repo = fx.scout_make_repo(tmp_path)
+    fx.scout_pr_branch(repo)
+    fx.scout_write(repo, PLAN, "not: [a plan\n")
+    fx.scout_commit(repo, "bad plan")
     _main_moves(repo)
     verdict = _judge(repo)
     assert verdict.kind == msi.UNAVAILABLE and "PLAN-demo.yaml" in verdict.reason
@@ -311,16 +311,16 @@ def _sidecar_text(after: str) -> str:
 
 
 def test_main_changing_only_a_candidate_sidecar_is_computed(tmp_path: Path) -> None:
-    repo = fx.make_repo(tmp_path)
-    fx.write(repo, PLAN, fx.plan_text())
-    fx.write(repo, SIDECAR, _sidecar_text("body 1"))
-    fx.commit(repo, "plan and sidecar on main")
-    fx.pr_branch(repo)
-    fx.write(repo, PLAN, fx.plan_text(intent="Build the other thing"))
-    fx.commit(repo, "pr edits the plan")
-    fx.on_main(repo)
-    fx.write(repo, SIDECAR, _sidecar_text("body 2"))
-    fx.commit(repo, "main edits the sidecar")
+    repo = fx.scout_make_repo(tmp_path)
+    fx.scout_write(repo, PLAN, fx.scout_plan_text())
+    fx.scout_write(repo, SIDECAR, _sidecar_text("body 1"))
+    fx.scout_commit(repo, "plan and sidecar on main")
+    fx.scout_pr_branch(repo)
+    fx.scout_write(repo, PLAN, fx.scout_plan_text(intent="Build the other thing"))
+    fx.scout_commit(repo, "pr edits the plan")
+    fx.scout_on_main(repo)
+    fx.scout_write(repo, SIDECAR, _sidecar_text("body 2"))
+    fx.scout_commit(repo, "main edits the sidecar")
     git(repo, "checkout", "-q", "pr")
     verdict = _judge(repo)
     assert verdict.kind == msi.STALE and "approved_blocks" in verdict.reason
@@ -328,9 +328,9 @@ def test_main_changing_only_a_candidate_sidecar_is_computed(tmp_path: Path) -> N
 
 def test_main_changing_an_unrelated_plan_takes_the_inputs_unchanged_path(tmp_path: Path) -> None:
     repo = _plan_pr(tmp_path)
-    fx.on_main(repo)
-    fx.write(repo, "docs/plans/PLAN-other.yaml", fx.plan_text(slug="other"))
-    fx.commit(repo, "main adds an unrelated plan")
+    fx.scout_on_main(repo)
+    fx.scout_write(repo, "docs/plans/PLAN-other.yaml", fx.scout_plan_text(slug="other"))
+    fx.scout_commit(repo, "main adds an unrelated plan")
     git(repo, "checkout", "-q", "pr")
     verdict = _judge(repo)
     assert (verdict.kind, verdict.path) == (msi.CLEAR, "inputs-unchanged")
@@ -359,7 +359,7 @@ def test_cli_prints_the_path_taken(tmp_path: Path, capsys: pytest.CaptureFixture
 
 
 def test_cli_unresolved_merge_base_is_unavailable(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    repo = fx.make_repo(tmp_path)
+    repo = fx.scout_make_repo(tmp_path)
     assert msi.main(["--head-ref", "nope", "--base-ref", "main", "--root", str(repo)]) == 2
     assert "UNAVAILABLE" in capsys.readouterr().out
 
@@ -425,7 +425,8 @@ def test_unusable_merge_tree_output_and_missing_merged_plan(monkeypatch: pytest.
 
 
 def test_modified_plan_absent_at_the_merge_base_is_not_unchanged(tmp_path: Path) -> None:
-    repo = fx.make_repo(tmp_path)
+    repo = fx.scout_make_repo(tmp_path)
     assert (
-        msi._unchanged_plan(repo, fx.merge_base_of(repo), PLAN, "PLAN-demo.yaml", None, None, "x", msi._Deadline(5.0)) is False
+        msi._unchanged_plan(repo, fx.scout_merge_base_of(repo), PLAN, "PLAN-demo.yaml", None, None, "x", msi._Deadline(5.0))
+        is False
     )
