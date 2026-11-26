@@ -3,6 +3,7 @@
 The contracts and the index are read as YAML. Only a route named in executor-personas.yaml's fixture_kind.personas has a
 schema here; any other route gets None, so a result for it is never judged against a schema it does not have.
 guidance_slots is the exception: it reads any persona's contract under the trusted root, fixture or not.
+registry_key is the second whole-index read: it answers any personas row's registry_key, fixture or not.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 INDEX = "docs/contracts/executor-personas.yaml"
 CONTRACTS = "docs/contracts/personas"
+AGENT_KEY = re.compile(r"[a-z][a-z0-9_-]{0,63}")
 KINDS = {"input": "input_schema", "output": "output_schema"}
 
 
@@ -31,6 +33,16 @@ def fixture_personas(root: Path) -> list[str]:
     block = doc.get("fixture_kind") if isinstance(doc, dict) else None
     names = block.get("personas") if isinstance(block, dict) else None
     return [str(n) for n in names] if isinstance(names, list) else []
+
+
+def registry_key(root: Path, persona: str) -> str | None:
+    doc = _load(root / INDEX)
+    rows = doc.get("personas") if isinstance(doc, dict) else None
+    for row in rows if isinstance(rows, list) else []:
+        if isinstance(row, dict) and row.get("persona") == persona:
+            key = row.get("registry_key")
+            return key if isinstance(key, str) and AGENT_KEY.fullmatch(key) else None
+    return None
 
 
 def _contract(root: Path, route_id: str) -> dict[str, Any] | None:

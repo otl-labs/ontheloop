@@ -70,11 +70,11 @@ def test_record_sidecar_maps(monkeypatch: pytest.MonkeyPatch) -> None:
         "GITHUB_JOB": "run",
     }
     monkeypatch.setattr(keyed_run, "project_ref", lambda root: "ref")
-    body = json.loads(keyed_run.sidecar_bytes(env, ROOT) or b"null")
+    body = json.loads(keyed_run.sidecar_bytes(env, ROOT, AGENT) or b"null")
     assert body["agent"] == "canary-persona" and body["content_policy"] == "withheld"
     assert body["host"]["job"] == "run" and body["host"]["workflow_path"] == keyed_run.WORKFLOW_PATH
     monkeypatch.setattr(keyed_run, "project_ref", lambda root: None)
-    assert keyed_run.sidecar_bytes(env, ROOT) is None
+    assert keyed_run.sidecar_bytes(env, ROOT, AGENT) is None
 
 
 def test_request_refusal_keeps_the_key_off_both_streams(
@@ -116,6 +116,7 @@ def _work(tmp_path: Path, route: str = ROUTE, body: dict[str, str] | None = None
     return work
 
 
+AGENT = execute.registry_key(ROOT, "canary_persona") or ""
 GOOD = {"change_id": "o/r#1", "head_sha": SHA, "plan": "", "notes": "BLOCKING: x", "fixture_guidance": ""}
 
 
@@ -246,14 +247,14 @@ def test_primary_outage_is_false_without_a_launcher_result_and_unwritten_on_the_
     assert keyed_run.record({"GITHUB_JOB": "other", "GITHUB_OUTPUT": str(out)}, work, ROOT, b"{}") == 0
     assert out.read_text() == "primary_outage=false\n"
     monkeypatch.setattr(keyed_run, "project_ref", lambda root: "ref")
-    assert keyed_run.sidecar_bytes({"GITHUB_JOB": "other", "GITHUB_SHA": "a" * 40}, ROOT) is None
+    assert keyed_run.sidecar_bytes({"GITHUB_JOB": "other", "GITHUB_SHA": "a" * 40}, ROOT, AGENT) is None
 
 
 def test_host_job_follows_github_job(monkeypatch: pytest.MonkeyPatch) -> None:
     env = {"GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "1", "GITHUB_REPOSITORY": "o/r", "GITHUB_REF": "refs/heads/main"}
     monkeypatch.setattr(keyed_run, "project_ref", lambda root: "ref")
     for job in ("run", "run-fallback"):
-        body = json.loads(keyed_run.sidecar_bytes({**env, "GITHUB_SHA": "a" * 40, "GITHUB_JOB": job}, ROOT) or b"null")
+        body = json.loads(keyed_run.sidecar_bytes({**env, "GITHUB_SHA": "a" * 40, "GITHUB_JOB": job}, ROOT, AGENT) or b"null")
         assert body["host"]["job"] == job
 
 
@@ -321,7 +322,7 @@ def test_record_telemetry_survives_guidance_failure(tmp_path: Path, monkeypatch:
         calls.append(list(argv))
         return 0
 
-    monkeypatch.setattr(keyed_run, "sidecar_bytes", lambda env, root: b"{}")
+    monkeypatch.setattr(keyed_run, "sidecar_bytes", lambda env, root, agent: b"{}")
     monkeypatch.setattr(keyed_run.telemetry_rows, "main", fake_main)
 
     def run(sub: str, slots: list[str] | Exception, body: dict[str, str]) -> tuple[Path, dict]:
