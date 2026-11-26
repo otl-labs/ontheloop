@@ -8,7 +8,7 @@ This file is a curated projection of `CLAUDE.md`, `docs/contracts/north-star.yam
 The mission, and each entry's why, failure signal and binding scope, live in `docs/contracts/north-star.yaml`.
 
 - **NS.1** - Every substitutable boundary is a port; the vendor is an adapter; table data and blobs never have to be migrated to swap one.
-- **NS.2** - Source-available now, open source on proof.
+- **NS.2** - Open source before the first client depends on it.
 - **NS.3** - Every adapter runs where it economically belongs.
 - **NS.4** - The repo is for agents.
 - **NS.5** - The agent surface is named, typed, self-describing verbs.

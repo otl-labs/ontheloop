@@ -2,6 +2,109 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 289: The early Apache-2.0 flip precedes the first services client -- its trigger moves from a finished local core and a serving paid service to the company's title and a clean dependency audit (amends Decisions 184 and 194) (Decided)
+
+```yaml
+number: 289
+status: Decided
+decided_date: "2026-11-26"
+kind:
+  value: direction
+  justification: >-
+    Yes: clause 1 moves the licence commitment's trigger, clause 2 adds a human gate on offering On The Loop to a
+    services client, and clause 4 ends the commercial-licence route at the flip; undone, the flip waits on Decision
+    194's two conditions again.
+amends: [184, 194]
+serves: [NS.2]
+plan: apache-flip-precedes-client-work
+significance:
+  value: numbered_decision
+  justification: >-
+    Yes: it reverses the premise Decision 194 rests on and rewrites NS.2, which needs a carrying Decision; a dated
+    note on 194 (amendment_forms, considered) cannot carry a north-star change or a new human gate, and no
+    contract owns licence terms.
+```
+
+**Status:** Decided
+**Date:** 2026-11-26
+**Warehouse ID:** dec-289 (per Decision 84 backfill)
+
+**Problem:** Decision 194 brings the Apache-2.0 flip forward only when T4.22, T4.23 and T4.24 are complete (all
+deferred past MVP) and the operator attests a deployed, serving paid service; neither can hold for months. On The
+Loop Labs will now take services engagements in which a client depends on On The Loop as a framework, as dbt-core
+is used, and BUSL-1.1 reserves that production use for a commercial licence that does not exist
+(COMMERCIAL-LICENSE.md). The operator wants the flip before any client is approached (operator, 2026-11-26).
+
+**Intent:** The core's outbound licence is Apache-2.0 before any services client depends on it, and the flip waits
+only on the acts that make it lawful.
+
+**Decision:**
+1. **Trigger (amends Decision 194 cl.1-3).** The flip executes once both hold: (a) the founder-to-company IP
+   assignment (Decision 195 cl.2) has executed and LICENSE's Licensor line names On The Loop Labs Limited
+   (rec-5681); (b) rec-3153's dependency-licence audit finds every shipped dependency compatible with Apache-2.0
+   outbound, or removes each exception. The operator attests (a) by its date and fact only. T4.22-T4.24 and a
+   serving paid service no longer gate the flip.
+2. **Order (a human gate).** On The Loop Labs offers On The Loop to no services client, as a dependency of the
+   client's code or as the tooling it delivers that code with, while the outbound licence is BUSL-1.1. The
+   operator holds this gate.
+3. **Mechanism (restates Decision 194 cl.1).** On The Loop Labs Limited, as Licensor, brings every published
+   BUSL-1.1 version's Change Date forward to the flip date and publishes every later version under Apache-2.0;
+   nothing published is narrowed. One commit changes LICENSE, LICENSING.md (a second boundary row),
+   COMMERCIAL-LICENSE.md, README.md, CONTRIBUTING.md, NS.2's detail, the glossary's core row, the four placeholder
+   packages' licence fields and LICENSE copies, and validate_licence_consistency (rec-5682).
+4. **What the flip spends.** The Additional Use Grant is never widened: Decision 184 cl.5's open carve-out,
+   Decision 194 cl.4 and T4.24 c6 lapse at the flip, and no release is tagged before it (rec-5683). No commercial licence is offered, so Decision 171 cl.6's
+   dual-licensing authorisation, Decision 194 cl.5's dual licensing and rec-3148 end at the flip. The copyright-assignment requirement loses its dual-licensing
+   reason; what replaces it is rec-5685's to decide, with rec-3154 and rec-3921. Assumptions A1 and A2 stay flagged
+   for a solicitor; A2 is now condition (a).
+5. **NS.2.** NS.2 becomes "Open source before the first client depends on it": its reason moves from holding the
+   licence back until a paid service can compete to removing the term that would stop a client depending on the
+   core.
+
+**Rationale:** This reverses Decision 194's reasoning, not its date. 194 held Apache-2.0 back as leverage until a
+paid service could defend the market. The operator now judges that a production-use restriction on a framework
+dependency inside a client's estate blocks the adoption that shows which adapters to build (Decision 212) and
+proves brownfield otl init on repositories the operator did not write (Decision 211 cl.6), while the paywall was
+always organisational-scale tooling in a separate paid service (Decision 209), which the core's licence never
+protected. Services revenue is not the paid service and needs no licence term (rec-5684 names the client; rec-5686
+states the engagement guardrails). Cost accepted: a better-capitalised firm may host the Apache-2.0 core as a
+managed service before the paid service exists, the risk 194 cl.4's carve-out was shaped for, and a published
+Apache-2.0 version can never be narrowed.
+
+**Options considered:** widening the Additional Use Grant with a hosted-service carve-out (rejected: a client's
+legal review still meets source-available terms, which Decision 234's local-first users already object to); a
+commercial licence per client (rejected: no programme exists, Decision 286 cl.6 gates its terms, and selling one
+needs the copyright-provenance audit of Decision 171's reversal condition (a)); waiting for Decision 194's
+conditions (rejected: neither can hold before the first engagement).
+
+**Coverage (Decision 181 cl.2):** cl.1 and cl.3 -- validate_licence_consistency once rec-5681 and rec-5682 land,
+with the stanza's manual conditions until then; cl.2 -- operator procedure, an unenforced residual owned by
+rec-5686; cl.4 -- rec-5682 and rec-5683; cl.5 -- validate_tier_a_amendment_guard and validate_north_star.
+
+```yaml reversal-conditions
+decision: 289
+review_by: 2027-03-31
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: client-before-flip
+    kind: manual
+    description: "A services client depends on a release while the outbound licence is BUSL-1.1: re-decide clause 2."
+  - id: preconditions-stalled
+    kind: manual
+    description: "The first engagement is due while the IP assignment has not executed or rec-3153 is open: re-decide the order or the trigger."
+  - id: audit-blocks-flip
+    kind: manual
+    description: "rec-3153 finds a dependency incompatible with Apache-2.0 outbound that cannot be removed: re-decide clause 1."
+  - id: hosted-competitor
+    kind: manual
+    description: "A third party offers the Apache-2.0 core as a hosted or managed service against the paid service: re-decide the licence of later versions."
+```
+
+**Related:** Decisions 184 and 194 (amended), 171, 195, 209, 211, 212, 233, 234, 240, 286; rec-3148, rec-3153,
+rec-3154, rec-3921, rec-5680, rec-5681, rec-5682, rec-5683, rec-5684, rec-5685, rec-5686.
+
+---
+
 ## Decision 288: An agent merge of a plan is refused when main has changed what its decision scout read -- compared by the scout-input fingerprint on the PR head and on main with the PR's changes, fail closed, no agent override (amends Decision 83) (Decided)
 
 ```yaml
@@ -7060,6 +7163,8 @@ assignment (Decision 171 clause 5, rec-3154) is out of scope.
 
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
+> **Amended by Decision 289 (2026-11-26):** clauses 1-3's two conditions no longer gate the flip, which now waits on the IP assignment and rec-3153's audit and precedes any services client; clauses 4-5 lapse at the flip. The stanza above stays as history and its graduated check still pins it; a condition firing is answered by Decision 289.
+
 ---
 
 ## Decision 193: G4 sizes strictly from a declared source and bounds the post-expiry set; an over-budget pass drains partially instead of deferring wholesale (amends Decision 188 clause 2) (Decided)
@@ -7764,6 +7869,8 @@ conditions:
 > **Update (2026-11-02):** Promoted: this entry's intent is carried as the mission in docs/contracts/north-star.yaml; clauses unchanged.
 
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+
+> **Amended by Decision 289 (2026-11-26):** clause 5's open Additional Use Grant carve-out is never widened: it lapses at the Apache-2.0 flip, which precedes the first release and any services client; after the flip, clause 1's BUSL-1.1 reads Apache-2.0.
 
 ---
 
