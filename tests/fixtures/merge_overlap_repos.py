@@ -4,11 +4,15 @@ url.insteadOf mapping back to the file path. Test-only."""
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 CONFIG_REL = "docs/contracts/project-configuration.yaml"
 PERSONAS = ("code_reviewer", "decision_scout", "plan_critic")
@@ -195,6 +199,7 @@ def install_project(project: Path) -> None:
         ".claude/hooks/merge_gate.py",
         "scripts/session/merge_overlap.py",
         "scripts/session/merge_checks.py",
+        "scripts/session/merge_scout_inputs.py",
         "scripts/session/session_trailer.py",
         "bin/venv-python",
     ):
@@ -235,3 +240,75 @@ def run_shim(project: Path, payload: str, *, cwd: Path, extra_env: dict[str, str
         env=env,
         timeout=timeout,
     )
+
+
+# Scout-input predicate fixtures (rec-5654): a repo with a minimal fingerprintable tree on main, a pr branch from it.
+SCOUT_DECISIONS = "## Decision 217: Title (Decided)\n\nbody one\n\n## Decision 229: Other (Decided)\n\nbody two\n"
+SCOUT_PLAN: dict[str, Any] = {
+    "schema_version": 7,
+    "slug": "demo",
+    "intent": "Build the thing",
+    "plan_type": "IMPLEMENTATION",
+    "verification_tier": "V2",
+    "phase": "T4.32",
+    "scope": [{"file": "src/a.py", "action": "Create", "purpose": "p"}],
+    "cites": ["dec:217"],
+    "amends": [],
+    "introduces": [],
+    "closes_criteria": [],
+    "gate_rounds": [],
+}
+SCOUT_ROADMAP = {
+    "document": {"id": "R", "version": 1, "status": "ratified", "filed_via": "ops_decisions:dec-108"},
+    "tier_items": [{"id": "T4.32", "tier": "T4", "name": "verdicts", "status": "in_progress", "intent": "i"}],
+}
+
+
+def scout_plan_text(slug: str = "demo", **overrides: Any) -> str:
+    plan = copy.deepcopy(SCOUT_PLAN)
+    plan.update(slug=slug, **overrides)
+    return yaml.safe_dump(plan, sort_keys=False)
+
+
+def scout_write(repo: Path, rel: str, content: str | bytes) -> None:
+    path = repo / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(content, bytes):
+        path.write_bytes(content)
+    else:
+        path.write_text(content, encoding="utf-8")
+
+
+def scout_commit(repo: Path, message: str) -> str:
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", message)
+    return git(repo, "rev-parse", "HEAD")
+
+
+def scout_make_repo(tmp_path: Path) -> Path:
+    """A repo on branch main holding the scout-input tree; branch pr is created from it by scout_pr_branch()."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    scout_write(repo, "docs/DECISIONS.md", SCOUT_DECISIONS)
+    scout_write(repo, "docs/ROADMAP-PLATFORM.yaml", yaml.safe_dump(SCOUT_ROADMAP))
+    scout_write(repo, "docs/contracts/north-star.yaml", "stars\n")
+    scout_write(repo, "src/a.py", "x = 1\n")
+    scout_commit(repo, "base")
+    return repo
+
+
+def scout_pr_branch(repo: Path) -> None:
+    git(repo, "checkout", "-q", "-b", "pr")
+
+
+def scout_on_main(repo: Path) -> None:
+    git(repo, "checkout", "-q", "main")
+
+
+def scout_merge_base(repo: Path) -> str:
+    return git(repo, "merge-base", "main", "pr")
+
+
+def scout_merge_base_of(repo: Path) -> str:
+    return git(repo, "rev-parse", "HEAD")

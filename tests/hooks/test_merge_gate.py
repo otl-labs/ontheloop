@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from tests.fixtures import merge_overlap_repos as fx
+
+sys.path.insert(0, str(fx.REAL_ROOT / ".claude" / "hooks"))
+import merge_gate as mg  # noqa: E402
+
+from scripts.session import merge_overlap, merge_scout_inputs  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -208,3 +215,57 @@ def test_no_commit_message_or_no_trailer_unchanged(env: dict[str, Path]) -> None
 def test_non_string_commit_message_denies(env: dict[str, Path]) -> None:
     r = _run(env, fx.merge_payload(3, commit_message=["x"]))
     assert r.returncode == 2 and "commit_message" in r.stderr and "malformed" in r.stderr
+
+
+_HEAD = "a" * 40
+
+
+def _stub_judge(monkeypatch: pytest.MonkeyPatch, overlap_kind: str, scout: merge_scout_inputs.Verdict) -> list[tuple]:
+    monkeypatch.setattr(mg, "_fetch", lambda *a, **k: subprocess.CompletedProcess([], 0, "", ""))
+    monkeypatch.setattr(mg, "_git", lambda *a, **k: subprocess.CompletedProcess([], 0, _HEAD + "\n", ""))
+    verdict = merge_overlap.Verdict(overlap_kind, "b" * 40, 2, ("a.txt",) if overlap_kind == "OVERLAP" else ())
+    monkeypatch.setattr(merge_overlap, "overlap", lambda *a, **k: verdict)
+    calls: list[tuple] = []
+    monkeypatch.setattr(merge_scout_inputs, "judge", lambda *a, **k: calls.append(a) or scout)
+    monkeypatch.setattr(mg, "_persona_leg_app", lambda *a: ([], None, None))
+    monkeypatch.setattr(mg, "_checks_denial", lambda *a, **k: 0)
+    return calls
+
+
+def _call() -> mg._Call:
+    return mg._Call("otl-labs", "ontheloop", 7, _HEAD, None, True)
+
+
+def test_judge_refuses_a_stale_plan_after_a_clear_overlap(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stale = merge_scout_inputs.Verdict(
+        merge_scout_inputs.STALE, ("PLAN-x.yaml",), "PLAN-x.yaml: scout inputs moved on main (decisions)"
+    )
+    calls = _stub_judge(monkeypatch, "CLEAR", stale)
+    assert mg._judge(Path("."), _call(), mg._Deadline()) == 2
+    err = capsys.readouterr().err
+    assert "PLAN-x.yaml" in err and "decisions" in err and "re-scout required" in err and "--ff-only" in err
+    assert len(calls) == 1 and calls[0][2] == "refs/remotes/origin/main"
+
+
+def test_judge_denies_when_scout_inputs_are_unavailable(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _stub_judge(
+        monkeypatch, "CLEAR", merge_scout_inputs.Verdict(merge_scout_inputs.UNAVAILABLE, reason="git merge-tree exited 2")
+    )
+    assert mg._judge(Path("."), _call(), mg._Deadline()) == 2
+    assert "scout-inputs: UNAVAILABLE" in capsys.readouterr().err
+
+
+def test_judge_skips_scout_inputs_on_overlap(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _stub_judge(monkeypatch, "OVERLAP", merge_scout_inputs.Verdict(merge_scout_inputs.STALE))
+    assert mg._judge(Path("."), _call(), mg._Deadline()) == 2
+    assert calls == []
+
+
+def test_judge_passes_a_clear_scout_verdict_to_the_checks_leg(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _stub_judge(monkeypatch, "CLEAR", merge_scout_inputs.Verdict(merge_scout_inputs.CLEAR, path="no-plan"))
+    assert mg._judge(Path("."), _call(), mg._Deadline()) == 0
+    assert len(calls) == 1
