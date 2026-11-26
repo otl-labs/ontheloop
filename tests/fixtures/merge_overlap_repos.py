@@ -195,6 +195,7 @@ def install_project(project: Path) -> None:
         ".claude/hooks/merge_gate.py",
         "scripts/session/merge_overlap.py",
         "scripts/session/merge_checks.py",
+        "scripts/session/merge_scout_inputs.py",
         "scripts/session/session_trailer.py",
         "bin/venv-python",
     ):
