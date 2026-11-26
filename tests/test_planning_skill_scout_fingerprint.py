@@ -30,7 +30,10 @@ def test_planning_skill_rescouts_on_scout_input_fingerprint_change() -> None:
     gate_error = next(line for line in gate.splitlines() if line.startswith("- **Gate-error:**"))
     assert "fingerprint line" in gate_error and "FINGERPRINT-ERROR" in gate_error
     assert "re-dispatch after a BLOCK pivot or when the fingerprint moves" in gate and "never otherwise" in gate
-    assert "the plan's `cites` holds the `dec:` tokens fed to `--with-cites`" in gate
+    assert "the plan's `cites` is the printed `cites=` line" in gate
+    step6 = _step(_PLAN_MD, 6)
+    assert "`cites=` line printed under it" in step6 and "a cite the scout left out stays" in step6
+    assert "never context, verification_plan" in step6 and "write the exact `dec:` tokens" not in step6
     assert "only admin bypass merges it" in gate
     assert "re-run the Decision Scout if the fingerprint moved" in _SKILL
     for text in (_SKILL, _PLAN_MD):

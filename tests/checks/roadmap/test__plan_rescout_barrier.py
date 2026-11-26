@@ -323,6 +323,6 @@ def test_barrier_value_equals_the_cli_digest(root: Path, capsys: pytest.CaptureF
     (root / _SIDECAR_REL).write_text(sidecar, encoding="utf-8")
     _put(root, _plan())
     assert pf.main(["--plan", str(root / _PLAN_REL), "--root", str(root)]) == 0
-    printed = capsys.readouterr().out.strip().removeprefix("scout_input_fingerprint=")
+    printed = capsys.readouterr().out.splitlines()[0].removeprefix("scout_input_fingerprint=")
     result = _run(root, _doc(6, _scout(printed)))
     assert (result.failures, result.compared) == ([], 1)
