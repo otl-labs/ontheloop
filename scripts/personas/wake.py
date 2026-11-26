@@ -16,9 +16,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from scripts.personas import resolve_pr, route
+from scripts.personas import resolve_pr
 
 BOT_LOGIN = "github-actions[bot]"
+ROUTES = Path("prepared") / "routes.json"
 CHECK_PREFIX = "persona-verdict/"
 RETRIES = 3
 PER_PAGE = 100
@@ -112,7 +113,7 @@ def _gate(work: Path, event: dict[str, Any], env: dict[str, str]) -> tuple[str, 
     """Return (skip reason, {}) or ("", the validated inputs)."""
     repo = env.get("GITHUB_REPOSITORY", "")
     resolution = _read(work / resolve_pr.RESOLUTION)
-    routes_doc = _read(work / route.ROUTES)
+    routes_doc = _read(work / ROUTES)
     if not isinstance(resolution, dict) or not isinstance(routes_doc, dict):
         return "no_prepared_artifact", {}
     if not resolution.get("resolved"):
@@ -120,7 +121,12 @@ def _gate(work: Path, event: dict[str, Any], env: dict[str, str]) -> tuple[str, 
     if not resolution.get("allowlisted"):
         return "author_not_allowlisted", {}
     routes = routes_doc.get("routes")
-    if not isinstance(routes, list) or not routes:
+    carried = routes_doc.get("carried")
+    carried_ids = [c.get("route") for c in carried if isinstance(c, dict)] if isinstance(carried, list) else []
+    if not isinstance(routes, list):
+        return "no_routes", {}
+    routes = [*routes, *carried_ids]
+    if not routes:
         return "no_routes", {}
     run = event.get("workflow_run") if isinstance(event, dict) else None
     head_repo = ((run or {}).get("head_repository") or {}).get("full_name") if isinstance(run, dict) else None

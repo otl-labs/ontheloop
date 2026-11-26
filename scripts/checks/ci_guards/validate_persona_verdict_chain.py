@@ -49,9 +49,9 @@ KEYED_ENVIRONMENTS = frozenset({"smoke", "run", "run-fallback", "post"})
 KEYED_ID_TOKEN = frozenset({"smoke", "refusal", "run", "run-fallback", "post"})
 SNAPSHOT = "${{ runner.temp }}/snapshot"
 WORKDIR = "${{ runner.temp }}/work"
-PIP_SETS = {"prepare": "pyyaml", "wake": "pyyaml"}
+PIP_SETS = {"prepare": "pyyaml pydantic", "wake": "pyyaml"}
 JOB_PERMISSIONS: dict[str, dict[str, str]] = {
-    "prepare": {"contents": "read", "pull-requests": "read", "actions": "read"},
+    "prepare": {"contents": "read", "pull-requests": "read", "actions": "read", "checks": "read"},
     "run": {"contents": "read", "id-token": "write"},
     "run-fallback": {"contents": "read", "id-token": "write"},
     "post": {"checks": "read", "contents": "read", "actions": "read", "id-token": "write"},

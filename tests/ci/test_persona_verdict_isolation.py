@@ -41,13 +41,8 @@ def _materialise_step() -> dict[str, object]:
 def _layout(tmp_path: Path) -> dict[str, Path]:
     workspace = tmp_path / "workspace"
     main = workspace / "main"
-    for rel in ("scripts/personas", "scripts/session", "scripts/ci"):
-        (main / rel).mkdir(parents=True)
-    (main / "scripts/__init__.py").touch()
-    for src in (ROOT / "scripts/personas").glob("*.py"):
-        shutil.copy(src, main / "scripts/personas" / src.name)
-    for rel in ("scripts/session/__init__.py", "scripts/session/merge_checks.py", "scripts/ci/push_scope.py"):
-        shutil.copy(ROOT / rel, main / rel)
+    main.mkdir(parents=True)
+    shutil.copytree(ROOT / "scripts", main / "scripts", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     for rel in ("docs/contracts/executor-personas.yaml", "docs/contracts/personas/canary_persona.yaml"):
         (main / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(ROOT / rel, main / rel)

@@ -5,6 +5,8 @@ from __future__ import annotations
 import ast
 import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +74,33 @@ def _prepare(work: Path, resolution: dict[str, Any] | None = None, routes: list[
 
 def _run(work: Path, env: dict[str, str] | None = None, event: dict[str, Any] | None = None) -> int:
     return wake.wake(work, event or EVENT, {**ENV, **(env or {})}, sleep=lambda _s: None)
+
+
+def test_a_carried_only_run_wakes(tmp_path: Path, fake: Fake) -> None:
+    _prepare(tmp_path, routes=[])
+    (tmp_path / "prepared" / "routes.json").write_text(json.dumps({"routes": [], "carried": [{"route": "route_a"}, 5]}))
+    fake.landed = ["route_a"]
+    assert _run(tmp_path) == 0
+    assert len(fake.posts) == 1 and _marker("route_a") in fake.posts[0]
+    (tmp_path / "prepared" / "routes.json").write_text(json.dumps({"routes": [], "carried": []}))
+    fake.posts.clear()
+    assert _run(tmp_path) == 0 and fake.posts == []
+
+
+def test_wake_routes_path_equals_the_route_verbs() -> None:
+    from scripts.personas import route
+
+    assert wake.ROUTES == route.ROUTES
+
+
+def test_wake_and_override_import_without_pydantic() -> None:
+    code = (
+        "import sys; sys.modules['pydantic'] = None; sys.modules['jsonschema'] = None\n"
+        "import scripts.personas.wake, scripts.personas.override\n"
+        "assert 'scripts.personas.rescout' not in sys.modules\n"
+    )
+    done = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True, check=False)
+    assert done.returncode == 0, done.stderr
 
 
 def _marker(route: str) -> str:

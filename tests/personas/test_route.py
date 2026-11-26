@@ -187,13 +187,54 @@ def test_main_logs_routes_and_writes_the_routes_file(
     files = [_f(f"{route.FIXTURE_DIR}proceed.txt")]
     monkeypatch.setattr(route, "changed_files", lambda *a: (files, False, "m"))
     assert route.main([]) == 0
-    assert capsys.readouterr().out.strip() == "PERSONA-VERDICT routes=1 canary_persona"
+    assert capsys.readouterr().out.strip() == "PERSONA-VERDICT routes=1 canary_persona carried=0"
     assert json.loads((tmp_path / "prepared" / "routes.json").read_text()) == {
         "routes": ["canary_persona"],
         "plan_paths": [],
         "fixture_paths": [f"{route.FIXTURE_DIR}proceed.txt"],
+        "carried": [],
+        "rescout": {},
     }
+    assert not (tmp_path / "prepared" / route.PLAN_INPUTS).exists()
     assert (tmp_path / "out").read_text() == "routes=1\nfixture=true\nfallback_drill=false\n"
+
+
+def test_main_writes_carried_and_rescout_and_keeps_routes_to_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from scripts.personas import rescout
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "prepared").mkdir()
+    resolution = {"resolved": True, "head_sha": "h", "base_ref": "main", "draft": False, "number": 7, "allowlisted": True}
+    (tmp_path / "prepared" / "resolution.json").write_text(json.dumps(resolution))
+    monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "out"))
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    monkeypatch.setattr(route, "changed_files", lambda *a: ([_f(PLAN)], False, "m"))
+    monkeypatch.setattr(route, "route", lambda *a, **k: ["code_reviewer", "decision_scout"])
+    seen: list[Any] = []
+    entry = {"route": "decision_scout", "verdict": "NO_FLAGS"}
+    inputs = {PLAN: {"plan": "p", "sidecar": None}}
+
+    def fake_decide(repo: str, token: Any, res: dict, routes: list, plans: list, unknown: bool, root: Path) -> Any:
+        seen.append((routes, plans, unknown, root))
+        return rescout.Decision(["code_reviewer"], [entry], {}, inputs)
+
+    monkeypatch.setattr(rescout, "decide", fake_decide)
+    assert route.main([]) == 0
+    assert seen == [(["code_reviewer", "decision_scout"], [PLAN], False, tmp_path / "main")]
+    doc = json.loads((tmp_path / "prepared" / "routes.json").read_text())
+    assert doc["routes"] == ["code_reviewer"] and doc["carried"] == [entry] and doc["rescout"] == {}
+    assert json.loads((tmp_path / "prepared" / route.PLAN_INPUTS).read_text()) == inputs
+    assert capsys.readouterr().out.strip() == "PERSONA-VERDICT routes=1 code_reviewer carried=1"
+    assert (tmp_path / "out").read_text().startswith("routes=1\n")
+    monkeypatch.setattr(
+        rescout, "decide", lambda *a: rescout.Decision(["decision_scout"], [], {"decision_scout": "moved"}, None)
+    )
+    assert route.main([]) == 0
+    doc = json.loads((tmp_path / "prepared" / "routes.json").read_text())
+    assert doc["routes"] == ["decision_scout"] and doc["rescout"] == {"decision_scout": "moved"}
 
 
 def test_an_override_resolution_yields_no_routes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 from scripts.personas import app_token, override, post_verdict, resolve_pr
 
@@ -336,3 +337,126 @@ def test_without_a_fallback_result_the_primary_is_judged_as_today(tmp_path: Path
     work, bodies = _fallback_setup(tmp_path, monkeypatch, _out("PROCEED"), None)
     post_verdict.post_all(ROOT, work, "o/r", "t")
     assert "fallback" not in bodies[0][1]["output"]["title"]
+
+
+SCOUT = "decision_scout"
+PLAN_FILE = "docs/plans/PLAN-persona-verdict-scout-carry.yaml"
+SCOUT_OUT = {
+    "outcome": "success",
+    "verdict": "NO_FLAGS",
+    "cite": [{"decision": 205, "title": "t", "reason": "r"}, {"decision": 55, "title": "t", "reason": "r"}],
+    "contradictions": [],
+    "related": [],
+    "spirit": [],
+    "roadmap": {"status": "available", "intersected": 0, "conflict": 0, "related": 0, "rows": []},
+    "north_star": {"serves": "none", "score": 1, "rationale": "r", "engaged": []},
+    "decisions_triaged": 1,
+    "decisions_live": 1,
+}
+FP = "v1:" + "0" * 64
+ENTRY = {
+    "route": SCOUT,
+    "verdict": "BLOCK",
+    "blocking_ids": ["contradict:1"],
+    "titles": {"contradict:1": "bad <!-- x"},
+    "cites": ["dec:205"],
+    "fingerprints": {PLAN_FILE: FP},
+    "from_head": "a" * 40,
+    "from_check_run_id": 5,
+}
+
+
+def _carried_work(tmp_path: Path, entry: dict[str, Any], allowlisted: bool = True) -> Path:
+    work = _prepare(tmp_path, [], allowlisted)
+    res = json.loads((work / "prepared" / "resolution.json").read_text())
+    res["number"] = 7
+    (work / "prepared" / "resolution.json").write_text(json.dumps(res))
+    (work / "prepared" / "routes.json").write_text(json.dumps({"routes": [], "carried": [entry]}))
+    return work
+
+
+def _capture(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    bodies: list[Any] = []
+    monkeypatch.setattr(resolve_pr, "request", lambda m, u, t, b=None, accept="": (bodies.append(b), (201, CREATED))[1])
+    monkeypatch.setenv("GITHUB_RUN_ID", "901")
+    return bodies
+
+
+def test_carried_block_stays_a_failure_and_reuses_no_prior_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bodies = _capture(monkeypatch)
+    looked: list[Any] = []
+    monkeypatch.setattr(post_verdict.override, "lookup", lambda *a: (looked.append(a), None)[1])
+    post_verdict.post_all(ROOT, _carried_work(tmp_path / "a", ENTRY), "o/r", "t")
+    body = bodies[0]
+    assert body["conclusion"] == "failure" and body["output"]["title"] == "verdict BLOCK (carried from aaaaaaa)"
+    assert looked[0][3] == SHA and looked[0][1:3] == ("t", 7)
+    assert "override v1" not in body["output"]["text"]
+    monkeypatch.setattr(post_verdict.override, "lookup", lambda *a: APPROVED)
+    post_verdict.post_all(ROOT, _carried_work(tmp_path / "b", ENTRY), "o/r", "t")
+    assert bodies[1]["conclusion"] == "success"
+    assert post_verdict.rescout.parse_input(bodies[1]["output"]["text"])["carried_from"] == "a" * 40
+
+
+def test_carried_check_rerenders_the_v1_record_for_the_new_head(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bodies = _capture(monkeypatch)
+    monkeypatch.setattr(post_verdict.override, "lookup", lambda *a: None)
+    post_verdict.post_all(ROOT, _carried_work(tmp_path, ENTRY), "o/r", "t")
+    lines = bodies[0]["output"]["text"].split("\n")
+    rec = post_verdict.override.parse_record(lines[0])
+    assert rec and rec["head_sha"] == SHA and rec["run_id"] == "901" and rec["blocking_ids"] == ["contradict:1"]
+    inp = post_verdict.rescout.parse_input(bodies[0]["output"]["text"])
+    assert lines[1].startswith(post_verdict.rescout.INPUT_PREFIX) and inp
+    assert inp["head_sha"] == SHA and inp["run_id"] == "901" and inp["fingerprints"] == {PLAN_FILE: FP}
+    assert "&lt;!-- x" in lines[2]
+    ok = {**ENTRY, "verdict": "NO_FLAGS", "blocking_ids": []}
+    post_verdict.post_all(ROOT, _carried_work(tmp_path / "ok", ok), "o/r", "t")
+    assert bodies[1]["conclusion"] == "success" and bodies[1]["output"]["text"].count("\n") == 0
+    off = _carried_work(tmp_path / "off", ENTRY, allowlisted=False)
+    post_verdict.post_all(ROOT, off, "o/r", "t")
+    assert bodies[2]["conclusion"] == "failure" and "allowlist" in bodies[2]["output"]["title"]
+
+
+def _fresh_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, out: dict[str, Any], inputs: bool = True
+) -> tuple[Path, list[Any]]:
+    contract = yaml.safe_load((ROOT / "docs/contracts/personas/decision_scout.yaml").read_text(encoding="utf-8"))
+    monkeypatch.setattr(post_verdict.execute, "schema_for", lambda root, route, kind: contract["output_schema"])
+    monkeypatch.setattr(post_verdict.execute, "failure_schema_for", lambda root, route: None)
+    work, bodies = _post_setup(tmp_path, monkeypatch, SCOUT, json.dumps(out))
+    if inputs:
+        plan = (ROOT / PLAN_FILE).read_text(encoding="utf-8")
+        (work / "prepared" / "plan_inputs.json").write_text(json.dumps({PLAN_FILE: {"plan": plan, "sidecar": None}}))
+    return work, bodies
+
+
+def test_fresh_covered_check_records_the_cite_merged_fingerprint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    work, bodies = _fresh_work(tmp_path / "a", monkeypatch, SCOUT_OUT)
+    post_verdict.post_all(ROOT, work, "o/r", "t")
+    rec = post_verdict.rescout.parse_input(bodies[0][1]["output"]["text"])
+    assert rec and rec["cites"] == ["dec:205", "dec:55"] and rec["verdict"] == "NO_FLAGS" and rec["carried_from"] is None
+    plan = (ROOT / PLAN_FILE).read_text(encoding="utf-8")
+    want = post_verdict.rescout.fingerprints({PLAN_FILE: {"plan": plan, "sidecar": None}}, ROOT, rec["cites"])
+    assert rec["fingerprints"] == want and rec["head_sha"] == SHA and rec["run_id"] == "900"
+    work, bodies = _fresh_work(tmp_path / "b", monkeypatch, SCOUT_OUT, inputs=False)
+    post_verdict.post_all(ROOT, work, "o/r", "t")
+    assert "text" not in bodies[0][1]["output"]
+    work, bodies = _fresh_work(tmp_path / "c", monkeypatch, {"outcome": "failure", "failure": "input_unusable", "detail": "d"})
+    post_verdict.post_all(ROOT, work, "o/r", "t")
+    assert "text" not in bodies[0][1]["output"]
+
+
+def test_override_form_keeps_the_input_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    line = post_verdict.rescout.render_input(SCOUT, SHA, "BLOCK", [], {PLAN_FILE: FP}, "3", None)
+    source = post_verdict.rescout.with_input(post_verdict.override.render_record(SCOUT, SHA, "BLOCK", ["c:1"], "3"), line)
+    approved = {**APPROVED, "approved_at": "t"}
+    text = post_verdict._override_form(approved, "BLOCK", ["c:1"], source.split("\n")[0], source)[2].split("\n")
+    assert text[0].startswith(post_verdict.override.RECORD_PREFIX) and text[1] == line
+    assert text[2].startswith(post_verdict.override.OVERRIDE_PREFIX) and len(text) == 3
+    plain = post_verdict._override_form(approved, "BLOCK", ["c:1"], source.split("\n")[0])[2].split("\n")
+    assert len(plain) == 2 and plain[1].startswith(post_verdict.override.OVERRIDE_PREFIX)
+    work = _override_resolution(tmp_path)
+    rec = {"route": BLOCK, "head_sha": SHA, "verdict": "BLOCK", "blocking_ids": ["line:1", "line:2"], "run_id": "9"}
+    monkeypatch.setattr(post_verdict.override, "origin", lambda *a: (rec, source))
+    bodies = _capture(monkeypatch)
+    post_verdict.post_all(ROOT, work, "o/r", "t")
+    assert bodies[0]["output"]["text"].split("\n")[1] == line
