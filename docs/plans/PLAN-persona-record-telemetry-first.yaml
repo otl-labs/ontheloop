@@ -1,0 +1,122 @@
+schema_version: 7
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: persona-record-telemetry-first
+intent: >-
+  A persona run that spent model tokens always yields its model_call telemetry rows: keyed_run.record maps the
+  launcher's events before the guidance capture can refuse the record, so a guidance failure still fails the verdict
+  closed (input_unusable) but no longer hides the run's cost (rec-5663).
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-persona-record-telemetry-first.yaml
+phase: >-
+  T4.32 (persona foundation), persona telemetry leg: a follow-on of rec-5605's record capture (PLAN-persona-guidance-chain-fill).
+  No exit criterion is closed.
+closes_criteria: []
+cites: []
+amends: []
+introduces: []
+scope:
+  - file: scripts/personas/keyed_run.py
+    action: Modify
+    purpose: >-
+      _record(): move the one _telemetry(env, work, results, route, result.get("events"), root) call from the end of the
+      function to directly after the `result is None` early return, so it runs for every launcher result before
+      execute.guidance_slots, the declared-slot read and image_pin.load_pin. The guidance_slots ValueError and
+      missing-slot branches still write {route, failure: input_unusable} and return 0; the success record and the
+      telemetry status/rows files are byte-unchanged. No other behaviour changes.
+  - file: tests/personas/test_execute.py
+    action: Modify
+    purpose: >-
+      Add test_record_telemetry_survives_guidance_failure: with sidecar_bytes and telemetry_rows.main monkeypatched
+      (main records its argv and returns 0) and a launcher result carrying an events dict, both guidance failure modes
+      (guidance_slots raising ValueError; a declared slot absent from the prepared input) still write
+      {route, failure: input_unusable} to results/<route>.json AND call telemetry_rows.main once with the staged
+      telemetry-in/<route>/events.json equal to the result's events. Additive; existing nodes unchanged.
+bundled_recommendations: [rec-5663]
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - tests/personas/test_execute.py::test_record_telemetry_survives_guidance_failure passes, and fails before the keyed_run.py change (telemetry_rows.main is never called on either guidance failure).
+  - "A guidance failure still records route plus failure input_unusable; a successful run's record and telemetry output are unchanged (existing record nodes stay green)."
+  - rec-5663 is closed by the build's squash-merge Resolves trailer.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The rec's acceptance node passes.
+    command: bin/venv-python -m pytest tests/personas/test_execute.py::test_record_telemetry_survives_guidance_failure -q
+    expected: exit 0 with 1 passed; before the keyed_run.py change the node fails (no telemetry call on a guidance failure)
+    fix_if: the node fails; _telemetry still runs after the guidance branches; fix the call order, never the test
+    hermetic: true
+    expected_literals: ["1 passed"]
+    graduation: graduate
+    graduation_check_id: persona-record-telemetry-first
+  - step: 2
+    phase: pre-deploy
+    action: The existing record nodes stay green (fail-closed guidance capture and success record unchanged).
+    command: >-
+      bin/venv-python -m pytest tests/personas/test_execute.py::test_record_keeps_guidance_slot_values
+      tests/personas/test_execute.py::test_record_without_a_launcher_result
+      tests/personas/test_execute.py::test_record_carries_a_failure_file
+      tests/personas/test_execute.py::test_probe_route_is_gone_and_fixture_route_runs_pinned_image -q
+    expected: exit 0 with 4 passed
+    fix_if: a node fails; the move changed a record's content or a failure branch; fix the code, never the test
+    hermetic: true
+    expected_literals: ["4 passed"]
+    graduation: waive
+    graduation_waiver_reason: Re-runs existing nodes; the guidance and fixture-record ones already sit in graduated shards persona-guidance-chain-guards and persona-verdict-fixture-run-units.
+  - step: 3
+    phase: pre-deploy
+    action: Full tier, then HEAD attestation, after the build commit and rebase and before the push; start it backgrounded from the top-level session with a 2 h limit and HOME set to an empty directory.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: the full tier exits 0 and the validation result attests the current HEAD's tree
+    fix_if: any failure; fix and rerun the full tier from the start
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion).
+  - step: 4
+    phase: post-deploy
+    action: rec-5663 closed by the build's squash-merge Resolves trailer once its acceptance holds.
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import make_reader;
+      r=make_reader(profile='agent_platform').named('recs_by_ids', ids=['rec-5663']); print(r[0]['id'], r[0]['status'])"
+    expected: Prints rec-5663 closed.
+    fix_if: Still open after the closure job ran; read ci.yml's closure job log and report to the plan owner.
+    hermetic: false
+test_obligations:
+  - source: scripts/personas/keyed_run.py
+    behavior: a launcher result's events are mapped to telemetry rows even when guidance capture records input_unusable
+    verification_step: 1
+    test_selector: tests/personas/test_execute.py::test_record_telemetry_survives_guidance_failure
+    red_green_expectation: red before (telemetry_rows.main never called on a guidance failure), green after
+  - source: tests/personas/test_execute.py
+    behavior: the new node is additive; existing record nodes stay green
+    verification_step: 2
+    test_selector: tests/personas/test_execute.py::test_record_keeps_guidance_slot_values
+    red_green_expectation: green before and after
+constraints:
+  - "No workflow, persona contract, telemetry_rows or sidecar change; only the call order in _record moves."
+  - "No existing test, assertion or check rule is loosened (Decisions 181, 235)."
+  - "No rescue agents or workaround loops (Decision 55)."
+context:
+  - "rec-5663 (Medium, XS, follow-on found in rec-5605's code review, build #2488); persona telemetry is ours."
+  - "Fork decided with notice: one call moved ahead of the guidance branches, not _telemetry duplicated into each early return; the move also keeps telemetry when image_pin.load_pin raises (record still raises, as test_record_keeps_guidance_slot_values asserts). The failure-file branch is unchanged: prepared_request refuses a route with a failure file, so no model call is made."
+  - "Graduated shards persona-guidance-chain-guards, persona-verdict-fixture-run-units and persona-verdict-fallback-run-units kept: their test_execute.py nodes are unchanged; the new node is additive."
+  - "Overlap: PLAN-canary-guidance-eval-cases (unbuilt) also scopes tests/personas/test_execute.py (234 of 500 SLOC); keyed_run.py is 333 of 500. No ordering edge; whichever builds second rebases."
+  - "Decision-scout r1 NO_FLAGS (fingerprint v1:139e99680d067654a503ef6e6451c0897c7f2e923b4414f5fbe24ae17b60e0ed): CITE none. RELATED 280, 231, 199, 221, 229, 235, 181, 55. Decisions triaged: 235 of 235. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2."
+  - "Serves: NS.6 3/5 -- a persona run's spend no longer goes missing on a guidance failure, so Decision 221 cl.1's PROCESS-layer token measures stay complete."
+  - "Build note: _telemetry has no direct test today; the new node monkeypatches keyed_run.sidecar_bytes (returns bytes) and keyed_run.telemetry_rows.main, and reads work/telemetry-in/<route>/events.json."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: NO_FLAGS, scout_input_fingerprint: "v1:139e99680d067654a503ef6e6451c0897c7f2e923b4414f5fbe24ae17b60e0ed"}  # pragma: allowlist secret
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - scripts/personas/keyed_run.py -- move the _telemetry call in _record to directly after the `result is None` return
+  - tests/personas/test_execute.py -- add test_record_telemetry_survives_guidance_failure; confirm it fails before the move
+  - Execute Verification Plan -- run each step; loop until pass (Decision 55)
+  - 'Report: what was implemented, verification results'
