@@ -39,13 +39,24 @@ def test_decision_records_consult_escalation_authority() -> None:
 def test_planning_skill_routes_convergence_escalations_to_consult() -> None:
     planning = _read(".claude/skills/planning/SKILL.md")
     for phrase in (
-        "for this gate alone (the Decision Scout and Report Critique gates escalate to the human)",
-        "a convergence escalation (any trigger but the last) goes to a consult per the `consult` skill",
+        "or the consult a convergence one (`consult` skill, Decision",
+        "Revisit after 10 contested escalations (`consult` skill)",
+    ):
+        assert phrase in planning, phrase
+    assert "It recommends a disposition and decides nothing" not in planning
+    assert "or the consult a convergence escalation" in _read(".claude/commands/plan.md")
+    consult = _read(".claude/skills/consult/SKILL.md")
+    for phrase in (
+        "except a convergence escalation routed to it",
+        "records the choice without rejecting it",
+        "or any convergence escalation routed to it",
+        "for the plan-critique gate alone (the Decision Scout and Report Critique gates escalate to the human)",
+        "goes to a consult, which may only rule whether each disputed finding holds",
         "It decides once per finding",
         "any escalation after its one more round",
         "once per plan",
         "a finding that the plan weakens verification (Decision 235 cl.1)",
-        "`escalation_decider`",
+        "`escalation_decider: consult`",
         (
             "recorded on the consult's row as `overrides_consult: true` with their `override_choice`, which then counts as "
             "the row's choice"
@@ -53,25 +64,16 @@ def test_planning_skill_routes_convergence_escalations_to_consult() -> None:
         "An override made after a later round is also the human's answer on the latest plan-critique row",
         "after the series' final PROCEED, record it on the consult's row alone",
         "both positions unattributed",
-        "the consult does not read `gate_rounds` or `context`",
         "quotes each anchor's field text",
         "where it holds: fix it",
         "hands the escalation back to the human",
         "reopens the loop under that choice",
-        "(every row with `escalation_decider: consult`)",
-        "(a later escalated row in that plan that the human decided)",
-    ):
-        assert phrase in planning, phrase
-    assert "It recommends a disposition and decides nothing" not in planning
-    assert "or the consult a convergence escalation" in _read(".claude/commands/plan.md")
-    consult = _read(".claude/skills/consult/SKILL.md")
-    for phrase in (
-        "except a convergence escalation the planning skill's Escalate rule routes to it",
-        "records the choice without rejecting it",
         "holds, does not hold or cannot determine",
+        "do not read the plan's `gate_rounds` or `context`",
         "No ruling: <reason>; missing: <what would settle it>",
         "guard-input (5c) or category-consistency (12p)",
-        "or any convergence escalation the planning skill's Escalate rule routes to it",
+        "(every row with `escalation_decider: consult`)",
+        "(a later escalated row in that plan that the human decided)",
     ):
         assert phrase in consult, phrase
 
