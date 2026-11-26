@@ -224,12 +224,14 @@ class TestFailOver:
                 go(is_async)
         assert exc.value.kind == "missing_credential" and exc.value.attempts == () and len(seen) == 0
 
-        def disable(provider: dict, _config: dict) -> None:
-            personas = provider["model_id_formats"]["litellm_persona_selection"]["personas"]
-            personas[list(personas)[-1]][FALLBACK]["thinking"] = "disabled"
+        def disable(provider: dict, config: dict) -> None:
+            last = provider["model_id_formats"]["litellm_persona_selection"]["personas"][-1]
+            rows = {r["id"]: r for r in config["settings"] if r.get("id", "").startswith("project.capability_class.")}
+            members = rows["project.capability_class.members"]["defaults"]["local"]
+            rows["project.capability_class.classes"]["defaults"]["local"][members[last]][FALLBACK]["thinking"] = "disabled"
 
         root = cap.contracts_copy(tmp_path, disable)
-        persona = list(tier_selection.load(root)[0]["model_id_formats"]["litellm_persona_selection"]["personas"])[-1]
+        persona = tier_selection.load(root)[0]["model_id_formats"]["litellm_persona_selection"]["personas"][-1]
         with cap.capture([cap.anthropic_body()]):
             litellm_cold_start.ensure_asserted(FALLBACK, root=root)
         with cap.capture([cap.anthropic_body()]) as seen:

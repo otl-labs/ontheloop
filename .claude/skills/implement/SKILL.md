@@ -84,7 +84,7 @@ Track Attempts per step (see VP Compliance Gate below). This rule governs what a
 ### Deviation trigger
 Three branches for a decision point hit during implementation (full detail:
 `docs/contracts/implement-scope-boundary.yaml` `deviation_trigger`):
-(a) in-scope under-specification -- decide inline; dispatch a `model:"fable"` consult per
+(a) in-scope under-specification -- decide inline; dispatch a consult per
 `.claude/skills/consult/SKILL.md` when load-bearing or novel,
 recorded either way.
 (b) scope or contract deviation, or any always-ask surface -- STOP and raise the alarm; no consult

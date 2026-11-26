@@ -177,9 +177,12 @@ _REAL_CONTRACTS = Path(__file__).resolve().parents[3] / "docs" / "contracts"
 _PROJECT_CONFIG_NAME = "project-configuration.yaml"
 
 
-def _copy_real_contracts(target: Path) -> None:
-    for name in (_CONTRACT_NAME, _PROJECT_CONFIG_NAME):
-        shutil.copy(_REAL_CONTRACTS / name, target / name)
+def _copy_real_contracts(target: Path) -> Path:
+    contracts = target / "docs" / "contracts"
+    contracts.mkdir(parents=True)
+    for name in (_CONTRACT_NAME, _PROJECT_CONFIG_NAME, "executor-personas.yaml"):
+        shutil.copy(_REAL_CONTRACTS / name, contracts / name)
+    return contracts
 
 
 class TestTierSelectionLeg:
@@ -193,17 +196,17 @@ class TestTierSelectionLeg:
         assert " persona-role pairs." in out
 
     def test_copies_of_real_contracts_pass(self, tmp_path: Path) -> None:
-        _copy_real_contracts(tmp_path)
+        contracts = _copy_real_contracts(tmp_path)
 
         failed: list[str] = []
-        validate_inference_provider_registry(failed, contracts_dir=tmp_path)
+        validate_inference_provider_registry(failed, contracts_dir=contracts)
 
         assert failed == []
 
     def test_same_vendor_fixture_fails_naming_rule(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        _copy_real_contracts(tmp_path)
-        provider = yaml.safe_load((tmp_path / _CONTRACT_NAME).read_text(encoding="utf-8"))
-        config = yaml.safe_load((tmp_path / _PROJECT_CONFIG_NAME).read_text(encoding="utf-8"))
+        contracts = _copy_real_contracts(tmp_path)
+        provider = yaml.safe_load((contracts / _CONTRACT_NAME).read_text(encoding="utf-8"))
+        config = yaml.safe_load((contracts / _PROJECT_CONFIG_NAME).read_text(encoding="utf-8"))
         rows = provider["model_id_formats"]["litellm_tier_models"]
         for field in ("provider", "models", "default_model"):
             rows["tier_2"][field] = rows["tier_1"][field]
@@ -211,30 +214,30 @@ class TestTierSelectionLeg:
         by_id["ports.run_persona.litellm.api_key.warm_fetched_escape_hatch"]["variable"] = by_id[
             "ports.run_persona.litellm.api_key.primary"
         ]["variable"]
-        (tmp_path / _CONTRACT_NAME).write_text(yaml.safe_dump(provider), encoding="utf-8")
-        (tmp_path / _PROJECT_CONFIG_NAME).write_text(yaml.safe_dump(config), encoding="utf-8")
+        (contracts / _CONTRACT_NAME).write_text(yaml.safe_dump(provider), encoding="utf-8")
+        (contracts / _PROJECT_CONFIG_NAME).write_text(yaml.safe_dump(config), encoding="utf-8")
 
         failed: list[str] = []
-        validate_inference_provider_registry(failed, contracts_dir=tmp_path)
+        validate_inference_provider_registry(failed, contracts_dir=contracts)
 
         assert any("2(b) vendor_independence" in f for f in failed)
         assert "PASS" not in capsys.readouterr().out
 
     def test_missing_project_configuration_fails_naming_file(self, tmp_path: Path) -> None:
-        _copy_real_contracts(tmp_path)
-        (tmp_path / _PROJECT_CONFIG_NAME).unlink()
+        contracts = _copy_real_contracts(tmp_path)
+        (contracts / _PROJECT_CONFIG_NAME).unlink()
 
         failed: list[str] = []
-        validate_inference_provider_registry(failed, contracts_dir=tmp_path)
+        validate_inference_provider_registry(failed, contracts_dir=contracts)
 
         assert any(_PROJECT_CONFIG_NAME in f for f in failed)
 
     def test_unparseable_project_configuration_fails_naming_file(self, tmp_path: Path) -> None:
-        _copy_real_contracts(tmp_path)
-        (tmp_path / _PROJECT_CONFIG_NAME).write_text("a: [unclosed\n", encoding="utf-8")
+        contracts = _copy_real_contracts(tmp_path)
+        (contracts / _PROJECT_CONFIG_NAME).write_text("a: [unclosed\n", encoding="utf-8")
 
         failed: list[str] = []
-        validate_inference_provider_registry(failed, contracts_dir=tmp_path)
+        validate_inference_provider_registry(failed, contracts_dir=contracts)
 
         assert any(_PROJECT_CONFIG_NAME in f for f in failed)
 
@@ -281,3 +284,141 @@ def test_local_server_rows_state_how_credential_holder_applies() -> None:
     failed: list[str] = []
     validate_inference_provider_registry(failed, contracts_dir=path.parent)
     assert failed == []
+
+
+def _load(path: Path) -> dict:
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+def _run(contracts: Path) -> list[str]:
+    failed: list[str] = []
+    validate_inference_provider_registry(failed, contracts_dir=contracts)
+    return failed
+
+
+def _config_row(config: dict, row_id: str) -> dict:
+    return next(r for r in config["settings"] if r.get("id") == row_id)
+
+
+class TestCapabilityClass:
+    def _edit(self, contracts: Path, name: str, fn) -> None:
+        doc = _load(contracts / name)
+        fn(doc)
+        (contracts / name).write_text(yaml.safe_dump(doc), encoding="utf-8")
+
+    def test_real_tree_passes(self) -> None:
+        assert _run(_REAL_CONTRACTS) == []
+
+    def test_copy_passes(self, tmp_path: Path) -> None:
+        assert _run(_copy_real_contracts(tmp_path)) == []
+
+    def test_registry_persona_with_no_member_fails(self, tmp_path: Path) -> None:
+        contracts = _copy_real_contracts(tmp_path)
+
+        def drop(c: dict) -> None:
+            members = _config_row(c, "project.capability_class.members")["defaults"]
+            del members["local"]["implement_agent"], members["cloud"]["implement_agent"]
+
+        self._edit(contracts, _PROJECT_CONFIG_NAME, drop)
+        assert any("implement_agent has no member row" in f for f in _run(contracts))
+
+    def test_rule_a_breach_fails_and_tier_leg_refusal_still_reports(self, tmp_path: Path) -> None:
+        contracts = _copy_real_contracts(tmp_path)
+
+        def breach(c: dict) -> None:
+            members = _config_row(c, "project.capability_class.members")["defaults"]
+            members["local"]["plan_critic"] = members["cloud"]["plan_critic"] = "recall"
+
+        self._edit(contracts, _PROJECT_CONFIG_NAME, breach)
+        self._edit(contracts, _CONTRACT_NAME, lambda p: p["tier_model"]["tiers"].pop(0))
+        failed = _run(contracts)
+        assert any("rule (a)" in f for f in failed)
+        assert any("tier selection refused" in f for f in failed)
+
+    def test_platform_yaml_key_fails_while_current_home_null(self, tmp_path: Path) -> None:
+        contracts = _copy_real_contracts(tmp_path)
+        (tmp_path / "ontheloop").mkdir()
+        (tmp_path / "ontheloop" / "platform.yaml").write_text("project: {capability_class: {}}\n", encoding="utf-8")
+        assert any("platform.yaml" in f and "current_home is null" in f for f in _run(contracts))
+
+    def test_unparseable_and_non_mapping_platform_yaml_fail(self, tmp_path: Path) -> None:
+        contracts = _copy_real_contracts(tmp_path)
+        (tmp_path / "ontheloop").mkdir()
+        platform = tmp_path / "ontheloop" / "platform.yaml"
+        platform.write_text("a: [unclosed\n", encoding="utf-8")
+        assert any("platform.yaml" in f and "could not be read" in f for f in _run(contracts))
+        platform.write_text("- a\n", encoding="utf-8")
+        assert any("platform.yaml" in f and "not a YAML mapping" in f for f in _run(contracts))
+        platform.write_text("other: 1\n", encoding="utf-8")
+        assert _run(contracts) == []
+
+    @pytest.mark.parametrize("mode", ["absent", "unparseable", "no_list", "bad_entry"])
+    def test_executor_personas_problems_fail_naming_the_file(self, tmp_path: Path, mode: str) -> None:
+        contracts = _copy_real_contracts(tmp_path)
+        target = contracts / "executor-personas.yaml"
+        if mode == "absent":
+            target.unlink()
+        elif mode == "unparseable":
+            target.write_text("a: [unclosed\n", encoding="utf-8")
+        elif mode == "no_list":
+            target.write_text("personas: 3\n", encoding="utf-8")
+        else:
+            doc = _load(target)
+            doc["personas"].append({"name": "x"})
+            target.write_text(yaml.safe_dump(doc), encoding="utf-8")
+        assert any("executor-personas.yaml" in f for f in _run(contracts))
+
+    def test_non_mapping_shapes_become_findings(self, tmp_path: Path) -> None:
+        contracts = _copy_real_contracts(tmp_path)
+
+        def shapes(c: dict) -> None:
+            classes = _config_row(c, "project.capability_class.classes")["defaults"]
+            for side in ("local", "cloud"):
+                classes[side]["recall"]["primary"] = "oops"
+                classes[side]["build"] = "oops"
+                classes[side]["reason"]["extra"] = {}
+                classes[side]["consult"]["primary"]["model"] = "x"
+            members = _config_row(c, "project.capability_class.members")["defaults"]
+            members["local"]["recon"] = members["cloud"]["recon"] = 5
+
+        self._edit(contracts, _PROJECT_CONFIG_NAME, shapes)
+        failed = _run(contracts)
+        for fragment in (
+            "is not a mapping",
+            "not primary or warm_fetched_escape_hatch",
+            "not thinking or effort",
+            "non-string class",
+        ):
+            assert any(fragment in f for f in failed), fragment
+
+    def test_absent_block_and_duplicate_values_fail(self, tmp_path: Path) -> None:
+        contracts = _copy_real_contracts(tmp_path)
+        self._edit(contracts, _CONTRACT_NAME, lambda p: p.pop("capability_class"))
+        assert any("no capability_class mapping" in f for f in _run(contracts))
+        contracts2 = _copy_real_contracts(tmp_path / "two")
+        self._edit(contracts2, _CONTRACT_NAME, lambda p: p["capability_class"]["values"].append("recall"))
+        assert any("capability_class.values" in f for f in _run(contracts2))
+
+    def test_unparseable_project_configuration_and_platform_free_tree_fail(self, tmp_path: Path) -> None:
+        contracts = _copy_real_contracts(tmp_path)
+        (contracts / _PROJECT_CONFIG_NAME).write_text("a: [unclosed\n", encoding="utf-8")
+        assert any("capability_class leg" in f and _PROJECT_CONFIG_NAME in f for f in _run(contracts))
+
+    def test_missing_project_configuration_reports_and_executor_checks_still_run(self, tmp_path: Path) -> None:
+        contracts = _copy_real_contracts(tmp_path)
+        (contracts / _PROJECT_CONFIG_NAME).unlink()
+        (contracts / "executor-personas.yaml").unlink()
+        failed = [f for f in _run(contracts) if "capability_class leg" in f]
+        assert any(_PROJECT_CONFIG_NAME in f for f in failed)
+        assert any("executor-personas.yaml" in f for f in failed)
+
+    def test_rule_a_scout_above_critic_fails(self, tmp_path: Path) -> None:
+        contracts = _copy_real_contracts(tmp_path)
+
+        def invert(c: dict) -> None:
+            members = _config_row(c, "project.capability_class.members")["defaults"]
+            for side in ("local", "cloud"):
+                members[side]["plan_critic"], members[side]["decision_scout"] = "recall", "reason"
+
+        self._edit(contracts, _PROJECT_CONFIG_NAME, invert)
+        assert any("rule (a)" in f for f in _run(contracts))

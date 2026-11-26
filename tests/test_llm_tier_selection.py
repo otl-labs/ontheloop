@@ -47,9 +47,30 @@ def _same_vendor(provider: dict[str, Any], config: dict[str, Any]) -> None:
     _key_row(config, _FALLBACK_KEY_ROW)["variable"] = _key_row(config, _PRIMARY_KEY_ROW)["variable"]
 
 
+def _rows(config: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    return (
+        _key_row(config, "project.capability_class.members")["defaults"]["local"],
+        _key_row(config, "project.capability_class.classes")["defaults"]["local"],
+    )
+
+
+def _class_setting(config: dict[str, Any], persona: str, role: str) -> dict[str, Any]:
+    members, classes = _rows(config)
+    return classes[members[persona]][role]
+
+
+def test_settings_come_from_capability_class(real) -> None:
+    provider, config = real
+    assert _resolve(real, "decision_scout", "primary").effort == "low"
+    assert _resolve(real, "plan_critic", "primary").effort == "max"
+    assert _resolve(real, "plan_critic", "warm_fetched_escape_hatch").effort == "high"
+    assert _resolve(real, "code_reviewer", "primary").effort == "high"
+    _rows(config)[1]["recall"]["primary"]["effort"] = "high"
+    assert _resolve(real, "decision_scout", "primary").effort == "high"
+
+
 def test_real_tree_resolves_every_persona_and_role(real) -> None:
     provider, config = real
-    persona_block = provider["model_id_formats"]["litellm_persona_selection"]["personas"]
     selections = ts.resolve_all(inference_provider=provider, project_configuration=config)
     assert len(selections) >= 6
     seen = {(s.persona, s.role) for s in selections}
@@ -60,8 +81,8 @@ def test_real_tree_resolves_every_persona_and_role(real) -> None:
         tier = _tiers(provider)[s.role]
         row = _models(provider)[tier["selection_ref"].rsplit(".", 1)[-1]]
         assert s.model == row["default_model"]
-        assert s.thinking == persona_block[s.persona][s.role]["thinking"]
-        assert s.effort == persona_block[s.persona][s.role]["effort"]
+        assert s.thinking == _class_setting(config, s.persona, s.role)["thinking"]
+        assert s.effort == _class_setting(config, s.persona, s.role)["effort"]
         assert s.billing_shape == tier["billing_shape"]
         assert s.cold_start_assertion == tier["cold_start_assertion"]
         assert s.env_name == _key_row(config, ts._ENV_ROW_PREFIX + s.role)["variable"]
@@ -165,16 +186,143 @@ def test_cold_start_assertion_refused(real) -> None:
 
 
 def test_persona_missing_role_refused(real) -> None:
-    del real[0]["model_id_formats"]["litellm_persona_selection"]["personas"]["plan_critic"]["primary"]
-    with pytest.raises(ts.TierSelectionError, match="persona_settings"):
+    members, classes = _rows(real[1])
+    del classes[members["plan_critic"]]["primary"]
+    with pytest.raises(ts.TierSelectionError, match="capability_class"):
         _resolve(real, "plan_critic", "primary")
 
 
 @pytest.mark.parametrize("key", ["thinking", "effort"])
 def test_setting_outside_vocabulary_refused(real, key: str) -> None:
-    real[0]["model_id_formats"]["litellm_persona_selection"]["personas"]["plan_critic"]["primary"][key] = "bogus"
+    members, classes = _rows(real[1])
+    classes[members["plan_critic"]]["primary"][key] = "bogus"
     with pytest.raises(ts.TierSelectionError, match="persona_settings"):
         _resolve(real, "plan_critic", "primary")
+
+
+@pytest.mark.parametrize(
+    "mutate", ["no_members_row", "member_missing", "member_non_string", "class_missing", "personas_non_string"]
+)
+def test_capability_class_refusals(real, mutate: str) -> None:
+    provider, config = real
+    members, classes = _rows(config)
+    if mutate == "no_members_row":
+        config["settings"] = [r for r in config["settings"] if r.get("id") != "project.capability_class.members"]
+    elif mutate == "member_missing":
+        del members["plan_critic"]
+    elif mutate == "member_non_string":
+        members["plan_critic"] = ["reason"]
+    elif mutate == "class_missing":
+        del classes["reason"]
+    else:
+        provider["model_id_formats"]["litellm_persona_selection"]["personas"].append(7)
+    with pytest.raises(ts.TierSelectionError, match="capability_class"):
+        _resolve(real, "plan_critic", "primary")
+
+
+def test_member_row_alone_does_not_admit_a_persona(real) -> None:
+    _rows(real[1])[0]["recon"] = "recall"
+    with pytest.raises(ts.TierSelectionError, match="unknown_persona"):
+        _resolve(real, "recon", "primary")
+
+
+def _findings(real) -> list[str]:
+    return ts.capability_class_findings(real[0], real[1], ["implement_agent", "plan_agent", "code_reviewer"])
+
+
+def test_real_tree_has_no_capability_class_findings(real) -> None:
+    assert _findings(real) == []
+
+
+def _drop_row(real) -> None:
+    real[1]["settings"] = [r for r in real[1]["settings"] if r.get("id") != "project.capability_class.classes"]
+
+
+def _cloud_differs(real) -> None:
+    _key_row(real[1], "project.capability_class.members")["defaults"]["cloud"] = {}
+
+
+def _unknown_class(real) -> None:
+    _rows(real[1])[0]["recon"] = "bogus"
+
+
+def _extra_class(real) -> None:
+    _rows(real[1])[1]["bogus"] = copy.deepcopy(_rows(real[1])[1]["recall"])
+
+
+def _extra_role_key(real) -> None:
+    _rows(real[1])[1]["recall"]["extra"] = {}
+
+
+def _extra_setting_key(real) -> None:
+    _rows(real[1])[1]["recall"]["primary"]["model"] = "x"
+
+
+def _bad_effort(real) -> None:
+    _rows(real[1])[1]["recall"]["primary"]["effort"] = "bogus"
+
+
+def _bad_model(real) -> None:
+    _rows(real[1])[1]["recall"]["claude_code_model"] = "gpt"
+
+
+def _no_member(real) -> None:
+    del _rows(real[1])[0]["decision_scout"]
+
+
+def _rule_a_same_class(real) -> None:
+    _rows(real[1])[0]["plan_critic"] = "recall"
+
+
+def _rule_a_inverted(real) -> None:
+    members = _rows(real[1])[0]
+    members["plan_critic"], members["decision_scout"] = "recall", "reason"
+
+
+def _non_mapping_entry(real) -> None:
+    _rows(real[1])[1]["recall"] = "oops"
+
+
+def _non_mapping_role(real) -> None:
+    _rows(real[1])[1]["recall"]["primary"] = "oops"
+
+
+def _non_mapping_defaults(real) -> None:
+    _key_row(real[1], "project.capability_class.classes")["defaults"] = "oops"
+
+
+def _non_string_member(real) -> None:
+    _rows(real[1])[0]["recon"] = 5
+
+
+def _non_string_persona(real) -> None:
+    real[0]["model_id_formats"]["litellm_persona_selection"]["personas"].append(["x"])
+
+
+@pytest.mark.parametrize(
+    ("mutate", "fragment"),
+    [
+        (_drop_row, "is missing"),
+        (_cloud_differs, "differs from defaults.cloud"),
+        (_unknown_class, "which the classes row lacks"),
+        (_extra_class, "outside capability_class.values"),
+        (_extra_role_key, "not primary or warm_fetched_escape_hatch"),
+        (_extra_setting_key, "not thinking or effort"),
+        (_bad_effort, "outside the vocabulary"),
+        (_bad_model, "claude_code_model_values"),
+        (_no_member, "has no member row"),
+        (_rule_a_same_class, "rule (a)"),
+        (_rule_a_inverted, "rule (a)"),
+        (_non_mapping_entry, "is not a mapping"),
+        (_non_mapping_role, "is not a mapping"),
+        (_non_mapping_defaults, "is not a mapping"),
+        (_non_string_member, "non-string class"),
+        (_non_string_persona, "is not a string"),
+    ],
+)
+def test_capability_class_findings(real, mutate, fragment: str) -> None:
+    mutate(real)
+    assert any(fragment in f for f in _findings(real))
 
 
 def test_missing_api_key_row_refused(real) -> None:
