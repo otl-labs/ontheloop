@@ -75,3 +75,7 @@ def on_main(repo: Path) -> None:
 
 def merge_base(repo: Path) -> str:
     return git(repo, "merge-base", "main", "pr")
+
+
+def merge_base_of(repo: Path) -> str:
+    return git(repo, "rev-parse", "HEAD")
