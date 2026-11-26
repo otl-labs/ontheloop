@@ -251,3 +251,28 @@ def test_compute_automatable_refuses_instruction_surfaces(monkeypatch: pytest.Mo
     ):
         assert risk_scoring.compute_automatable(path, "S") is False, path
     assert risk_scoring.compute_automatable("scripts/unrelated_helper.py", "S") is True
+
+
+def test_claude_md_and_agent_definitions_are_boundary_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    patterns = _patterns()
+    claude_md = [p for p in _tracked("*CLAUDE.md") if p.rsplit("/", 1)[-1] == "CLAUDE.md"]
+    agents = _tracked(".claude/agents/")
+    assert "CLAUDE.md" in claude_md
+    assert any("/" in p for p in claude_md)
+    assert agents
+    missing = [p for p in claude_md + agents if not _covered(p, patterns)]
+    assert not missing, missing
+
+    without_claude_md = [p for p in patterns if "CLAUDE.md" not in p]
+    without_agents = [p for p in patterns if ".claude/agents/" not in p]
+    assert len(without_claude_md) < len(patterns)
+    assert len(without_agents) < len(patterns)
+    nested = [p for p in claude_md if "/" in p]
+    assert any(not _covered(p, without_claude_md) for p in nested)
+    assert any(not _covered(p, without_agents) for p in agents)
+
+    monkeypatch.setattr(risk_scoring, "_compute_risk_score", lambda *_a, **_k: 0.0)
+    monkeypatch.setattr(risk_scoring, "_capabilities_cache", None)
+    for path in ("scripts/CLAUDE.md", ".claude/agents/scheduled/ci-rca.md"):
+        assert risk_scoring.compute_automatable(path, "S") is False, path
+    assert risk_scoring.compute_automatable("scripts/unrelated_helper.py", "S") is True
