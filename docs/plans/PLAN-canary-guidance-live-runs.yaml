@@ -41,8 +41,9 @@ scope:
       inputs_sha256(root, persona): sha256 over contract_version, rendered_prompt_sha256, each case's sha256 read
       through guidance.case_file, and sha256(expected_notes). Records: tests/fixtures/persona_verdict/guidance_eval/
       <persona>.records.yaml, {records: [...], discarded: [...]}, unknown keys refused at every level. A record is
-      {case: baseline or a manifest case, outcome, check_title, check_run_id: positive int, run_id: positive int (a
-      bool refused), main_sha and head_sha: 40 hex, role, model_id: ^[A-Za-z0-9._:/-]+$, image_digest:
+      {case: baseline or a manifest case, outcome, check_title, check_run_id: positive int, run_id and run_attempt:
+      positive ints (a bool refused), main_sha and head_sha: 40 hex, role, model_id and requested_model: ^[A-Za-z0-9._:/-]+$ (the served model and the requested one, so a
+      response with no served model, which litellm_producer records as the requested id, stays visible, CGL3-12), image_digest:
       ^sha256:[0-9a-f]{64}$, contract_version, rendered_prompt_sha256, guidance_sha256, notes_sha256, run_date: ISO
       date}; a discarded entry is {case (a manifest case or baseline), run_id, outcome, reason}.
       evidence_failures(root, persona) -> list[str] never raises (ValueError, OSError and yaml errors become lines), every
@@ -61,7 +62,9 @@ scope:
       pattern; an unreadable merge-base is a line): its plan file exists there, lists the marker's rec in
       bundled_recommendations, scopes at least one of the persona's evidence inputs (its contract, rendered prompt,
       case directory or manifest) and is not this plan (slug canary-guidance-live-runs), so the authorising
-      human-confirmed plan reached main through its own plan PR; a marker present at the merge-base is byte-unchanged
+      human-confirmed plan reached main through its own plan PR. That plan is the re-run plan (its build writes fresh
+      records, drops the marker and closes the rec by Resolves), merged as a plan before the stale-making build carries
+      the marker (CGL3-03); a marker present at the merge-base is byte-unchanged
       at head, and a different marker while one stands at the base is refused (no stacking, consult 2 Q2). Expiry is
       never read here (critique CGL-06): the acceptance node's full-tier leg starts the seven days at the committer date
       of the oldest origin/main commit whose manifest carries this exact marker (git log; CI checkouts use fetch-depth
@@ -98,7 +101,8 @@ scope:
     action: Modify
     purpose: >-
       Guard, in its own loop after the try block at validate_persona_contracts.py:475-482 so one persona cannot cut
-      short the others (critique CGL-16): for each index persona whose contract declares any guidance slot, extend
+      short the others (critique CGL-16): for each index persona whose contract, read through _load_raw (never raising;
+      an unreadable contract is already a contract line), declares a non-empty guidance_slots list (CGL3-08), extend
       failed with guidance_evidence.evidence_failures(root, persona). It fails closed on every slot (consult 2 Q1,
       critique CGL-04): no contract on main declares a file-provided slot today, so it is green now, and rec-5585's
       first file-provided slot reports a line until that persona's evidence exists (its route is the rec the build files,
@@ -112,7 +116,7 @@ scope:
       canary contract, cases, manifest and a synthetic six-record file; the merge-base read is a monkeypatched seam):
       the clean copy yields no line; each of a missing record, a duplicate record, a changed case file, a changed
       rendered_prompt_sha256, a changed contract_version, a notes or guidance hash mismatch, a fallback role, an empty or
-      off-pattern model_id, a bool, zero or string run_id, an off-pattern image_digest, main_sha, head_sha or run_date,
+      off-pattern model_id, a bool, zero or string run_id or run_attempt, a missing run_attempt, an off-pattern image_digest, main_sha, head_sha or run_date,
       an unknown key in the file, a record or a discard, a discard naming an unknown case, two discards for one case, a
       PROCEED outcome, an outcome unequal to its check_title's, a repeated check_run_id or head_sha, a bool
       check_run_id, an unknown manifest key, an off-pattern pr_body, and a non-list or off-pattern covers or
@@ -135,7 +139,8 @@ scope:
       test_relaxing_guidance_is_refused (rec-5603's and rec-5660's acceptance node): for canary_persona, when the
       manifest carries rerun_owed, fail when today is more than seven days after the committer date of the oldest
       origin/main commit carrying that exact marker (the calendar leg, so it reddens only the full tier, as
-      validate_temporary_exemption_review does, critique CGL-06) else skip naming the marker's rec; with no marker,
+      validate_temporary_exemption_review does, critique CGL-06; --pre's pytest_diff also runs it on a PR that edits this
+      test file, an accepted exception, CGL3-09) else skip naming the marker's rec; with no marker,
       assert evidence_failures(ROOT, "canary_persona") == [] and grade(manifest, outcomes from the committed
       records) == []. A skip never satisfies acceptance (the closure gate needs passed). test_contract_schema_declares_generic_guidance_slot
       (line 58, shard persona-guidance-slot-schema kept, node name unchanged): its no-failure assertion on a
@@ -155,9 +160,9 @@ followon_recs: []
 infrastructure_dependencies: []
 acceptance_criteria:
   - tests/persona_contracts/test_persona_guidance_slots.py::test_relaxing_guidance_is_refused passes on six committed live records; it does not exist on main.
+  - Every committed record's image_digest equals the digest the operator-merged pin PR wrote to config/persona_image.yaml (CGL3-07).
   - Every committed record's check_run_id resolves to a persona-verdict/canary_persona check run whose title equals the record's check_title (VP 5), and each record was written by the record command from a primary-role run's artifacts with a served model id.
   - validate_persona_contracts fails any contract declaring a guidance slot with no fresh evidence and no bound rerun_owed marker.
-  - The operator merged the pin PR before the first live run, and VP 3 printed its literal before each of the six pushes.
 verification_plan:
   - step: 1
     phase: pre-deploy
@@ -203,7 +208,9 @@ verification_plan:
     phase: pre-deploy
     action: >-
       Six live runs on the fixture pull request (never merged): baseline first, then the manifest's cases in order; one
-      push per case, each only after the previous run concluded and its record was written (the head_branch concurrency
+      push per case, each only after the previous run concluded and its record was written, and each head pushed only
+      after its own full tier and --verify-head (the handoff-evidence push gate, CGL3-01; precedent rec-5550 VP 6) and
+      VP 3 re-run after that full tier (the head_branch concurrency
       group cancels an earlier run; artifacts expire after one day). The record command runs in the evidence worktree.
     command: >-
       Per head: mcp__github__actions_list(method="list_workflow_runs", owner="otl-labs", repo="ontheloop",
@@ -211,16 +218,20 @@ verification_plan:
       mcp__github__pull_request_read(method="get_check_runs", pullNumber=<fixture PR>) for persona-verdict/canary_persona's
       id, then mcp__github__get_check_run(checkRunId=<id>) for its title; mcp__github__actions_list(method="list_workflow_run_artifacts",
       resource_id=<run id>), then mcp__github__actions_get(method="download_workflow_run_artifact") for
-      persona-verdict-prepared and persona-verdict-results, each unzipped into its own new directory; then, in the
+      persona-verdict-prepared and persona-verdict-results of the attempt being recorded (mcp__github__actions_get(method="get_workflow_run")
+      gives run_attempt; after a re-run, the artifacts created after that attempt's run_started_at), each unzipped into
+      its own new directory; then, in the
       evidence worktree, bin/venv-python -m scripts.persona_contracts.guidance_evidence record --persona canary_persona
-      --case <case> --run-id <id> --check-run-id <check id> --main-sha <run head_sha> --head-sha <fixture head> --title
+      --case <case> --run-id <id> --run-attempt <attempt> --check-run-id <check id> --main-sha <run head_sha> --head-sha <fixture head> --title
       "<check title>" --prepared <dir> --results <dir>
     expected: >-
       each record call exits 0 and prints RECORDED <case>; six in all. An INVALID run (exit 2) is re-run once for its
       case with mcp__github__actions_run_trigger(method="rerun_workflow_run", run_id=<id>), never by a new or empty
       commit, so the head and PR body are unchanged; a second INVALID for one case is a STOP to the operator with both
       run ids. A run that stopped before the persona step (no results artifact, e.g. UNSUPPORTED_PLACEMENT, rec-5455) is
-      re-run the same way and is not a discard. MISMATCH is a STOP to the plan owner.
+      re-run the same way and is not a discard, but it uses that case's one re-run (CGL3-05). A telemetry status file
+      reading DEFERRED or HALT on the baseline is a STOP to the plan owner, not a re-run (CGL3-11). A refused
+      rerun_workflow_run is a STOP to the operator (CGL3-06). MISMATCH is a STOP to the plan owner.
     fix_if: a run held by an unexpected gate (the persona-verdict Environment has no reviewers, Decision 263 cl.2) or any other run shape is a STOP to the plan owner with the run id.
     hermetic: false
     graduation: not-applicable
@@ -317,8 +328,10 @@ context:
   - "Branch and worktree (critique CGL-02): after the pin PR's squash-merge the session branch restarts at main; the code commit (guidance_eval, guidance_evidence, guard, tests, manifest pr_body/covers/not_covered) is made first and its SHA recorded; a detached local worktree of it in the scratchpad (git worktree add --detach; no new remote branch) runs every record call and holds the records file; the session branch then restarts at main for the fixture PR; after the sixth record the fixture PR is closed and the branch is rebuilt from the code commit plus the records commit, then force-with-lease pushed for the build PR."
   - "Overlap: rec-5561 (planning now) re-points the canary and re-pins the image; a canary contract or case change after this merges stales the records and adds a rerun_owed whose own approved plan bundles its re-run rec. rec-5585's first file-provided slot turns the guard red until that persona's evidence exists; the build files the route rec (execution step 1) and rec-5585 depends on it."
   - "Blind Fable consult 2 (operator asked 14:27Z): /mnt/project-files/canary-guidance-live-runs/advisor-brief-2/ADVICE.md. Adopted: Q1 the guard covers every slot and fails closed (green today), activation-time enforcement left to the flip plans (debt is not evidence at a gate); a file-provided slot's evidence is metamorphic on fixed seeded-defect inputs (current guidance file no weaker than none), bound to prompt, contract, guidance file hash and model id, which is the route rec's shape. Q2 the bounded debt is the guard's pre-registered semantics (no honest change can produce records before merge), derived not declared, no stacking, clock from the main commit. Not adopted: reading prompt and cases from the PR head (reverses Decision 280 cl.5 and Decision 205's base-ref reads: an operator decision, not this plan's); binding freshness to the model id and n above 1 (operator 2026-11-25: record the model, never pin; rec-5659 pre-registered n=1; model_change is in not_covered)."
-  - "Decision 235 (scout r2 WARN, red-on-the-change): answered by consult 2 Q2; the marker is only usable through a later plan the operator approves that names it."
-  - "Decision 231 (scout r2 NOTE): tests/fixtures/persona_verdict/guidance_eval/ (manifest and records) is not in capabilities.yaml boundary_patterns; the build files a rec for the operator-gated boundary edit (execution step 1) rather than editing the protected file here."
+  - "Decision 235 (scout r2 and r3 WARN, red-on-the-change): answered by consult 2 Q2 (the bounded debt is the guard's pre-registered semantics); the marker is only usable through a later re-run plan the operator approves. Operator confirmation of that reading is asked in the planner thread before the plan PR merges."
+  - "Decision 231 cl.3 (scout r2 NOTE, corrected by scout r3): tests/fixtures/persona_verdict/guidance_eval/ is already inside boundary_patterns through the bare persona_verdict pattern (config/agent/executor/capabilities.yaml:115; readers match by substring), as are scripts/persona_contracts/ and tests/persona_contracts/; no boundary rec is needed."
+  - "Push gate (critique CGL3-01): every non-exempt push needs a full tier and --verify-head for its tree, so the pin head and the six fixture heads each take one (seven runs, backgrounded, 2 h limit each). An exempt glob for tests/fixtures/persona_verdict/fixture_pr/ would be an operator change to git-ops.yaml, not this plan's."
+  - "Run-path drift (CGL3-12): plans approved since this plan's base touch the run path: rec-5663 (PLAN-persona-record-telemetry-first, keyed_run), persona-verdict-scout-carry (post_verdict.py, persona-verdict.yml) and capability-class (inference-provider.yaml, read by keyed_run at run time). Records bind the served model per run; model_change stays in not_covered."
   - "Durability (critique CGL2-09): after each RECORDED, copy the records file and a git bundle of the code commit to /mnt/project-files/canary-guidance-live-runs/evidence/."
   - "Image window: until the pin PR merges, the pinned image holds canary contract_version 1, which refuses fixture_guidance; no run starts before VP 3 prints its literal."
   - "Decision 231 (scout NOTE): a fixture-persona regression canary under T4.32 c3, not a sealed-set evaluation, so cl.3's sealing does not apply; the operator's approval of this plan is cl.4's start. The records file is fixture evidence; it moves to the loop record journal once CD.47 ratifies (cl.1, no second journal)."
@@ -328,6 +341,7 @@ context:
   - "Graduated shards kept (nodes only added beside them, none renamed or dropped): persona-guidance-chain-guards, persona-guidance-slot-schema, persona-guidance-slot-seam (test_persona_guidance_slots.py); persona-registry-key-check, persona-run-identity-contract, verdict-consistency-contract-rules (test_validate_persona_contracts.py). rec-5659's build (unbuilt plan) also scopes guidance_eval.py and the manifest; this build starts after it merges and rebases on it."
   - "Decision-scout r1 FLAGS_FOUND (fingerprint v1:ef03e74f1ca0aa624bf6ad706dbb74dfdc17eac9341f3c1e95ff701c71e77fce): WARN 235 and NOTE 231, both answered by the lines above. CITE 280, 231, 246. RELATED 263, 205, 271, 264, 249, 283, 254, 221, 117, 210, 173, 122, 181, 244, 189, 132, 247, 55, 48. Decisions triaged: 235 of 235. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2. Serves: NS.6 4/5."
   - "Decision-scout r2 FLAGS_FOUND (fingerprint v1:f39f088f423526b9e5e07343186cc3f5c7c586d77b26d9f8119514979c9d6d82): WARN 235 (red on the change), NOTE 231 (journal, operator start, boundary paths), SPIRIT 271 (verdict App), answered by the lines above. CITE 280, 231, 246. Decisions triaged: 235 of 235. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2. Serves: NS.6 4/5."
+  - "Decision-scout r3 FLAGS_FOUND (fingerprint v1:343b7bd733eacaeb5fc099030b75499aa5142f3169c837027591604c0c0845e9): WARN 235 carried (operator confirmation asked), NOTE 231 corrected (boundary already covered). CITE 280, 231, 246. Decisions triaged: 235 of 235. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2. Serves: NS.6 4/5."
   - "red_overlap: {verdict: clear, slo_hours: 4, reds: []} (2026-11-26 14:11Z)."
   - "Plan owner: the planner thread 'Plan canary guidance live runs rec-5660'; build problems go back to it (2026-11-10 ruling)."
 gate_rounds:
@@ -373,6 +387,26 @@ gate_rounds:
       - {id: CGL2-10, severity: nit, origin: judgement, anchor: "verification_plan[5]", subject: "VP 5 binds title only; add head_sha and app", disposition: fixed}
       - {id: CGL2-11, severity: nit, origin: mechanical, anchor: "closes_criteria", subject: "empty closes_criteria reason accepted", disposition: fixed}
       - {id: CGL2-12, severity: nit, origin: mechanical, anchor: "scope[tests/persona_contracts/test_guidance_evidence.py]", subject: "covers, not_covered and bool check_run_id refusal rows", disposition: fixed}
+  - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:343b7bd733eacaeb5fc099030b75499aa5142f3169c837027591604c0c0845e9"}  # pragma: allowlist secret
+  - gate: plan-critique
+    round: 3
+    verdict: REVISE
+    blocking: 2
+    nits: 10
+    category_consistency: []
+    findings:
+      - {id: CGL3-01, severity: blocking, origin: mechanical, anchor: "execution_steps", subject: "push gate needs a full tier per fixture and pin head", disposition: fixed}
+      - {id: CGL3-02, severity: blocking, origin: mechanical, anchor: "verification_plan[4]", subject: "run_attempt missing from schema and VP 4; attempt artifact pick", disposition: fixed}
+      - {id: CGL3-03, severity: nit, origin: judgement, anchor: "context", subject: "rerun_owed authority is the re-run plan; state the sequence", disposition: fixed}
+      - {id: CGL3-04, severity: nit, origin: judgement, anchor: "execution_steps", subject: "rec-5561 gets no evidence-duty note", disposition: fixed}
+      - {id: CGL3-05, severity: nit, origin: judgement, anchor: "verification_plan[4]", subject: "pre-persona-step re-runs uncapped", disposition: fixed}
+      - {id: CGL3-06, severity: nit, origin: judgement, anchor: "verification_plan[4]", subject: "rerun_workflow_run unproven; STOP on refusal", disposition: fixed}
+      - {id: CGL3-07, severity: nit, origin: mechanical, anchor: "acceptance_criteria", subject: "AC4 has no read-back; use image_digest", disposition: fixed}
+      - {id: CGL3-08, severity: nit, origin: judgement, anchor: "scope[scripts/checks/contracts/validate_persona_contracts.py]", subject: "slot read outside the try must not raise", disposition: fixed}
+      - {id: CGL3-09, severity: nit, origin: judgement, anchor: "scope[tests/persona_contracts/test_persona_guidance_slots.py]", subject: "calendar leg also runs under --pre pytest_diff", disposition: fixed}
+      - {id: CGL3-10, severity: nit, origin: mechanical, anchor: "scope[scripts/persona_contracts/guidance_evidence.py]", subject: "no SLOC estimate for the new module", disposition: fixed}
+      - {id: CGL3-11, severity: nit, origin: judgement, anchor: "verification_plan[4]", subject: "systemic DEFERRED telemetry burns the baseline's discards", disposition: fixed}
+      - {id: CGL3-12, severity: nit, origin: judgement, anchor: "context", subject: "requested model masquerades as served; run-path plans unnamed", disposition: fixed}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -380,10 +414,10 @@ pre_implementation_checklist:
   - All files in scope located and readable
   - Acceptance criteria understood and verifiable
 execution_steps:
-  - "Confirm rec-5659's build is merged (guidance_eval.py and the canary manifest on main); stop and report to the plan owner if not. With update_rec, append to rec-5603's context: 'Closure criterion (rec-5660 plan, consult Q3): Decision 280's Coverage line is updated once, through wording approval, naming the gated half (never_relax, test_relaxing_guidance_is_refused) and the ungated half (injection_flag)'; and to rec-5585's context: 'Evidence duty (rec-5660 plan, CGL-04, consult 2): validate_persona_contracts fails each contract that declares a guidance slot until its relaxation evidence exists or the slot is removed; the route is the rec filed below'. Also file (get_rec_write_guidance first) one rec for a file-provided guidance evidence route for verdict personas (consult 2 Q1 shape: fixed seeded-defect inputs, verdict with the current guidance file no weaker than with none, records bound to prompt hash, contract_version, guidance file hash and model id) and add it to rec-5585's dependencies; and one rec to add tests/fixtures/persona_verdict/guidance_eval/ to capabilities.yaml boundary_patterns (Decision 231 cl.3, an operator-gated protected-file edit). Read every write back."
-  - "Pin PR: read the newest successful persona-image-publish run at or after rec-5659's merge, run scripts/ci/persona_image_pin.py update, open the pin PR (config/persona_image.yaml only) and ask the operator to merge it. After the squash-merge, restart the session branch at main and run VP 3."
-  - "Code commit per the scope rows (all but the records file), with pr_body equal to the LF body the fixture PR will be opened with; confirm VP 1 and VP 2's guard node red with the code absent, then green. Record the commit SHA and create the evidence worktree from it."
-  - "Fixture PR: restart the session branch at main, add guidance_eval.txt with the manifest notes, force-with-lease push, run VP 3, open the PR through the API with the pr_body body (the baseline run fires on open), then VP 4 for the baseline and, after VP 3 again before each push, for each case in order. Close the fixture PR after the sixth record."
+  - "Confirm rec-5659's build is merged (guidance_eval.py and the canary manifest on main); stop and report to the plan owner if not. With update_rec, append to rec-5603's context: 'Closure criterion (rec-5660 plan, consult Q3): Decision 280's Coverage line is updated once, through wording approval, naming the gated half (never_relax, test_relaxing_guidance_is_refused) and the ungated half (injection_flag)'; and to rec-5585's context: 'Evidence duty (rec-5660 plan, CGL-04, consult 2): validate_persona_contracts fails each contract that declares a guidance slot until its relaxation evidence exists or the slot is removed; the route is the rec filed below'. Also file (get_rec_write_guidance first) one rec for a file-provided guidance evidence route for verdict personas (consult 2 Q1 shape: fixed seeded-defect inputs, verdict with the current guidance file no weaker than with none, records bound to prompt hash, contract_version, guidance file hash and model id) and add it to rec-5585's dependencies;. Append to rec-5561's context the same evidence duty and the re-run sequence (a re-run plan merged first, its rec bundled; the stale-making build carries rerun_owed naming that plan; the re-run build repays it, CGL3-04). Read every write back."
+  - "Pin PR: read the newest successful persona-image-publish run at or after rec-5659's merge, run scripts/ci/persona_image_pin.py update, run the full tier and --verify-head, push, open the pin PR (config/persona_image.yaml only) and ask the operator to merge it. After the squash-merge, restart the session branch at main and run VP 3."
+  - "Code commit per the scope rows (all but the records file; measure guidance_evidence.py and its test against 500 SLOC and decompose into a facade package if needed, CGL3-10), with pr_body equal to the LF body the fixture PR will be opened with; confirm VP 1 and VP 2's guard node red with the code absent, then green. Record the commit SHA and create the evidence worktree from it."
+  - "Fixture PR: restart the session branch at main, add guidance_eval.txt with the manifest notes, full tier and --verify-head, VP 3, force-with-lease push, open the PR through the API with the pr_body body (the baseline run fires on open), then VP 4 for the baseline; for each case in order, commit the case line, full tier and --verify-head, VP 3, push, VP 4. Close the fixture PR after the sixth record."
   - "Build PR: rebuild the session branch from the code commit plus one commit adding the records file from the worktree, run VP 2, 5, 6, 7 and 8, then open the build PR (Resolves: rec-5660)."
   - Execute Verification Plan -- run each step; loop until pass; on unrecoverable failure stop and RCA (Decision 55)
   - "Report: what was implemented, the six outcomes with run ids and model ids, verification results"
