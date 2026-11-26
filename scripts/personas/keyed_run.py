@@ -38,7 +38,6 @@ SETTINGS = Path(".claude") / "settings.json"
 MAX_STDIN = 8 * 1024 * 1024
 ROUTE = re.compile(r"^[a-z][a-z0-9_]*$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
-AGENT = "canary-persona"
 WORKFLOW_PATH = ".github/workflows/persona-verdict.yml"
 EXIT_REFUSED = 2
 STATUS_LABELS = {2: "REFUSED", 3: "DEFERRED", 4: "HALT"}
@@ -230,7 +229,7 @@ def checked_out_sha(root: Path) -> str | None:
     return head if SHA.match(head) else None
 
 
-def sidecar_bytes(env: Mapping[str, str], root: Path) -> bytes | None:
+def sidecar_bytes(env: Mapping[str, str], root: Path, agent: str) -> bytes | None:
     ref = project_ref(root)
     if env.get("GITHUB_JOB", "") not in JOB_ROLES:
         return None
@@ -254,7 +253,7 @@ def sidecar_bytes(env: Mapping[str, str], root: Path) -> bytes | None:
     body = {
         "schema_version": host_run.SCHEMA_VERSION,
         "project_ref": ref,
-        "agent": AGENT,
+        "agent": agent,
         "content_policy": "withheld",
         "host": host,
     }
@@ -281,8 +280,12 @@ def launcher_result(raw: bytes) -> dict[str, Any] | None:
 def _telemetry(env: Mapping[str, str], work: Path, results: Path, route: str, events: Any, root: Path) -> None:
     if not isinstance(events, dict):
         return
-    sidecar = sidecar_bytes(env, root)
     status = results / f"telemetry-{route}.status"
+    agent = execute.registry_key(root, route)
+    if agent is None:
+        status.write_text(f"exit {EXIT_REFUSED} {STATUS_LABELS[EXIT_REFUSED]} registry_key\n", encoding="utf-8")
+        return
+    sidecar = sidecar_bytes(env, root, agent)
     if sidecar is None:
         status.write_text("exit 3 DEFERRED\n", encoding="utf-8")
         return
