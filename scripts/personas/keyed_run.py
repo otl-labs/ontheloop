@@ -352,16 +352,30 @@ def _record(env: Mapping[str, str], work: Path, root: Path, result: dict[str, An
     if result is None:
         put(route, {"route": route, "failure": "launcher_no_result"})
         return 0
-    put(
-        route,
-        {
-            "route": route,
-            "exit_code": result["exit_code"],
-            "timed_out": result["timed_out"],
-            "stdout": result["stdout"],
-            "image_digest": image_pin.load_pin(root).digest,
-        },
-    )
+    try:
+        slots = execute.guidance_slots(root, route)
+    except ValueError:
+        put(route, {"route": route, "failure": "input_unusable"})
+        return 0
+    guidance: dict[str, str] = {}
+    if slots:
+        body = _json(work / "prepared" / f"input-{route}.json")
+        for slot in slots:
+            value = body.get(slot) if isinstance(body, dict) else None
+            if not isinstance(value, str):
+                put(route, {"route": route, "failure": "input_unusable"})
+                return 0
+            guidance[slot] = value
+    recorded: dict[str, Any] = {
+        "route": route,
+        "exit_code": result["exit_code"],
+        "timed_out": result["timed_out"],
+        "stdout": result["stdout"],
+        "image_digest": image_pin.load_pin(root).digest,
+    }
+    if guidance:
+        recorded["guidance"] = guidance
+    put(route, recorded)
     _telemetry(env, work, results, route, result.get("events"), root)
     return 0
 

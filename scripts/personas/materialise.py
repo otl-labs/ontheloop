@@ -2,21 +2,28 @@
 
 Data only: no network call, no token, and nothing under the snapshot is imported, executed or added to sys.path; snapshot
 files are read as bytes through snapshot.read_bytes. Names no registered persona id or contract path. A later add plan
-registers its persona's own fields in PROVIDERS. Stdlib only.
+registers its persona's own fields in PROVIDERS. Guidance slots a route's contract declares are filled by
+guidance.fill at base_root, the trusted main checkout (default execute.ROOT, resolved at call time), never the head
+snapshot. A fixture route's notes may carry one "GUIDANCE-CASE: <name>" line naming a case committed on main; the head
+selects the case and never supplies a value. Stdlib only.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from scripts.personas import execute, resolve_pr, snapshot
+from scripts.personas import execute, guidance, resolve_pr, snapshot
 from scripts.personas import route as route_mod
 
 Provider = Callable[[Path, dict[str, Any]], dict[str, Any]]
 PROVIDERS: dict[str, Provider] = {}
+CASE_KEY = "_guidance_case"
+CASE_PREFIX = "GUIDANCE-CASE:"
+CASE_LINE = re.compile(r"^GUIDANCE-CASE: ([a-z][a-z0-9_]*)$")
 
 
 class Unusable(Exception):
@@ -58,22 +65,56 @@ def _fixture(root: Path, ctx: dict[str, Any]) -> dict[str, Any]:
     body = str(resolution.get("body") or "")
     if body:
         texts.append(body)
-    notes = "\n".join(texts)
+    kept: list[str] = []
+    cases: list[str] = []
+    for line in "\n".join(texts).split("\n"):
+        if line.rstrip("\r").startswith(CASE_PREFIX):
+            matched = CASE_LINE.match(line.rstrip("\r"))
+            if matched is None:
+                raise Unusable("input_unusable", "a GUIDANCE-CASE line is malformed")
+            cases.append(matched.group(1))
+        else:
+            kept.append(line)
+    if len(cases) > 1:
+        raise Unusable("input_unusable", "the fixture notes name more than one guidance case")
+    notes = "\n".join(kept)
     if not notes.strip():
         raise Unusable("input_unusable", "the fixture notes are empty")
-    return {"notes": notes}
+    return {"notes": notes, CASE_KEY: cases[0] if cases else None}
 
 
 def build_input(
-    root: Path, route_id: str, resolution: dict[str, Any], plan_paths: list[str], fixture_paths: list[str] | None = None
+    root: Path,
+    route_id: str,
+    resolution: dict[str, Any],
+    plan_paths: list[str],
+    fixture_paths: list[str] | None = None,
+    *,
+    base_root: Path | None = None,
 ) -> dict[str, Any]:
+    base = base_root if base_root is not None else execute.ROOT
     fields = shared_fields(root, resolution, plan_paths)
+    is_fixture = route_id in execute.fixture_personas(base)
     provider = PROVIDERS.get(route_id)
-    if provider is None and route_id in execute.fixture_personas(execute.ROOT):
+    if provider is None and is_fixture:
         provider = _fixture
     if provider is None:
         raise Unusable("input_incomplete", f"no input provider is registered for {route_id}")
-    fields.update(provider(root, {"route": route_id, "resolution": resolution, "fixture_paths": fixture_paths or []}))
+    provided = provider(root, {"route": route_id, "resolution": resolution, "fixture_paths": fixture_paths or []})
+    case = provided.pop(CASE_KEY, None)
+    fields.update(provided)
+    try:
+        slots = execute.guidance_slots(base, route_id)
+        if not is_fixture and any(guidance.has_case_provider(slot) for slot in slots):
+            raise Unusable("input_unusable", "only a fixture persona may declare a case-provided guidance slot")
+        if case is not None and not any(guidance.has_case_provider(slot) for slot in slots):
+            raise Unusable("input_unusable", "the fixture notes name a guidance case but the contract declares no case slot")
+        clash = sorted(slot for slot in slots if slot in fields)
+        if clash:
+            raise Unusable("input_unusable", f"guidance slot {clash[0]} names a field the input already carries")
+        fields.update(guidance.fill(base, route_id, slots, case))
+    except (ValueError, OSError) as exc:
+        raise Unusable("input_unusable", str(exc)) from exc
     return fields
 
 
@@ -85,12 +126,14 @@ def materialise(
     plan_paths: list[str],
     usable: bool,
     fixture_paths: list[str] | None = None,
+    *,
+    base_root: Path | None = None,
 ) -> None:
     for route_id in routes:
         try:
             if not usable:
                 raise Unusable("input_unusable", "the head snapshot was refused")
-            body = build_input(root, route_id, resolution, plan_paths, fixture_paths)
+            body = build_input(root, route_id, resolution, plan_paths, fixture_paths, base_root=base_root)
             (out / f"input-{route_id}.json").write_text(json.dumps(body, sort_keys=True), encoding="utf-8")
         except (Unusable, snapshot.SnapshotRefused) as exc:
             failure = exc.failure if isinstance(exc, Unusable) else "input_unusable"
@@ -111,5 +154,6 @@ def main(argv: list[str]) -> int:
         routes_doc["plan_paths"],
         usable,
         routes_doc.get("fixture_paths", []),
+        base_root=execute.ROOT,
     )
     return 0
