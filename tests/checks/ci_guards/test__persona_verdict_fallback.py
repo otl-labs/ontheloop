@@ -86,3 +86,15 @@ def test_run_fallback_permissions_and_environment(edit: Callable[[dict[str, Any]
     jobs = _jobs()
     edit(jobs)
     assert any("permissions are not" in p or "Environment is not" in p for p in f.fallback_problems(jobs))
+
+
+def test_persona_id_is_none_without_the_persona_step() -> None:
+    assert f._persona_id({}) is None
+    assert f._persona_id({"steps": [{"name": "Checkout", "id": "co"}, "not-a-step"]}) is None
+    assert f._persona_id(_jobs()["run"]) is not None
+
+
+def test_run_outputs_refused_when_run_lacks_the_persona_step() -> None:
+    jobs = _jobs()
+    jobs["run"]["steps"] = [s for s in jobs["run"]["steps"] if s.get("name") != "Run the fixture persona"]
+    assert any("run job's outputs" in p for p in f.fallback_problems(jobs))

@@ -162,3 +162,118 @@ def test_fixture_input_carries_every_schema_field(tmp_path: Path) -> None:
     body = json.loads((out / f"input-{PROBE}.json").read_text())
     schema = execute.schema_for(execute.ROOT, PROBE, "input")
     assert schema is not None and set(schema["required"]) == set(body) and set(schema["properties"]) == set(body)
+
+
+def _base(
+    tmp_path: Path, files: dict[str, str], *, slots: list[str] | None = None, fixture: bool = False, route_id: str = "r_one"
+) -> Path:
+    import yaml
+
+    root = tmp_path / "base"
+    allfiles = dict(files)
+    allfiles["docs/contracts/executor-personas.yaml"] = yaml.safe_dump(
+        {"fixture_kind": {"personas": [route_id] if fixture else []}}
+    )
+    if slots is not None:
+        allfiles[f"docs/contracts/personas/{route_id}.yaml"] = yaml.safe_dump({"guidance_slots": slots})
+    for rel, text in allfiles.items():
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    return root
+
+
+def _run(tmp_path: Path, head: Path, base: Path, route_id: str = "r_one", **kw: Any) -> tuple[Path, dict[str, Any] | None]:
+    out = tmp_path / "out"
+    out.mkdir(exist_ok=True)
+    for stale in out.iterdir():
+        stale.unlink()
+    provider = kw.pop("provider", lambda r, ctx: {})
+    if provider is not None:
+        materialise.PROVIDERS[route_id] = provider
+    try:
+        materialise.materialise(head, out, RES, [route_id], [], usable=True, base_root=base, **kw)
+    finally:
+        materialise.PROVIDERS.pop(route_id, None)
+    path = out / f"input-{route_id}.json"
+    return out, (json.loads(path.read_text()) if path.exists() else None)
+
+
+def test_guidance_slots_filled_from_base_checkout(tmp_path: Path) -> None:
+    base = _base(tmp_path, {"ontheloop/guidance/r_one/focus.md": "BASE"}, slots=["focus", "other"])
+    head = _snap(tmp_path, {"ontheloop/guidance/r_one/focus.md": "HEAD", "ontheloop/guidance/r_one/other.md": "HEAD-ONLY"})
+    out, body = _run(tmp_path, head, base)
+    assert body is not None and body["focus"] == "BASE" and body["other"] == ""
+    assert "HEAD" not in (out / "input-r_one.json").read_text()
+
+
+def test_guidance_collision_and_bad_file_are_unusable(tmp_path: Path) -> None:
+    head = _snap(tmp_path, {})
+    base = _base(tmp_path, {}, slots=["focus"])
+    out, body = _run(tmp_path, head, base, provider=lambda r, ctx: {"focus": "x"})
+    assert body is None and json.loads((out / "failure-r_one.json").read_text())["failure"] == "input_unusable"
+    base2 = tmp_path / "b2"
+    base2.mkdir()
+    (base2 / "docs/contracts/personas").mkdir(parents=True)
+    (base2 / "docs/contracts/personas/r_one.yaml").write_text("guidance_slots: [plan]\n")
+    out, body = _run(tmp_path, head, base2)
+    assert body is None and (out / "failure-r_one.json").exists()
+    base3 = _base(tmp_path / "t3", {}, slots=["focus"])
+    (base3 / "ontheloop/guidance/r_one").mkdir(parents=True)
+    os.symlink(base3 / "docs", base3 / "ontheloop/guidance/r_one/focus.md")
+    out, body = _run(tmp_path, head, base3)
+    assert body is None and (out / "failure-r_one.json").exists()
+    base4 = _base(tmp_path / "t4", {}, slots=None)
+    (base4 / "docs/contracts/personas").mkdir(parents=True, exist_ok=True)
+    (base4 / "docs/contracts/personas/r_one.yaml").write_text("guidance_slots: [unclosed\n")
+    out, body = _run(tmp_path, head, base4)
+    assert body is None and (out / "failure-r_one.json").exists()
+
+
+def test_main_fills_guidance_from_execute_root_not_the_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts.personas import execute
+
+    base = _base(tmp_path, {"ontheloop/guidance/r_one/focus.md": "BASE"}, slots=["focus"])
+    monkeypatch.setattr(execute, "ROOT", base)
+    monkeypatch.chdir(tmp_path)
+    prepared = _out(tmp_path)
+    (prepared / "resolution.json").write_text(json.dumps(RES))
+    (prepared / "routes.json").write_text(json.dumps({"routes": ["r_one"], "plan_paths": []}))
+    (prepared / "snapshot.json").write_text(json.dumps({"ok": True}))
+    root = _snap(tmp_path, {"ontheloop/guidance/r_one/focus.md": "HEAD"})
+    monkeypatch.setenv("PERSONA_SNAPSHOT", str(root))
+    monkeypatch.setitem(materialise.PROVIDERS, "r_one", lambda r, ctx: {})
+    assert materialise.main([]) == 0
+    text = (prepared / "input-r_one.json").read_text()
+    assert json.loads(text)["focus"] == "BASE" and "HEAD" not in text
+
+
+CASE_REL = "tests/fixtures/persona_verdict/guidance_cases/r_one/relax_one.md"
+
+
+def _case_run(
+    tmp_path: Path, notes: str, files: dict[str, str] | None = None, **kw: Any
+) -> tuple[Path, dict[str, Any] | None]:
+    base = _base(tmp_path, files if files is not None else {CASE_REL: "BASE"}, **kw)
+    head = _snap(tmp_path, {FX: notes, CASE_REL: "HEAD"})
+    return _run(tmp_path, head, base, provider=None, fixture_paths=[FX])
+
+
+def test_fixture_case_picks_the_base_value(tmp_path: Path) -> None:
+    out, body = _case_run(tmp_path, "NIT: a\nGUIDANCE-CASE: relax_one\r\n", slots=["fixture_guidance"], fixture=True)
+    assert body is not None and body["fixture_guidance"] == "BASE" and body["notes"] == "NIT: a"
+    assert "HEAD" not in (out / "input-r_one.json").read_text()
+    for name, notes in (
+        ("unknown", "NIT: a\nGUIDANCE-CASE: nope"),
+        ("two", "NIT: a\nGUIDANCE-CASE: relax_one\nGUIDANCE-CASE: relax_one"),
+        ("near", "NIT: a\nGUIDANCE-CASE:relax_one"),
+        ("bad", "NIT: a\nGUIDANCE-CASE: Relax One"),
+    ):
+        out, body = _case_run(tmp_path / name, notes, slots=["fixture_guidance"], fixture=True)
+        assert body is None and json.loads((out / "failure-r_one.json").read_text())["failure"] == "input_unusable", name
+    out, body = _case_run(tmp_path / "none", "NIT: a", slots=["fixture_guidance"], fixture=True)
+    assert body is not None and body["fixture_guidance"] == ""
+    out, body = _case_run(tmp_path / "noslot", "NIT: a\nGUIDANCE-CASE: relax_one", slots=[], fixture=True)
+    assert body is None and (out / "failure-r_one.json").exists()
+    out, body = _case_run(tmp_path / "nonfix", "NIT: a", slots=["fixture_guidance"], fixture=False)
+    assert body is None
