@@ -2,10 +2,12 @@
 
 The contracts and the index are read as YAML. Only a route named in executor-personas.yaml's fixture_kind.personas has a
 schema here; any other route gets None, so a result for it is never judged against a schema it does not have.
+guidance_slots is the exception: it reads any persona's contract under the trusted root, fixture or not.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -60,3 +62,31 @@ def failure_schema_for(root: Path, route_id: str) -> dict[str, Any] | None:
             "detail": {"type": "string"},
         },
     }
+
+
+_ROUTE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+def guidance_slots(root: Path, route_id: str) -> list[str]:
+    """The guidance slots route_id's contract declares under root; [] when the contract or key is absent, else ValueError."""
+    if not isinstance(route_id, str) or not _ROUTE.match(route_id):
+        raise ValueError(f"route id {route_id!r} is off ^[a-z][a-z0-9_]*$")
+    path = root / CONTRACTS / f"{route_id}.yaml"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"contract {path.name} is unreadable") from exc
+    try:
+        doc = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"contract {path.name} does not parse") from exc
+    if not isinstance(doc, dict):
+        raise ValueError(f"contract {path.name} is not a mapping")
+    if "guidance_slots" not in doc:
+        return []
+    slots = doc["guidance_slots"]
+    if not isinstance(slots, list) or not all(isinstance(slot, str) for slot in slots):
+        raise ValueError(f"contract {path.name} guidance_slots is not a list of strings")
+    return list(slots)
