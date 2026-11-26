@@ -206,7 +206,7 @@ def test_contested_residue_consult_names_its_dispatch_carrier() -> None:
     rule = _step9_convergence()
     consult = rule[rule.index("**Contested-residue consult:**") :]
     assert "(dispatched: an `open_questions` item of the same GATE_REQUEST)" in consult
-    assert 'model: "fable"' in consult
+    assert "`consult` skill" in consult
     assert 'model:"fable"' not in rule
 
 
