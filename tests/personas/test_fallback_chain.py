@@ -16,7 +16,7 @@ from scripts.personas import egress_proxy as proxy_module
 from scripts.personas import keyed_run
 
 ROOT = Path(__file__).resolve().parents[2]
-GOOD = {"change_id": "o/r#1", "head_sha": "a" * 40, "plan": "", "notes": "BLOCKING: x"}
+GOOD = {"change_id": "o/r#1", "head_sha": "a" * 40, "plan": "", "notes": "BLOCKING: x", "fixture_guidance": ""}
 
 
 class Answering:
