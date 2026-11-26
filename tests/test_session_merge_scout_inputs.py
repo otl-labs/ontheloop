@@ -362,3 +362,70 @@ def test_cli_unresolved_merge_base_is_unavailable(tmp_path: Path, capsys: pytest
     repo = fx.make_repo(tmp_path)
     assert msi.main(["--head-ref", "nope", "--base-ref", "main", "--root", str(repo)]) == 2
     assert "UNAVAILABLE" in capsys.readouterr().out
+
+
+def _cp(code: int, out: bytes = b"", err: bytes = b"") -> subprocess.CompletedProcess[bytes]:
+    return subprocess.CompletedProcess([], code, out, err)
+
+
+def _stub_git(monkeypatch: pytest.MonkeyPatch, results: dict[str, subprocess.CompletedProcess[bytes]]) -> None:
+    monkeypatch.setattr(msi, "_git", lambda root, *args, **kw: results[args[0]])
+
+
+@pytest.mark.parametrize("exc", [subprocess.TimeoutExpired("git", 1), OSError("no git")])
+def test_git_failure_to_run_is_unavailable(monkeypatch: pytest.MonkeyPatch, exc: Exception) -> None:
+    def boom(*a: object, **k: object) -> None:
+        raise exc
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    with pytest.raises(msi._Unavailable):
+        msi._git(Path("."), "status", dl=msi._Deadline(5.0))
+
+
+def test_show_reads_absent_failed_and_present_files(monkeypatch: pytest.MonkeyPatch) -> None:
+    dl = msi._Deadline(5.0)
+    _stub_git(monkeypatch, {"ls-tree": _cp(1, err=b"bad rev")})
+    with pytest.raises(msi._Unavailable, match="ls-tree"):
+        msi._show(Path("."), "r", "a.txt", dl, "s")
+    _stub_git(monkeypatch, {"ls-tree": _cp(0, b"other\0")})
+    assert msi._show(Path("."), "r", "a.txt", dl, "s") is None
+    _stub_git(monkeypatch, {"ls-tree": _cp(0, b"a.txt\0"), "show": _cp(128, err=b"gone")})
+    with pytest.raises(msi._Unavailable, match="git show"):
+        msi._show(Path("."), "r", "a.txt", dl, "s")
+    _stub_git(monkeypatch, {"ls-tree": _cp(0, b"a.txt\0"), "show": _cp(0, b"data")})
+    assert msi._show(Path("."), "r", "a.txt", dl, "s") == b"data"
+
+
+def test_git_diff_failures_and_junk_lines_are_handled(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_git(monkeypatch, {"diff": _cp(2, err=b"bad")})
+    with pytest.raises(msi._Unavailable, match="git diff"):
+        msi._quiet_diff(Path("."), "m", "main", ["x"], None)
+    with pytest.raises(msi._Unavailable, match="git diff"):
+        msi._plan_candidates(Path("."), "m", "pr")
+    listing = b"junk\nA\tdocs/plans/PLAN-a.yaml\nD\tdocs/plans/PLAN-b.yaml\n"
+    _stub_git(monkeypatch, {"diff": _cp(0, listing)})
+    assert msi._plan_candidates(Path("."), "m", "pr") == [("A", "docs/plans/PLAN-a.yaml")]
+
+
+def test_unusable_plan_documents_are_unavailable() -> None:
+    with pytest.raises(msi._Unavailable, match="not a mapping"):
+        msi._load_plan(b"- a\n", "PLAN-x.yaml")
+    with pytest.raises(msi._Unavailable, match="slug"):
+        msi._sidecar_rel({"slug": "../x"}, "PLAN-x.yaml")
+    with pytest.raises(msi._Unavailable, match="absent from the PR head"):
+        msi._must(None, "PLAN-x.yaml")
+
+
+def test_unusable_merge_tree_output_and_missing_merged_plan(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _stub_git(monkeypatch, {"merge-tree": _cp(0, b"not-a-tree\0")})
+    with pytest.raises(msi._Unavailable, match="no tree id"):
+        msi._conflicts(Path("."), "m", "pr", "main", msi._Deadline(5.0))
+    with pytest.raises(msi._Unavailable, match="absent from the compared tree"):
+        msi._read_tree_plan(tmp_path, PLAN, "PLAN-demo.yaml")
+
+
+def test_modified_plan_absent_at_the_merge_base_is_not_unchanged(tmp_path: Path) -> None:
+    repo = fx.make_repo(tmp_path)
+    assert (
+        msi._unchanged_plan(repo, fx.merge_base_of(repo), PLAN, "PLAN-demo.yaml", None, None, "x", msi._Deadline(5.0)) is False
+    )
