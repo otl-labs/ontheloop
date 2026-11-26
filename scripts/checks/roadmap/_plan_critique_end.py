@@ -9,7 +9,7 @@ _DISPOSED_NITS = {"applied-wording", "build-note"}
 
 def ended(critique: list[Any], schema_version: int) -> bool:
     last = critique[-1]
-    if last.escalation_choice == "accept-with-deferral":
+    if last.effective_choice == "accept-with-deferral":
         return True
     confirming = len(critique) > 1 and critique[-2].verdict == "PROCEED" and critique[-2].nits > 0
     if last.verdict != "PROCEED":

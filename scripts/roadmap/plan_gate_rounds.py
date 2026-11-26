@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 _GATE_VERDICTS: dict[str, frozenset[str]] = {
     "decision-scout": frozenset({"NO_FLAGS", "FLAGS_FOUND", "BLOCK"}),
@@ -20,6 +20,7 @@ _GATE_VERDICTS: dict[str, frozenset[str]] = {
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _GIT_SHA_RE = re.compile(r"[0-9a-f]{40}")
 _FINGERPRINT_RE = re.compile(r"v[1-9][0-9]*:[0-9a-f]{64}")
+_Choice = Literal["accept-with-deferral", "re-scope", "split", "abandon", "one more round"]
 
 
 class CategoryVerdict(BaseModel):
@@ -76,16 +77,22 @@ def version_errors(schema_version: int, rows: list[GateRound]) -> list[str]:
             errors.append(f"plan-critique round {row.round}: findings requires schema_version 7 or above")
         if schema_version >= 7 and row.findings is None:
             errors.append(f"plan-critique round {row.round}: schema_version 7 rows carry {_FINDINGS_SHAPE}")
-        if schema_version >= 7 and row.verdict == "PROCEED" and row.escalation_choice == "accept-with-deferral":
+        if schema_version >= 7 and row.verdict == "PROCEED" and row.effective_choice == "accept-with-deferral":
             errors.append(
                 f"plan-critique round {row.round}: accept-with-deferral on a PROCEED is closed at schema_version 7; "
                 "record each nit's disposition (applied-wording or build-note) in findings instead"
             )
+    consult_rows = [row for row in rows if row.gate == "plan-critique" and row.escalation_decider == "consult"]
+    if len(consult_rows) > 1:
+        errors.append("a consult decides once per plan (Decision 287 cl.3)")
     return errors
 
 
 class GateRound(BaseModel):
     """One gate round as the planner reports it (planning SKILL.md Step 9 convergence rule).
+
+    A plan-critique escalation records its decider (escalation_decider: operator, or consult for one more round) and an
+    operator override on the consult's row (overrides_consult, override_choice; effective_choice reads it).
 
     Counts, plus on a plan-critique row the planner's recorded per-finding gate history (findings): never a status
     or approval input (Decision 87 as amended by Decision 205; persona per-finding rows stay with rec-4434, T4.29
@@ -104,7 +111,10 @@ class GateRound(BaseModel):
     blocking: int = Field(default=0, ge=0)
     nits: int = Field(default=0, ge=0)
     escalated: bool = False
-    escalation_choice: Literal["accept-with-deferral", "re-scope", "split", "abandon", "one more round"] | None = None
+    escalation_choice: _Choice | None = None
+    escalation_decider: Literal["operator", "consult"] | None = None
+    overrides_consult: StrictBool = False
+    override_choice: _Choice | None = None
     gate_run_id: str | None = None
     digest: str | None = None
     base: str | None = None
@@ -121,12 +131,33 @@ class GateRound(BaseModel):
         if self.gate == "plan-critique" and (self.verdict == "REVISE") != (self.blocking > 0):
             raise ValueError("a plan-critique REVISE carries at least one blocking finding and a PROCEED carries none")
         if self.escalation_choice is not None and not self.escalated:
-            raise ValueError("escalation_choice records the human's answer to an escalation; set escalated: true")
+            raise ValueError("escalation_choice records the decider's answer to an escalation; set escalated: true")
+        self._check_decider()
         self._check_run_facts()
         self._check_scout_fingerprint()
         self._check_category_consistency()
         self._check_findings()
         return self
+
+    @property
+    def effective_choice(self) -> str | None:
+        return self.override_choice if self.overrides_consult else self.escalation_choice
+
+    def _check_decider(self) -> None:
+        if self.gate != "plan-critique" and (
+            self.escalation_decider == "consult" or self.overrides_consult or self.override_choice is not None
+        ):
+            raise ValueError("the consult route is the plan-critique gate's alone (Decision 287)")
+        if self.escalation_decider is not None and self.escalation_choice is None:
+            raise ValueError("escalation_decider needs an escalation_choice")
+        if self.escalation_decider == "consult" and self.escalation_choice != "one more round":
+            raise ValueError("a consult decides only one more round; any other choice is the operator's (Decision 287 cl.4)")
+        if self.overrides_consult and (self.escalation_decider != "consult" or self.override_choice is None):
+            raise ValueError("an override is written on the consult's row with the operator's choice")
+        if self.override_choice is not None and not self.overrides_consult:
+            raise ValueError("override_choice needs overrides_consult")
+        if self.override_choice is not None and self.override_choice == self.escalation_choice:
+            raise ValueError("an override names a different choice")
 
     def _check_findings(self) -> None:
         if self.findings is None:
@@ -139,7 +170,7 @@ class GateRound(BaseModel):
         blocking = [item for item in self.findings if item.severity == "blocking"]
         if len(blocking) != self.blocking or len(self.findings) - len(blocking) != self.nits:
             raise ValueError("findings blocking and nit entries must match the row's blocking and nits counts")
-        deferrable = {"fixed", "disputed"} | ({"deferred"} if self.escalation_choice == "accept-with-deferral" else set())
+        deferrable = {"fixed", "disputed"} | ({"deferred"} if self.effective_choice == "accept-with-deferral" else set())
         if any(item.disposition not in deferrable for item in blocking):
             raise ValueError(
                 "a blocking finding's disposition is fixed or disputed (deferred only under accept-with-deferral)"

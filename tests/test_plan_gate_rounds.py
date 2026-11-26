@@ -289,3 +289,82 @@ def test_version_errors_at_6_and_7() -> None:
     assert "findings: [{id" in version_errors(7, bare)[0]
     assert "accept-with-deferral on a PROCEED" in version_errors(7, deferral)[0]
     assert version_errors(7, [GateRound(gate="decision-scout", round=1, verdict="NO_FLAGS")]) == []
+
+
+def _consult(**extra) -> dict:
+    row = {"escalated": True, "escalation_choice": "one more round", "escalation_decider": "consult"}
+    return _row(verdict="REVISE", blocking=1, **{**row, **extra})
+
+
+def test_consult_decides_only_one_more_round() -> None:
+    assert GateRound(**_consult()).escalation_decider == "consult"
+    for choice in ("re-scope", "split", "abandon", "accept-with-deferral"):
+        with pytest.raises(ValidationError, match="only one more round"):
+            GateRound(**_consult(escalation_choice=choice))
+
+
+def test_override_is_written_on_the_consults_row() -> None:
+    row = GateRound(**_consult(overrides_consult=True, override_choice="re-scope"))
+    assert row.escalation_decider == "consult" and row.effective_choice == "re-scope"
+    assert GateRound(**_consult()).effective_choice == "one more round"
+    refused = [
+        _consult(escalation_decider="operator", overrides_consult=True, override_choice="re-scope"),
+        _consult(escalation_decider=None, overrides_consult=True, override_choice="re-scope"),
+        _consult(overrides_consult=True),
+        _consult(override_choice="re-scope"),
+        _consult(overrides_consult="yes", override_choice="re-scope"),
+        _consult(overrides_consult=1, override_choice="re-scope"),
+        _consult(overrides_consult=True, override_choice="one more round"),
+    ]
+    for bad in refused:
+        with pytest.raises(ValidationError):
+            GateRound(**bad)
+    with pytest.raises(ValidationError, match="names a different choice"):
+        GateRound(**_consult(overrides_consult=True, override_choice="one more round"))
+
+
+def test_an_override_to_deferral_allows_deferred_blocking_findings() -> None:
+    from scripts.roadmap.plan_gate_rounds import version_errors
+
+    deferred = [_finding("B1", "blocking", "deferred")]
+    assert GateRound(**_consult(overrides_consult=True, override_choice="accept-with-deferral", findings=deferred))
+    with pytest.raises(ValidationError):
+        GateRound(**_consult(findings=deferred))
+    proceed = _row(
+        escalated=True,
+        escalation_choice="one more round",
+        escalation_decider="consult",
+        overrides_consult=True,
+        override_choice="accept-with-deferral",
+        findings=[],
+    )
+    assert "accept-with-deferral on a PROCEED" in version_errors(7, [GateRound(**proceed)])[0]
+
+
+def test_consult_route_is_plan_critique_only() -> None:
+    scout = {
+        "gate": "decision-scout",
+        "round": 1,
+        "verdict": "BLOCK",
+        "escalated": True,
+        "escalation_choice": "one more round",
+    }
+    with pytest.raises(ValidationError, match="plan-critique gate's alone"):
+        GateRound(**{**scout, "escalation_decider": "consult"})
+    with pytest.raises(ValidationError):
+        GateRound(**{**_wording(), "overrides_consult": True, "override_choice": "re-scope"})
+    assert GateRound(**{**scout, "escalation_decider": "operator"}).escalation_decider == "operator"
+
+
+def test_decider_needs_an_escalation_choice() -> None:
+    with pytest.raises(ValidationError, match="needs an escalation_choice"):
+        GateRound(**_row(verdict="REVISE", blocking=1, escalated=True, escalation_decider="operator"))
+
+
+def test_consult_decides_once_per_plan() -> None:
+    from scripts.roadmap.plan_gate_rounds import version_errors
+
+    one = GateRound(**_consult(findings=[_finding("B1", "blocking", "fixed")]))
+    two = GateRound(**_consult(round=2, findings=[_finding("B2", "blocking", "fixed")]))
+    assert version_errors(7, [one]) == []
+    assert version_errors(7, [one, two]) == ["a consult decides once per plan (Decision 287 cl.3)"]
