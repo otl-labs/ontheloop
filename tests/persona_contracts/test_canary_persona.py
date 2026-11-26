@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +35,7 @@ def test_canary_persona_is_registered_and_never_routed_on_real_prs(tmp_path: Pat
     index = yaml.safe_load(INDEX.read_text(encoding="utf-8"))
     row = _row(index)
     assert row["kind"] == "fixture"
-    assert row["implementation"] == {"status": "pending", "owning_item": "T4.32:c3"}
+    assert row["implementation"] == {"status": "implemented", "location": "scripts/personas/execute.py"}
     assert PERSONA in index["fixture_kind"]["personas"]
     assert "machinery" in index["fixture_kind"]["purpose"]
     entries = yaml.safe_load(REGISTRY.read_text(encoding="utf-8"))["entries"]
@@ -110,3 +111,27 @@ def test_rendered_prompt_equals_fresh_render() -> None:
 
     fresh = render(load_contract(CONTRACT), load_index(ROOT))
     assert (ROOT / "docs/contracts/personas/rendered/canary_persona.txt").read_bytes() == fresh
+
+
+def test_canary_persona_binding_follows_met_c3(tmp_path: Path) -> None:
+    raw = yaml.safe_load(CONTRACT.read_text(encoding="utf-8"))
+    assert raw["budget"]["provisional"] is False
+    assert "45687386075" in raw["budget"]["basis"] and "45693907198" in raw["budget"]["basis"]
+    assert "T4.32:c3" not in CONTRACT.read_text(encoding="utf-8")
+    assert "T4.32:c3" not in str(_row(yaml.safe_load(INDEX.read_text(encoding="utf-8")))["implementation"])
+
+    root = tmp_path / "tree"
+    for rel in ("docs/contracts", "config/agent", ".claude/skills", "src/common", "scripts/personas", "src/persona_backends"):
+        source = ROOT / rel
+        if source.is_dir():
+            shutil.copytree(source, root / rel, ignore=shutil.ignore_patterns("__pycache__"))
+    roadmap = yaml.safe_load((ROOT / "docs/ROADMAP-PLATFORM.yaml").read_text(encoding="utf-8"))
+    item = next(t for t in roadmap["tier_items"] if t["id"] == "T4.32")
+    for criterion in item["exit_criteria"]:
+        if criterion["id"] in ("c3", "c7"):
+            criterion["status"] = "met"
+    (root / "docs/ROADMAP-PLATFORM.yaml").write_text(yaml.safe_dump(roadmap), encoding="utf-8")
+    for check in (validate_persona_contract_binding, validate_persona_contracts):
+        failed: list[str] = []
+        check(failed, root)
+        assert failed == [], failed
