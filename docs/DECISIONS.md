@@ -2,6 +2,87 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 286: On The Loop's public identity in one entry -- external marks over frozen internal identifiers, a marketing-prose exception, and a static public site that never publishes account specifics or financial figures (supersedes Decision 101) (Decided)
+
+```yaml
+number: 286
+status: Decided
+decided_date: "2026-11-26"
+kind:
+  value: direction
+  justification: >-
+    Clause 4 says what the public site never exposes and clause 2 keeps every internal rename behind a separate
+    explicit decision; this entry writes both down unchanged as its own rule, a data commitment and a human gate.
+supersedes: [101]
+significance:
+  value: numbered_decision
+  justification: >-
+    It restates Decision 101's current rule with its five amenders' edits so 101 can compact (Decisions 149 and 278);
+    a dated note (considered) cannot retire an entry, and no contract holds the disclosure boundary or the freeze.
+```
+
+**Status:** Decided
+**Date:** 2026-11-26
+**Warehouse ID:** dec-286 (per Decision 84 backfill)
+
+**Problem:** A reader needs Decision 101, its five amenders and two dated readings to learn what On The Loop may
+publish and which internal names are frozen, and the operator asked for 101 to be superseded in full (rec-4389).
+
+**Intent:** Restate the current rule unchanged in one entry so Decision 101 compacts to a stub. Re-deciding the
+boundary, hosting and positioning is a later entry that supersedes this one (rec-5668); so is reconciling
+the audience with Decision 232 cl.2's archetypes, and so are the citations, other than those clause 4 names, that
+read Decision 101 as the boundary on committed content or CI logs, which clause 4 (the public site) does not hold.
+
+**Decision:**
+1. **External marks on external surfaces only.** On The Loop Labs Limited and On The Loop are the external marks and
+   Semanto is an internal roadmap name only (Decision 198 cl.1). External names apply only to external and marketing
+   surfaces.
+2. **Internal identifiers frozen.** An internal identifier changes only by a separate explicit decision. Frozen: the
+   agent-platform-* AWS resource prefixes and /agent-platform/* SSM paths, the agent_platform IAM profile and Glue
+   database, and project_id trading-system. Families an amendment of Decision 101 added: platform-security-* in
+   terraform/bootstrap only, for the IAM-change detector's resources and those Decision 270 cl.3 adds (Decision 202
+   cl.3), and /secret/ for secret values (Decision 237). The repository name left the freeze (Decision 171 cl.1) and
+   is otl-labs/ontheloop (Decision 218). A deep internal rename is deferred past MVP, its scope bounded only by a
+   future plan (Decision 75).
+3. **Marketing prose exception to Decision 86.** Marketing prose lives only in a top-level marketing/ directory,
+   outside docs/. It renders internal artefacts one way: it never feeds back into an agent's context and is never a
+   warehouse write source (Decision 84). The exception covers marketing prose and nothing else under docs/.
+4. **Public-content boundary.** The public site never publishes AWS account specifics (account IDs, infra topology,
+   VPC details, secret names), decision logs, or any content from docs/ or logs/. It markets On The Loop's engineering
+   and architecture and never publishes the trading alpha, performance figures or returns of an adopter product On The
+   Loop Labs hosts: performance claims carry investment-solicitation and securities-law risk. Performance figures mean
+   financial performance of any kind, not only investment performance, and financial figures of any kind are not
+   published (operator reading, 2026-10-17). The non-financial curves (coverage, freshness, accuracy, time to heal,
+   autonomy rung, and tokens and GB-seconds per verified merge) are engineering and may be published (Decision 221
+   cl.5). Decision 209 cl.3(1)'s public site, 209 cl.3(2)'s "public products monorepo", 220 cl.1's public surfaces and
+   221 cl.5's receipts are bound to this clause.
+5. **Hosting.** The public site is a static site on Cloudflare Pages built with Astro and Starlight, with no
+   hand-rolled build or hosting tooling (Decision 100), at onthelooplabs.com on Cloudflare-managed DNS (Decision 198).
+6. **Positioning.** The primary audience is data-engineering hiring managers and early adopters of On The Loop and of
+   On The Loop Labs' adopter products (Decision 198). The secondary aspiration is a source-available contributor
+   community, contributions needing an assignment or an equivalently broad grant (Decision 171 cl.5). A paid service
+   offering needs its own decision and plan: Decision 171 discharged its licence half and Decision 209 its boundary and
+   architecture, so a commercial surface, pricing and terms stay gated.
+7. **Carried forward.** Decision 171 keeps the relicence and contribution posture, 198 the company and the marks,
+   202 the CloudTrail detector, 209 the paywall and repository topology and 237 secrets in SSM; each keeps its amends.
+   A ruling change is a new entry superseding this one.
+
+**Options considered:** re-deciding the boundary, hosting and positioning here (rejected: restating and changing a
+rule are two outcomes, Decision 247, and the operator decides each clause in the entry that supersedes this one);
+taking an amender as a victim (rejected: 171, 198, 202, 209 and 237 each amend another Decision); one successor per
+subject now (rejected: only one entry can supersede 101 and nothing compacts in part, Decision 278 cl.5; the
+re-decision may split by subject).
+
+**Coverage (Decision 181 cl.2):** cl.1, cl.2 and cl.5 to cl.7 -- procedural, held by scout and plan critique, as is
+the stub's letter map; cl.3 -- validate_prose_allowlist sanctions marketing/**/*.md (file-router.yaml), its one-way
+rule procedural; cl.4 -- no public site exists, so no check enforces it, a residual owned by rec-4142 and
+rec-5668; the accounting -- validate_delegated_key_changes over the consolidation manifest.
+
+**Related:** Decision 101 (superseded), 171, 198, 202, 209 and 237 (carried forward), 75, 84, 86, 100, 127, 149, 218,
+220, 221, 232, 240, 242, 247, 270, 278; rec-4142, rec-4389.
+
+---
+
 ## Decision 285: The CI deployer's authority in one entry -- broad prefix-scoped grants under a mandatory permissions boundary that only a named exclusion escapes, and role creation that stays reviewer-gated (supersedes Decisions 144 and 180; amends Decision 98) (Decided)
 
 ```yaml
@@ -11941,133 +12022,12 @@ to this numbered Decision).
 
 ## Decision 101: External brand identity (Theseus / Guerdon / Semanto) -- presentation-layer only, with a scoped Agent-First marketing-prose exception (Decided)
 
-**Status:** Decided
+**Status:** Superseded
 **Date:** 2026-06-28
-**Warehouse ID:** dec-101 (keyed on the decision number; synced to ops_decisions via `ops_data_portal --backfill-decisions-md` post-merge, per Decision 84)
 
-> **Amended by Decision 171 (2026-08-16):** three clauses move, and only three. (1) Point (b)'s
-> **repository-name row** is promoted into the presentation layer -- the repository is renamed
-> `benjamin-blake/agent-platform` -> `benjamin-blake/theseus`. This is the "separate explicit
-> decision" that row required. The other four (b) rows -- `agent-platform-*` AWS resource
-> prefixes, the `agent_platform` IAM profile, the `agent_platform` Glue database, and
-> `project_id = trading-system` -- are re-affirmed FROZEN, and the deep internal rename stays
-> deferred post-MVP. (2) Point (f)'s **deferred paid service offering** is discharged for the
-> LICENCE half only: Decision 171 relicenses to BUSL-1.1 and authorises dual licensing, but
-> builds no commercial surface, pricing or terms, so the remainder of that deferral stands.
-> (3) Point (f)'s **"secondary aspiration: open-source community"** is amended: BUSL-1.1 is
-> source-available, NOT OSI open source, and contributions now require a copyright assignment
-> or equivalently broad grant (`CONTRIBUTING.md`). Points (a), (c), (d) and (e) are unedited;
-> see Decision 171 for the full derivation.
+**Decision:** Superseded by Decision 286, which restates its current rule unchanged and names the amenders that keep their parts: Decision 171, Decision 198, Decision 202, Decision 209 and Decision 237. Letter map: (a) -> cl.1; (b) -> cl.1, cl.2; (c) -> cl.3; (d) -> cl.4; (e) -> cl.5; (f) -> cl.6. Compacted in place (Decision 149), not archived, because code and contracts still cite "Decision 101" by name.
 
-> **Amended by Decision 198 (2026-09-21):** Theseus and Guerdon are retired as external brands;
-> On The Loop Labs Limited (company) and On The Loop (product) replace them as the sole external
-> mark, superseding clause (a)'s naming hierarchy in full:
-> - **On The Loop Labs Limited** = the owning company (Decision 195).
-> - **On The Loop** = the external brand for both the platform and its products; one mark covers
->   both (Grafana Labs / Vercel pattern). Guerdon's forward intent (the trading product) moves to
->   the not-yet-created private commercial repository (Decision 184).
-> - **Semanto** survives unchanged as the internal marketing/comms roadmap name only, never a
->   public-facing mark (`docs/ROADMAP-SEMANTO.yaml`, rec-3986).
->
-> Clause (d)'s Guerdon trading-alpha sentence is replaced: never publish any hosted product's
-> trading alpha, performance figures, or returns. Publishing performance figures exposes
-> investment-solicitation and securities-law risk. This restates the original prohibition
-> brand-neutrally. Clause (d)'s site reference follows clause (e)'s domain change below: the
-> boundary still binds to the public site, now at `onthelooplabs.com`.
->
-> Clause (e)'s Domain line is replaced: `onthelooplabs.com` (Cloudflare-managed DNS).
->
-> Clause (f)'s primary-audience line is replaced: primary audience is data-engineering hiring
-> managers AND early adopters of the On The Loop product line.
->
-> Clauses (b), (c) and the remainder of clause (d) (the AWS-specifics bullet and the
-> public-content boundary itself) are UNAFFECTED.
-
-> **Amended by Decision 202 (2026-09-25):** point (b) gains a second resource name family,
-> `platform-security-*`, for the IAM-change detector's resources in `terraform/bootstrap` only (the
-> separate explicit decision point (b) requires). The `agent-platform-*` prefixes stay frozen for
-> everything else. See Decision 202 clause 3.
-
-> **Amended by Decision 209 (2026-09-28):** Point (f)'s deferred paid service offering is further discharged for boundary and architecture only: Decision 209 draws the paywall on organisational scale, a metadata-only managed control plane over a customer-owned data plane, and the repository topology. No commercial surface, pricing or terms is built, so the rest of that deferral stands; point (d) binds any public docs site.
-
-> **Update (2026-10-17):** Operator reading (2026-10-17): point (d)'s "performance figures", as Decision 198 restated it, means financial performance of any kind, not only investment performance. Non-financial curves -- coverage, freshness, accuracy, time to heal, autonomy rung, tokens and GB-seconds per verified merge -- are platform engineering and may be published (Decision 221 clause 5); financial figures of any kind are not published under point (d) as it stands. The operator intends to supersede this entry in full (rec-4389).
-
-**Problem:**
-The platform and its trading product were operating under purely internal identifiers (repo
-`agent-platform`, AWS prefixes `agent-platform-*`, profile `agent_platform`, project_id
-`trading-system`). As the system matures toward MVP, external-facing brand identity and a
-public documentation/marketing presence are needed. No ratified decision named the external
-brands or governed what may and may not be published publicly.
-
-**Decision:**
-
-**(a) Naming hierarchy:**
-- **Theseus** = external brand for the PLATFORM (the self-improving host system).
-- **Guerdon** = external brand for the trading PRODUCT (product #1 built on Theseus).
-- **Semanto** = the external-facing marketing/comms system and the name of its roadmap
-  (`docs/ROADMAP-SEMANTO.yaml`). Semanto is a PRESENTATION-LAYER-ONLY brand for the
-  marketing and communications surface; it is not a product or a subsystem.
-
-**(b) Presentation-layer only -- internal identifiers unchanged:**
-The external brands apply exclusively to external/marketing surfaces. ALL internal identifiers
-are unchanged by this decision and must not be altered without a separate explicit decision:
-- Repository name: `agent-platform`
-- AWS resource prefixes: `agent-platform-*`
-- IAM profile: `agent_platform`
-- Glue database: `agent_platform`
-- Project ID: `trading-system` (per the INTENT-multi-product-platform origin model, which is
-  unbuilt and unchanged here)
-
-A deep internal rename (aligning identifiers to `theseus-*`) is a recognised high-blast-radius
-future item DEFERRED to a post-MVP tightening refactor. Citing Decision 75 (Frame-Lock): no
-fixed internal-rename scope is committed here; the scope will be bounded in a future plan.
-
-**(c) Scoped Decision-86 marketing-prose exception:**
-Decision 86 (Agent-First repository) mandates machine-parseable artefacts over narrative prose
-and bans standing human-readable companion documents. Marketing prose is hereby granted a
-SCOPED EXCEPTION under the following conditions:
-- Marketing content lives OUTSIDE `docs/` -- the canonical directory is the top-level
-  `marketing/` directory.
-- Marketing content is NOT consumed by internal agents as a source of truth. It is strictly
-  one-way downstream: it renders internal artefacts; it never feeds back into agent context.
-- Marketing content is never a warehouse write source (Decision 84). It is read-only from the
-  warehouse's perspective.
-- This exception is scoped to marketing prose only and does not extend to any other
-  human-readable content under `docs/`.
-
-**(d) Public-content boundary:**
-The public site (theseus.support) must enforce the following boundary at all times:
-- Never publish AWS account specifics: account IDs, infra topology, VPC details, secret
-  names, decision logs, or any content from `docs/` or `logs/`.
-- Market the platform engineering and architecture; never publish Guerdon's trading
-  alpha, performance figures, or returns. Publishing performance claims exposes
-  investment-solicitation and securities-law risk.
-
-**(e) Hosting:**
-The public site is a static site on Cloudflare Pages, built with Astro and Starlight
-(both free/MIT-licensed). Cloudflare Pages is the native managed primitive for static-site
-hosting -- consistent with Decision 100 (use managed primitives, no client-tooling substitution
-for native operations). No hand-rolled build or hosting tooling is permitted.
-Domain: `theseus.support` (Cloudflare-managed DNS, already owned).
-
-**(f) Positioning:**
-- Primary audience: data-engineering hiring managers (portfolio and technical credibility signal).
-- Secondary aspiration: open-source community (transparency, contribution).
-- Deferred, separately gated: a paid service offering (requires its own decision and plan;
-  not in scope for the MVP marketing surface).
-
-**Scope of this decision:**
-This decision ratifies branding and governance only. It DOES NOT provision any infrastructure,
-deploy any site, or change any internal identifier. The theseus.support site and DNS are
-deferred_post_mvp items (S1.2/S1.3 in `docs/ROADMAP-SEMANTO.yaml`). The deep internal rename
-is explicitly deferred. This session's only artefacts are this decision and `docs/ROADMAP-SEMANTO.yaml`.
-
-**Affected files:**
-`docs/DECISIONS.md` (this decision), `docs/ROADMAP-SEMANTO.yaml` (new third sibling roadmap).
-
-[Amendment 2026-10-27, Decision 237: point (b) gains the /secret/ SSM name family for secret values, a deliberate exclusion from /agent-platform/*.]
-
-> **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
+**Superseded by: Decision 286**
 
 ---
 
