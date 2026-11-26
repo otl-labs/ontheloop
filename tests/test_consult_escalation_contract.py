@@ -46,7 +46,8 @@ def test_planning_skill_routes_convergence_escalations_to_consult() -> None:
         "once per plan",
         "a finding that the plan weakens verification (Decision 235 cl.1)",
         "`escalation_decider`",
-        "recorded on the consult's row as `overrides_consult: true` with their `override_choice`, which then counts as the row's choice",
+        "recorded on the consult's row as `overrides_consult: true` with their `override_choice`, which then counts as "
+        "the row's choice",
         "An override made after a later round is also the human's answer on the latest plan-critique row",
         "after the series' final PROCEED, record it on the consult's row alone",
         "both positions unattributed",
