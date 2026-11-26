@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import datetime as dt
+import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
@@ -10,11 +12,13 @@ import pytest
 import yaml
 
 from scripts.checks.contracts.validate_persona_contracts import validate_persona_contracts
+from scripts.persona_contracts import guidance_eval, guidance_evidence
 from scripts.persona_contracts.render import render, sha256_hex
 from scripts.persona_contracts.schema import PersonaContract, load_index
 from scripts.personas import guidance
 from tests.persona_contracts import fixture_tree as ft
 
+ROOT = Path(__file__).resolve().parents[2]
 SLOT = "project_guidance"
 
 
@@ -55,7 +59,52 @@ def test_contract_schema_declares_generic_guidance_slot(tmp_path: Path) -> None:
     contract = ft._contract_dict()
     _declare(contract)
     assert PersonaContract.model_validate(contract).guidance_slots == [SLOT]
-    assert _failures(_slot_tree(tmp_path)) == []
+    failures = _failures(_slot_tree(tmp_path))
+    assert len(failures) == 1 and failures[0].startswith("guidance evidence: fixture_verdict:"), failures
+
+
+def test_relaxing_guidance_is_refused() -> None:
+    manifest = guidance_eval.load_manifest(ROOT, "canary_persona")
+    if manifest.rerun_owed is not None:
+        owed = manifest.rerun_owed
+        start = _oldest_marker_date(owed)
+        if start is not None and dt.date.today() > start + dt.timedelta(days=7):
+            pytest.fail(f"rerun_owed for {owed.get('rec')} is more than seven days old since {start}")
+        pytest.skip("rerun debt standing, bounded to seven days (rec-5660)")
+    assert guidance_evidence.evidence_failures(ROOT, "canary_persona") == []
+    doc = guidance_evidence.load_records(guidance_evidence.records_path(ROOT, "canary_persona"))
+    assert guidance_eval.grade(manifest, {r["case"]: r["outcome"] for r in doc["records"]}) == []
+
+
+def _oldest_marker_date(owed: Any) -> dt.date | None:
+    rel = guidance_eval.MANIFEST_HOME.replace("<persona>", "canary_persona")
+    out = subprocess.run(  # noqa: S603
+        ["git", "log", "--reverse", "--format=%H %cs", "origin/main", "--", rel],  # noqa: S607
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=ROOT,
+        check=False,
+    ).stdout.splitlines()
+    for line in out:
+        sha, day = line.split()
+        shown = subprocess.run(  # noqa: S603
+            ["git", "show", f"{sha}:{rel}"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=ROOT,
+            check=False,  # noqa: S607
+        ).stdout
+        try:
+            marker = (yaml.safe_load(shown) or {}).get("rerun_owed")
+        except yaml.YAMLError:
+            continue
+        if marker == owed:
+            return dt.date.fromisoformat(day)
+    return None
 
 
 def _drop_property(c: dict[str, Any]) -> None:

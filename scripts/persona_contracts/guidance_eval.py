@@ -23,6 +23,7 @@ REVISE = "REVISE"
 INJECTION = "injection_suspected"
 _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 _TOP_KEYS = {"persona", "slot", "runs_per_case", "notes", "baseline", "cases"}
+_OPTIONAL_KEYS = {"pr_body", "covers", "not_covered", "rerun_owed"}
 _FORBIDDEN_CASE_PREFIXES = ("BLOCKING:", "NIT:", "GUIDANCE-CASE:")
 
 
@@ -42,6 +43,10 @@ class Manifest:
     notes: str
     baseline_allowed: tuple[str, ...]
     cases: tuple[Case, ...]
+    pr_body: str | None = None
+    covers: tuple[str, ...] = ()
+    not_covered: tuple[str, ...] = ()
+    rerun_owed: Any = None
 
 
 def _name(kind: str, value: Any) -> str:
@@ -53,6 +58,24 @@ def _name(kind: str, value: Any) -> str:
 def _allowed(where: str, value: Any) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
         raise ValueError(f"{where} allowed is not a list of strings")
+    return tuple(value)
+
+
+def _check_pr_body(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or "\r" in value:
+        raise ValueError("pr_body is not a string without a carriage return")
+    if any(line.startswith(_FORBIDDEN_CASE_PREFIXES) for line in value.splitlines()):
+        raise ValueError("pr_body holds a line starting BLOCKING:, NIT: or GUIDANCE-CASE:")
+    return value
+
+
+def _check_tokens(where: str, value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not all(isinstance(v, str) and _NAME.match(v) for v in value):
+        raise ValueError(f"{where} is not a list of ^[a-z][a-z0-9_]*$ tokens")
     return tuple(value)
 
 
@@ -104,8 +127,10 @@ def load_manifest(root: Path, persona: str) -> Manifest:
         doc = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
         raise ValueError(f"manifest {path.name} is unreadable") from exc
-    if not isinstance(doc, dict) or set(doc) != _TOP_KEYS:
-        raise ValueError(f"manifest {path.name} must be a mapping of exactly {sorted(_TOP_KEYS)}")
+    if not isinstance(doc, dict) or not _TOP_KEYS <= set(doc) <= _TOP_KEYS | _OPTIONAL_KEYS:
+        raise ValueError(
+            f"manifest {path.name} must be a mapping of exactly {sorted(_TOP_KEYS)} plus optional {sorted(_OPTIONAL_KEYS)}"
+        )
     if doc["persona"] != persona:
         raise ValueError(f"manifest persona {doc['persona']!r} differs from {persona!r}")
     slot = doc["slot"]
@@ -132,7 +157,18 @@ def load_manifest(root: Path, persona: str) -> Manifest:
     if set(cases_raw) != stems:
         raise ValueError(f"cases {sorted(map(str, cases_raw))} differ from case files {sorted(stems)}")
     cases = tuple(_check_case(root, persona, slot, name, raw) for name, raw in cases_raw.items())
-    return Manifest(persona, slot, runs, notes, (REVISE,), cases)
+    return Manifest(
+        persona,
+        slot,
+        runs,
+        notes,
+        (REVISE,),
+        cases,
+        _check_pr_body(doc.get("pr_body")),
+        _check_tokens("covers", doc.get("covers")),
+        _check_tokens("not_covered", doc.get("not_covered")),
+        doc.get("rerun_owed"),
+    )
 
 
 def grade(manifest: Manifest, outcomes: Mapping[str, Any]) -> list[str]:

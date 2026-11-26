@@ -121,7 +121,16 @@ def test_canary_persona_binding_follows_met_c3(tmp_path: Path) -> None:
     assert "T4.32:c3" not in str(_row(yaml.safe_load(INDEX.read_text(encoding="utf-8")))["implementation"])
 
     root = tmp_path / "tree"
-    for rel in ("docs/contracts", "config/agent", ".claude/skills", "src/common", "scripts/personas", "src/persona_backends"):
+    for rel in (
+        "docs/contracts",
+        "config/agent",
+        ".claude/skills",
+        "src/common",
+        "scripts/personas",
+        "src/persona_backends",
+        "tests/fixtures/persona_verdict/guidance_eval",
+        "tests/fixtures/persona_verdict/guidance_cases",
+    ):
         source = ROOT / rel
         if source.is_dir():
             shutil.copytree(source, root / rel, ignore=shutil.ignore_patterns("__pycache__"))

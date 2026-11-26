@@ -23,6 +23,7 @@ import yaml
 from pydantic import ValidationError
 
 from scripts.checks import _common, registry
+from scripts.persona_contracts import guidance_evidence
 from scripts.persona_contracts.render import render, sha256_hex
 from scripts.persona_contracts.schema import (
     PersonaContract,
@@ -463,6 +464,15 @@ def _leash_failures(root: Path, index: PersonaIndex | None = None) -> list[str]:
     ]
 
 
+def _evidence_guard(index: PersonaIndex, root: Path) -> list[str]:
+    out: list[str] = []
+    for row in index.personas:
+        slots = (_load_raw(root / row.contract) or {}).get("guidance_slots")
+        if isinstance(slots, list) and slots:
+            out.extend(guidance_evidence.evidence_failures(root, row.persona))
+    return out
+
+
 @registry.register("validate_persona_contracts", owner="platform")
 def validate_persona_contracts(failed: list[str], root: Path | None = None) -> None:
     root = root or _common.ROOT
@@ -480,5 +490,6 @@ def validate_persona_contracts(failed: list[str], root: Path | None = None) -> N
             failed.extend(_contract_failures(row, index, root))
     except (OSError, yaml.YAMLError, ImportError, AttributeError, KeyError) as exc:
         failed.append(f"{_LABEL}: a source file is missing or unreadable ({type(exc).__name__}: {exc})")
+    failed.extend(_evidence_guard(index, root))
     failed.extend(_leash_failures(root, index))
     registry.examined(len(index.capability_vocabulary.capabilities) + len(index.personas), unit="persona_contract_items")
