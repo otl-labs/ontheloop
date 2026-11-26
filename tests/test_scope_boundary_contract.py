@@ -207,8 +207,8 @@ class TestProseSurfacesPointAtContract:
         assert i >= 0, "### Deviation trigger section absent"
         section = re.split(r"\n#{2,3} ", text[i:], maxsplit=1)[0]
         assert "(a)" in section and "(b)" in section and "(c)" in section
-        assert "Fable Advice-Consult Protocol" in section
-        assert "overseer/SKILL.md" in section
+        assert "consult/SKILL.md" in section
+        assert 'model:"fable"' in section
         assert "3-fix-attempt" in section and "VF-08" in section
 
     def test_implement_skill_deviation_trigger_adds_no_auto_file_path(self) -> None:

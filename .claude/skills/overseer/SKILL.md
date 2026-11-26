@@ -182,16 +182,6 @@ See `overseer-dispatch.yaml#autonomy_tiers`.
 **Hard always-ask list (no override, ever):** IAM/security, spend impact, any public-surface
 artefact change (PUBLIC-repository boundary, AGENTS.md), any governed-deploy action.
 
-## Fable Advice-Consult Protocol
-
-Before each major design decision, dispatch a fresh-context subagent (`Agent`, `model: "fable"`). It
-reads (Read/Grep/Glob) but edits nothing, separating advice into "settled consensus" vs "contested"
-(where practice diverges from this repo's convention). Reconcile via **adopt** / **adapt** /
-**reject**, logged to the ledger. Triggers beyond G1: **workflow-adaptation** (adapting the
-overseer's own dispatch workflow to a methodology gap) and **rec-synthesis** (reconciling related
-recs into one slice boundary, vs. sequencing already-atomic work). See
-`overseer-dispatch.yaml#fable_triggers`.
-
 ## Model Namespace Note
 
 A skill-frontmatter `model:` pin (e.g. `opus[1m]` above) is a different **namespace** from the Agent
