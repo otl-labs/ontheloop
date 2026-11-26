@@ -1,0 +1,150 @@
+schema_version: 7
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: keyed-run-registry-key
+intent: >-
+  The keyed run tags each run's host-run sidecar (telemetry_agents.agent_type) with the routed persona's registry_key,
+  read from docs/contracts/executor-personas.yaml, instead of the hard-coded canary-persona, so the first verdict persona
+  routed through the run job (T4.28 c4, code_reviewer) is attributed to its own key and rec-4434's per-persona counters
+  count it. Serves NS.6: each verdict persona's runs are measured separately.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-keyed-run-registry-key.yaml
+phase: >-
+  Prerequisite of T4.28 c4 (the first verdict persona add step); rec-5675, follow-on of the rec-5561 plan's blind
+  consult. Closes no criterion.
+closes_criteria: []
+cites: [dec:206]
+scope:
+  - file: scripts/personas/execute.py
+    action: Modify
+    purpose: >-
+      New registry_key(root, persona) -> str | None: the registry_key of the personas row whose persona equals the
+      argument, read from INDEX as raw YAML like fixture_personas (never through _contract, which answers only fixture
+      routes). None when the index is unreadable, no row matches, or the value is not a non-empty string. Any row kind
+      is read (code_reviewer -> code-review). The module docstring gains one clause naming this second whole-index read.
+  - file: scripts/personas/keyed_run.py
+    action: Modify
+    purpose: >-
+      AGENT is removed. sidecar_bytes(env, root, agent) writes the agent it is given. _telemetry reads
+      execute.registry_key(root, route) first: when it is None, it writes results/telemetry-<route>.status as the line
+      "exit 2 REFUSED registry_key" and returns, with no staging directory, no host-run.json and no telemetry_rows call;
+      otherwise it passes the key to sidecar_bytes and continues as today (DEFERRED on a None sidecar). Never falls back
+      to a literal or to the route id. The route's results/<route>.json is written exactly as today in every case
+      (telemetry never blocks the result, graduated record persona-record-telemetry-first). persona-request is unchanged
+      (operator 2026-11-26: refuse telemetry only, not the run).
+  - file: tests/personas/test_keyed_run.py
+    action: Create
+    purpose: >-
+      test_record_tags_the_routed_personas_registry_key (rec-5675 acceptance): a tmp root holding copies of
+      executor-personas.yaml (the canary_persona row's registry_key replaced by a different registered-shape key, e.g.
+      code-review), config/persona_image.yaml and docs/contracts/personas/canary_persona.yaml; project_ref patched;
+      keyed_run.record with GITHUB_* env and a result carrying events; asserts the staged host-run.json agent equals the
+      replaced key (red before: canary-persona). test_record_refuses_telemetry_for_a_route_with_no_registry_key: same
+      tmp root with the row's registry_key deleted; asserts the status file reads "exit 2 REFUSED registry_key", no
+      telemetry-in/<route>/host-run.json exists, telemetry_rows.main is not called, and results/<route>.json still holds
+      the launcher stdout (red before: the sidecar is written with canary-persona). test_registry_key_reads_the_index_row:
+      on the real ROOT, canary_persona -> canary-persona, code_reviewer -> code-review, an unknown id -> None (red before:
+      no such function).
+  - file: tests/personas/test_execute.py
+    action: Modify
+    purpose: >-
+      Signature follow-through only, assertions unchanged: test_record_sidecar_maps, test_host_job_follows_github_job and
+      the sidecar call beside the primary_outage asserts pass the agent ("canary-persona", read from
+      execute.registry_key(ROOT, "canary_persona") so no persona literal is new); test_record_telemetry_survives_guidance_failure's
+      sidecar_bytes monkeypatch takes (env, root, agent).
+bundled_recommendations: [rec-5675]
+followon_recs: []
+infrastructure_dependencies:
+  - >-
+    None. No workflow, Terraform, credential or contract change. keyed_run.py and execute.py are not persona image inputs
+    (config/persona_image.yaml build.copy), so no image republish or pin PR; persona-verdict.yml runs main's checkout, so
+    the change is live on merge.
+acceptance_criteria:
+  - A keyed run's host-run sidecar agent is the routed persona's registry_key from the index, not a literal (VP 1).
+  - A routed persona with no registry_key gets no sidecar or telemetry rows and the status line "exit 2 REFUSED registry_key", while its results file is still written (VP 1).
+  - The existing keyed-run and fallback suites stay green with unchanged assertions (VP 2).
+  - rec-5675 is closed by the build PR's Resolves trailer (VP 4).
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The registry_key lookup, the routed-key tag and the no-key refusal
+    command: >-
+      bin/venv-python -m pytest
+      tests/personas/test_keyed_run.py::test_record_tags_the_routed_personas_registry_key
+      tests/personas/test_keyed_run.py::test_record_refuses_telemetry_for_a_route_with_no_registry_key
+      tests/personas/test_keyed_run.py::test_registry_key_reads_the_index_row -q
+    expected: 3 passed; before the change all three fail
+    fix_if: a node fails -- fix keyed_run.py or execute.py, never loosen a node
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: keyed-run-registry-key
+  - step: 2
+    phase: pre-deploy
+    action: No persona literal remains in keyed_run.py, and the existing persona suites stay green
+    command: >-
+      ! grep -n 'canary' scripts/personas/keyed_run.py && bin/venv-python -m pytest tests/personas/test_execute.py
+      tests/personas/test_fallback_chain.py tests/personas/test_run.py -q
+    expected: grep prints nothing; tests pass
+    fix_if: grep matches -- a literal survived; a test fails -- fix the call site, never an assertion
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Existing suites already run in both tiers; VP 1 carries this plan's assertions.
+  - step: 3
+    phase: pre-deploy
+    action: Full tier, then HEAD attestation, before commit and push (handoff_policy)
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: the full tier exits 0 and the validation result attests the current HEAD's tree
+    fix_if: any failure -- fix and rerun the full tier from the start
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: The full tier cannot graduate (recursion refusal); it is the handoff gate.
+  - step: 4
+    phase: post-deploy
+    action: rec-5675 closed by the trailer closure on main's covering run
+    command: >-
+      bin/venv-python -c "from src.common import ducklake_reader_client as c; r,_=c.fetch_recs_by_ids(c.make_reader(),
+      ['rec-5675']); print(r[0]['id'], r[0]['status'])"
+    expected: rec-5675 closed
+    fix_if: still open -- read ci.yml's closure job; never close by hand
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: scripts/personas/execute.py
+    behavior: registry_key answers any persona row's key and None for an unknown id
+    verification_step: 1
+    test_selector: tests/personas/test_keyed_run.py::test_registry_key_reads_the_index_row
+    red_green_expectation: red before (no function), green after
+  - source: scripts/personas/keyed_run.py
+    behavior: the sidecar agent is the routed persona's index key; no key refuses telemetry and keeps the result
+    verification_step: 1
+    test_selector: tests/personas/test_keyed_run.py::test_record_tags_the_routed_personas_registry_key
+    red_green_expectation: red before (the literal canary-persona), green after
+weakening_dispositions: []
+constraints:
+  - "Telemetry never blocks the result (persona-record-telemetry-first); persona-request is not changed (operator 2026-11-26)."
+  - "No persona-id or registry_key literal is added under scripts/personas (executor-personas.yaml implementation_binding landing_dirs rule)."
+  - "keyed_run's third-party imports stay boto3, botocore, jsonschema, yaml and src (tests/personas/test_run.py ALLOWED)."
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - "rec-5675. Blind Fable consult /mnt/project-files/keyed-run-registry-key/advisor-brief/ADVICE.md: lookup in execute.py (owns the raw index read); no-key -> its own REFUSED class word, not DEFERRED (DEFERRED means environment not ready); never fall back to a literal; keyed_run.py's AGENT is the only canary literal on the run path."
+  - "Operator 2026-11-26 18:57 UTC: chose refuse telemetry only (not the run), then 'write the plan'."
+  - "Order: build after rec-5659's build (PLAN-canary-guidance-eval-cases, unbuilt at planning) merges; both edit tests/personas/test_execute.py. rec-5561 and rec-5660 do not edit keyed_run.py or execute.py."
+  - "Graduated shards over test_execute.py nodes this plan touches (persona-verdict-fixture-run-units: test_record_sidecar_maps; persona-record-telemetry-first) are kept: call sites change, assertions and node ids do not. persona-guidance-chain-guards and persona-verdict-fallback-run-units are kept: their test_execute.py nodes are not edited."
+  - "Ports: SA-11 already records the persona mechanism's dependency on the executor-personas index; no ports.yaml change (Decision 212)."
+  - "The first verdict persona add still meets the fixture-only gates in prepared_request and execute._contract; that is the add plan's scope, not this one."
+  - "Decision-scout r1 NO_FLAGS (fp v1:facf04bc1262cd3ac3155bfad274c14518e00cc99636faa8bb30e4fee67b9651). CITE 206 (cl.4 cost-per-verified-merge per (persona, backend) is why agent_type carries the registry key). Decisions triaged: 236 of 236. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2. Serves: NS.6 3/5."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: NO_FLAGS, scout_input_fingerprint: "v1:facf04bc1262cd3ac3155bfad274c14518e00cc99636faa8bb30e4fee67b9651"}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - Write tests/personas/test_keyed_run.py first and confirm VP 1 fails; then execute.py registry_key; then keyed_run.py (drop AGENT, sidecar_bytes agent argument, _telemetry refusal); then the test_execute.py call sites.
+  - Execute VP 1-2; run validate --pre; run VP 3 (full tier) as the Bash tool's own background task (run_in_background true, timeout 7200000); open the PR; merge on green with Resolves rec-5675; VP 4.
+  - 'Report: what was implemented, verification results'
+rollback: Revert the build PR; the run job reads main's checkout, so the revert is live on merge.
