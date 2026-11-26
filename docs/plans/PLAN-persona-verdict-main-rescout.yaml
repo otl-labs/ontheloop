@@ -47,13 +47,20 @@ scope:
       merge_checks.FINGERPRINT_PERSONAS: rescout.prior must return a trusted record whose head_sha is the current head
       (else nothing covers the head and nothing is marked); a head whose newest App check for the route already holds a
       RESCOUT_PREFIX line is skipped (idempotent); a mark entry is emitted when rescout.fingerprints(head inputs,
-      main_root, record cites) differs from the record's map or raises Unreadable. In-session leg, per plan path: the
-      last decision-scout gate_rounds row's scout_input_fingerprint against rescout.fingerprints(head inputs,
-      main_root, no extra cites); a wake entry when they differ, the row is absent on a plan carrying any scout row,
-      or the recompute raises Unreadable. Drill: a fixture-only diff that adds or modifies
+      main_root, record cites) differs from the record's map or raises Unreadable. In-session leg, per plan path whose head text
+      is schema_version 6 or later (the barrier's floor; older plans are skipped): the last decision-scout gate_rounds
+      row's scout_input_fingerprint against rescout.fingerprints(head inputs, merge_root, no extra cites), where
+      merge_root is a temporary tree holding the four WATCHED_PATHS files as the PR's merge commit has them (main's
+      checkout, with each watched file the PR's diff touches replaced by its text at pulls/{n} merge_commit_sha, read
+      with the raw media type), the tree the re-scout barrier compares on, so a PR's own roadmap or north-star edit
+      never reads as main moving; a wake entry when the values differ, when the plan has decision-scout rows but the
+      last one carries no scout_input_fingerprint, when merge_commit_sha is null, or when the recompute raises
+      Unreadable; no wake for a plan with no decision-scout row. Drill: a fixture-only diff that adds or modifies
       tests/fixtures/persona_verdict/fixture_pr/rescout_drill.txt yields one mark entry per execute.fixture_personas
       route (reason drill), subject to the same idempotence skip. moved_since(repo, token, base_sha) -> bool: the
-      compare API from base_sha to main touches a WATCHED_PATHS file (any API error: True).
+      compare API from base_sha to main touches a WATCHED_PATHS file (any API error, or a truncated compare at
+      route.COMPARE_LIMIT files or 250 commits: True). A PR whose diff holds no plan path and no drill marker costs no
+      call after its compare; the sweep prints its API call count.
   - file: scripts/personas/resolve_pr.py
     action: Modify
     purpose: >-
@@ -84,16 +91,24 @@ scope:
       On a sweep resolution, _gate reads prepared/sweep.json instead of routes: one comment per entry not yet marked,
       marker <!-- persona-verdict-rescout:<head sha>:<route or in_session>:<fingerprint digest> -->, text saying main
       moved a scouted input and the scout must re-run (re-scout in session, or re-run the PR's persona-verdict-trigger
-      run); idempotent per (head, route, fingerprint); no fault comment for a sweep with no entries.
+      run); idempotent per (head, route, fingerprint); a mark entry's comment is posted only when landed_names shows its check
+      on that head, a wake entry's always; a sweep never posts a fault comment (it has no PR of its own; a failed post
+      shows in the run log, see the ci_rca_taxonomy residual).
   - file: scripts/checks/ci_guards/_persona_verdict_rescout.py
     action: Create
     new_imports: []
     purpose: >-
       Stdlib and yaml only (no scripts.personas import, so the gated Entry's pre_globs stay as they are). WATCHED, the
       upstream's path list, equal to sweep.WATCHED_PATHS by a test that imports both. rescout_trigger_problems(doc):
-      refuses any trigger but push, branches other than [main], paths other than WATCHED, any non-{} permissions, a uses: step, a secrets. reference or an Environment;
-      keyed_push_problems(verdict_doc): refuses a keyed job (run, run-fallback, smoke, refusal) whose if: lacks the
-      workflow_run.event == 'pull_request' conjunct.
+      exact-shape pins -- name exactly persona-verdict-rescout (workflow_run matches upstreams by name); on (the parsed
+      on/True key) exactly {push: {branches: [main], paths: WATCHED}}, so a bare string or list form and any other
+      event or push sub-key (tags, tags-ignore, branches-ignore, paths-ignore) is refused; top-level and every job's
+      permissions exactly {}; each job's keys within {runs-on, timeout-minutes, permissions, steps}, so job-level uses,
+      container, services and environment are refused; no step with uses:; no secrets reference in any form, matched
+      with validate_persona_verdict_chain.SECRETS_CTX's pattern (copied, the guard imports nothing from the chain
+      module). Keyed jobs: no new check; the existing exact KEYED_CONDITION pins (_persona_verdict_keyed.py for run,
+      smoke and refusal, _persona_verdict_fallback.py for run-fallback) already refuse any if: that drops or ORs the
+      pull_request conjunct, and a test here asserts each pinned condition carries it as a top-level conjunct.
   - file: scripts/checks/ci_guards/validate_persona_verdict_chain.py
     action: Modify
     new_imports: [scripts.checks.ci_guards._persona_verdict_rescout]
@@ -105,7 +120,8 @@ scope:
     purpose: >-
       plan_scout_input_fingerprint's governance note: the main-amendment and merged-plan-amendment residuals read
       narrowed (marked on Actions, advisory wake in session; a merge_gate recompute is rec-5128's), not closed; the
-      Actions recompute is enforced by rec-5653's carry.
+      Actions recompute is enforced by rec-5653's carry; one new terse amendment_log row (governance_note change) and
+      Decision 282's decay applied by its tool.
   - file: docs/contracts/git-ops.yaml
     action: Modify
     purpose: >-
@@ -117,7 +133,9 @@ scope:
     action: Modify
     purpose: >-
       workflows gains persona-verdict-rescout {tier: not_a_gate, ci_rca: excluded, owner: platform}: a secretless push
-      trigger whose conclusion carries no meaning; the sweep's own faults show in the persona-verdict run.
+      trigger whose conclusion carries no meaning. The persona-verdict row's rationale is reworded in place to say a
+      push-origin sweep's fault has no PR and shows only as a failed persona-verdict run on main (a named residual:
+      nothing alerts on it; the next qualifying push re-sweeps).
   - file: tests/personas/test_rescout_sweep.py
     action: Create
     purpose: >-
@@ -138,7 +156,7 @@ scope:
     purpose: sweep comments are idempotent per (head, route, fingerprint).
   - file: tests/checks/ci_guards/test__persona_verdict_rescout.py
     action: Create
-    purpose: each refused shape of the new upstream; a keyed job without the pull_request conjunct is refused; WATCHED equals sweep.WATCHED_PATHS.
+    purpose: one red fixture per refused upstream form (name, on forms, push sub-keys, permissions, job keys, uses, each secrets form); the keyed conditions' top-level conjunct; WATCHED equals sweep.WATCHED_PATHS.
   - file: tests/checks/ci_guards/test_validate_persona_verdict_chain.py
     action: Modify
     purpose: >-
@@ -182,7 +200,9 @@ verification_plan:
       tests/personas/test_post_verdict.py::test_covered_success_becomes_a_mark_when_main_moved
       tests/personas/test_wake.py::test_sweep_comments_are_idempotent
       tests/checks/ci_guards/test__persona_verdict_rescout.py::test_refuses_each_widened_upstream_shape
-      tests/checks/ci_guards/test__persona_verdict_rescout.py::test_refuses_a_keyed_job_without_the_pull_request_conjunct -q
+      tests/checks/ci_guards/test__persona_verdict_rescout.py::test_keyed_conditions_carry_the_pull_request_conjunct_at_top_level
+      tests/personas/test_rescout_sweep.py::test_own_watched_edit_with_main_unmoved_does_not_wake
+      tests/personas/test_wake.py::test_a_sweep_posts_no_fault_comment_and_wakes_marks_only_when_landed -q
     expected: All selected tests pass.
     fix_if: A test fails; fix the code inside scope, never the assertion (Decision 235).
     hermetic: true
@@ -223,17 +243,19 @@ verification_plan:
     phase: post-deploy
     action: >-
       Live drill, part 1. Before the build merges, open a fixture-only PR (allowlisted author) adding
-      tests/fixtures/persona_verdict/fixture_pr/rescout_drill.txt and let its own canary run post. The first push to main
-      touching a watched path at or after the build merge (the build's own roadmap edit qualifies) starts the sweep.
+      tests/fixtures/persona_verdict/fixture_pr/rescout_drill.txt and let its own canary run post. The first later push
+      to main touching a watched path (any merge; the build itself touches none) starts the sweep; the session
+      subscribes to the fixture PR and waits on its persona-verdict-rescout wake comment, never polling.
     command: >-
       mcp__github__actions_list(method="list_workflow_runs", owner="otl-labs", repo="ontheloop",
       resource_id="persona-verdict.yml") for event push on that main SHA, then list_workflow_jobs and get_job_logs for
       prepare, post and wake; mcp__github__pull_request_read(method="get_check_runs", pullNumber=<fixture PR>) and
       method="get_comments"
     expected: >-
-      The run has event push; prepare prints sweep=1, post posted=1, wake new=1; run, run-fallback, smoke and refusal
-      concluded skipped; the fixture head's newest persona-verdict/canary_persona check concluded failure, titled
-      re-scout required, with the verdict App's app id; one comment holds the persona-verdict-rescout marker.
+      The run has event push; prepare, keyprep, post and wake succeeded; run, run-fallback, smoke and refusal concluded
+      skipped; on the fixture PR only (other open PRs may add entries, so counts are not asserted): its head's newest
+      persona-verdict/canary_persona check concluded failure, titled re-scout required, with the verdict App's app id,
+      and exactly one comment holds a persona-verdict-rescout marker for that head.
     fix_if: Any other shape is a STOP to the plan owner with the run id; rec-5654 is reopened with update_rec naming it.
     hermetic: false
     graduation: not-applicable
@@ -245,9 +267,14 @@ verification_plan:
       the second sweep; mcp__github__actions_run_trigger(method="rerun_workflow_run", run_id=<trigger run>) then
       list_workflow_runs on persona-verdict.yml for event pull_request at the fixture head
     expected: >-
-      The second sweep adds no check and no comment (prepare prints sweep=0); the re-run starts a pull_request-origin
-      persona-verdict run whose post lands a fresh persona-verdict/canary_persona check newer than the mark.
-    fix_if: A duplicate mark or comment, or no workflow_run on the re-run, is a STOP to the plan owner with the run ids.
+      On the fixture PR, the second sweep adds no persona-verdict/canary_persona check and no rescout comment; the re-run
+      starts a pull_request-origin persona-verdict run whose post lands a fresh persona-verdict/canary_persona check
+      newer than the mark.
+    fix_if: >-
+      A duplicate mark or comment on the fixture PR, or no workflow_run on the re-run, is a STOP to the plan owner with
+      the run ids; a rerun refused for want of actions write on the session's GitHub identity is a STOP to the operator
+      (he re-runs it from the Actions UI and the reads continue). Placeholders are the fixture PR number and its latest
+      persona-verdict-trigger run id, read at run time.
     hermetic: false
     graduation: not-applicable
   - step: 8
@@ -284,13 +311,28 @@ test_obligations:
     verification_step: 2
     test_selector: tests/personas/test_post_verdict.py::test_covered_success_becomes_a_mark_when_main_moved
     red_green_expectation: red before (success posted), green after
+  - source: scripts/personas/sweep.py
+    behavior: a PR's own watched-file edit with main unmoved does not wake
+    verification_step: 2
+    test_selector: tests/personas/test_rescout_sweep.py::test_own_watched_edit_with_main_unmoved_does_not_wake
+    red_green_expectation: red if the in-session recompute uses pure main, green on the merge tree
+  - source: scripts/personas/post_verdict.py
+    behavior: a mark concludes failure and carries no persona-verdict-input line
+    verification_step: 2
+    test_selector: tests/personas/test_post_verdict.py::test_mark_has_no_input_line_and_fails
+    red_green_expectation: red before (sweep resolutions post nothing), green after
+  - source: scripts/personas/wake.py
+    behavior: a sweep posts no fault comment and wakes a mark only once its check landed
+    verification_step: 2
+    test_selector: tests/personas/test_wake.py::test_a_sweep_posts_no_fault_comment_and_wakes_marks_only_when_landed
+    red_green_expectation: red before (skips as unresolved), green after
   - source: scripts/personas/wake.py
     behavior: sweep comments are idempotent
     verification_step: 2
     test_selector: tests/personas/test_wake.py::test_sweep_comments_are_idempotent
     red_green_expectation: red before (skips as unresolved), green after
   - source: scripts/checks/ci_guards/_persona_verdict_rescout.py
-    behavior: the new upstream stays secretless and no keyed job admits a push origin
+    behavior: the new upstream keeps its exact secretless shape
     verification_step: 2
     test_selector: tests/checks/ci_guards/test__persona_verdict_rescout.py::test_refuses_each_widened_upstream_shape
     red_green_expectation: red before (no guard), green after
@@ -332,6 +374,26 @@ context:
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:3581641bc78d58589209041df2686605845680b8260de9e6f1a272e4584b2d7b"}
   - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: "v1:44f635c14970f2fabf4de9dcfaefd3230adef6e75c5347d5a4ca976fb4e22c9a"}
+  - gate: plan-critique
+    round: 1
+    verdict: REVISE
+    blocking: 3
+    nits: 11
+    findings:
+      - {id: MRS-01, severity: blocking, origin: judgement, anchor: "scope[scripts/personas/sweep.py]", subject: "in-session recompute on pure main wakes every PR that edits a watched file itself", disposition: fixed}
+      - {id: MRS-02, severity: blocking, origin: judgement, anchor: "verification_plan[6]", subject: "drill asserts exact sweep counts and a false trigger premise", disposition: fixed}
+      - {id: MRS-03, severity: blocking, origin: judgement, anchor: "scope[scripts/checks/ci_guards/_persona_verdict_rescout.py]", subject: "upstream guard leaves on forms, name, job keys and secrets forms unexamined", disposition: fixed}
+      - {id: MRS-04, severity: nit, origin: judgement, anchor: "scope[scripts/personas/sweep.py]", subject: "a truncated compare must read as moved", disposition: fixed}
+      - {id: MRS-05, severity: nit, origin: judgement, anchor: "scope[scripts/personas/sweep.py]", subject: "skip plans below schema 6; reword the absent-row case", disposition: fixed}
+      - {id: MRS-06, severity: nit, origin: judgement, anchor: "scope[config/ci_rca_taxonomy.yaml]", subject: "push-origin faults have no PR; reword the rationale and name the residual", disposition: fixed}
+      - {id: MRS-07, severity: nit, origin: judgement, anchor: "scope[scripts/personas/wake.py]", subject: "sweep fault behaviour and landed gating unspecified", disposition: fixed}
+      - {id: MRS-08, severity: nit, origin: judgement, anchor: "scope[scripts/personas/sweep.py]", subject: "GITHUB_TOKEN budget: count calls, short-circuit non-plan PRs", disposition: fixed}
+      - {id: MRS-09, severity: nit, origin: mechanical, anchor: "execution_steps[0]", subject: "taxonomy and ledger missing from the build-start STOP list", disposition: fixed}
+      - {id: MRS-10, severity: nit, origin: mechanical, anchor: "scope[docs/contracts/exit-criteria-ledger.yaml]", subject: "amendment_log row and Decision 282 decay unnamed", disposition: fixed}
+      - {id: MRS-11, severity: nit, origin: mechanical, anchor: "closes_criteria", subject: "[] on in_progress T4.32, reason in phase", disposition: fixed}
+      - {id: MRS-12, severity: nit, origin: judgement, anchor: "verification_plan[7]", subject: "placeholders and a refused rerun", disposition: fixed}
+      - {id: MRS-13, severity: nit, origin: mechanical, anchor: "test_obligations", subject: "mark path and sweep wake behaviour lack obligations", disposition: fixed}
+      - {id: MRS-14, severity: nit, origin: judgement, anchor: "scope", subject: "ports.yaml coverage of the new couplings", disposition: fixed}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -339,7 +401,7 @@ pre_implementation_checklist:
   - All files in scope located and readable
   - Acceptance criteria understood and verifiable
 execution_steps:
-  - "Build start: confirm rec-5653's build is merged to main (rescout.prior, fingerprints, head_inputs, Unreadable, merge_checks.FINGERPRINT_PERSONAS exist), else STOP. Re-measure with bin/venv-python -m scripts.roadmap.plan_obligations --plan docs/plans/PLAN-persona-verdict-main-rescout.yaml; persona-verdict.yml, validate_persona_verdict_chain.py and its test past their caps, or git-ops.yaml past its byte cap after relief, is a STOP to the plan owner."
+  - "Build start: confirm rec-5653's build is merged to main (rescout.prior, fingerprints, head_inputs, Unreadable, merge_checks.FINGERPRINT_PERSONAS exist), else STOP. Re-measure with bin/venv-python -m scripts.roadmap.plan_obligations --plan docs/plans/PLAN-persona-verdict-main-rescout.yaml; persona-verdict.yml, validate_persona_verdict_chain.py and its test, config/ci_rca_taxonomy.yaml (494 of 500 on 2026-11-26, five other unbuilt plans also scope it) or docs/contracts/exit-criteria-ledger.yaml past their caps, or git-ops.yaml past its byte cap after relief, is a STOP to the plan owner. If docs/contracts/ports.yaml (SA-14, PC-09) does not cover the sweep's open-PR listing, merge-commit contents read and compare-to-main couplings, STOP to the plan owner for a scope row."
   - "scripts/personas/sweep.py with tests/personas/test_rescout_sweep.py; then resolve_pr.py, route.py, post_verdict.py and wake.py with their tests."
   - "The new upstream, persona-verdict.yml's two in-place edits, _persona_verdict_rescout.py and validate_persona_verdict_chain.py's pins, with their tests, in one commit."
   - "config/ci_rca_taxonomy.yaml row; docs/contracts/exit-criteria-ledger.yaml note; docs/contracts/git-ops.yaml relief, sentence and amendment_log entry."
