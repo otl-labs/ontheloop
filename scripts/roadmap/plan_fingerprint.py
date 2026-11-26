@@ -224,7 +224,9 @@ def _run(args: argparse.Namespace) -> str:
     plan = _read_plan(Path(args.plan))
     extra = [t for t in args.with_cites.split(",") if t] if args.with_cites else []
     payload = projection(plan, load_tree(root), _read_sidecar(root, plan), extra)
-    return json.dumps(payload, sort_keys=True) if args.json else f"scout_input_fingerprint={fingerprint(payload)}"
+    if args.json:
+        return json.dumps(payload, sort_keys=True)
+    return f"scout_input_fingerprint={fingerprint(payload)}\ncites={','.join(payload['cites'])}"
 
 
 def main(argv: list[str] | None = None) -> int:

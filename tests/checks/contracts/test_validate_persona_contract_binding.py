@@ -101,3 +101,81 @@ def test_syntax_error_in_landing_module_is_ignored(tree: Path) -> None:
 def test_missing_roadmap_is_a_failure_not_a_crash(tree: Path) -> None:
     (tree / "docs/ROADMAP-PLATFORM.yaml").unlink()
     assert any("roadmap is missing" in f for f in _run(tree))
+
+
+FIXTURE_ROW = '{status: pending, owning_item: "T4.10a:c5"}'
+
+
+def _fixture_tree(tmp_path: Path) -> Path:
+    return build_tree(tmp_path, kind="fixture")
+
+
+def _bind_fixture(tree: Path, location: str, body: str | None = None) -> None:
+    if body is not None:
+        module = tree / location
+        module.parent.mkdir(parents=True, exist_ok=True)
+        module.write_text(body, encoding="utf-8")
+    edit_text(tree, INDEX_REL, FIXTURE_ROW, f"{{status: implemented, location: {location}}}")
+
+
+def test_fixture_row_bound_through_the_kind_is_green(tmp_path: Path) -> None:
+    tree = _fixture_tree(tmp_path)
+    _bind_fixture(tree, "scripts/personas/execute.py", 'KEY = "fixture_kind"\n')
+    assert _run(tree) == []
+
+
+def test_fixture_row_location_without_fixture_kind_fails(tmp_path: Path) -> None:
+    tree = _fixture_tree(tmp_path)
+    _bind_fixture(tree, "scripts/personas/execute.py", '"""fixture_kind"""\n# fixture_kind\nX = 1\n')
+    assert any("does not bind through fixture_kind" in f for f in _run(tree))
+
+
+def test_fixture_row_location_outside_landing_dirs_fails(tmp_path: Path) -> None:
+    tree = _fixture_tree(tmp_path)
+    _bind_fixture(tree, "tests/helper.py", 'KEY = "fixture_kind"\n')
+    assert any("is outside the landing dirs" in f for f in _run(tree))
+
+
+@pytest.mark.parametrize("field", ["persona", "contract"])
+def test_landing_dir_module_naming_implemented_fixture_persona_fails(tmp_path: Path, field: str) -> None:
+    tree = _fixture_tree(tmp_path)
+    _bind_fixture(tree, "scripts/personas/execute.py", 'KEY = "fixture_kind"\n')
+    name = "fixture_verdict" if field == "persona" else CONTRACT_REL
+    other = tree / "src" / "persona_backends" / "backend.py"
+    other.parent.mkdir(parents=True)
+    other.write_text(f'NAME = "{name}"\n', encoding="utf-8")
+    assert any("names fixture persona" in f for f in _run(tree))
+
+
+def test_fixture_row_naming_its_contract_cannot_bind_by_naming(tmp_path: Path) -> None:
+    tree = _fixture_tree(tmp_path)
+    _bind_fixture(tree, "scripts/personas/execute.py", f'KEY = "fixture_kind"\nPATH = "{CONTRACT_REL}"\n')
+    assert any("names fixture persona" in f for f in _run(tree))
+
+
+def test_fixture_row_location_escaping_landing_dirs_fails(tmp_path: Path) -> None:
+    tree = _fixture_tree(tmp_path)
+    outside = tree / "tests" / "x.py"
+    outside.parent.mkdir(parents=True)
+    outside.write_text('KEY = "fixture_kind"\n', encoding="utf-8")
+    (tree / "scripts" / "personas").mkdir(parents=True, exist_ok=True)
+    for location in ("scripts/personas/../../tests/x.py", str(outside)):
+        edit_text(tree, INDEX_REL, FIXTURE_ROW, f"{{status: implemented, location: {location}}}")
+        assert any("is outside the landing dirs" in f for f in _run(tree)), location
+        edit_text(tree, INDEX_REL, f"{{status: implemented, location: {location}}}", FIXTURE_ROW)
+    link = tree / "scripts" / "personas" / "link.py"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(outside)
+    edit_text(tree, INDEX_REL, FIXTURE_ROW, "{status: implemented, location: scripts/personas/link.py}")
+    assert any("is outside the landing dirs" in f for f in _run(tree))
+
+
+def test_fixture_row_non_python_location_fails(tmp_path: Path) -> None:
+    tree = _fixture_tree(tmp_path)
+    _bind_fixture(tree, "scripts/personas/notes.txt", 'fixture_kind = "x"\n')
+    assert any("does not bind through fixture_kind" in f for f in _run(tree))
+
+
+def test_verdict_row_naming_only_fixture_kind_fails(tree: Path) -> None:
+    _implement(tree, 'KEY = "fixture_kind"\n')
+    assert any("does not name" in f for f in _run(tree))

@@ -231,12 +231,38 @@ def _cli(tmp_path: Path, capsys: pytest.CaptureFixture[str], plan: dict | None, 
     return rc, out.out, out.err
 
 
-def test_cli_prints_one_line_and_is_deterministic(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_cli_prints_fingerprint_and_cites_lines(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     rc, out, _ = _cli(tmp_path, capsys, copy.deepcopy(_PLAN))
-    assert (
-        rc == 0 and out.startswith("scout_input_fingerprint=v1:") and len(out.strip()) == len("scout_input_fingerprint=") + 67
-    )
+    lines = out.splitlines()
+    assert rc == 0 and len(lines) == 2
+    assert lines[0].startswith("scout_input_fingerprint=v1:") and len(lines[0]) == len("scout_input_fingerprint=") + 67
+    assert lines[1] == "cites=" + ",".join(_PLAN["cites"])
     assert _cli(tmp_path / "again", capsys, copy.deepcopy(_PLAN))[1] == out
+
+
+def test_scout_dropped_cite_does_not_force_rescout(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    plan = copy.deepcopy(_PLAN)
+    plan["cites"] = ["dec:211", "dec:212", "dec:229"]
+    rc, out, _ = _cli(tmp_path / "a", capsys, plan, "--with-cites", "dec:229,dec:246")
+    assert rc == 0
+    fp_line, cites_line = out.splitlines()
+    cites = cites_line.removeprefix("cites=").split(",")
+    assert "dec:211" in cites and "dec:212" in cites and "dec:246" in cites
+
+    synced = copy.deepcopy(plan)
+    synced["cites"] = cites
+    _, out2, _ = _cli(tmp_path / "b", capsys, synced)
+    assert out2.splitlines()[0] == fp_line
+
+    old_way = copy.deepcopy(plan)
+    old_way["cites"] = ["dec:229", "dec:246"]
+    _, out3, _ = _cli(tmp_path / "c", capsys, old_way)
+    assert out3.splitlines()[0] != fp_line
+
+    _, out4, _ = _cli(tmp_path / "d", capsys, copy.deepcopy(plan), "--with-cites", "")
+    _, out5, _ = _cli(tmp_path / "e", capsys, copy.deepcopy(plan), "--with-cites", "dec:229")
+    assert set(out4.splitlines()[1].removeprefix("cites=").split(",")) == {"dec:211", "dec:212", "dec:229"}
+    assert out5.splitlines()[1] == out4.splitlines()[1]
 
 
 def test_cli_json_prints_the_payload(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
