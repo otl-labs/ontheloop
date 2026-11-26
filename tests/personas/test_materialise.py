@@ -51,6 +51,7 @@ def test_fixture_input_has_shared_fields_and_notes(tmp_path: Path) -> None:
         "head_sha": SHA,
         "plan": "slug: a\n",
         "notes": "BLOCKING: a",
+        "fixture_guidance": "",
     }
 
 

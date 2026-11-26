@@ -20,7 +20,13 @@ def test_fixture_personas_lists_the_canary() -> None:
 
 
 def test_a_fixture_route_has_input_and_output_schemas() -> None:
-    assert execute.schema_for(ROOT, "canary_persona", "input")["required"] == ["change_id", "head_sha", "plan", "notes"]
+    assert execute.schema_for(ROOT, "canary_persona", "input")["required"] == [
+        "change_id",
+        "head_sha",
+        "plan",
+        "notes",
+        "fixture_guidance",
+    ]
     assert execute.schema_for(ROOT, "canary_persona", "output") is not None
 
 
@@ -46,6 +52,7 @@ def test_probe_route_is_gone_and_fixture_route_runs_pinned_image(tmp_path: Path)
     work = tmp_path / "work"
     (work / "prepared").mkdir(parents=True)
     (work / "prepared" / "routes.json").write_text(json.dumps({"routes": ["canary_persona"], "plan_paths": []}))
+    (work / "prepared" / "input-canary_persona.json").write_text(json.dumps(GOOD))
     raw = json.dumps({"exit_code": 0, "timed_out": False, "stdout": "{}"}).encode()
     assert keyed_run.record({"GITHUB_JOB": "run"}, work, ROOT, raw) == 0
     out = json.loads((work / "results" / "canary_persona.json").read_text())
@@ -80,7 +87,7 @@ def test_request_refusal_keeps_the_key_off_both_streams(
     work = tmp_path / "w"
     (work / "prepared").mkdir(parents=True)
     (work / "prepared" / "routes.json").write_text(json.dumps({"routes": ["canary_persona"], "plan_paths": []}))
-    body = {"change_id": "o/r#1", "head_sha": "a" * 40, "plan": "", "notes": "NIT: x"}
+    body = {"change_id": "o/r#1", "head_sha": "a" * 40, "plan": "", "notes": "NIT: x", "fixture_guidance": ""}
     (work / "prepared" / "input-canary_persona.json").write_text(json.dumps(body))
     monkeypatch.setattr(keyed_run, "assume_role", lambda env: {})
     monkeypatch.setattr(keyed_run, "_ssm_value", lambda *a: "SENTINEL-KEY-VALUE")
@@ -92,6 +99,7 @@ def test_request_refusal_keeps_the_key_off_both_streams(
     assert keyed_run.request({**ENV_RUN, "RUNNER_TEMP": str(tmp_path)}, work, ROOT) == keyed_run.EXIT_REFUSED
     captured = capfd.readouterr()
     assert captured.out == "" and "SENTINEL-KEY-VALUE" not in captured.err + captured.out
+    assert "REFUSED input" not in captured.err
 
 
 SHA = "a" * 40
@@ -108,7 +116,7 @@ def _work(tmp_path: Path, route: str = ROUTE, body: dict[str, str] | None = None
     return work
 
 
-GOOD = {"change_id": "o/r#1", "head_sha": SHA, "plan": "", "notes": "BLOCKING: x"}
+GOOD = {"change_id": "o/r#1", "head_sha": SHA, "plan": "", "notes": "BLOCKING: x", "fixture_guidance": ""}
 
 
 def test_valid_request_is_returned(tmp_path: Path) -> None:
