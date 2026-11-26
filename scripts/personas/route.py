@@ -16,7 +16,7 @@ from typing import Any
 
 import yaml
 
-from scripts.personas import execute, resolve_pr
+from scripts.personas import execute, rescout, resolve_pr
 from scripts.session import merge_checks
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -28,6 +28,7 @@ COMPARE_LIMIT = 300
 SCOPE_CONTRACT = "docs/contracts/implement-scope-boundary.yaml"
 PERSONAS_CONTRACT = "docs/contracts/executor-personas.yaml"
 ROUTES = Path("prepared") / "routes.json"
+PLAN_INPUTS = "plan_inputs.json"
 
 
 def changed_files(repo: str, base_ref: str, head_sha: str, token: str | None) -> tuple[list[dict[str, Any]], bool, str]:
@@ -213,6 +214,9 @@ def main(argv: list[str]) -> int:
     fixture = False
     drill = False
     paths: list[str] = []
+    carried: list[dict[str, Any]] = []
+    rescout_map: dict[str, str] = {}
+    inputs: dict[str, Any] | None = None
     if resolution.get("resolved") and not resolution.get("override"):
         files, unknown, merge_base = changed_files(repo, resolution["base_ref"], resolution["head_sha"], token)
         routes = route(files, unknown, bool(resolution["draft"]), repo, resolution["head_sha"], merge_base, token)
@@ -220,11 +224,15 @@ def main(argv: list[str]) -> int:
         paths = fixture_paths(files, unknown)
         fixture = bool(fixture_routes(files, unknown))
         drill = fixture and fallback_drill(files, unknown)
+        main_root = Path(os.environ["GITHUB_WORKSPACE"]) / "main" if os.environ.get("GITHUB_WORKSPACE") else ROOT
+        decision = rescout.decide(repo, token, resolution, routes, plans, unknown, main_root)
+        routes, carried, rescout_map, inputs = decision.routes, decision.carried, decision.rescout, decision.inputs
     ROUTES.parent.mkdir(parents=True, exist_ok=True)
-    ROUTES.write_text(
-        json.dumps({"routes": routes, "plan_paths": plans, "fixture_paths": paths}, sort_keys=True), encoding="utf-8"
-    )
-    print(f"PERSONA-VERDICT routes={len(routes)} {' '.join(routes)}".rstrip())
+    doc = {"routes": routes, "plan_paths": plans, "fixture_paths": paths, "carried": carried, "rescout": rescout_map}
+    ROUTES.write_text(json.dumps(doc, sort_keys=True), encoding="utf-8")
+    if inputs is not None:
+        (ROUTES.parent / PLAN_INPUTS).write_text(json.dumps(inputs, sort_keys=True), encoding="utf-8")
+    print(f"PERSONA-VERDICT routes={len(routes)} {' '.join(routes)}".rstrip() + f" carried={len(carried)}")
     resolve_pr.write_output(
         routes=str(len(routes)), fixture="true" if fixture else "false", fallback_drill="true" if drill else "false"
     )

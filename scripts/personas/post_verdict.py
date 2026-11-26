@@ -17,7 +17,7 @@ from typing import Any
 
 import jsonschema
 
-from scripts.personas import app_token, execute, override, resolve_pr
+from scripts.personas import app_token, execute, override, rescout, resolve_pr
 
 SUCCESS_VERDICTS = frozenset({"NO_FLAGS", "FLAGS_FOUND", "PROCEED"})
 FAILURE_VERDICTS = frozenset({"BLOCK", "REVISE"})
@@ -105,12 +105,11 @@ def _escape(value: str) -> str:
     return " ".join(value.replace("<!--", "&lt;!--").split())
 
 
-def overridable_output(root: Path, route_id: str, result: Any) -> tuple[str, list[str], dict[str, Any]] | None:
-    """(verdict, blocking ids, parsed output) of a parsed, schema-valid, overridable verdict result, else None."""
-    if not (isinstance(result, dict) and result.get("route") == route_id and override.overridable(route_id)):
+def success_output(root: Path, route_id: str, result: Any) -> dict[str, Any] | None:
+    """The parsed output of a route's schema-valid, outcome-success result, else None."""
+    if not (isinstance(result, dict) and result.get("route") == route_id):
         return None
-    extract = override.extractor_for(route_id)
-    if extract is None or result.get("failure") or result.get("timed_out") or result.get("exit_code") != 0:
+    if result.get("failure") or result.get("timed_out") or result.get("exit_code") != 0:
         return None
     try:
         out = json.loads(str(result.get("stdout") or ""))
@@ -120,7 +119,16 @@ def overridable_output(root: Path, route_id: str, result: Any) -> tuple[str, lis
         jsonschema.validate(out, schema)
     except (ValueError, jsonschema.ValidationError):
         return None
-    if not isinstance(out, dict) or out.get("outcome") != "success":
+    return out if isinstance(out, dict) and out.get("outcome") == "success" else None
+
+
+def overridable_output(root: Path, route_id: str, result: Any) -> tuple[str, list[str], dict[str, Any]] | None:
+    """(verdict, blocking ids, parsed output) of a parsed, schema-valid, overridable verdict result, else None."""
+    if not (isinstance(result, dict) and result.get("route") == route_id and override.overridable(route_id)):
+        return None
+    extract = override.extractor_for(route_id)
+    out = success_output(root, route_id, result) if extract is not None else None
+    if out is None or extract is None:
         return None
     verdict, ids = extract(out)
     if verdict not in override.OVERRIDABLE_VERDICTS or not ids:
@@ -145,7 +153,9 @@ def record_text(route_id: str, head_sha: str, verdict: str, ids: list[str], out:
     return "\n".join(lines)
 
 
-def _override_form(approved: dict[str, Any], verdict: str, ids: list[str], record: str) -> tuple[str, str, str]:
+def _override_form(
+    approved: dict[str, Any], verdict: str, ids: list[str], record: str, source: str | None = None
+) -> tuple[str, str, str]:
     who = approved["approver"]
     title = f"{verdict} dispositioned by {who}" if verdict == "FLAGS_FOUND" else f"{verdict} overridden by {who}"
     summary = (
@@ -153,7 +163,9 @@ def _override_form(approved: dict[str, Any], verdict: str, ids: list[str], recor
         f"Approved at: {approved['approved_at']}. Override run: {approved['url']}."
     )
     marker = {"run_id": approved["run_id"], "approver": who, "approved_at": approved["approved_at"]}
-    text = record.split("\n", 1)[0] + "\n" + override.OVERRIDE_PREFIX + json.dumps(marker, sort_keys=True) + " -->"
+    kept = rescout.input_line(source if source is not None else record)
+    mark = override.OVERRIDE_PREFIX + json.dumps(marker, sort_keys=True) + " -->"
+    text = record.split("\n", 1)[0] + "\n" + (kept + "\n" if kept else "") + mark
     return title, summary, text
 
 
@@ -174,12 +186,43 @@ def plan_override(resolution: dict[str, Any], repo: str, read_token: str | None)
     except override.Refused as exc:
         raise RuntimeError(f"override re-check failed: {exc}") from exc
     record = override.render_record(route_id, head, rec["verdict"], rec["blocking_ids"], rec["run_id"])
-    title, summary, text = _override_form(ov, rec["verdict"], rec["blocking_ids"], record)
+    title, summary, text = _override_form(ov, rec["verdict"], rec["blocking_ids"], record, _text)
     return _body(f"persona-verdict/{route_id}", head, "success", title, summary, text)
 
 
 def _body(name: str, head_sha: str, conclusion: str, title: str, summary: str, text: str | None) -> dict[str, Any]:
     return {"name": name, "head_sha": head_sha, "conclusion": conclusion, "title": title, "summary": summary, "text": text}
+
+
+def _carried_body(
+    root: Path, resolution: dict[str, Any], entry: dict[str, Any], repo: str, read_token: str | None
+) -> dict[str, Any]:
+    route_id, head = str(entry["route"]), resolution["head_sha"]
+    name = f"persona-verdict/{route_id}"
+    if not resolution.get("allowlisted"):
+        conclusion, title, summary = judge(root, route_id, None, False)
+        return _body(name, head, conclusion, title, summary, None)
+    verdict, run_id = str(entry["verdict"]), os.environ.get("GITHUB_RUN_ID", "0")
+    ids = sorted({str(i) for i in entry.get("blocking_ids") or []})
+    conclusion = "success" if verdict in SUCCESS_VERDICTS else "failure"
+    title = f"verdict {verdict} (carried from {str(entry['from_head'])[:7]})"
+    summary = f"Verdict: {verdict}. The scout-input fingerprint is unchanged since {entry['from_head']}; no persona ran."
+    lines: list[str] = []
+    if ids:
+        titles = entry.get("titles") or {}
+        lines = [override.render_record(route_id, head, verdict, ids, run_id)]
+        lines += [f"- {_escape(i).replace(' ', '_')}: {_escape(str(titles.get(i, '')))}" for i in ids]
+    line = rescout.render_input(route_id, head, verdict, entry["cites"], entry["fingerprints"], run_id, entry["from_head"])
+    text = rescout.with_input("\n".join(lines) if lines else None, line)
+    if conclusion == "failure" and ids:
+        try:
+            approved = override.lookup(repo, read_token, int(resolution["number"]), head, route_id, override.ids_digest(ids))
+        except override.Refused:
+            approved = None
+        if approved:
+            conclusion = "success"
+            title, summary, text = _override_form(approved, verdict, ids, text)
+    return _body(name, head, conclusion, title, summary, text)
 
 
 def plan_all(root: Path, work: Path, repo: str, read_token: str | None) -> list[dict[str, Any]]:
@@ -205,6 +248,14 @@ def plan_all(root: Path, work: Path, repo: str, read_token: str | None) -> list[
         if info is not None:
             verdict, ids, out = info
             text = record_text(route_id, resolution["head_sha"], verdict, ids, out)
+        fresh = success_output(root, route_id, result) if allowlisted else None
+        if fresh is not None:
+            line = rescout.fresh_input(
+                root, work, route_id, resolution["head_sha"], fresh, os.environ.get("GITHUB_RUN_ID", "0")
+            )
+            text = rescout.with_input(text, line) if line else text
+        if info is not None:
+            verdict, ids, out = info
             if conclusion == "failure":
                 try:
                     approved = override.lookup(
@@ -219,8 +270,10 @@ def plan_all(root: Path, work: Path, repo: str, read_token: str | None) -> list[
                     approved = None
                 if approved:
                     conclusion = "success"
-                    title, summary, text = _override_form(approved, verdict, ids, text)
+                    title, summary, text = _override_form(approved, verdict, ids, text or "")
         bodies.append(_body(f"persona-verdict/{route_id}", resolution["head_sha"], conclusion, title + marker, summary, text))
+    for entry in routes_doc.get("carried") or []:
+        bodies.append(_carried_body(root, resolution, entry, repo, read_token))
     return bodies
 
 

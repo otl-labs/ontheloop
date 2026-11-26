@@ -300,3 +300,8 @@ def test_persona_pins_cover_every_persona_name(app: int | None) -> None:
     names = [mc.persona_check_name(p) for p in mc.PERSONA_CLASSES]
     pins = mc.persona_pins([*names, "pr-validate", "persona-verdict/code_reviewr", f"{names[0]}-x"], app)
     assert pins == dict.fromkeys(names, app)
+
+
+def test_fingerprint_personas_are_plan_class() -> None:
+    assert mc.FINGERPRINT_PERSONAS
+    assert all(mc.PERSONA_CLASSES.get(p) == "plan" for p in mc.FINGERPRINT_PERSONAS)

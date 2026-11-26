@@ -16,13 +16,13 @@ APP_TOKEN_ALLOWED = {"boto3", "botocore", "jwt", "cryptography", "yaml", "src"}
 INFERENCE_SMOKE_ALLOWED = {"boto3", "botocore", "yaml", "litellm", "src"}
 ALLOWED = {
     "resolve_pr": {"yaml"},
-    "route": {"yaml"},
+    "route": {"yaml", "pydantic"},
     "snapshot": {"yaml"},
     "override": {"yaml"},
-    "materialise": {"yaml"},
+    "materialise": {"yaml", "pydantic"},
     "execute": {"yaml"},
     "keyed_run": {"boto3", "botocore", "jsonschema", "yaml", "src"},
-    "post_verdict": {"yaml", "jsonschema", *APP_TOKEN_ALLOWED},
+    "post_verdict": {"yaml", "jsonschema", "pydantic", *APP_TOKEN_ALLOWED},
     "app_token": APP_TOKEN_ALLOWED,
     "wake": {"yaml"},
     "egress_probe": set(),
