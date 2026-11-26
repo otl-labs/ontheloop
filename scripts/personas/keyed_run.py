@@ -352,6 +352,7 @@ def _record(env: Mapping[str, str], work: Path, root: Path, result: dict[str, An
     if result is None:
         put(route, {"route": route, "failure": "launcher_no_result"})
         return 0
+    _telemetry(env, work, results, route, result.get("events"), root)
     try:
         slots = execute.guidance_slots(root, route)
     except ValueError:
@@ -376,7 +377,6 @@ def _record(env: Mapping[str, str], work: Path, root: Path, result: dict[str, An
     if guidance:
         recorded["guidance"] = guidance
     put(route, recorded)
-    _telemetry(env, work, results, route, result.get("events"), root)
     return 0
 
 
