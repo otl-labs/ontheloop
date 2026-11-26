@@ -2,10 +2,10 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
-## Decision 287: An agent merge of a plan is refused when main has changed what its decision scout read -- compared by the scout-input fingerprint on the PR head and on main with the PR's changes, fail closed, no agent override (amends Decision 83) (Decided)
+## Decision 288: An agent merge of a plan is refused when main has changed what its decision scout read -- compared by the scout-input fingerprint on the PR head and on main with the PR's changes, fail closed, no agent override (amends Decision 83) (Decided)
 
 ```yaml
-number: 287
+number: 288
 status: Decided
 decided_date: "2026-11-26"
 kind:
@@ -26,7 +26,7 @@ significance:
 
 **Status:** Decided
 **Date:** 2026-11-26
-**Warehouse ID:** dec-287 (per Decision 84 backfill)
+**Warehouse ID:** dec-288 (per Decision 84 backfill)
 
 **Problem:** A plan's decision-scout verdict holds only for the inputs it read: the Decisions the plan cites or
 amends, the roadmap rows its scope meets, north-star and its approved wording, which the scout-input fingerprint
@@ -70,7 +70,7 @@ post-MVP (Decision 196 cl.8, Decision 197 cl.8), and the fingerprint already has
 rule through plan_fingerprint's tree reader without changing it.
 
 ```yaml reversal-conditions
-decision: 287
+decision: 288
 review_by: 2027-05-26
 on_trigger: "re-decide via /plan; never add an agent override"
 conditions:
@@ -3421,7 +3421,7 @@ conditions:
 
 > **Amended by Decision 254 (2026-11-12):** Decision 254 fires tap-promotion-lands: clause 5's end state is decided (a last-green ref, not a promotion in environment-taxonomy.yaml's sense). The refusal stays as written until the culprit step has named the culprit correctly on three real multi-commit reds, none misattributed; it then narrows to overlapping files under terraform/** and governed deploy paths, and the update-branch remedy gains an attempt cap (Decision 254 cl.8).
 
-> **Update (2026-11-26, PLAN-persona-verdict-main-rescout):** Decision 287 covers one cross-file class clause 2 misses: a plan whose decision-scout inputs main changed since the PR's base. The same gate refuses it after this rule clears, by fingerprint, never by file.
+> **Update (2026-11-26, PLAN-persona-verdict-main-rescout):** Decision 288 covers one cross-file class clause 2 misses: a plan whose decision-scout inputs main changed since the PR's base. The same gate refuses it after this rule clears, by fingerprint, never by file.
 
 ---
 
@@ -13064,7 +13064,7 @@ conditions:
 
 > **Update (2026-11-19, PLAN-actions-sha-pin-native-policy):** the ghas-probe's Actions-permissions control also checks sha_pinning_required, GitHub's required SHA pinning (rec-5290, Decision 100), so the three controls named in the reversal conditions include it. The first live read-back run is appended to rec-5290's resolution.
 
-> **Update (2026-11-26, PLAN-persona-verdict-main-rescout):** Decision 287 narrows it again for agent merges of plans whose decision-scout inputs main changed since the PR's base: the merge gate refuses them, and an operator merge in the GitHub UI stays the release valve.
+> **Update (2026-11-26, PLAN-persona-verdict-main-rescout):** Decision 288 narrows it again for agent merges of plans whose decision-scout inputs main changed since the PR's base: the merge gate refuses them, and an operator merge in the GitHub UI stays the release valve.
 
 ---
 

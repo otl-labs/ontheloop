@@ -361,12 +361,12 @@ _SCOUT_STALE_MSG = (
     "merge-gate: scout-inputs: STALE: main changed what the decision scout read for {plans} since this PR's base. "
     "Update the branch (mcp__github__update_pull_request_branch) and `git pull --ff-only` the updated head; "
     'pr-validate then fails "re-scout required" on that plan: re-run the decision scout there, record its row, push, '
-    "wait for the CI-green wake on the new head (subscribe_pr_activity, never poll), then merge (Decision 287)."
+    "wait for the CI-green wake on the new head (subscribe_pr_activity, never poll), then merge (Decision 288)."
 )
 
 
 def _scout_inputs_denial(root: Path, ref: str, merge_base: str, dl: _Deadline) -> int | None:
-    """Decision 287: refuse a plan whose scout inputs main moved. None means clear."""
+    """Decision 288: refuse a plan whose scout inputs main moved. None means clear."""
     from scripts.session import merge_scout_inputs  # noqa: PLC0415
 
     budget = max(dl.left("scout inputs") - _SCOUT_RESERVE, 0.0)

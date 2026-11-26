@@ -1,4 +1,4 @@
-"""The merge gate's scout-input predicate (rec-5654, Decision 287): a plan whose scout inputs main moved is refused."""
+"""The merge gate's scout-input predicate (rec-5654, Decision 288): a plan whose scout inputs main moved is refused."""
 
 from __future__ import annotations
 
