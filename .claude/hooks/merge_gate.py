@@ -356,6 +356,29 @@ class _Call:
     is_merge: bool
 
 
+_SCOUT_RESERVE = 10.0
+_SCOUT_STALE_MSG = (
+    "merge-gate: scout-inputs: STALE: main changed what the decision scout read for {plans} since this PR's base. "
+    "Update the branch (mcp__github__update_pull_request_branch) and `git pull --ff-only` the updated head; "
+    'pr-validate then fails "re-scout required" on that plan: re-run the decision scout there, record its row, push, '
+    "wait for the CI-green wake on the new head (subscribe_pr_activity, never poll), then merge (Decision 288)."
+)
+
+
+def _scout_inputs_denial(root: Path, ref: str, merge_base: str, dl: _Deadline) -> int | None:
+    """Decision 288: refuse a plan whose scout inputs main moved. None means clear."""
+    from scripts.session import merge_scout_inputs  # noqa: PLC0415
+
+    budget = max(dl.left("scout inputs") - _SCOUT_RESERVE, 0.0)
+    verdict = merge_scout_inputs.judge(root, ref, "refs/remotes/origin/main", merge_base, budget)
+    if verdict.kind == merge_scout_inputs.CLEAR:
+        return None
+    if verdict.kind == merge_scout_inputs.STALE:
+        sys.stderr.write(_SCOUT_STALE_MSG.format(plans=verdict.reason) + "\n")
+        return 2
+    return _deny(f"scout-inputs: UNAVAILABLE: {verdict.reason}; retry later, or the operator merges in the GitHub UI")
+
+
 def _judge(root: Path, call: _Call, dl: _Deadline) -> int:
     from scripts.session import merge_overlap  # noqa: PLC0415
 
@@ -395,6 +418,9 @@ def _judge(root: Path, call: _Call, dl: _Deadline) -> int:
             )
         if not _HEX40.match(head):
             return _deny(f"checks: UNAVAILABLE: fetched head {head!r} is not a 40-hex sha")
+        scout = _scout_inputs_denial(root, ref, verdict.merge_base, dl)
+        if scout is not None:
+            return scout
         extra, app, refusal = _persona_leg_app(root, head, verdict.merge_base, dl)
         if refusal is not None:
             return _deny(refusal)
