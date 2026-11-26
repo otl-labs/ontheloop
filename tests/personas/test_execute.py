@@ -302,3 +302,40 @@ def test_record_keeps_guidance_slot_values(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.setattr(keyed_run.image_pin, "load_pin", boom)
     with pytest.raises(ValueError, match="pin"):
         keyed_run.record({}, work, ROOT, raw)
+
+
+def test_record_telemetry_survives_guidance_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    events = {"model_call": [{"n": 1}]}
+    raw = json.dumps({"exit_code": 0, "timed_out": False, "stdout": "{}", "events": events}).encode()
+    calls: list[list[str]] = []
+
+    def fake_main(argv: list[str]) -> int:
+        calls.append(list(argv))
+        return 0
+
+    monkeypatch.setattr(keyed_run, "sidecar_bytes", lambda env, root: b"{}")
+    monkeypatch.setattr(keyed_run.telemetry_rows, "main", fake_main)
+
+    def run(sub: str, slots: list[str] | Exception, body: dict[str, str]) -> tuple[Path, dict]:
+        calls.clear()
+        work = _work(tmp_path / sub, body=body)
+
+        def fake(root: Path, route: str) -> list[str]:
+            if isinstance(slots, Exception):
+                raise slots
+            return slots
+
+        monkeypatch.setattr(execute, "guidance_slots", fake)
+        assert keyed_run.record({}, work, ROOT, raw) == 0
+        return work, json.loads((work / "results" / f"{ROUTE}.json").read_text())
+
+    for sub, slots in (("raises", ValueError("x")), ("missing", ["focus"])):
+        work, out = run(sub, slots, GOOD)
+        assert out == {"route": ROUTE, "failure": "input_unusable"}
+        assert len(calls) == 1
+        staged = work / "telemetry-in" / ROUTE / "events.json"
+        assert calls[0][calls[0].index("--events") + 1] == str(staged)
+        assert json.loads(staged.read_text()) == events
+
+    work, out = run("ok", ["focus"], {**GOOD, "focus": "V"})
+    assert len(calls) == 1 and "image_digest" in out and out["guidance"] == {"focus": "V"}
