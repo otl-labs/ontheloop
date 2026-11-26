@@ -1,0 +1,331 @@
+schema_version: 7
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "persona-verdict-scout-carry"
+intent: >-
+  Bind a decision-scout verdict to the scout-input fingerprint it judged (T4.32 c4 legs 1-2, rec-5653): on every
+  plan-PR push the verdict chain's prepare job computes each changed plan's fingerprint with plan_fingerprint
+  unchanged; an equal value on the last verdict-App scout check posts a carried check on the new head with no persona
+  run, and a moved, missing, untrusted or unreadable value routes the scout, so usage falls without a verdict ever
+  covering inputs it did not judge.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-persona-verdict-scout-carry.yaml
+phase: >-
+  T4.32 (persona foundation): c4 legs 1-2 (carry on an equal fingerprint, re-run the scout on a moved one); c4 stays
+  open (leg 3 is rec-5654, the live proof is T4.30's), so closes_criteria is [] because c4 cannot be met here
+cites: [dec:205, dec:229, dec:262, dec:264, dec:271]
+amends: []
+introduces: []
+closes_criteria: []
+scope:
+  - file: scripts/personas/rescout.py
+    action: Create
+    new_imports: [scripts.personas.override, scripts.personas.resolve_pr, scripts.personas.route, scripts.roadmap.plan_fingerprint, scripts.roadmap.approved_words, scripts.session.merge_checks]
+    purpose: >-
+      The fingerprint carry, no persona-id literal. INPUT_PREFIX "<!-- persona-verdict-input v1 " with render_input /
+      parse_input: one line, compact sorted JSON, keys exactly {route, head_sha, verdict, cites, fingerprints, run_id,
+      carried_from}; cites a sorted list of dec:N tokens; fingerprints {plan path: "v<N>:<hex>"}; carried_from a 40-hex
+      SHA or null; parse_input finds exactly one such line anywhere in a check's output text, else None.
+      head_inputs(repo, token, head_sha, plan_paths): each plan's text and approved-text sidecar
+      (path approved_words.sidecar_rel(slug)) at the head through the contents API with a status-aware fetch -- 404
+      means no sidecar, any other non-200 or undecodable body raises Unreadable; the plan text is parsed with
+      route.parse_plan (512 KiB cap, alias refusal), None raising Unreadable, and a slug that is not a string matching
+      [A-Za-z0-9._-]+ raises Unreadable before any sidecar fetch. fingerprints(inputs, main_root, cites): {path:
+      plan_fingerprint.fingerprint(projection(plan, load_tree(main_root), parse_sidecar(sidecar) or None, cites))};
+      any FingerprintError, PlanEdgesError, ApprovedTextError or yaml error raises Unreadable. prior(repo, token, number,
+      route): the PR's commits (pulls/{n}/commits, every page, at most 3), newest first, at most SCAN_COMMITS = 20; on
+      the first commit holding a check run named persona-verdict/<route> whose app.id equals override.app_id(), the
+      newest such run's output.text; returns (input record, v1 record or None, finding titles) or a reason: missing
+      (no such run within the scan), untrusted (record route or head_sha differs from the run's), unreadable (an API
+      error, no or bad input line, a verdict that is not an upper-case token, or override.app_id() refusing; rescout
+      never imports post_verdict, whose jsonschema prepare does not install, and post maps an unknown verdict to failure
+      as judge does). decide(...): for each route in routes that is in merge_checks.FINGERPRINT_PERSONAS, when the resolution is
+      allowlisted (Decision 205 cl.2), the diff is known, plan_paths is non-empty, the prior record is trusted and fingerprints(head inputs, main, record cites) equals
+      the record's fingerprints map exactly, the route moves from routes to carried {route, verdict, blocking_ids,
+      titles, cites, fingerprints, from_head, from_check_run_id}; else it stays in routes with reason moved (record
+      readable, maps differ), missing, untrusted, unreadable or not_allowlisted. rescout_required(routes_doc) -> bool: True when
+      routes_doc's rescout map is non-empty (the state the plan_critic add plan, T4.29, reads).
+  - file: scripts/personas/route.py
+    action: Modify
+    new_imports: [scripts.personas.rescout]
+    purpose: >-
+      main(), after route(): imports rescout function-locally (wake.py imports route, and the wake job installs pyyaml
+      alone, so route's module scope must never load pydantic) and calls rescout.decide over the resolved PR (number, head, routes, plan paths, unknown flag,
+      $GITHUB_WORKSPACE/main as the main tree), writes routes.json with the two new keys carried (list) and rescout
+      ({route: reason}), and prepared/plan_inputs.json ({path: {plan, sidecar}}) whenever a covered route stays in
+      routes, so post can compute the fresh record; "routes" stays the routes to run, so materialise.py and
+      keyed_run.py are untouched. The printed line gains carried=<n>. route() itself is unchanged.
+  - file: scripts/personas/post_verdict.py
+    action: Modify
+    new_imports: [scripts.personas.rescout]
+    purpose: >-
+      plan_all: (a) one body per carried entry on the resolved head (an unallowlisted resolution posts judge's allowlist
+      failure instead, as for a fresh route): conclusion success for a SUCCESS_VERDICTS verdict and
+      failure for FAILURE_VERDICTS (Decision 262: a carried BLOCK stays a failure), title "verdict <V> (carried from
+      <short sha>)"; text = override.render_record(route, new head, verdict, blocking_ids, this GITHUB_RUN_ID) and the
+      finding lines when blocking_ids is non-empty, with rescout.render_input inserted as the text's second line (its first when
+      there is no v1 record): head_sha the new head, run_id this GITHUB_RUN_ID, verdict, cites and fingerprints copied
+      from the carried entry, carried_from the prior record's head; a failure is then looked up with override.lookup for the NEW head only, exactly as a fresh failure,
+      so no override crosses heads. (b) a fresh result on a covered route whose output is schema-valid with outcome
+      success gets rescout.render_input as the text's second line (its first when there is no v1 record), so the
+      TEXT_LIMIT cut never drops it; fingerprints computed from
+      prepared/plan_inputs.json and the checked-out main with the output's cite[].decision ids as dec:N tokens; no
+      input line when the output fails, the inputs file is absent or rescout raises Unreadable (the check still posts).
+      (c) _override_form and plan_override keep the source text's input line, as the line after the v1 record and before
+      the override marker. The v1 record stays the text's first line whenever it is written.
+  - file: scripts/personas/wake.py
+    action: Modify
+    purpose: >-
+      _gate and wake read the route ids to mark as routes plus each carried entry's route, so a run whose only checks
+      are carried still wakes the watching session; no_routes only when both are empty.
+  - file: scripts/session/merge_checks.py
+    action: Modify
+    purpose: >-
+      FINGERPRINT_PERSONAS = frozenset({"decision_scout"}) beside PERSONA_CLASSES and READY_HEAD_PERSONAS: the personas
+      whose verdict a scout-input fingerprint covers.
+  - file: .github/workflows/persona-verdict.yml
+    action: Modify
+    purpose: >-
+      prepare's permissions gain checks: read (to list earlier check runs; no write scope, no secret, no id-token) and its
+      install line becomes pip install pyyaml pydantic -c "$GITHUB_WORKSPACE/main/requirements.txt" (plan_fingerprint
+      needs both). No other job or step changes. Size: in place on rec-5559's flow-form permissions line, else +1 line;
+      re-measured at build start.
+  - file: scripts/checks/ci_guards/validate_persona_verdict_chain.py
+    action: Modify
+    new_imports: []
+    purpose: >-
+      PIP_SETS["prepare"] = "pyyaml pydantic" and JOB_PERMISSIONS["prepare"] gains "checks": "read", in place (no line
+      growth); the live-pair test then pins the workflow edit.
+  - file: tests/personas/test_rescout.py
+    action: Create
+    purpose: >-
+      Hermetic tests with a fake GitHub API and the repository tree as main: carry on equal, re-run on moved, the
+      fail-closed reasons (missing, untrusted, unreadable, not_allowlisted, bad slug), the status-aware sidecar fetch, the
+      cite merge, a two-carry chain, the input line round trip and the export.
+  - file: tests/personas/test_route.py
+    action: Modify
+    purpose: main writes carried, rescout and plan_inputs.json and keeps routes the to-run list.
+  - file: tests/personas/test_post_verdict.py
+    action: Modify
+    purpose: carried bodies, the fresh input line and the override form keeping it.
+  - file: tests/personas/test_wake.py
+    action: Modify
+    purpose: a carried-only run wakes; wake and override import in a subprocess with pydantic blocked.
+  - file: tests/test_session_merge_checks.py
+    action: Modify
+    purpose: FINGERPRINT_PERSONAS is a subset of the plan class.
+bundled_recommendations: [rec-5653]
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - bin/venv-python -m pytest tests/personas/test_rescout.py::test_equal_fingerprint_carries_the_scout_verdict_and_a_moved_one_reruns -q passes (rec-5653's acceptance).
+  - A carried BLOCK posts a failure on the new head, and a prior head's override success is never posted on the new head.
+  - A missing, untrusted or unreadable prior record, an unallowlisted author, an unknown diff, a bad slug or a sidecar fetch error routes the scout.
+  - scripts.personas.wake and scripts.personas.override import with pydantic unavailable.
+  - routes.json keeps routes as the routes to run; carried and rescout are new keys; materialise.py and keyed_run.py are unchanged.
+  - The workflow's prepare job holds exactly contents read, pull-requests read, actions read and checks read; no job gains a write scope.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: rec-5653's acceptance test.
+    command: bin/venv-python -m pytest tests/personas/test_rescout.py::test_equal_fingerprint_carries_the_scout_verdict_and_a_moved_one_reruns -q
+    expected: One test passes.
+    expected_literals: ["1 passed"]
+    fix_if: It fails; fix rescout.py or route.py inside scope, never the assertion (Decision 235).
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: persona-verdict-scout-carry-acceptance
+  - step: 2
+    phase: pre-deploy
+    action: The new behaviour tests across the four modules.
+    command: >-
+      bin/venv-python -m pytest
+      tests/personas/test_rescout.py::test_missing_untrusted_or_unreadable_record_routes_the_scout
+      tests/personas/test_rescout.py::test_a_chain_of_carries_compares_against_the_first_record
+      tests/personas/test_rescout.py::test_sidecar_404_is_none_and_other_errors_are_unreadable
+      tests/personas/test_rescout.py::test_recorded_cites_merge_into_the_recomputed_fingerprint
+      tests/personas/test_rescout.py::test_input_line_round_trips_beside_the_v1_record
+      tests/personas/test_rescout.py::test_rescout_required_reads_the_rescout_map
+      tests/personas/test_post_verdict.py::test_carried_block_stays_a_failure_and_reuses_no_prior_override
+      tests/personas/test_post_verdict.py::test_carried_check_rerenders_the_v1_record_for_the_new_head
+      tests/personas/test_post_verdict.py::test_fresh_covered_check_records_the_cite_merged_fingerprint
+      tests/personas/test_post_verdict.py::test_override_form_keeps_the_input_line
+      tests/personas/test_route.py::test_main_writes_carried_and_rescout_and_keeps_routes_to_run
+      tests/personas/test_wake.py::test_a_carried_only_run_wakes
+      tests/personas/test_wake.py::test_wake_and_override_import_without_pydantic
+      tests/test_session_merge_checks.py::test_fingerprint_personas_are_plan_class -q
+    expected: All selected tests pass.
+    fix_if: A test fails; fix the code inside scope, never the assertion (Decision 235).
+    hermetic: true
+    graduation: graduate
+    graduation_check_id: persona-verdict-scout-carry-units
+  - step: 3
+    phase: pre-deploy
+    action: Regression over the touched modules' whole suites and the chain guard's live pair.
+    command: >-
+      bin/venv-python -m pytest tests/personas/test_route.py tests/personas/test_post_verdict.py
+      tests/personas/test_post_verdict_app_token.py tests/personas/test_wake.py tests/personas/test_override.py
+      tests/personas/test_materialise.py tests/test_session_merge_checks.py
+      tests/checks/ci_guards/test_validate_persona_verdict_chain.py -q
+    expected: All tests pass.
+    fix_if: A pre-existing test fails; fix the code inside scope or STOP to the plan owner; never edit an assertion out of scope.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: duplicates the graduated shards persona-verdict-fixture-run-units, persona-verdict-wake-verb, persona-verdict-chain-shape and the merge-checks shards, which already run these files
+  - step: 4
+    phase: pre-deploy
+    action: Fast tier.
+    command: bin/venv-python -m scripts.validate --pre
+    expected: All fast-tier checks pass.
+    fix_if: A check fails; fix inside scope or STOP to the plan owner; never loosen a check (Decision 235).
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: is the fast tier itself
+  - step: 5
+    phase: pre-deploy
+    action: Full tier before handoff.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: Full tier passes and --verify-head confirms it for the head (background, 2 h limit, HOME an empty directory).
+    fix_if: A failure in scope is fixed; one outside scope is a STOP to the plan owner.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: is the full tier itself
+  - step: 6
+    phase: post-deploy
+    action: rec-5653 closed by the build's squash-merge Resolves trailer once its acceptance holds.
+    command: bin/venv-python -c "from src.common import ducklake_reader_client as c; r,_=c.fetch_recs_by_ids(c.make_reader(), ['rec-5653']); print(r[0]['id'], r[0]['status'])"
+    expected: Prints rec-5653 closed.
+    fix_if: Still open after the closure job ran; read ci.yml's closure job log and report to the plan owner.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: scripts/personas/rescout.py
+    behavior: an equal recomputed fingerprint carries the recorded verdict and a moved one routes the scout
+    verification_step: 1
+    test_selector: tests/personas/test_rescout.py::test_equal_fingerprint_carries_the_scout_verdict_and_a_moved_one_reruns
+    red_green_expectation: red before (no rescout module), green after
+  - source: scripts/personas/rescout.py
+    behavior: missing, untrusted and unreadable records, an unallowlisted author, a bad slug and a non-404 sidecar error each route the scout with that reason
+    verification_step: 2
+    test_selector: tests/personas/test_rescout.py::test_missing_untrusted_or_unreadable_record_routes_the_scout
+    red_green_expectation: red before (no rescout module), green after
+  - source: scripts/personas/route.py
+    behavior: route's module scope loads no pydantic, so the wake and render jobs (pyyaml only) still import
+    verification_step: 2
+    test_selector: tests/personas/test_wake.py::test_wake_and_override_import_without_pydantic
+    red_green_expectation: red if route.py imports rescout at module scope (subprocess with pydantic blocked), green after
+  - source: scripts/personas/rescout.py
+    behavior: a chain of carries keeps comparing against the first scout's record, each carried line naming its own head
+    verification_step: 2
+    test_selector: tests/personas/test_rescout.py::test_a_chain_of_carries_compares_against_the_first_record
+    red_green_expectation: red before (no rescout module), green after
+  - source: scripts/personas/route.py
+    behavior: routes.json gains carried and rescout while routes stays the to-run list
+    verification_step: 2
+    test_selector: tests/personas/test_route.py::test_main_writes_carried_and_rescout_and_keeps_routes_to_run
+    red_green_expectation: red before (no carried key), green after
+  - source: scripts/personas/post_verdict.py
+    behavior: a carried BLOCK is a failure and only an override approved for the new head turns it green
+    verification_step: 2
+    test_selector: tests/personas/test_post_verdict.py::test_carried_block_stays_a_failure_and_reuses_no_prior_override
+    red_green_expectation: red before (carried entries are not posted), green after
+  - source: scripts/personas/post_verdict.py
+    behavior: a fresh covered check records the CITE-merged fingerprint on its input line
+    verification_step: 2
+    test_selector: tests/personas/test_post_verdict.py::test_fresh_covered_check_records_the_cite_merged_fingerprint
+    red_green_expectation: red before (no input line), green after
+  - source: scripts/personas/wake.py
+    behavior: a run whose only checks are carried still posts the wake marker
+    verification_step: 2
+    test_selector: tests/personas/test_wake.py::test_a_carried_only_run_wakes
+    red_green_expectation: red before (skips with no_routes), green after
+  - source: scripts/session/merge_checks.py
+    behavior: the fingerprint-covered set stays inside the plan class
+    verification_step: 2
+    test_selector: tests/test_session_merge_checks.py::test_fingerprint_personas_are_plan_class
+    red_green_expectation: red before (no FINGERPRINT_PERSONAS), green after
+  - source: scripts/checks/ci_guards/validate_persona_verdict_chain.py
+    behavior: the prepare pins match the workflow
+    verification_step: 3
+    test_selector: tests/checks/ci_guards/test_validate_persona_verdict_chain.py::test_green_on_the_live_pair
+    red_green_expectation: red if only one of the workflow and the pins changes, green after both
+  - source: .github/workflows/persona-verdict.yml
+    behavior: prepare's permissions and install line
+    verification_step: 3
+    test_selector: tests/checks/ci_guards/test_validate_persona_verdict_chain.py::test_green_on_the_live_pair
+    red_green_expectation: red if only one of the workflow and the pins changes, green after both
+constraints:
+  - plan_fingerprint.py is consumed unchanged; no module re-derives the projection (exit-criteria-ledger.yaml plan_scout_input_fingerprint).
+  - No persona-id string literal in scripts/personas (executor-personas.yaml implementation_binding landing_dirs rule); the covered set is merge_checks.FINGERPRINT_PERSONAS.
+  - override.py's persona-verdict-record v1 format, parse_record and origin are unchanged; the input line is a separate line.
+  - "Fail closed (Decision 271 cl.3): any API error, unreadable record, unknown diff or fingerprint error runs the scout; nothing is carried on doubt."
+  - A carry never widens past an exactly equal fingerprint map (Decision 235); a carried verdict's conclusion is re-derived, never copied from a prior check's conclusion.
+  - No new GitHub write scope (T4.32 c4); prepare holds no secret and no id-token (Decision 263).
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - "Decision-scout r2 NO_FLAGS (scout_input_fingerprint v1:b6581e7c16f6ffee092f375d4aaeac97fc8ac73d7921897381edcc9c3fa2d210; r1 on the draft v1:609127c4 before one scope row was dropped). CITE: 205, 229, 262, 264, 271. RELATED: 217, 235, 263, 273, 231, 234, 212, 246, 279, 184, 55, 166, 128. Decisions triaged: 234 of 234. Roadmap items intersected: 3; CONFLICT: 0; RELATED: 2. Serves: NS.9 4/5."
+  - "Split of rec-5103 (operator 2026-11-25 21:19 UTC): this plan is legs 1-2; leg 3 (push-to-main re-scout, in-session wake) is rec-5654, planned after this merges. T4.32 c4 stays open until the decision_scout add plan (T4.30) proves the legs on a real plan PR; closes_criteria []."
+  - "Build order: rec-5653 depends on rec-5559 (PLAN-persona-verdict-fallback-run), whose build (merged #2486, 24e5171c) edited persona-verdict.yml into flow-form permissions, route.py, post_verdict.py and validate_persona_verdict_chain.py. This build starts from main at or after 24e5171c."
+  - "Fork settled by blind Fable consult (/mnt/project-files/persona-verdict-rescout/rec-5653-advisor-brief/ADVICE.md): the record holds the CITE-merged fingerprint (ledger semantics); post computes it from the scout's cite ids, prepare recomputes with the recorded tokens."
+  - "Operator sign-off 2026-11-25 21:41 UTC (write the plan): approach approved, prepare gains checks: read as recommended."
+  - "Decided with notice: SCAN_COMMITS = 20 (a cancelled run on the last push still finds the verdict before it); a carried check copies the original verdict and tokens so chains of carries compare against the first scout's record; a same-head re-run re-applies only an override approved for that head."
+  - "Hermetic only: decision_scout is implementation pending, so route.bound_personas() routes it nowhere today; tests inject the covered route and a schema-valid scout output."
+  - "Residuals (inherent in c4, named for the critic): decisions the scout triaged but did not cite or amend, and the unhashed scout inputs (decisions_index, tag_shortlist, north_star_carriers, the persona's prompt and model), can change without moving the value; Decisions are read at main, so a plan PR's own edit to docs/DECISIONS.md moves the value only through approved_blocks."
+  - "red_overlap at plan merge (2026-11-26 11:04 UTC): blocked rule 1 slo_breached on rec-5664, rec-5665 and rec-5666 (no shared files). Operator deferred them for this plan merge only (decision card, 11:05 UTC); a fix thread owns them. The build re-runs red_overlap at dispatch."
+  - "selection_budget: breadth_waived (predicted CI test half 202.7-770.4s of a 770s allowance); declared, not split: one outcome across the chain's modules."
+  - "Reading of T4.30 c1 (critique r2 PSC-08): the carry applies on draft pushes too (T4.32 c4, Decision 229 cl.4: every push, draft or ready); T4.30's add plan does not reopen it. The fixture-run tail (rec-5551, rec-5561) does not gate this hermetic build: only rec-5550's merged keyed run is a predecessor."
+  - "Left to rec-5654 or the T4.30 add plan (critique r2 PSC-10): the exit-criteria-ledger plan_scout_input_fingerprint governance note that lists the Actions recompute as UNENFORCED."
+  - "Follow-on: T4.32 decomposition_hints still name one rescout plan for c4's chain legs; rec-5654's plan updates the hint for both children."
+  - "A carried check is not a persona run: keyed_run.py writes no telemetry row for it (Decision 231)."
+  - "Graduated shards kept unchanged: merge-checks-persona-functions, merge-checks-verdict-app-pin, merge-checks-verdicts (tests/test_session_merge_checks.py), persona-verdict-fixture-run-units and persona-verdict-fallback-run-units (tests/personas/test_post_verdict.py), persona-verdict-wake-verb (tests/personas/test_wake.py)."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: NO_FLAGS, scout_input_fingerprint: "v1:609127c4d191edf98f22a740c7b898d883ae061a7be27612258dea83ce21a050"}
+  - {gate: decision-scout, round: 2, verdict: NO_FLAGS, scout_input_fingerprint: "v1:b6581e7c16f6ffee092f375d4aaeac97fc8ac73d7921897381edcc9c3fa2d210"}
+  - gate: plan-critique
+    round: 1
+    verdict: REVISE
+    blocking: 3
+    nits: 6
+    findings:
+      - {id: PCR-01, severity: blocking, origin: judgement, anchor: "scope[scripts/personas/route.py]", subject: "route importing rescout at module scope loads pydantic into the pyyaml-only wake job", disposition: fixed}
+      - {id: PCR-02, severity: blocking, origin: judgement, anchor: "scope[scripts/personas/rescout.py]", subject: "decide and the carried post path never check the author allowlist (Decision 205 cl.2)", disposition: fixed}
+      - {id: PCR-03, severity: blocking, origin: judgement, anchor: "scope[scripts/personas/rescout.py]", subject: "head_inputs builds the sidecar path from an unchecked slug", disposition: fixed}
+      - {id: PCR-04, severity: nit, origin: judgement, anchor: "scope[scripts/personas/post_verdict.py]", subject: "carried input line head_sha and run_id unstated; chains would read untrusted", disposition: fixed}
+      - {id: PCR-05, severity: nit, origin: judgement, anchor: "scope[scripts/personas/post_verdict.py]", subject: "Unreadable inside plan_all unspecified", disposition: fixed}
+      - {id: PCR-06, severity: nit, origin: judgement, anchor: "scope[scripts/personas/post_verdict.py]", subject: "a trailing input line can be cut by TEXT_LIMIT", disposition: fixed}
+      - {id: PCR-07, severity: nit, origin: mechanical, anchor: "phase", subject: "phase does not name the c4 legs", disposition: fixed}
+      - {id: PCR-08, severity: nit, origin: judgement, anchor: "context[1]", subject: "T4.32 decomposition_hints not updated for the split", disposition: fixed}
+      - {id: PCR-09, severity: nit, origin: judgement, anchor: "scope[scripts/personas/rescout.py]", subject: "head plan text parsed without parse_plan's size cap and alias refusal", disposition: fixed}
+  - gate: plan-critique
+    round: 2
+    verdict: PROCEED
+    blocking: 0
+    nits: 12
+    findings:
+      - {id: PSC-01, severity: nit, origin: judgement, anchor: "scope[scripts/personas/rescout.py]", subject: "prior() is unreadable unless the newest listed PR commit equals the resolved head_sha (the 250-commit cap)", disposition: build-note}
+      - {id: PSC-02, severity: nit, origin: judgement, anchor: "scope[scripts/personas/rescout.py]", subject: "name reason tokens unknown_diff and no_plans for those routed cases; decide makes no API call unless a covered route is present", disposition: build-note}
+      - {id: PSC-03, severity: nit, origin: judgement, anchor: "scope[scripts/personas/rescout.py]", subject: "when a v1 record is present its verdict, route and head_sha must equal the input line's, else unreadable", disposition: build-note}
+      - {id: PSC-04, severity: nit, origin: judgement, anchor: "scope[scripts/personas/rescout.py]", subject: "apply the 512 KiB cap and alias refusal to the head sidecar text too; pass None to projection when there is no sidecar", disposition: build-note}
+      - {id: PSC-05, severity: nit, origin: judgement, anchor: "scope[tests/personas/test_route.py]", subject: "test_route.py:190 stdout and :191-195 routes.json exact assertions are extensions; record weakening_dispositions planned-change", disposition: build-note}
+      - {id: PSC-06, severity: nit, origin: judgement, anchor: "scope[.github/workflows/persona-verdict.yml]", subject: "pydantic in prepare is version-pinned only; post re-verifying the prior record before a carry is optional hardening, report if adopted", disposition: build-note}
+      - {id: PSC-07, severity: nit, origin: judgement, anchor: "scope", subject: "if ports.yaml SA-14 does not cover pulls/{n}/commits and check-run output.text as a store, STOP to the plan owner for a scope row", disposition: build-note}
+      - {id: PSC-11, severity: nit, origin: judgement, anchor: "scope[scripts/personas/route.py]", subject: "plan_inputs.json is not written when head_inputs raised Unreadable, so post emits no input line", disposition: build-note}
+      - {id: PSC-12, severity: nit, origin: judgement, anchor: "context[2]", subject: "after the rec-5559 rebase, path (b) reads the same result file judge selects (results or results-fallback)", disposition: build-note}
+      - {id: PSC-08, severity: nit, origin: judgement, anchor: "context[1]", subject: "state the draft-push reading of T4.30 c1 and why the fixture-run tail does not gate", disposition: applied-wording}
+      - {id: PSC-09, severity: nit, origin: mechanical, anchor: "closes_criteria", subject: "say closes_criteria is [] because c4 cannot be met here", disposition: applied-wording}
+      - {id: PSC-10, severity: nit, origin: judgement, anchor: "constraints[0]", subject: "name who updates the ledger governance note", disposition: applied-wording}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "Build start: confirm rec-5559's build is merged to main, else STOP. Re-measure with bin/venv-python -m scripts.roadmap.plan_obligations --plan docs/plans/PLAN-persona-verdict-scout-carry.yaml; if persona-verdict.yml would pass 500 effective lines, STOP to the plan owner."
+  - "scripts/session/merge_checks.py: FINGERPRINT_PERSONAS. scripts/personas/rescout.py per its scope row, with tests/personas/test_rescout.py."
+  - "route.py main, post_verdict.py plan_all, _override_form and plan_override, wake.py _gate and wake, with their tests."
+  - "Workflow prepare permissions and install line, and validate_persona_verdict_chain.py's two pins, in one commit."
+  - Execute Verification Plan -- run each step; loop until pass; on an unrecoverable failure stop and RCA (Decision 55)
+  - "Report: what was implemented, verification results"
