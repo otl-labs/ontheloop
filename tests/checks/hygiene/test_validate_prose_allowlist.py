@@ -50,6 +50,19 @@ class TestPathAllowed:
         assert not path_allowed("docs/other/delegate-cli.md", globs)
 
 
+def test_persona_guidance_case_files_are_sanctioned() -> None:
+    import yaml
+
+    router = Path(__file__).resolve().parents[3] / "docs/contracts/file-router.yaml"
+    globs = yaml.safe_load(router.read_text(encoding="utf-8"))["prose_allowlist"]["allowed_globs"]
+    base = "tests/fixtures/persona_verdict"
+    assert path_allowed(f"{base}/guidance_cases/canary_persona/benign_add.md", globs)
+    assert not path_allowed(f"{base}/fixture_pr/notes.md", globs)
+    assert not path_allowed("tests/fixtures/other/x.md", globs)
+    assert not path_allowed(f"{base}/guidance_cases/x.md", globs)
+    assert not path_allowed(f"{base}/guidance_cases/canary_persona/sub/x.md", globs)
+
+
 class TestValidateProseAllowlist:
     def test_all_listed_files_pass(self, tmp_path: Path) -> None:
         router = _router(
