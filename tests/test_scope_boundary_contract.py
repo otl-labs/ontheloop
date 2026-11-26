@@ -208,7 +208,7 @@ class TestProseSurfacesPointAtContract:
         section = re.split(r"\n#{2,3} ", text[i:], maxsplit=1)[0]
         assert "(a)" in section and "(b)" in section and "(c)" in section
         assert "consult/SKILL.md" in section
-        assert 'model:"fable"' in section
+        assert "capability_class" not in section and not re.search(r'model:\s*"?fable', section)
         assert "3-fix-attempt" in section and "VF-08" in section
 
     def test_implement_skill_deviation_trigger_adds_no_auto_file_path(self) -> None:

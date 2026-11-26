@@ -1,6 +1,6 @@
 ---
 name: consult
-description: 'Use when: you were dispatched as a consult. Callers consult on: a design fork, a disputed or second blocking critique finding, a NEW table or identity scheme or merge_key change, a load-bearing /implement under-specification, workflow adaptation, rec synthesis, or a convergence escalation routed to it. A caller never invokes this skill in its own session: it dispatches a fresh-context subagent (Agent, model: "fable") whose first action invokes this skill.'
+description: 'Use when: you were dispatched as a consult. Callers consult on: a design fork, a disputed or second blocking critique finding, a NEW table or identity scheme or merge_key change, a load-bearing /implement under-specification, workflow adaptation, rec synthesis, or a convergence escalation routed to it. A caller never invokes this skill in its own session: it dispatches a fresh-context subagent (Agent, the consult-class model per project.capability_class.classes) whose first action invokes this skill.'
 ---
 
 # consult
@@ -8,8 +8,11 @@ description: 'Use when: you were dispatched as a consult. Callers consult on: a 
 The advice consult. One home for the protocol and every trigger; it recommends and decides nothing outside the Convergence section.
 
 ## Dispatch (caller)
-Dispatch a fresh-context subagent (`Agent`, `model: "fable"`, an agent type that has the Skill tool). Its brief names the
-question and the facts. Its first action is to invoke this skill (persona attribution reads that first Skill call).
+Dispatch a fresh-context subagent (`Agent`, `model:` the consult class's model, an agent type that has the Skill tool).
+The consult class's model is project-configuration.yaml row `project.capability_class.classes`,
+`defaults.local.consult.claude_code_model` (`ontheloop/platform.yaml` once it exists); read it, never inherit the parent's:
+`bin/venv-python -c "import yaml;r=yaml.safe_load(open('docs/contracts/project-configuration.yaml'))['settings'];print(next(x for x in r if x['id']=='project.capability_class.classes')['defaults']['local']['consult']['claude_code_model'])"`.
+Its brief names the question and the facts. Its first action is to invoke this skill (persona attribution reads that first Skill call).
 
 ## Protocol (consult)
 The consult reads (Read/Grep/Glob) but edits nothing, separating advice into "settled consensus" vs "contested" (where

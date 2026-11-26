@@ -24,6 +24,8 @@ _ROOT = Path(__file__).resolve().parents[2]
 _INFERENCE_PROVIDER = "docs/contracts/inference-provider.yaml"
 _PROJECT_CONFIGURATION = "docs/contracts/project-configuration.yaml"
 _ROLES = ("primary", "warm_fetched_escape_hatch")
+_MEMBERS_ROW = "project.capability_class.members"
+_CLASSES_ROW = "project.capability_class.classes"
 _ENV_ROW_PREFIX = "ports.run_persona.litellm.api_key."  # pragma: allowlist secret
 
 
@@ -85,6 +87,129 @@ def _prefix(persona: str, role: str, inference_provider: dict[str, Any]) -> tupl
     return tier, row, default.split("/", 1)[0]
 
 
+def _persona_names(inference_provider: dict[str, Any]) -> list[str]:
+    block = _mapping(_mapping(inference_provider.get("model_id_formats")).get("litellm_persona_selection"))
+    names = block.get("personas")
+    return list(names) if isinstance(names, list) else []
+
+
+def _default_local(project_configuration: dict[str, Any], row_id: str) -> Any:
+    rows = project_configuration.get("settings")
+    for row in rows if isinstance(rows, list) else []:
+        if isinstance(row, dict) and row.get("id") == row_id:
+            return _mapping(row.get("defaults")).get("local")
+    return None
+
+
+def _class_settings(persona: str, role: str, project_configuration: dict[str, Any]) -> dict[str, Any]:
+    members = _default_local(project_configuration, _MEMBERS_ROW)
+    classes = _default_local(project_configuration, _CLASSES_ROW)
+    if not isinstance(members, dict) or not isinstance(classes, dict):
+        raise _refuse(persona, role, "capability_class", f"rows {_MEMBERS_ROW} and {_CLASSES_ROW} must be mappings")
+    name = members.get(persona)
+    if not isinstance(name, str):
+        raise _refuse(persona, role, "capability_class", f"{_MEMBERS_ROW} has no string class for {persona}")
+    entry = classes.get(name)
+    if not isinstance(entry, dict):
+        raise _refuse(persona, role, "capability_class", f"{_CLASSES_ROW} has no entry for class {name!r}")
+    settings = entry.get(role)
+    if not isinstance(settings, dict):
+        raise _refuse(persona, role, "capability_class", f"class {name!r} has no settings mapping for this role")
+    return settings
+
+
+def _row_defaults(project_configuration: dict[str, Any], row_id: str, found: list[str]) -> dict[str, Any] | None:
+    settings = project_configuration.get("settings")
+    rows = settings if isinstance(settings, list) else []
+    row = next((r for r in rows if isinstance(r, dict) and r.get("id") == row_id), None)
+    if row is None:
+        found.append(f"row {row_id} is missing")
+        return None
+    defaults = _mapping(row.get("defaults"))
+    if not isinstance(defaults.get("local"), dict):
+        found.append(f"row {row_id} defaults.local is not a mapping")
+    if defaults.get("local") != defaults.get("cloud"):
+        found.append(f"row {row_id} defaults.local differs from defaults.cloud")
+    return defaults
+
+
+def _role_findings(name: str, role: str, setting: Any, vocabulary: dict[str, Any]) -> list[str]:
+    if not isinstance(setting, dict):
+        return [f"class {name!r} role {role} is not a mapping"]
+    found = [
+        f"class {name!r} role {role} holds key {k!r}, not thinking or effort"
+        for k in sorted(set(setting) - {"thinking", "effort"})
+    ]
+    for key in ("thinking", "effort"):
+        allowed = vocabulary.get(key)
+        if setting.get(key) not in (allowed if isinstance(allowed, list) else []):
+            found.append(f"class {name!r} role {role} {key} {setting.get(key)!r} is outside the vocabulary")
+    return found
+
+
+def _class_findings(name: str, entry: Any, values: list[Any], models: list[Any], vocabulary: dict[str, Any]) -> list[str]:
+    found = [f"classes row key {name!r} is outside capability_class.values"] if name not in values else []
+    if not isinstance(entry, dict):
+        return [*found, f"class {name!r} is not a mapping"]
+    if entry.get("claude_code_model") not in models:
+        found.append(
+            f"class {name!r} claude_code_model {entry.get('claude_code_model')!r} is outside claude_code_model_values"
+        )
+    found += [
+        f"class {name!r} has role key {k!r}, not primary or warm_fetched_escape_hatch"
+        for k in entry
+        if k != "claude_code_model" and k not in _ROLES
+    ]
+    for role in _ROLES:
+        found += _role_findings(name, role, entry.get(role), vocabulary)
+    return found
+
+
+def _member_findings(members: dict[str, Any], classes: dict[str, Any], persona_names: list[Any]) -> list[str]:
+    found: list[str] = []
+    for member, name in members.items():
+        if not isinstance(name, str):
+            found.append(f"member {member} has a non-string class {name!r}")
+        elif name not in classes:
+            found.append(f"member {member} names class {name!r}, which the classes row lacks")
+    for persona in persona_names:
+        if not isinstance(persona, str):
+            found.append(f"personas element {persona!r} is not a string")
+        elif persona not in members:
+            found.append(f"persona {persona} has no member row")
+    return found
+
+
+def _rule_a_findings(members: dict[str, Any], values: list[Any]) -> list[str]:
+    rank = {v: i for i, v in enumerate(values)}  # values run highest first
+    critic, scout = members.get("plan_critic"), members.get("decision_scout")
+    ranked = isinstance(critic, str) and isinstance(scout, str) and critic in rank and scout in rank
+    if ranked and rank[critic] < rank[scout]:
+        return []
+    return [f"rule (a): plan_critic class {critic!r} does not rank strictly above decision_scout class {scout!r}"]
+
+
+def capability_class_findings(
+    inference_provider: dict[str, Any], project_configuration: dict[str, Any], registry_personas: list[str]
+) -> list[str]:
+    """One string per breach of the capability_class rows; never raises."""
+    found: list[str] = []
+    members_defaults = _row_defaults(project_configuration, _MEMBERS_ROW, found) or {}
+    classes_defaults = _row_defaults(project_configuration, _CLASSES_ROW, found) or {}
+    members = _mapping(members_defaults.get("local"))
+    classes = _mapping(classes_defaults.get("local"))
+    block = _mapping(inference_provider.get("capability_class"))
+    raw_values, raw_models = block.get("values"), block.get("claude_code_model_values")
+    values: list[Any] = raw_values if isinstance(raw_values, list) else []
+    models: list[Any] = raw_models if isinstance(raw_models, list) else []
+    selection = _mapping(_mapping(inference_provider.get("model_id_formats")).get("litellm_persona_selection"))
+    vocabulary = _mapping(selection.get("vocabulary"))
+    found += _member_findings(members, classes, [*registry_personas, *_persona_names(inference_provider)])
+    for name, entry in classes.items():
+        found += _class_findings(name, entry, values, models, vocabulary)
+    return found + _rule_a_findings(members, values)
+
+
 def resolve(
     persona: str,
     role: str,
@@ -96,9 +221,11 @@ def resolve(
     if role not in _ROLES:
         raise _refuse(persona, role, "unknown_role", f"known roles are {list(_ROLES)}")
     model_formats = _mapping(inference_provider.get("model_id_formats"))
-    personas = _mapping(_mapping(model_formats.get("litellm_persona_selection")).get("personas"))
+    personas = _persona_names(inference_provider)
+    if any(not isinstance(n, str) for n in personas):
+        raise _refuse(persona, role, "capability_class", "litellm_persona_selection.personas holds a non-string element")
     if persona not in personas:
-        raise _refuse(persona, role, "unknown_persona", f"known personas are {list(personas)}")
+        raise _refuse(persona, role, "unknown_persona", f"known personas are {personas}")
     holders = _mapping(_mapping(_mapping(inference_provider.get("vocabulary")).get("axes")).get("credential_holder")).get(
         "values"
     )
@@ -149,9 +276,7 @@ def resolve(
 
     selection_block = _mapping(model_formats.get("litellm_persona_selection"))
     vocabulary = _mapping(selection_block.get("vocabulary"))
-    settings = _mapping(personas[persona]).get(role)
-    if not isinstance(settings, dict):
-        raise _refuse(persona, role, "persona_settings", "the persona has no settings for this role")
+    settings = _class_settings(persona, role, project_configuration)
     for key in ("thinking", "effort"):
         allowed = vocabulary.get(key)
         if settings.get(key) not in (allowed if isinstance(allowed, list) else []):
@@ -186,9 +311,7 @@ def resolve_all(
     project_configuration: dict[str, Any],
     credential_holder: str = "on_the_loop",
 ) -> list[Selection]:
-    personas = _mapping(
-        _mapping(_mapping(inference_provider.get("model_id_formats")).get("litellm_persona_selection")).get("personas")
-    )
+    personas = _persona_names(inference_provider)
     roles = _ROLES[:1] if credential_holder == "end_user" else _ROLES
     return [
         resolve(

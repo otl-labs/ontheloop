@@ -4,7 +4,8 @@ Asserts docs/contracts/inference-provider.yaml's provider_defaults.executor_path
 (valid_providers/default) agrees with scripts/llm/model_registry.py's
 _VALID_PROVIDERS / _DEFAULT_EXECUTOR_PROVIDER, and that retired_providers stay disjoint from the
 valid set. When the contract carries a tier_model mapping, a further leg resolves every persona and
-tier role through scripts/llm/tier_selection.py (project-configuration.yaml read from the same directory).
+tier role through scripts/llm/tier_selection.py (project-configuration.yaml read from the same directory), and a
+capability_class leg checks the class vocabulary, the member and class rows and rule (a) (rec-5646).
 """
 
 from __future__ import annotations
@@ -74,6 +75,76 @@ def _check_tier_selection(failed: list[str], target_dir: Path, data: dict) -> in
     return len(selections)
 
 
+def _string_list(value: object) -> bool:
+    return isinstance(value, list) and all(isinstance(v, str) for v in value) and len(set(value)) == len(value)
+
+
+def _registry_personas(failed: list[str], target_dir: Path) -> list[str]:
+    path = target_dir / "executor-personas.yaml"
+    prefix = f"Inference-provider registry: capability_class leg: {path}"
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        failed.append(f"{prefix} could not be read or parsed: {exc}")
+        return []
+    personas = data.get("personas") if isinstance(data, dict) else None
+    if not isinstance(personas, list):
+        failed.append(f"{prefix} has no personas list")
+        return []
+    names: list[str] = []
+    for entry in personas:
+        if isinstance(entry, dict) and isinstance(entry.get("persona"), str):
+            names.append(entry["persona"])
+        else:
+            failed.append(f"{prefix} has a personas entry that is not a mapping carrying a string persona")
+    return names
+
+
+def _platform_file_findings(failed: list[str], target_dir: Path) -> None:
+    path = target_dir.parent.parent / "ontheloop" / "platform.yaml"
+    if not path.is_file():
+        return
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        failed.append(f"Inference-provider registry: capability_class leg: {path} could not be read or parsed: {exc}")
+        return
+    if not isinstance(data, dict):
+        failed.append(f"Inference-provider registry: capability_class leg: {path} is not a YAML mapping")
+        return
+    project = data.get("project")
+    if isinstance(project, dict) and "capability_class" in project:
+        failed.append(
+            f"Inference-provider registry: capability_class leg: {path} sets project.capability_class while the rows' "
+            "current_home is null; T4.24 c16 moves the reader first"
+        )
+
+
+def _check_capability_class(failed: list[str], target_dir: Path, data: dict) -> None:
+    if not isinstance(data.get("tier_model"), dict):
+        return
+    from scripts.llm import tier_selection  # noqa: PLC0415
+
+    prefix = "Inference-provider registry: capability_class leg:"
+    block = data.get("capability_class")
+    if not isinstance(block, dict):
+        failed.append(f"{prefix} {_CONTRACT_NAME} has no capability_class mapping")
+    else:
+        for key in ("values", "claude_code_model_values"):
+            if not _string_list(block.get(key)):
+                failed.append(f"{prefix} capability_class.{key} is absent, not a list of unique strings")
+    personas = _registry_personas(failed, target_dir)
+    _platform_file_findings(failed, target_dir)
+    config_path = target_dir / "project-configuration.yaml"
+    try:
+        project_configuration = tier_selection._load_one(config_path)
+    except tier_selection.TierSelectionError as exc:
+        failed.append(f"{prefix} {config_path.name} unusable: {exc}")
+        return
+    for finding in tier_selection.capability_class_findings(data, project_configuration, personas):
+        failed.append(f"{prefix} {finding}")
+
+
 @registry.register("validate_inference_provider_registry", owner="platform")
 def validate_inference_provider_registry(failed: list[str], *, contracts_dir: Path | None = None) -> None:
     """Fail if provider_defaults or retired_providers drift from scripts/llm/model_registry.py."""
@@ -114,6 +185,7 @@ def validate_inference_provider_registry(failed: list[str], *, contracts_dir: Pa
         _check_retired_providers(failed, retired_providers)
 
     resolved = _check_tier_selection(failed, target_dir, data)
+    _check_capability_class(failed, target_dir, data)
     examined_count += resolved
 
     registry.examined(examined_count, unit="provider_registry_entries")

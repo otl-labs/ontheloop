@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
@@ -33,7 +34,7 @@ def test_consult_skill_holds_protocol_and_triggers() -> None:
     desc = " ".join(meta["description"].split())
     for phrase in (
         "Use when: you were dispatched as a consult",
-        'model: "fable"',
+        "the consult-class model",
         "first action",
         "never invokes this skill in its own session",
         "merge_key",
@@ -78,3 +79,11 @@ def test_live_surfaces_point_at_the_consult_skill() -> None:
     runs = yaml.safe_load((REPO / "config/agent/read_sets.yaml").read_text(encoding="utf-8"))["runs"]
     for name in ("planning", "implementing"):
         assert POINTER in [row["path"] for row in runs[name]["files"]], name
+
+
+def test_no_skill_or_contract_hard_codes_the_consult_model() -> None:
+    pattern = re.compile(r'(?<![\w])model:\s*"?fable')
+    paths = [*(REPO / ".claude/skills").rglob("*.md"), *(REPO / "docs/contracts").rglob("*.yaml")]
+    hits = [str(p.relative_to(REPO)) for p in paths if pattern.search(" ".join(p.read_text(encoding="utf-8").split()))]
+    assert hits == []
+    assert "project.capability_class.classes" in SKILL.read_text(encoding="utf-8")
