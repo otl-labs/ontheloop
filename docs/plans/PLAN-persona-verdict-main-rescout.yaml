@@ -26,28 +26,33 @@ scope:
     action: Create
     purpose: >-
       judge(root, head_ref, base_ref, merge_base, timeout) -> Verdict(kind CLEAR | STALE | UNAVAILABLE, plans, reason),
-      called only after merge_overlap returned CLEAR. TREE_FILES names the files plan_fingerprint.load_tree reads
+      called after merge_overlap returned CLEAR. TREE_FILES names the files plan_fingerprint.load_tree reads
       (docs/DECISIONS.md, docs/DECISIONS_ARCHIVE.md, docs/ROADMAP-PLATFORM.yaml, docs/ROADMAP-PLATFORM-ARCHIVE.yaml,
-      docs/contracts/north-star.yaml); a test proves the list complete, and nothing else is derived from it. Candidates: from git diff --no-renames --name-status
-      <merge_base> <head_ref> -- docs/plans, each docs/plans/PLAN-*.yaml (depth 2) the head adds or modifies, and each
-      plan whose docs/plans/approved/<slug>.yaml sidecar the head adds, modifies or deletes; deleted plans are skipped;
-      none is CLEAR. git diff --quiet <merge_base> <base_ref> -- TREE_FILES: no change on main is
-      CLEAR without computing. Otherwise git merge-tree --write-tree --name-only --no-messages <base_ref> <head_ref>
-      gives the merged tree (main with the PR's changes, computed locally from the fetched refs, never GitHub's test
-      merge) and its conflicted paths; a TREE_FILES path among them is UNAVAILABLE (update the branch), and a git
-      without --write-tree is UNAVAILABLE. The merge is computed whatever the overlap predicate decided, so Decision 254
-      cl.8's later narrowing of that predicate leaves this one exact. It writes two trees of TREE_FILES into a temporary
-      directory, the head's (git show <head_ref>:<path>) and the merged one (git show <tree>:<path>); a file absent at
-      its tree stays absent. Each tree is loaded once by plan_fingerprint.load_tree
-      and every value comes from plan_fingerprint.projection and fingerprint with the plan and sidecar text read at
-      head_ref. A modified plan is skipped when its base version and base sidecar (read at merge_base) give the same
-      fingerprint on the head tree as its head version (the re-scout barrier's compared-plan rule, so a build PR's
-      bookkeeping edit is never refused). STALE when a candidate's head-tree and merged-tree fingerprints differ,
-      naming the plan and the payload keys whose values differ. Any git failure, missing or unparsable plan,
-      FingerprintError, PlanEdgesError, ApprovedTextError, OSError, YAMLError or ValueError, and running past timeout, is
-      UNAVAILABLE. plan_fingerprint is imported inside judge, so importing the module never raises. A CLI
-      (--head-ref, --base-ref; merge base computed) prints one verdict line with the elapsed seconds and exits 0 CLEAR,
-      1 STALE, 2 UNAVAILABLE, as merge_overlap's does.
+      docs/contracts/north-star.yaml); a test proves the list complete. CANDIDATES are the re-scout barrier's examined
+      set: from git diff -z --no-renames --name-status <merge_base> <head_ref> -- docs/plans, each path matching a
+      local copy of scripts.checks._common.PLAN_PATH_RE (a test pins the two equal) with status A, M or T (T read as
+      M) whose head version has schema_version at or above _plan_rescout_barrier.FINGERPRINT_MIN_SCHEMA_VERSION; D is
+      skipped (a retired plan, with or without its sidecar); any other status on such a path is UNAVAILABLE; a change
+      to an approved-text sidecar alone is not a candidate, as the barrier does not examine it (rec-5671's residual).
+      FAST PATHS: no candidate is CLEAR; git diff --quiet <merge_base> <base_ref> -- TREE_FILES with no change on main
+      is CLEAR. Both run before plan_fingerprint or the barrier module is imported, so a fixture project without that
+      closure still clears. MERGE: git merge-tree --write-tree -z --name-only --no-messages <base_ref> <head_ref>,
+      computed locally from the fetched refs (never GitHub's test merge): exit 0 is clean, exit 1 lists conflicted
+      paths after the tree id, and any other exit, or a git without --write-tree, is UNAVAILABLE. A conflicted path
+      among TREE_FILES or a candidate's plan or sidecar is UNAVAILABLE with the rebase_resolve remedy (GitHub's branch
+      update cannot resolve a conflict); conflicts elsewhere are the overlap predicate's to judge. The merge is computed
+      whatever overlap decided, so Decision 254 cl.8's later narrowing of that predicate leaves this one exact for
+      every file it reads. TREES: two temporary directories, the head's (git show <head_ref>:<path>) and the merged
+      one (git show <tree>:<path>), each holding TREE_FILES and the candidates' plans and sidecars read from that same
+      tree; a file absent from its tree stays absent. Each tree is loaded once by plan_fingerprint.load_tree; every
+      value comes from plan_fingerprint.projection and fingerprint. A modified candidate is skipped when its base
+      version and base sidecar (read at merge_base) give the same fingerprint on the head tree as its head version
+      (the barrier's compared-plan rule, so a build PR's bookkeeping edit is never refused). STALE when a candidate's
+      head-tree and merged-tree fingerprints differ, naming the plan and the payload keys that differ. Any git failure,
+      missing or unparsable plan, ImportError, FingerprintError, PlanEdgesError, ApprovedTextError, OSError, YAMLError
+      or ValueError, or running past timeout, is UNAVAILABLE. CLI (--head-ref, --base-ref, optional --merge-base,
+      computed when absent) prints one line with the verdict, the path taken (no-candidate, main-unchanged or
+      computed), the candidate count and the elapsed seconds, and exits 0 CLEAR, 1 STALE, 2 UNAVAILABLE.
   - file: .claude/hooks/merge_gate.py
     action: Modify
     purpose: >-
@@ -55,20 +60,28 @@ scope:
       merge_scout_inputs.judge(root, ref, "refs/remotes/origin/main", verdict.merge_base, remaining deadline). STALE
       writes a refusal naming each plan and its moved keys with the remedy (update the branch with
       mcp__github__update_pull_request_branch, wait for the CI-green wake; the re-scout barrier then asks for a
-      re-scout) and returns 2; UNAVAILABLE returns _deny with its reason. OVERLAP and UNAVAILABLE overlap verdicts are
+      re-scout) and returns 2; UNAVAILABLE returns _deny with its reason (a conflicted scout input names the
+      rebase_resolve route, as _OVERLAP_MSG does). OVERLAP and UNAVAILABLE overlap verdicts are
       judged exactly as today.
   - file: tests/test_session_merge_scout_inputs.py
     action: Create
     purpose: >-
       Fixture git repos with a minimal fingerprintable tree (the tests/test_plan_fingerprint.py helpers' shape): a plan
       PR is refused when main moved a cited Decision; clear when main moved an uncited one; a code PR is clear; a build
-      PR whose plan inputs are unchanged is clear; a sidecar-only PR is refused when main moved a cited Decision; the
-      branch updated with main is clear; a scout-input file changed on both sides without conflict is judged on the
-      merged file (main's cited-Decision edit refuses even though the PR also edited that file); a conflicting
-      scout-input file is UNAVAILABLE; an unparsable plan is UNAVAILABLE; a timeout is UNAVAILABLE; the refusal names
-      the plan and the moved key; and TREE_FILES copied alone from the repository's own tree give the same fingerprint
-      for a synthetic plan citing real Decisions as the full tree does, so a new load_tree input fails this test until
-      the gate learns it.
+      PR whose plan inputs are unchanged is clear; a sidecar-only change and a plan below schema 6 are not candidates;
+      a deleted plan is skipped; a type-changed plan is judged as modified; a non-ASCII plan path is a candidate; an
+      unrecognised status on a plan path is UNAVAILABLE; the branch updated with main is clear; a scout-input file
+      changed on both sides without conflict is judged on the merged file; a conflicting scout-input file is
+      UNAVAILABLE and a conflict elsewhere is ignored; an unparsable plan, an ImportError and a timeout are
+      UNAVAILABLE; the refusal names the plan and the moved key; the local plan-path rule equals
+      scripts.checks._common.PLAN_PATH_RE; the CLI prints the path taken; and TREE_FILES copied alone from the
+      repository's own tree give the same fingerprint for a synthetic plan citing real Decisions as the full tree does,
+      so a new load_tree input fails this test until the gate learns it.
+  - file: tests/fixtures/merge_overlap_repos.py
+    action: Modify
+    purpose: >-
+      install_project also copies scripts/session/merge_scout_inputs.py, so the six shim-run hook suites that build
+      fixture projects with it reach the new call and clear on its no-candidate path.
   - file: tests/hooks/test_merge_gate.py
     action: Modify
     purpose: >-
@@ -85,8 +98,10 @@ scope:
       push_pr_ci_merge_flow: one sentence after the overlap refusal naming the scout-input refusal, its Decision and the
       same remedy; merge_step_coverage's runs list names scripts/session/merge_scout_inputs.py and the residual owners
       (rec-4624, rec-5671, rec-5673); referenced_repo_paths gains the module; contract_version bump and one terse
-      amendment_log row with Decision 282's decay. Byte relief inside git-ops.yaml by its compaction tool or by turning
-      restated detail into citations, never a budget raise; approved_text_binding is not touched.
+      amendment_log row (the compaction tool selects no row today, so Decision 275 cl.4's hold binds, not Decision 282's
+      decay). Byte relief: merge_step_coverage's residual-owner list restates the Coverage clauses of Decisions 245
+      and 264; it becomes a citation of those clauses and the new Decision's cl.5, never a budget raise;
+      approved_text_binding is not touched.
   - file: docs/contracts/exit-criteria-ledger.yaml
     action: Modify
     purpose: >-
@@ -94,7 +109,7 @@ scope:
       UNENFORCED list (refused at agent merges by the merge gate's scout-input predicate; GitHub UI merges stay
       rec-4624's residual); "an amendment of a merged plan whose own inputs are unchanged while a cited Decision moved"
       moves to rec-5671; approved but unbuilt edits to a cited Decision join it, owned by rec-5673. One terse
-      amendment_log row with Decision 282's decay.
+      amendment_log row (the compaction tool selects no row today, so Decision 275 cl.4's hold binds).
 bundled_recommendations: [rec-5654]
 followon_recs: [rec-5671, rec-5673]
 infrastructure_dependencies: []
@@ -124,14 +139,19 @@ verification_plan:
       tests/test_session_merge_scout_inputs.py::test_plan_pr_is_clear_when_main_moved_an_uncited_decision
       tests/test_session_merge_scout_inputs.py::test_code_pr_is_clear_when_main_moved_a_cited_decision
       tests/test_session_merge_scout_inputs.py::test_build_pr_with_unchanged_plan_inputs_is_clear
-      tests/test_session_merge_scout_inputs.py::test_sidecar_only_pr_is_refused_when_main_moved_a_cited_decision
+      tests/test_session_merge_scout_inputs.py::test_sidecar_only_change_is_not_a_candidate
+      tests/test_session_merge_scout_inputs.py::test_deleted_plan_is_skipped
+      tests/test_session_merge_scout_inputs.py::test_type_changed_plan_is_judged_as_modified
+      tests/test_session_merge_scout_inputs.py::test_non_ascii_plan_path_is_a_candidate
       tests/test_session_merge_scout_inputs.py::test_branch_updated_with_main_is_clear
       tests/test_session_merge_scout_inputs.py::test_scout_input_changed_on_both_sides_is_judged_merged
       tests/test_session_merge_scout_inputs.py::test_conflicting_scout_input_is_unavailable
       tests/test_session_merge_scout_inputs.py::test_unparsable_plan_is_unavailable
+      tests/test_session_merge_scout_inputs.py::test_import_error_is_unavailable
       tests/test_session_merge_scout_inputs.py::test_timeout_is_unavailable
       tests/test_session_merge_scout_inputs.py::test_refusal_names_the_plan_and_the_moved_key
       tests/test_session_merge_scout_inputs.py::test_tree_files_suffice_for_the_fingerprint
+      tests/test_session_merge_scout_inputs.py::test_plan_path_rule_equals_the_barrier
       tests/hooks/test_merge_gate.py::test_judge_refuses_a_stale_plan_after_a_clear_overlap
       tests/hooks/test_merge_gate.py::test_judge_denies_when_scout_inputs_are_unavailable
       tests/hooks/test_merge_gate.py::test_judge_skips_scout_inputs_on_overlap -q
@@ -142,10 +162,13 @@ verification_plan:
     graduation_check_id: persona-verdict-main-rescout-units
   - step: 3
     phase: pre-deploy
-    action: Regression over the gate, overlap, fingerprint and barrier suites.
+    action: Regression over the gate (every suite that installs a fixture project), overlap, fingerprint and barrier suites.
     command: >-
       bin/venv-python -m pytest tests/test_session_merge_scout_inputs.py tests/test_plan_fingerprint.py
-      tests/hooks/test_merge_gate.py tests/test_session_merge_overlap.py tests/checks/roadmap/test__plan_rescout_barrier.py -q
+      tests/hooks/test_merge_gate.py tests/hooks/test_merge_requires_green_checks.py tests/hooks/test_merge_gate_shim.py
+      tests/hooks/test_merge_gate_persona_leg.py tests/hooks/test_merge_gate_persona_check_origin.py
+      tests/checks/prose/test_s1_concurrent_merge_premerge.py tests/test_session_merge_overlap.py
+      tests/checks/roadmap/test__plan_rescout_barrier.py -q
     expected: All tests pass.
     fix_if: A pre-existing test fails; fix in scope or STOP to the plan owner; never edit an assertion out of scope.
     hermetic: false
@@ -162,9 +185,9 @@ verification_plan:
     graduation_waiver_reason: the fast tier's approved_text_binding check runs the same verification on the PR
   - step: 5
     phase: pre-deploy
-    action: Wall time on the real tree, against the gate's 40 s deadline.
-    command: bin/venv-python -m scripts.session.merge_scout_inputs --head-ref HEAD --base-ref origin/main
-    expected: One verdict line whose elapsed value is under 10 seconds.
+    action: Wall time of the full computed path on the real tree, against the gate's 40 s deadline. The merge base is forced 60 commits back so main has moved scout inputs and the plans merged since are candidates.
+    command: bin/venv-python -m scripts.session.merge_scout_inputs --head-ref HEAD --base-ref origin/main --merge-base origin/main~60
+    expected: One verdict line naming path=computed with an elapsed value under 10 seconds.
     fix_if: Over 10 s; cache the loaded trees or STOP to the plan owner; never raise the gate's deadline here.
     hermetic: false
     graduation: waive
@@ -212,6 +235,16 @@ test_obligations:
     test_selector: tests/test_session_merge_scout_inputs.py::test_build_pr_with_unchanged_plan_inputs_is_clear
     red_green_expectation: red before (no module), green after
   - source: scripts/session/merge_scout_inputs.py
+    behavior: candidates are the barrier's examined set (no sidecar-only or below-schema-6 change)
+    verification_step: 2
+    test_selector: tests/test_session_merge_scout_inputs.py::test_sidecar_only_change_is_not_a_candidate
+    red_green_expectation: red before (no module), green after
+  - source: scripts/session/merge_scout_inputs.py
+    behavior: the merged state is judged even when both sides changed a scout input
+    verification_step: 2
+    test_selector: tests/test_session_merge_scout_inputs.py::test_scout_input_changed_on_both_sides_is_judged_merged
+    red_green_expectation: red before (no module), green after
+  - source: scripts/session/merge_scout_inputs.py
     behavior: every failure to compute refuses
     verification_step: 2
     test_selector: tests/test_session_merge_scout_inputs.py::test_unparsable_plan_is_unavailable
@@ -253,9 +286,10 @@ context:
   - "RE-SCOPED 2026-11-26 13:08 UTC by the operator (decision card: adopt the consult's plan) after his concern that the file rule's churn grows with main's throughput and a third blind consult (/mnt/project-files/persona-verdict-rescout/rec-5654-advisor-brief-3/ADVICE.md). Replayed over the 80 plans merged in the week to 2026-11-26, the file rule fired on 30 to 47 (2 to 6 hour PR lifetimes, inferred) and on build PRs; the fingerprint moved on 4 to 11. rec-5654's context and acceptance were updated (read back 13:15 UTC)."
   - "History: consult 1 (push-to-main sweep, rec-5654-advisor-brief/) escalated at critique r2; consult 2 (merge-gate file rule, rec-5654-advisor-brief-2/) drew scout r3's WARN that a new refusal ground needs its own Decision. This plan drafts that Decision in docs/plans/approved/persona-verdict-main-rescout.yaml (Decision 264's pattern: amends Decision 83, a dated Update on Decision 245)."
   - "Scout r3's Decision 254 NOTE: cl.8 narrows Decision 245's overlap rule only; the new Decision's cl.2 says the narrowing does not reach this predicate."
-  - "Why git merge-tree: the merged state is computed locally from the refs the gate just fetched, so there is no stale GitHub merge_commit_sha (critique r2 MRS2-02), and it does not lean on the overlap predicate's CLEAR, so Decision 254 cl.8's narrowing of that predicate cannot make it drop main's edit to a file both sides changed (scout r4 NOTE). The predicate still runs after CLEAR only for ordering; git 2.38+ is needed (CC-web has 2.43)."
+  - "Why git merge-tree: the merged state is computed locally from the refs the gate just fetched, so there is no stale GitHub merge_commit_sha (critique r2 MRS2-02), and it does not lean on the overlap predicate's CLEAR, so Decision 254 cl.8's narrowing of that predicate cannot make it drop main's edit to a file both sides changed (scout r4 NOTE). The plan and sidecar are read from each tree too, so the comparison is exact for every file it reads (critique r3 MRS3-12). git 2.38+ is needed for --write-tree: CC-web (Ubuntu 24.04) and the claude.ai project-thread container both report git 2.43.0 (git --version, 2026-11-26); an older git refuses (MRS3-14)."
   - "Scout r4 (v1:dfd237b8): FLAGS_FOUND, Decision 254 NOTE answered above by git merge-tree and two tests. Decision 245's r3 WARN (own Decision, git-ops row) and 254's r3 NOTE are answered. CITE: 245, 83, 264, 203, 229, 254, 181, 205. Decisions triaged: 235 of 235. Roadmap items intersected: 7; CONFLICT: 0; RELATED: 6. Serves: NS.8 4/5. T4.32 c4's amendment now states it supersedes the 2026-11-09 push-to-main trigger."
-  - "Why the barrier's compared-plan rule: a build PR that edits its merged plan for bookkeeping keeps the plan's fingerprint, so it is skipped and never woken for drift it cannot re-scout (critique r2 MRS2-01); a merged plan gone stale is rec-5671's build-start check."
+  - "Why the barrier's examined set: the remedy (branch update, then the barrier asks for a re-scout) only works for plans the barrier examines, so candidates are exactly those (critique r3 MRS3-02): PLAN-*.yaml added or modified at schema 6 or above, skipped when the plan's own fingerprint did not move, so a build PR's bookkeeping edit is never refused (critique r2 MRS2-01). A sidecar-only change escapes the barrier and this gate alike; rec-5671's build-start check owns it, as it owns a merged plan gone stale."
+  - "DECISIONS.md co-scope (critique r3 MRS3-09): eight unbuilt plans also scope docs/DECISIONS.md (PLAN-agent-proxy-signed-access, bootstrap-ci-gated-apply, bootstrap-trusted-pr-plan, decision-229-subagent-scope, pypi-and-gated-apply-environments, scheduled-workflow-dispatch, sit-restore-spike, telemetry-content-edit-hook), and PLAN-consult-escalation-authority inserts its new Decision at the same preamble anchor; whichever builds second rebases, and the Decision number is read at build."
   - "Pending intent: approved but unbuilt wording in other plans' sidecars is not compared; consult 3 Q3 and the operator's 2026-11-26 13:08 choice route it to rec-5673 (filed, read back open): declare amends completely, then flag conflicting approved intent at approval."
   - "Seam: when DECISIONS.md is split or the roadmap moves to the work-item store (post-MVP), plan_fingerprint.load_tree changes and the completeness test fails until TREE_FILES follows; the comparison itself is untouched. TREE_FILES lives in the new module, not plan_fingerprint, for the fast-tier budget: plan_fingerprint.py alone measures a 182-690 s test half and with DECISIONS.md the scope breaches."
   - "selection_budget at plan write (main 4f052a84): breadth_waived, predicted CI test half 172-662 s, docs/DECISIONS.md the main driver (128-490 s alone); declared here, not split, because the Decision and the code it governs land together."
@@ -312,6 +346,27 @@ gate_rounds:
   - {gate: decision-scout, round: 3, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:f6e79acd9dcaaf4d24ef1f00396aeccaf9caf812ef7432b1a6eb417e7ea3835d"}
   - {gate: decision-scout, round: 4, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:dfd237b8610e887971d75d2946140455b33c7444ef1bae37a503117befb5f404"}
   - {gate: decision-scout, round: 5, verdict: NO_FLAGS, scout_input_fingerprint: "v1:4b1d82a39ae3acf14fd91a40eed0a04f8ba9296c35d7201f68aae5f9dadac46d"}
+  - gate: plan-critique
+    round: 3
+    verdict: REVISE
+    blocking: 4
+    nits: 10
+    findings:
+      - {id: MRS3-01, severity: blocking, origin: judgement, anchor: "scope[tests/fixtures/merge_overlap_repos.py]", subject: "fixture install_project omits the new module; six shim suites would refuse on CLEAR", disposition: fixed}
+      - {id: MRS3-02, severity: blocking, origin: judgement, anchor: "scope[scripts/session/merge_scout_inputs.py]", subject: "candidates wider than the barrier's examined set; remedy cannot re-scout them", disposition: fixed}
+      - {id: MRS3-03, severity: blocking, origin: judgement, anchor: "scope[scripts/session/merge_scout_inputs.py]", subject: "T status, quoted paths, deletion, merge-tree exit 1 and ImportError outcomes unstated", disposition: fixed}
+      - {id: MRS3-04, severity: blocking, origin: mechanical, anchor: "gate_rounds", subject: "no wording-check row before critique", disposition: fixed}
+      - {id: MRS3-05, severity: nit, origin: judgement, anchor: "verification_plan[5]", subject: "VP5 likely times the fast path only", disposition: fixed}
+      - {id: MRS3-06, severity: nit, origin: mechanical, anchor: "scope[docs/contracts/git-ops.yaml]", subject: "compaction selects no row; name the relief passage", disposition: fixed}
+      - {id: MRS3-07, severity: nit, origin: judgement, anchor: "sidecar[DECISIONS-1]", subject: "'the gate never lists its inputs' is false at face value", disposition: fixed}
+      - {id: MRS3-08, severity: nit, origin: mechanical, anchor: "closes_criteria", subject: "[] on in_progress T4.32, reason in phase", disposition: fixed}
+      - {id: MRS3-09, severity: nit, origin: mechanical, anchor: "context", subject: "name the unbuilt plans co-scoping DECISIONS.md", disposition: fixed}
+      - {id: MRS3-10, severity: nit, origin: judgement, anchor: "bundled_recommendations", subject: "rec-5654 title and the T4.32 hint note describe old designs", disposition: fixed}
+      - {id: MRS3-11, severity: nit, origin: judgement, anchor: "scope[.claude/hooks/merge_gate.py]", subject: "conflict refusal must name rebase_resolve", disposition: fixed}
+      - {id: MRS3-12, severity: nit, origin: judgement, anchor: "context", subject: "plan and sidecar read at head, not the merged tree", disposition: fixed}
+      - {id: MRS3-13, severity: nit, origin: judgement, anchor: "sidecar", subject: "Decision 83 dated Update missing", disposition: fixed}
+      - {id: MRS3-14, severity: nit, origin: judgement, anchor: "context", subject: "record git version on the project-thread surface", disposition: fixed}
+  - {gate: wording-check, round: 1, verdict: PASS, digest: c0c9982a1e80d7201fa46d153374e7beb0210f403573e65e85c64c6180da113b, base: a77e7b26fb32860d20528a342b06315d0874719f, selection: complete}  # pragma: allowlist secret
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
@@ -321,6 +376,7 @@ pre_implementation_checklist:
 execution_steps:
   - "Build start: re-measure with bin/venv-python -m scripts.roadmap.plan_obligations --plan docs/plans/PLAN-persona-verdict-main-rescout.yaml and the contract byte caps; git-ops.yaml or exit-criteria-ledger.yaml still past a cap after decay and relief is a STOP to the plan owner. Re-read the next free Decision number on main."
   - "scripts/session/merge_scout_inputs.py with tests/test_session_merge_scout_inputs.py, red first."
+  - "tests/fixtures/merge_overlap_repos.py install_project copies the new module; the six fixture-project suites stay green."
   - ".claude/hooks/merge_gate.py with its hook tests, red first."
   - "docs/DECISIONS.md from the sidecar word for word ({{N}} and {{DATE}} filled); then git-ops.yaml and exit-criteria-ledger.yaml naming that number."
   - Execute Verification Plan -- run each step; loop until pass; on an unrecoverable failure stop and RCA (Decision 55)
