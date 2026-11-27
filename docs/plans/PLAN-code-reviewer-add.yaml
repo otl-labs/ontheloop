@@ -94,21 +94,23 @@ scope:
   purpose: Adds the review-context verb to the dispatch table (review_context.main).
 - file: scripts/personas/route.py
   action: Modify
-  purpose: 'Upstream-aware routing in main() from UPSTREAM_PATH, which the route step sets from the GitHub-set github.event.workflow_run.path;
-    route() and its signature are unchanged, main() filters its result. Declared paths (UPSTREAM_PATHS): .github/workflows/ci.yml,
-    .github/workflows/persona-verdict-trigger.yml and .github/workflows/persona-verdict-override.yml. Any other value, or an unset
-    one, routes nothing with a ''PERSONA-VERDICT skip: undeclared upstream <path>'' line (a workflow named CI at another path on
+  purpose: 'Upstream-aware routing in main() from the GitHub-set event file (GITHUB_EVENT_PATH, read as resolve_pr.main reads
+    it): workflow_run.path and workflow_run.conclusion; no workflow env is added. route() and its signature are unchanged, main()
+    filters its result before rescout.decide. Declared paths (UPSTREAM_PATHS): .github/workflows/ci.yml, .github/workflows/persona-verdict-trigger.yml
+    and .github/workflows/persona-verdict-override.yml. Any other path, or an absent event file or path, routes nothing with a ''PERSONA-VERDICT skip: undeclared upstream <path>'' line (a workflow named CI at another path on
     a PR branch, CRI5-03). CI upstream: keeps only code-class personas (merge_checks.PERSONA_CLASSES); a fixture-only diff routes
     nothing with a skip line (the trigger upstream owns fixture runs); fixture and fallback_drill outputs are always false; a conclusion
     of cancelled routes nothing (a newer head brings its own). A PR that edits ci.yml can make CI conclude at once; that is accepted
     because ci_results is data and gates nothing. Trigger upstream: plan-class and fixture personas as today, never code-class.
-    gates.code_reviewer.advisory_runs read at main through the project-configuration row: off drops code_reviewer with a ''PERSONA-VERDICT
-    skip code_reviewer: advisory_runs off'' line; an absent row reads as the default on; any other value drops it with a ''bad
-    value'' line (fails closed). A head that already carries a persona-verdict/code_reviewer check from the verdict App whose title
+    gates.code_reviewer.advisory_runs read at main through the project-configuration row: the string disabled drops code_reviewer
+    with a ''PERSONA-VERDICT skip code_reviewer: advisory_runs disabled'' line; an absent row reads as the default enabled; any
+    other value, including a YAML boolean from an unquoted on/off, drops it with a ''bad value'' line (fails closed, CRI6-03). A head that already carries a persona-verdict/code_reviewer check from the verdict App whose title
     starts ''verdict '' (a CI re-run) is skipped with a line; a failure-titled check does not block a re-run (CRI5-11); when verdict_app_id
-    is None or a reason string the skip is not applied and a line names why. New output keyed=true when exactly one route remains
+    is None or a reason string, or the check-runs read fails, the skip is not applied and a line names why (a duplicate advisory
+    run is the worst case). New output keyed=true when exactly one route remains
     and it is a fixture persona on the trigger upstream or code_reviewer on the CI upstream (a later persona add widens this with
-    its own Decision 235 entry approval).'
+    its own Decision 235 entry approval); every other form (zero routes, two routes, code_reviewer on the trigger upstream, a
+    plan-class persona alone, a fixture on the CI upstream) is false.'
 - file: scripts/personas/keyed_run.py
   action: Modify
   purpose: prepared_request accepts a route that is a fixture persona or an implemented verdict persona (execute.keyed_personas);
@@ -121,8 +123,8 @@ scope:
   action: Modify
   purpose: 'workflow_run.workflows gains CI; the concurrency group gains github.event.workflow_run.path so a CI-upstream run never
     cancels a trigger-upstream run for the same branch; prepare gains output keyed and a ''Fetch the review context'' step (GH_TOKEN,
-    after materialise inputs are routed, before materialise); the route step gains env UPSTREAM_PATH: ${{ github.event.workflow_run.path
-    }}; run and run-fallback read needs.prepare.outputs.keyed == ''true'' in place of fixture and their timeout-minutes go from
+    after materialise inputs are routed, before materialise, gated on allowlisted == ''true'' and routes != ''0'' like its neighbours,
+    CRI6-08); run and run-fallback read needs.prepare.outputs.keyed == ''true'' in place of fixture and their timeout-minutes go from
     25 to 75 (the launcher''s raised 3600 s bound plus setup); smoke and refusal keep fixture == ''true''; the step name ''Run the
     fixture persona'' is kept (pinned by guard tests; no rename); the header comment''s ''fixture PRs only'' becomes ''fixture
     PRs and implemented verdict routes''. 481 of 500 effective lines (NEAR_CAP): the new step is about 7 lines; if the edit crosses
@@ -132,7 +134,8 @@ scope:
   purpose: 'BOUNDS run goes from 600 to 3600 seconds and MAX_REQUEST from 4 MiB to 64 MiB (operator 2026-11-27 12:10 UTC: set
     unnecessarily high, tune later from data, rec-5718). The backend still ends a run at the contract''s max_wall_clock_seconds
     (2400) as budget_exhausted; the launcher bound is the backstop above it. probe stays 120; MAX_RESULT, the proxy''s MAX_BODY
-    and every other line are unchanged (the egress floor is untouched).'
+    and every other line are unchanged (the egress floor is untouched), except that the ''request over 4 MiB'' refusal text
+    (line 80) is derived from MAX_REQUEST (CRI6-06).'
 - file: tests/personas/test_egress_launcher.py
   action: Modify
   purpose: 'test_sigterm_and_sigint_kill_the_container_and_proxy_then_exit_one''s BOUNDS literal becomes {probe: 120, run: 3600}
@@ -142,7 +145,7 @@ scope:
 - file: scripts/checks/ci_guards/validate_persona_verdict_chain.py
   action: Modify
   purpose: 'UPSTREAMS gains CI; VERDICT_GROUP gains the workflow_run.path term; the prepare step pins gain the review-context step
-    and the route step''s UPSTREAM_PATH env. 445 SLOC today (validate_sloc_limits): if the edit crosses 500, move the trigger and
+    with its allowlisted and routes condition. 445 SLOC today (validate_sloc_limits): if the edit crosses 500, move the trigger and
     upstream pins into a sibling module (Decision 128), never raise a budget.'
   new_imports: []
 - file: scripts/checks/ci_guards/_persona_verdict_keyed.py
@@ -198,13 +201,23 @@ scope:
     test_rerun_with_existing_check_skips (a verdict-titled check skips, a failure-titled one does not, an unreadable app id applies
     no skip), test_fixture_routes_only_from_the_trigger_upstream (CI upstream with a fixture-only diff routes nothing and outputs
     fixture=false, fallback_drill=false, including a drill diff), test_undeclared_upstream_path_routes_nothing (a CI-named path
-    elsewhere and an unset UPSTREAM_PATH), test_advisory_runs_absent_or_bad_value. Updated in place (names kept): test_live_tree_binds_no_verdict_persona
-    asserts bound_personas(ROOT) == {''code_reviewer''} and the code PR route equals [''code_reviewer'']; every node that drives
-    route.main (test_main_logs_routes_and_writes_the_routes_file, test_main_writes_carried_and_rescout_and_keeps_routes_to_run,
+    elsewhere, an event without workflow_run.path, no event file), test_advisory_runs_absent_or_bad_value (absent reads enabled;
+    unquoted on and off, read as YAML booleans, and an unknown string each drop with the bad value line), test_advisory_runs_reads_the_committed_row_as_enabled
+    (real tree), test_keyed_is_false_outside_the_two_admitted_forms (zero routes, two routes, code_reviewer alone on the trigger
+    upstream via a patched route, a bound plan-class persona alone on the trigger upstream via bound_root, a fixture route on the
+    CI upstream). Existing nodes edited in place, names kept (CRI6-01): (a) test_live_tree_binds_no_verdict_persona asserts bound_personas(ROOT)
+    == {''code_reviewer''} and the code PR route equals [''code_reviewer'']; (b) test_fixture_only_diff_routes_the_fixture_personas
+    (graduated, persona-verdict-fixture-run-units) lines 149 and 152 expect [''code_reviewer''] on the live ROOT for the fixture-plus-scripts
+    and the unknown diff (route() is unchanged but ROOT now binds code_reviewer); (c) test_main_logs_routes_and_writes_the_routes_file
+    line 199''s output literal gains keyed=true (one fixture route on the trigger upstream); (d) test_main_writes_carried_and_rescout_and_keeps_routes_to_run
+    (graduated, persona-verdict-scout-carry-units) patches route to [''decision_scout'', ''plan_critic''] (both kept by the trigger
+    filter), its fake decide returns [''plan_critic''], and the seen, routes and log assertions follow those names, so it still
+    proves the filter runs before rescout.decide and carried entries are kept; (e) every node that drives route.main (those above,
     test_an_override_resolution_yields_no_routes, _main_fixture_output''s callers, test_fixture_is_false_when_unresolved_or_an_override,
-    test_fallback_drill_only_on_fixture_diffs) sets UPSTREAM_PATH to the trigger path (the override path for the override node).
-    route()-level nodes are unchanged because route() is. Graduated shards persona-verdict-scout-carry-units, persona-verdict-fallback-run-units
-    and persona-verdict-fixture-run-units kept: their selected nodes stay, keep their names and pass.'
+    test_fallback_drill_only_on_fixture_diffs, graduated) writes a GITHUB_EVENT_PATH file whose workflow_run.path is the trigger
+    path (the override path for the override node), its assertions otherwise unchanged. Every other route()-level node is unchanged.
+    Graduated shards persona-verdict-scout-carry-units, persona-verdict-fallback-run-units and persona-verdict-fixture-run-units
+    kept: their selected nodes stay, keep their names and pass.'
 - file: tests/personas/test_keyed_run.py
   action: Modify
   purpose: 'Adds test_implemented_verdict_route_is_accepted_and_pending_refused. Graduated shard(s) keyed-run-registry-key kept:
@@ -213,7 +226,8 @@ scope:
   action: Modify
   purpose: 'Adds test_keyed_personas_are_fixtures_and_implemented_verdicts. test_a_non_fixture_route_has_no_schema is updated
     in place to a still-pending persona (decision_scout): schema_for and failure_schema_for return None for it, and code_reviewer
-    now has both. Graduated shard(s) persona-record-telemetry-first,
+    now has both. test_bad_requests_are_refused''s case ({route: code_reviewer, body: GOOD}, route_kind) moves to decision_scout,
+    still route_kind (CRI6-01). Graduated shard(s) persona-record-telemetry-first,
     persona-verdict-fallback-run-units kept: their selected nodes stay and pass (any pinned literal they assert is updated in the
     same node, never dropped).'
 - file: tests/personas/test_run.py
@@ -233,8 +247,8 @@ scope:
 - file: tests/checks/ci_guards/test_validate_persona_verdict_chain_upstreams.py
   action: Create
   purpose: 'Sibling of test_validate_persona_verdict_chain.py (Decision 128): test_three_upstreams_and_path_group_required (a missing
-    CI upstream or the old group is refused) and test_route_step_needs_upstream_path_env (a route step without UPSTREAM_PATH from
-    workflow_run.path is refused).'
+    CI upstream or the old group is refused) and test_review_context_step_is_gated (a fetch step without the allowlisted and routes
+    condition is refused).'
 - file: tests/checks/ci_guards/test__persona_verdict_fallback.py
   action: Modify
   purpose: 'CASES and the expected PREPARE_OUTPUTS follow keyed; adds test_run_fallback_reading_fixture_is_refused. The graduated
@@ -248,9 +262,22 @@ scope:
   action: Modify
   purpose: 'gates.verdict_app.app_id readers gains scripts/personas/review_input.py and scripts/personas/route.py (the re-run
     skip, CRI5-09; Decision 224); a new row gates.code_reviewer.advisory_runs
-    (kind project, values on|off, default on, reader scripts/personas/route.py, basis this plan and the 2026-11-26 consult''s kill
+    (kind project, values enabled|disabled as quoted strings, default enabled, committed as enabled, reader scripts/personas/route.py, basis this plan and the 2026-11-26 consult''s kill
     switch); and one amendment_log entry {semantic_break: false, change_class: field_add} naming both, as the Class D drift check
     requires. No other line changes.'
+- file: docs/DECISIONS.md
+  action: Modify
+  purpose: 'Two dated Update blockquotes, wording approved by the operator 2026-11-27 12:34 UTC (critique r6 CRI6-04), nothing
+    else. At the end of Decision 205''s body: ''> **Update (2026-11-27):** (PLAN-code-reviewer-add) Clause 2''s workflow_run upstream
+    may also be the repository''s own CI workflow, which holds secrets of its own. It qualifies because the verdict job reads from
+    it only GitHub-set fields (workflow path, head SHA, conclusion) and the head''s check runs as data, never its artifacts or outputs,
+    and the persona role''s trust still refuses any pull_request subject (Decision 263 cl.2).'' After Decision 263''s second 2026-11-24
+    Update: ''> **Update (2026-11-27):** The 2026-11-24 Update''s premise that the persona path''s pull_request trigger is secretless
+    reads with Decision 205''s 2026-11-27 Update: the CI upstream holds secrets of its own, and the pull_request refusal still rests
+    on this role''s one trust statement (cl.2), which no pull_request subject meets.'''
+- file: docs/decisions-index.json
+  action: Modify
+  purpose: Regenerated by bin/venv-python -m scripts.decisions_index after the DECISIONS.md edit, never hand-edited.
 - file: tests/fixtures/persona_verdict/review_input/
   action: Create
   purpose: Synthetic head snapshot (one plan, one changed src module with an import, one non-collectable test-shaped file named
@@ -303,8 +330,8 @@ verification_plan:
   expected_literals:
   - passed
   graduation: waive
-  graduation_waiver_reason: existing suites already in the fast tier by path; the one new node is a mirror-test node of a changed
-    file, run by --pre pytest_diff
+  graduation_waiver_reason: existing suites already in the fast tier by path; the new nodes and the two new test files are mirror
+    tests of changed or created files, run by --pre pytest_diff
 - step: 3
   phase: pre-deploy
   action: code_reviewer is implemented and bound to its contract.
@@ -426,6 +453,16 @@ test_obligations:
   verification_step: 2
   test_selector: tests/personas/test_route.py::test_fixture_routes_only_from_the_trigger_upstream
   red_green_expectation: red before (node absent), green after
+- source: scripts/personas/route.py
+  behavior: keyed is false in every form but one fixture on the trigger upstream or code_reviewer on the CI upstream
+  verification_step: 2
+  test_selector: tests/personas/test_route.py::test_keyed_is_false_outside_the_two_admitted_forms
+  red_green_expectation: red before (node absent), green after
+- source: docs/contracts/project-configuration.yaml
+  behavior: the committed advisory_runs row reads as enabled through route's reader
+  verification_step: 2
+  test_selector: tests/personas/test_route.py::test_advisory_runs_reads_the_committed_row_as_enabled
+  red_green_expectation: red before (row and node absent), green after
 - source: scripts/personas/egress_launcher.py
   behavior: the run bound is above every keyed persona's contract wall clock and the request cap is at least 64 MiB
   verification_step: 2
@@ -457,7 +494,7 @@ test_obligations:
   test_selector: tests/checks/ci_guards/test_validate_persona_verdict_chain_upstreams.py::test_three_upstreams_and_path_group_required
   red_green_expectation: red before (new nodes), green after
 - source: scripts/checks/ci_guards/validate_persona_verdict_chain.py
-  behavior: three upstreams, the path-bearing group and the route step's UPSTREAM_PATH env are required
+  behavior: three upstreams, the path-bearing group and the gated review-context step are required
   verification_step: 2
   test_selector: tests/checks/ci_guards/test_validate_persona_verdict_chain_upstreams.py
   red_green_expectation: red before (new nodes), green after
@@ -481,7 +518,8 @@ constraints:
 - 'Operator approvals 2026-11-27: merge steps 1 and 2 (11:38 UTC, critique r4 escalation, re-scope) and widen the keyed run to
   real code PRs in this plan (11:41 UTC, Decision 235 entry gate for the keyed-job pin). The widening is the code_reviewer route
   only, from allow-listed authors, from the CI upstream; smoke and refusal stay fixture-only; main''s definition and code, the
-  Environment, OIDC and the egress floor are unchanged (Decision 205 cl.1, Decision 263).'
+  Environment, OIDC and the egress floor are unchanged (Decision 205 cl.1, Decision 263). Decision 205 cl.2''s and Decision 263''s
+  ''secretless trigger'' wording gains the dated Updates in scope (operator 2026-11-27 12:34 UTC); no clause changes.'
 - 'The check is advisory: gates.code_reviewer.verdict_source stays in_session; no gate reads the check.'
 - 'Head content is data: parse with ast or read as text, never import, exec, install or run it; PR text enters only as quoted data.'
 - 'No spend mechanism (operator ruling 2026-11-27: rec-5707); live runs are authorised by this plan''s approval.'
@@ -548,6 +586,17 @@ context:
 - 'Roadmap drift (CRI5-14): T4.32''s SPEND annotation (''the first add plan re-sets the ceiling ... per-PR and per-day dollar
   cap'') is superseded for add plans by the operator''s 2026-11-27 10:39 UTC ruling recorded in rec-5707''s context; the roadmap
   text edit is rec-5707''s.'
+- 'Build notes (critique r6 nits): name this plan''s repo-structure assumptions (the upstream CI at .github/workflows/ci.yml,
+  the head_ref agent/<slug> plan fallback, the DECISIONS_ARCHIVE ''## Code Review Exemptions'' section) in ports.yaml SA-14''s
+  or SA-11''s list, or file a rec if neither fits (CRI6-09); read_input''s search mode has no byte cap on long lines, for rec-5709
+  or rec-5718 (CRI6-10); a CI re-run of a head whose check ended budget_exhausted spends another run, with CRI5-17 for rec-5707
+  (CRI6-11).'
+- 'Decision-scout r5 FLAGS_FOUND (fingerprint v1:dfac3f1efa55f729b1d7cca3f7d5f31bf6c68f01503274283f990a21bbb6d92a): WARN 280
+  cl.1 (project guidance enters only as a guidance slot) answered by deferral: review_exemptions, review_dispositions and review_guidance
+  are contract-declared plain fields read only at base_root, the in-session lane''s same inputs; moving them into slots is rec-5585''s
+  contract change (Decision 280 cl.1 Coverage residual). NOTE 234 cl.4: review-context.json is shell data under PC-09, the provider
+  keys on change_id. CITE 184 suggested (Actions as verdict plane, as amended by 205 cl.1); the cites line keeps the scout''s
+  cites= output. ROADMAP T4.28 CONFLICT (allow-listed authors) answered as in r4. Serves: NS.9 2/5.'
 gate_rounds:
 - gate: decision-scout
   round: 1
@@ -987,6 +1036,86 @@ gate_rounds:
     anchor: scope[0]
     subject: comment wedge and two-plan PRs
     disposition: build-note
+- gate: decision-scout
+  round: 5
+  verdict: FLAGS_FOUND
+  scout_input_fingerprint: v1:dfac3f1efa55f729b1d7cca3f7d5f31bf6c68f01503274283f990a21bbb6d92a
+- gate: plan-critique
+  round: 6
+  verdict: REVISE
+  blocking: 4
+  nits: 7
+  category_consistency: []
+  escalated: true
+  escalation_choice: one more round
+  escalation_decider: operator
+  findings:
+  - id: CRI6-01
+    severity: blocking
+    origin: mechanical
+    anchor: test_obligations
+    subject: existing nodes the change breaks, named with edits
+    disposition: fixed
+  - id: CRI6-02
+    severity: blocking
+    origin: judgement
+    anchor: scope[4]
+    subject: keyed false forms, conclusion source, failed re-run read
+    disposition: fixed
+  - id: CRI6-03
+    severity: blocking
+    origin: judgement
+    anchor: scope[4]
+    subject: on/off read as YAML booleans
+    disposition: fixed
+  - id: CRI6-04
+    severity: blocking
+    origin: judgement
+    anchor: constraints[0]
+    subject: Decision 205 cl.2 and 263 secretless trigger wording
+    disposition: fixed
+  - id: CRI6-05
+    severity: nit
+    origin: mechanical
+    anchor: gate_rounds
+    subject: re-scout on moved fingerprint
+    disposition: fixed
+  - id: CRI6-06
+    severity: nit
+    origin: mechanical
+    anchor: scope[8]
+    subject: stale 4 MiB refusal text
+    disposition: fixed
+  - id: CRI6-07
+    severity: nit
+    origin: mechanical
+    anchor: verification_plan[1]
+    subject: VP2 waiver reason
+    disposition: fixed
+  - id: CRI6-08
+    severity: nit
+    origin: judgement
+    anchor: scope[7]
+    subject: gate the fetch step on allowlist and routes
+    disposition: fixed
+  - id: CRI6-09
+    severity: nit
+    origin: judgement
+    anchor: scope
+    subject: repo-structure assumptions in ports.yaml
+    disposition: build-note
+  - id: CRI6-10
+    severity: nit
+    origin: judgement
+    anchor: scope[1]
+    subject: read_input search has no byte cap
+    disposition: build-note
+  - id: CRI6-11
+    severity: nit
+    origin: judgement
+    anchor: scope[4]
+    subject: re-runs after budget_exhausted spend again
+    disposition: build-note
 pre_implementation_checklist:
 - Branch confirmed not on main
 - docs/PROJECT_CONTEXT.md read
@@ -999,6 +1128,7 @@ execution_steps:
 - Write the fixtures and the new and modified test nodes; confirm they fail.
 - Write review_input.py and review_context.py; register the provider and the ctx extension in materialise.py; add the run.py verb;
   route.py upstream split, kill switch, re-run skip and keyed output; execute.keyed_personas and keyed_run acceptance.
+- Add the two dated Updates to docs/DECISIONS.md exactly as worded in scope and regenerate docs/decisions-index.json.
 - Edit persona-verdict.yml and the guards together; edit executor-personas.yaml (implemented) and project-configuration.yaml (readers,
   advisory_runs, amendment_log).
 - Run VP 1-3, then validate --pre; then the full tier and --verify-head as a tracked background run (run_in_background, timeout
