@@ -32,7 +32,14 @@ _SELECT_STAR_VERBS = frozenset({"rec_by_id", "recs_by_ids", "rec_history", "deci
 # Only `since_ts` binds need a value CAST-able to TIMESTAMPTZ; every other bound param is a plain
 # string equality/LIKE/lookup value, so any non-empty string discriminates without erroring. recs_related's
 # near/terms binds are "key|weight" pairs (CAST to DOUBLE) and max_rows is CAST to INTEGER.
-_PARAM_VALUES = {"since_ts": "2024-01-01T00:00:00+00:00", "near": "a.py|1", "terms": "x|1", "max_rows": "5"}
+_PARAM_VALUES = {
+    "since_ts": "2024-01-01T00:00:00+00:00",
+    "near": "a.py|1",
+    "terms": "x|1",
+    "max_rows": "5",
+    "status": "open",
+    "before": "2024-01-01T00:00:00Z|x",
+}
 
 
 def _con() -> "duckdb.DuckDBPyConnection":
