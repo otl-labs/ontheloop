@@ -1,0 +1,206 @@
+schema_version: 7
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: "recs-by-tag-read"
+intent: >-
+  Add the recs_by_tag named read (rec-5700): current recommendations whose tags contain one tag, newest
+  last_updated_timestamp first, with status (default open), since, priority and source filters, a keyset cursor
+  for older pages and a capped row count, bind values only. Project coordinators can then read the latest recs
+  labelled to their project through the threads they start, instead of paging the unfilterable issue log.
+plan_type: IMPLEMENTATION
+implementation_declared: true
+verification_tier: V3
+plan_path: docs/plans/PLAN-recs-by-tag-read.yaml
+phase: >-
+  ad_hoc_rec (soft-warn exception category; no tier_item claimed, so the Tier Item Freshness Gate is skipped):
+  rec-5700 (Medium, S), taken by Agents in GitHub at the operator's request (cross-project coordination). Closes no
+  roadmap criterion.
+closes_criteria: []
+cites: [dec:79, dec:84, dec:215, dec:249]
+amends: []
+introduces: []
+scope:
+  - file: src/common/ducklake_named_reads.py
+    action: Modify
+    purpose: >-
+      rec-5700. One new NamedRead, verb recs_by_tag, table ops_recommendations, agent_facing True, paginable False,
+      params in bind order (tag, status, since_ts, priority, source, before, max_rows), all strings. SQL binds the
+      first six once each in a leading args CTE and max_rows only in the final
+      LIMIT least(CAST(? AS INTEGER), 100) (recs_related precedent). Semantics: list_contains(tags, tag) (a NULL tags
+      row never matches); status is one value or a comma list, empty means open, the single value all means every
+      status, and any other element outside open, in_progress, closed, failed, declined, superseded raises; since_ts
+      empty means no bound, else last_updated_timestamp at or after CAST(since_ts AS TIMESTAMPTZ) through a CASE so an
+      empty value is never cast; priority empty means any, else lower(priority) = lower(bind); source empty means
+      any, else source = bind; before empty means the first page, else "ts|id" and only rows strictly older than
+      (ts, id) in the sort order. Guards raise through error() (recs_related pattern) on an empty tag, an unknown
+      status element, a since_ts or before timestamp without an explicit Z or numeric offset, or a before value
+      without exactly one "|". Columns: id, title, status, priority, effort, source, file, tags, created_timestamp,
+      last_updated_timestamp, total (count(*) OVER () before the cap, so a caller sees truncation). ORDER BY
+      last_updated_timestamp DESC, id DESC. The description states the defaults, the cap and the cursor shape, since
+      it is all an MCP caller sees. NAMED_READS_VERSION stays 6 (additive verb, docs/contracts/ducklake_reader.yaml
+      history); no existing verb's read_version moves. About +45 SLOC.
+    new_imports: []
+  - file: src/common/ducklake_reader_client.py
+    action: Modify
+    purpose: >-
+      VERB_FIELDS gains the recs_by_tag column tuple (the 11 columns above, in order); the version pin stays 6.
+      NEAR_CAP (476 of 500 SLOC on main 2026-11-26; three unbuilt plans also scope it): a literal 11-string tuple formats
+      to about 13 lines (489 of 500), and the build re-measures with validate_sloc_limits against main at build time; if the file
+      would pass 500 the build parks with a plan-defect report (decomposition is its own plan), never a raise.
+    new_imports: []
+  - file: tests/test_ducklake_named_reads.py
+    action: Modify
+    purpose: >-
+      rec-5700's acceptance node test_recs_by_tag_filters_and_orders_newest_first executes the verb's SQL in DuckDB
+      (tests.fixtures.duckdb_connect, the parity test's table-from-spec pattern, {tbl} pointed at a local table) over
+      fixture rows covering: tag hit and miss and NULL tags; open default, a comma list, all; since at-or-after
+      boundary; priority case-insensitive; source; the before cursor returning the next page with no overlap and no
+      gap when timestamps tie; the max_rows cap with total above it; and the cap of 100. Sibling nodes: guard errors
+      (empty tag, unknown status, offset-less since_ts, malformed before) raise; registry shape (params order, one ?
+      per param, paginable False, agent_facing True, ORDER BY ending id DESC immediately before the LIMIT, which the
+      generic total-order test does not reach for a bind LIMIT); NAMED_READS_VERSION still 6 and the existing
+      pinned digests unchanged. The module docstring drops "DB-free" and names the two duckdb nodes. About +110 SLOC.
+    new_imports: [tests.fixtures.duckdb_connect]
+  - file: tests/common/ducklake_reader_client/test_verb_fields_parity.py
+    action: Modify
+    purpose: >-
+      _PARAM_VALUES gains values the new guards accept for the params only recs_by_tag uses (status, before), so the
+      parametrised column-parity node runs the verb's real SQL. +1 SLOC.
+  - file: docs/contracts/read-engine.yaml
+    action: Modify
+    purpose: >-
+      The ops_recommendations verb roster gains recs_by_tag (validate_read_engine_verbs), and an amendment_log entry
+      (field_add, semantic_break false, additive: no existing caller's answer changes).
+constraints:
+  - Bind values only; no caller SQL crosses the reader boundary (Decision 84 I-3). The runtime (src/common/ducklake_reads.py) and the client's named() signature are unchanged.
+  - Additive only. No existing verb, its SQL, params or read_version changes; NAMED_READS_VERSION stays 6.
+  - The reader ships through the governed channel deploy-ducklake-lambdas.yml after the merge's full tier passes on main (build-lambda.yaml deploy_channels); build_lambda --deploy is break-glass only and is not used.
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - "Consult 2026-11-26 (blind, claude-fable-5-2): /mnt/project-files/recs-by-tag-read/advisor-brief/ADVICE.md. Adopted: empty-string binds in an args CTE, error() guards, max_rows bind capped at 100 with total, at-or-after since with an explicit offset."
+  - "Deviation from rec-5700's text: the rec says paginable and that the version pin moves. The runtime limit cannot be sent by the client's named() or the MCP projection (ducklake_reader_client.py:551-559), so the bound is the max_rows bind plus a before cursor and paginable stays False; additive verbs keep NAMED_READS_VERSION at 6 (ducklake_reader.yaml:268,277)."
+  - "Operator sign-off 2026-11-26 23:53 UTC: write the plan, with the before cursor included (fork offered at sign-off; deferring it was the alternative)."
+  - "Cursor caveat: the sort key is mutable, so a rec updated between page reads moves to the top and is not seen again in that walk; a fresh first page shows it."
+  - "Live probe 2026-11-26 (agent_platform reader): warm full-scan verbs count_by_status 1.3 s, open_recs_tally 1.2 s over 4,404 rows. tags cannot prune files, so a cold first touch may be slow (rec-5181 measured 84 s for list_contains over id). UNPROVEN until VP post-deploy step."
+  - "Out of scope (rec-5700): a fixed list of project tags the portal checks. Related, not bundled: rec-5181 (recs_by_ids pruning), rec-4240 (deprecated verb removal)."
+  - "Graduated shards kept unchanged (their node ids stay valid): named-reads-v4-recs-verbs, recs-read-model-parity, recs-related-verb-registered, telemetry-event-reads-registry, verb-fields-match-registry-sql, verb-fields-version-pin-matches. VP 1 adds shard recs-by-tag-filters-and-orders-newest-first."
+  - "Other active artifacts packaging these files (data-pipeline via deploy-prod-lambdas.yml; the telemetry readers, writer, maintenance and catalog-dr; the operator-gated telemetry content reader under Decision 272) receive inert registry data through their own channels; only the reader carries a smoke obligation here."
+  - "Amendment 1 (2026-11-27, build plan-defect report): VP 1 is hermetic false under docs/contracts/vp-red-before.yaml hermetic_authoring rule (iii), since its node needs duckdb, which the fast tier excludes; graduation stays graduate, as for the duckdb shard verb-fields-match-registry-sql. The two new duckdb nodes skip in the fast tier only (importorskip inside each node, env: reason), recorded as owned-skip weakening_dispositions; no module-level skip, and no assertion or scope change."
+  - "Related-work check: red_overlap verdict clear (no reds), 2026-11-26."
+  - "Unbuilt plans also scoping these files (whichever builds second rebases): PLAN-agent-proxy-signed-access, PLAN-telemetry-claude-p-capture-adapter (ducklake_reader_client.py); PLAN-telemetry-planning-cost-reads (read-engine.yaml, ducklake_reader_client.py)."
+  - "Decision-scout round 1: NO_FLAGS (Decisions triaged: 238 of 238; Roadmap items intersected: 3; CONFLICT: 0; RELATED: 2). CITE: 84, 215, 79, 249. Related: 88 (catalog egress: cap 100 on the warm reader), 125, 254, 283, 255, 213, 140, 214. Roadmap: T2.19 c8/c14 related; both stay open (one verb verifies neither). Serves: NS.5 4/5."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: NO_FLAGS, scout_input_fingerprint: "v1:1a7d1223291986c3648e0e0f4c6a423ef2298f29e488c84d7edaf6a7d8420a13"}
+  - {gate: plan-critique, round: 1, verdict: PROCEED, blocking: 0, nits: 11, findings: [{id: RBT-01, severity: nit, origin: judgement, anchor: "verification_plan[step=5]", subject: "other affected artifacts ride their own channels with no smoke obligation", disposition: applied-wording}, {id: RBT-02, severity: nit, origin: judgement, anchor: "scope[0].purpose", subject: "Build: add an error() guard requiring max_rows to be an integer of at least 1 (^[0-9]+$ and > 0); max_rows -1 is a 500 BinderException and 0 returns [] with no total", disposition: build-note}, {id: RBT-03, severity: nit, origin: mechanical, anchor: "scope[1].purpose", subject: "the 3-line claim was false; the tuple formats to about 13 lines (489 of 500); optionally derive it from the recs_for_files fields to save SLOC", disposition: applied-wording}, {id: RBT-04, severity: nit, origin: mechanical, anchor: "scope[0].purpose", subject: "Build: name columns explicitly in every CTE; no SELECT * anywhere in the verb SQL (_SELECT_STAR would fold columns into read_version)", disposition: build-note}, {id: RBT-05, severity: nit, origin: judgement, anchor: "scope[0].purpose", subject: "Build: add a sibling assertion that the SQL status vocabulary is a superset of config/agent/data_quality/ops.yaml accepted_values for status", disposition: build-note}, {id: RBT-06, severity: nit, origin: judgement, anchor: "scope[0].purpose", subject: "Build: the description states that total counts rows past the cursor, that every param is required with empty string as the default, and that max_rows has no default", disposition: build-note}, {id: RBT-07, severity: nit, origin: judgement, anchor: "verification_plan[step=6]", subject: "Build: VP 6 uses max_rows 100, asserts rec-5700 in ids, newest-first order and total >= len(rows), plus a live status=bogus call expecting a typed 400", disposition: build-note}, {id: RBT-08, severity: nit, origin: mechanical, anchor: "verification_plan[step=5].command", subject: "Build: VP 5 checks the run head_sha equals the merge SHA or a later main commit", disposition: build-note}, {id: RBT-09, severity: nit, origin: judgement, anchor: "test_obligations[1]", subject: "Build: the client obligation's evidence node is test_verb_fields_match_registry_sql[recs_by_tag] (absent on main)", disposition: build-note}, {id: RBT-10, severity: nit, origin: judgement, anchor: "scope[2].purpose", subject: "Build: import duckdb inside the acceptance node (no module-level importorskip) and pin a guard case over a fixture with no matching rows", disposition: build-note}, {id: RBT-11, severity: nit, origin: judgement, anchor: "context", subject: "T2.19 c8/c14 stay open; wording changed from advanced to related", disposition: applied-wording}]}
+  - {gate: plan-critique, round: 2, verdict: PROCEED, blocking: 0, nits: 5, findings: [{id: RBT2-01, severity: nit, origin: judgement, anchor: "scope[2].purpose", subject: "docstring note said one duckdb node; amendment makes two", disposition: applied-wording}, {id: RBT2-02, severity: nit, origin: mechanical, anchor: "weakening_dispositions", subject: "Build: each in-node guard is exactly pytest.importorskip(duckdb, reason=env: duckdb is not installed in the fast tier) so the cite resolves", disposition: build-note}, {id: RBT2-03, severity: nit, origin: mechanical, anchor: "weakening_dispositions", subject: "Build: keep duckdb execution to the two disposed functions (parametrize inside), or record any extra skip in the build's plan edit", disposition: build-note}, {id: RBT2-04, severity: nit, origin: judgement, anchor: "verification_plan[step=1]", subject: "Build: the PR body cites VP 1's pass from the local full tier (VP 4 verify-head), since PR CI shows it skipped", disposition: build-note}, {id: RBT2-05, severity: nit, origin: judgement, anchor: "scope[2]", subject: "separate duckdb test file would avoid skip candidates; not adopted (scope change; in-node route precedented)", disposition: build-note}]}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+weakening_dispositions:
+  - {candidate: "[skip-added] tests/test_ducklake_named_reads.py::test_recs_by_tag_filters_and_orders_newest_first", disposition: owned-skip, cite: "env: duckdb is not installed in the fast tier"}
+  - {candidate: "[skip-added] tests/test_ducklake_named_reads.py::test_recs_by_tag_guards_raise", disposition: owned-skip, cite: "env: duckdb is not installed in the fast tier"}
+bundled_recommendations: [rec-5700]
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - rec-5700's acceptance node passes (VP 1) and the guard, shape and parity nodes pass (VP 2).
+  - After deploy the live reader lists recs_by_tag in describe and answers it (VP 6), and rec-5700 is closed (VP 7).
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: rec-5700's acceptance node.
+    command: bin/venv-python -m pytest -q tests/test_ducklake_named_reads.py::test_recs_by_tag_filters_and_orders_newest_first
+    expected: >-
+      exit 0; the node passes in the full tier (duckdb present). Red before (the verb is absent on main). Not
+      replayed in the fast tier, which carries no duckdb (requirements-fast.txt heavy-exclusion).
+    fix_if: Fix the verb SQL, never an assertion.
+    hermetic: false
+    graduation: graduate
+    graduation_check_id: recs-by-tag-filters-and-orders-newest-first
+  - step: 2
+    phase: pre-deploy
+    action: The registry, parity and contract suites.
+    command: >-
+      bin/venv-python -m pytest -q tests/test_ducklake_named_reads.py tests/common/ducklake_reader_client/test_verb_fields_parity.py
+      tests/checks/contracts/test_validate_read_engine_verbs.py tests/test_ducklake_reader_handler.py
+    expected: exit 0; every test passes (the count is not pinned).
+    fix_if: Fix the code, never the assertion.
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Whole-suite re-run of existing graduated shards plus VP 1's new shard; no new node id beyond the scope rows'.
+  - step: 3
+    phase: pre-deploy
+    action: Lint and format.
+    command: >-
+      bin/venv-python -m ruff check src/common/ducklake_named_reads.py src/common/ducklake_reader_client.py tests/test_ducklake_named_reads.py tests/common/ducklake_reader_client/test_verb_fields_parity.py &&
+      bin/venv-python -m ruff format --check src/common/ducklake_named_reads.py src/common/ducklake_reader_client.py tests/test_ducklake_named_reads.py tests/common/ducklake_reader_client/test_verb_fields_parity.py
+    expected: exit 0.
+    fix_if: Run ruff format and fix lint.
+    hermetic: false
+    graduation: not-applicable
+  - step: 4
+    phase: pre-deploy
+    action: Full tier to completion, backgrounded from the top-level session with Bash run_in_background and a 2 h limit.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: validation_result --verify-head exits 0 attesting HEAD's tree.
+    fix_if: Fix in-scope failures on the branch; out-of-scope failures become recs (Decisions 55, 59).
+    hermetic: false
+    graduation: not-applicable
+  - step: 5
+    phase: post-deploy
+    action: Confirm deploy-ducklake-lambdas.yml deployed the merge commit (or a later main commit) to the reader and its smoke passed.
+    command: >-
+      mcp__github__actions_list(owner="otl-labs", repo="ontheloop", method="list_workflow_runs", resource_id="deploy-ducklake-lambdas.yml")
+    expected: A run for the merge SHA or later concludes success, deploy-serving and smoke green.
+    fix_if: A red or held run follows deploy-paths.yaml deploy_code recovery; never break-glass without the operator.
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: post-deploy
+    action: Live read through the deployed reader.
+    command: >-
+      bin/venv-python -c "import time; from src.common.ducklake_reader_client import make_reader; r=make_reader(profile='agent_platform');
+      d=r.describe(); assert 'recs_by_tag' in d, sorted(d); t=time.time();
+      rows=r.named('recs_by_tag', tag='coordinator-log', status='all', since_ts='', priority='', source='', before='', max_rows='5');
+      print(round(time.time()-t,1), [(x['id'], x['status'], x['total']) for x in rows])"
+    expected: describe lists recs_by_tag; the read returns rec-5700 among rows newest first with total at least 1; the elapsed seconds are recorded in the PR.
+    fix_if: Missing verb means the deploy has not shipped this commit (VP 5); a typed error means an SQL fault, fixed forward.
+    hermetic: false
+    graduation: not-applicable
+  - step: 7
+    phase: post-deploy
+    action: Confirm rec-5700 is closed (squash Resolves trailer).
+    command: >-
+      bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids, make_reader;
+      r,m=fetch_recs_by_ids(make_reader(profile='agent_platform'), ['rec-5700']); print(sorted((x['id'], x['status']) for x in r), m)"
+    expected: Prints rec-5700 with status closed and an empty missing list.
+    fix_if: Still open - read the ci.yml closure job log and close it with update_rec.
+    hermetic: false
+    graduation: not-applicable
+test_obligations:
+  - source: src/common/ducklake_named_reads.py
+    behavior: recs_by_tag filters by tag, status default open, since at-or-after, priority, source, cursor and cap, newest first with an id tiebreak.
+    verification_step: 1
+    test_selector: tests/test_ducklake_named_reads.py::test_recs_by_tag_filters_and_orders_newest_first
+    red_green_expectation: red before (verb absent on main), green after.
+  - source: src/common/ducklake_reader_client.py
+    behavior: VERB_FIELDS declares the columns the recs_by_tag SQL really returns.
+    verification_step: 2
+    test_selector: tests/common/ducklake_reader_client/test_verb_fields_parity.py::test_verb_fields_covers_every_registered_verb
+    red_green_expectation: red before (a registered verb without a VERB_FIELDS entry), green after.
+  - source: docs/contracts/read-engine.yaml
+    behavior: The ops_recommendations verb roster names recs_by_tag, matching the registry (validate_read_engine_verbs).
+    verification_step: 2
+    test_selector: tests/checks/contracts/test_validate_read_engine_verbs.py::TestRealContractRoster::test_real_contract_matches_registry_and_names_v4_verbs
+    red_green_expectation: red if the registry gains recs_by_tag without the roster entry, green after.
+execution_steps:
+  - Add the recs_by_tag NamedRead to src/common/ducklake_named_reads.py per its scope row.
+  - Add its VERB_FIELDS tuple; add the parity test's param values; add the roster entry and amendment_log entry in read-engine.yaml.
+  - Add the acceptance node and sibling nodes to tests/test_ducklake_named_reads.py.
+  - Execute the Verification Plan; loop until pass; on an unrecoverable V3 failure stop and RCA (Decision 55).
+  - 'Report: what was implemented, verification results, the live elapsed time from VP 6.'
+rollback: Revert the squash commit; the next governed deploy removes the verb. No data or schema changes.

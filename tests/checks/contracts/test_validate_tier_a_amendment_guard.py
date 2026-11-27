@@ -269,7 +269,7 @@ def test_second_change_to_a_block_key_takes_two_prs(repo: Path, capsys: pytest.C
     [
         lambda t: t + "mission: {}\n",
         lambda t: t.replace("  - id: NS.2\n", "  - id: NS.1\n", 1),
-        lambda t: t.replace("kind: north_star\n    principle: Source", "kind: &a north_star\n    principle: Source", 1),
+        lambda t: t.replace("  - id: NS.2\n    kind: north_star\n", "  - id: NS.2\n    kind: &a north_star\n", 1),
         lambda t: t.replace("kind: north_star\n    principle: Every", "kind: *a\n    principle: Every", 1).replace(
             "class: D", "class: &a D", 1
         ),
@@ -283,7 +283,9 @@ def test_second_change_to_a_block_key_takes_two_prs(repo: Path, capsys: pytest.C
     ],
 )
 def test_head_shape_defects_fail_closed(repo: Path, capsys: pytest.CaptureFixture[str], mutate: Any) -> None:
-    _put(repo, _NS, mutate(_get(repo)))
+    text = _get(repo)
+    assert mutate(text) != text, "the mutation no longer matches the contract"
+    _put(repo, _NS, mutate(text))
     _fails(repo, capsys, "PARSE")
 
 
@@ -403,10 +405,20 @@ def test_corpus_read_failure_fails_closed(
     _fails(repo, capsys, "Decision corpus unreadable at the base")
 
 
+def _reflow(text: str, entry: str) -> str:
+    """Move the last word of the entry's first detail line onto the next line; the folded value is unchanged."""
+    head = text.index("    detail: >-\n", text.index(f"  - id: {entry}\n")) + len("    detail: >-\n")
+    end = text.index("\n", head)
+    rest = text[end + 1 :]
+    assert rest.startswith("      ") and not rest[6:7].isspace(), entry
+    first, word = text[head:end].rsplit(" ", 1)
+    return text[:head] + first + "\n      " + word + " " + rest[6:]
+
+
 def test_header_comment_amendment_log_and_reflow_are_free(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _sub(repo, "# Tier A north stars", "# Tier A north stars (edited header)")
     _sub(repo, "amendment_log:\n", _LOG + '    summary: "free"\n')
-    _sub(repo, "On The\n      Loop Labs supports", "On The Loop\n      Labs supports")
+    _put(repo, _NS, _reflow(_get(repo), "NS.2"))
     _sub(repo, "\n  - id: NS.3\n", "\n\n  - id: NS.3\n")
     text = _get(repo)
     start, end = text.index("semantics:\n"), text.index("\nmission:")

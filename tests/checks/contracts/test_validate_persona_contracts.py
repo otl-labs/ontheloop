@@ -227,11 +227,23 @@ def test_malformed_guidance_slot_is_refused(tree: Path, name: str) -> None:
 
 def test_well_formed_and_empty_guidance_slots_pass(tree: Path) -> None:
     edit_contract(tree, _declare_slot, rerender=True)
-    assert _run(tree) == []
+    failures = _run(tree)
+    assert len(failures) == 1 and failures[0].startswith("guidance evidence: fixture_verdict:"), failures
     edit_contract(tree, lambda c: c.__setitem__("guidance_slots", []), rerender=True)
     assert _run(tree) == []
     edit_contract(tree, lambda c: c.__setitem__("input_schema", {**c["input_schema"], "properties": ["x"]}))
     assert not any("guidance_slots" in f for f in _run(tree))
+
+
+def test_slot_contract_needs_guidance_evidence(tmp_path: Path) -> None:
+    fixture = build_tree(tmp_path / "fixture", kind="fixture")
+    edit_contract(fixture, lambda c: c.__setitem__("guidance_slots", ["fixture_guidance"]), rerender=False)
+    failures = [f for f in _run(fixture) if f.startswith("guidance evidence:")]
+    assert len(failures) == 1 and failures[0].startswith("guidance evidence: fixture_verdict:"), failures
+    verdict = build_tree(tmp_path / "verdict")
+    edit_contract(verdict, _declare_slot, rerender=True)
+    failures = _run(verdict)
+    assert len(failures) == 1 and failures[0].startswith("guidance evidence: fixture_verdict:"), failures
 
 
 def test_guidance_home_outside_boundary_patterns_is_refused(tree: Path) -> None:
