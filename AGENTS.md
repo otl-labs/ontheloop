@@ -125,7 +125,6 @@ Before any push/PR/CI/merge action read `docs/contracts/git-ops.yaml#push_pr_ci_
 names; read its other keys (branching, commit messages, Resolves: trailer, OAuth-token runbook) only when needed.
 AGENTS.md keeps only the machine-enforced norms and one-line triggers below.
 
-- **Presubmit tier**: see the table below -- fast `--pre` gates PRs, full tier runs pre-handoff (local) + post-merge.
 - **Squash-merge**: `mcp__github__merge_pull_request(..., merge_method="squash")` once CI is green.
 - **Never-poll wake**: event-driven only (`subscribe_pr_activity` plus the CI-green/merge-conflict comment signals) -- never sleep/poll for CI or merge status.
 - **Resolves: trailer**: when a plan bundles recommendations, name them (`Resolves: rec-NNNN[, rec-MMMM]`) in the squash-merge commit body to trigger `ci.yml`'s closure job.
@@ -137,8 +136,9 @@ AGENTS.md keeps only the machine-enforced norms and one-line triggers below.
 | Fast (`--pre`) | PR / edit loop | `bin/venv-python -m scripts.validate --pre` | Authoritative pre-merge gate when run by PR CI (Decision 73); advisory only when run outside CI |
 | Full | Pre-handoff (local) + post-merge on `main` | `bin/venv-python -m scripts.validate` | See `## Merge protocol` (post-merge disposition). |
 
-The full tier runs well past the 10-min foreground cap on CC-web: start it backgrounded with a 2 h limit from the
-top-level session (a subagent never receives the completion) and say it started. Its verdict is
+The full tier outruns CC-web's 10-min foreground cap: from the top-level session (a subagent never gets the
+completion), run it and any long validate as a Bash `run_in_background: true`, `timeout: 7200000` task, never
+`&`/`nohup`/`setsid` (they die with the idle container); say it started and end the turn. Its verdict is
 `bin/venv-python -m scripts.checks.validation_result --verify-head`, never a pipe's exit status.
 
 ### Commit signing (CC-web: SSH-signed via harness signer)
