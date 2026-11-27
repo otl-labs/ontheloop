@@ -664,3 +664,23 @@ def test_role_input_refusal_reservation_and_probe_turn(tmp_path, monkeypatch):
     cut = fakes.Fill((attempt(FB, "outage"),), None, None, probe)
     _, events = drive(fakes.CapturingTransport([cut]), role=FB, clock=fakes.FakeClock())
     assert [e["probe_turn"] for e in events if "turn" in e] == [1]
+
+
+def test_read_tree_refusal_dispatch_and_cap(tmp_path):
+    root = tmp_path / "rt"
+    (root / "rendered").mkdir(parents=True)
+    data = yaml.safe_load(fakes.FIXTURE.read_text(encoding="utf-8"))
+    data["capabilities"].append("read_tree:head")
+    data["budget"]["read_tree"] = {"max_calls": 1, "max_read_bytes": 1000, "max_search_results": 5, "max_total_bytes": 100000}
+    data["failure_outputs"].append({"id": "review_incomplete", "meaning": "A read limit was reached."})
+    contract = root / "fixture_persona.yaml"
+    contract.write_text(yaml.safe_dump(data), encoding="utf-8")
+    shutil.copy(fakes.PROMPT, root / "rendered" / "fixture_persona.txt")
+    with pytest.raises(RunRefused, match="read_tree:head needs a mounted tree"):
+        drive(T([final()]), contract=contract)
+    head = tmp_path / "head"
+    head.mkdir()
+    (head / "a.txt").write_text("alpha\n", encoding="utf-8")
+    call = tool({"tree": "head", "op": "list"}, name="read_tree")
+    result, events = drive(T([call, call, final()]), contract=contract, trees={"head": head})
+    assert result["failure"] == "review_incomplete" and events[-2]["reads"][0]["result"] == "cap"

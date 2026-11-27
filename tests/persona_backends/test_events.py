@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 import json
 import os
 
@@ -69,3 +70,11 @@ def test_cancelled_dict_overrides_outcome_and_latency():
     fixed = ev.cancelled_dict(fakes.attempt(), 77)
     assert (fixed["outcome"], fixed["latency_ms"]) == ("cancelled", 77)
     assert (fixed["role"], fixed["attempt"], fixed["provider"], fixed["started_at_ms"]) == ("primary", 1, "p", 1000)
+
+
+def test_turn_record_writes_reads_only_when_non_empty():
+    reads = [{"tree": "head", "op": "list", "result": "ok"}, {"tree": "main", "op": "read", "result": "ok"}]
+    params = inspect.signature(ev.turn_record).parameters
+    args = {n: 0 for n, p in params.items() if p.default is inspect.Parameter.empty}
+    assert "reads" not in ev.turn_record(**args) and "reads" not in ev.turn_record(**args, reads=[])
+    assert ev.turn_record(**args, reads=reads)["reads"] == reads
