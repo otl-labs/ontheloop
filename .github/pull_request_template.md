@@ -37,7 +37,7 @@
 
 ---
 
-<!-- PUBLIC-REPO BOUNDARY (Decision 101): Never include AWS account IDs / ARNs, IAM ExternalIds,
+<!-- PUBLIC-REPO BOUNDARY (Decision 290 cl.2; classes: docs/contracts/public-identity.yaml): Never include AWS account IDs / ARNs, IAM ExternalIds,
      secrets / API keys, or internal hostnames that provide an attack surface. See AGENTS.md
      "PUBLIC repository / confidential-data boundary".
 

@@ -4,8 +4,8 @@ Universal rules. For full project context, see `docs/PROJECT_CONTEXT.md` on dema
 
 ## PUBLIC repository / confidential-data boundary
 
-This repository is PUBLIC (Decisions 73, 83, 101). Public-content boundary (Decision 101):
-- NEVER publish: AWS account IDs or ARNs, IAM ExternalIds, credentials or API keys, private operational data, or any internal hostname that provides an attack surface.
+This repository is PUBLIC (Decisions 73, 83, 290). Confidentiality boundary (Decision 290 cl.2):
+- NEVER commit, log, post or return a class in `docs/contracts/public-identity.yaml#confidential` (e.g. account IDs, credentials, attack-surface hostnames).
 - SAFE to publish: On The Loop's engineering, infrastructure patterns, tooling, CI/CD design, and general LLM-agent architecture -- publish the engineering, never the operational secrets.
 - Confidential data lives ONLY in: the personal AWS account (Secrets Manager, gitignored tfvars, S3 private prefixes), and gitignored local files (e.g. `terraform/personal/terraform.personal.tfvars`, `~/.aws/credentials`). Nothing confidential is ever committed.
 - The pre-commit `never-commit` hook (shape-pattern) blocks 12-digit AWS account IDs, secret-like strings, and ExternalId patterns from reaching the repo.

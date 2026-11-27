@@ -2,6 +2,95 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 290: On The Loop's public identity re-decided -- one confidentiality boundary on every public surface, financial reporting in another repository, and the identity lists in one contract (supersedes Decision 286, amends Decisions 127, 171 and 209) (Decided)
+
+```yaml
+number: 290
+status: Decided
+decided_date: "2026-11-27"
+kind:
+  value: direction
+  justification: >-
+    Clause 2 widens a data commitment to every public surface, and clause 7 keeps a human gate on every internal
+    identifier.
+supersedes: [286]
+amends: [127, 171, 209]
+significance:
+  value: numbered_decision
+  justification: >-
+    It changes a data commitment and a human gate, and only an entry can supersede 286; a note on 286 cannot change
+    its rule, and the contract holds only the two lists this entry delegates, never the rulings.
+delegates:
+  - key: docs/contracts/public-identity.yaml#confidential.classes
+    change_rule: operator_approval
+    bounds: {text: "Every surface clause 2 names carries none of the listed classes; a class is removed or narrowed only with the operator's approval."}
+  - key: docs/contracts/public-identity.yaml#frozen_identifiers.families
+    change_rule: operator_approval
+    bounds: {text: "Every family listed is frozen; a family leaves the list only by a separate explicit decision."}
+```
+
+**Status:** Decided
+**Date:** 2026-11-27
+**Warehouse ID:** dec-290 (per Decision 84 backfill)
+
+**Problem:** Decision 286 restated Decision 101 unchanged: its boundary binds only the public site, though the
+repository, CI logs and responses cite "Decision 101" for a rule no clause holds, and its freeze list is partial.
+
+**Intent:** Record the operator's ruling on every clause of Decision 286 (rec-5668) in one entry, with the two
+lists the rulings need kept in one contract.
+
+**Decision:**
+1. **External marks on external surfaces only.** Unchanged: On The Loop Labs Limited and On The Loop are the external
+   marks and Semanto is an internal roadmap name only (Decision 198 cl.1). External names apply only to external and
+   marketing surfaces.
+2. **One confidentiality boundary on every public surface.** This repository and its history, its CI logs and job
+   summaries, pull-request and issue comments, runtime responses and log lines, every public site, and Decision 209
+   cl.3(2)'s public monorepo never carry a class listed in docs/contracts/public-identity.yaml `confidential.classes`,
+   the sole list; AGENTS.md points at it. On The Loop's engineering, architecture, tooling and CI/CD design are safe
+   to publish.
+3. **This repository's public site.** It never publishes infrastructure topology, VPC details or secret names, and
+   never republishes decision logs or content from docs/ or logs/: they stay public in the repository, and the site
+   curates. It is a static site on Cloudflare Pages built with Astro and Starlight, with no hand-rolled build or
+   hosting tooling (Decision 100), at onthelooplabs.com on Cloudflare-managed DNS (Decision 198). Another
+   repository's public surface takes its host from its own decision (Decision 220 cl.1). Running a released version
+   locally, its docs site included, is unaffected (Decision 209 cl.3(1)).
+4. **Reporting lives in another repository.** Neither this repository nor its site carries financial or investment
+   reporting for On The Loop Labs or an adopter product it owns or hosts; that reporting lives in a Decision 209
+   cl.3(2) or (3) repository, only under its own explicit decision. Operational figures (spending limits, cost
+   triggers, estimates) and Decision 221 cl.5's curves are engineering.
+5. **Audience and offering.** Adopter, customer and user mean what docs/contracts/glossary.yaml defines; On The
+   Loop's target users are Decision 232 cl.2's archetypes, which this entry reconciles. Contributions need an
+   assignment or an equivalently broad grant (Decision 171 cl.5). A paid service offering needs its own decision
+   and plan.
+6. **No marketing prose here.** This repository sanctions no marketing prose: marketing material lives in Decision
+   209 cl.3(2)'s public monorepo or cl.3(3)'s private one, whichever that repository's own decision names, and 209
+   cl.3(1)'s marketing/ placement and 127 point 1's marketing/**/*.md class are amended to match.
+7. **Internal identifiers frozen.** An internal identifier changes only by a separate explicit decision. The frozen
+   families are docs/contracts/public-identity.yaml `frozen_identifiers.families`, a complete inventory including
+   those Decisions 202, 223, 237, 248, 252, 255, 257 and 270 named. project_id trading-system leaves the freeze
+   (Decision 171 cl.1's row, amended): Decision 200 cl.1 made project ids opaque ULIDs. A deep rename stays deferred
+   (Decision 75).
+8. **Carried forward.** Decision 171 keeps the relicence and contribution posture, 198 the company and the marks,
+   202 the CloudTrail detector, 209 the paywall and repository topology, 237 secrets in SSM, and 248, 257 and 270
+   their roles; each keeps its amends.
+
+**Options considered:** keeping the boundary site-only (rejected: the repository rule then has no home); the lists in
+this entry (rejected: a list edit would mint an entry, and the entry would pass its cap); one domain with a
+subdirectory per surface (rejected: each repository deploys its own surface); a figure-by-figure financial bar here
+(rejected: spending limits in code reveal operational figures anyway, and the aim is to move reporting off this
+repository); keeping the unused marketing/ exception (rejected: marketing lives in another repository).
+
+**Coverage (Decision 181 cl.2):** cl.2 -- the never-commit hook (block-sensitive-identifiers) and the enforcers the
+contract names, comments with no named check a residual owned by rec-4142; cl.3 -- no public site
+exists, a residual owned by rec-4142; cl.6 -- validate_prose_allowlist; cl.1, cl.4, cl.5, cl.7 and cl.8 --
+procedural, held by scout and plan critique; the lists -- approval-routing.yaml's gated set.
+
+**Related:** Decision 286 (superseded), 127, 171 and 209 (amended), 198, 202, 237, 248, 257, 270 (carried forward), 75, 84,
+100, 101, 200, 214, 220, 221, 223, 232, 239, 252, 253, 255, 256; rec-4142, rec-5668.
+
+---
+
+
 ## Decision 289: The early Apache-2.0 flip precedes the first services client -- its trigger moves from a finished local core and a serving paid service to the company's title and a clean dependency audit (amends Decisions 184 and 194) (Decided)
 
 ```yaml
@@ -287,82 +376,12 @@ conditions:
 
 ## Decision 286: On The Loop's public identity in one entry -- external marks over frozen internal identifiers, a marketing-prose exception, and a static public site that never publishes account specifics or financial figures (supersedes Decision 101) (Decided)
 
-```yaml
-number: 286
-status: Decided
-decided_date: "2026-11-26"
-kind:
-  value: direction
-  justification: >-
-    Clause 4 says what the public site never exposes and clause 2 keeps every internal rename behind a separate
-    explicit decision; this entry writes both down unchanged as its own rule, a data commitment and a human gate.
-supersedes: [101]
-significance:
-  value: numbered_decision
-  justification: >-
-    It restates Decision 101's current rule with its five amenders' edits so 101 can compact (Decisions 149 and 278);
-    a dated note (considered) cannot retire an entry, and no contract holds the disclosure boundary or the freeze.
-```
-
-**Status:** Decided
+**Status:** Superseded
 **Date:** 2026-11-26
-**Warehouse ID:** dec-286 (per Decision 84 backfill)
 
-**Problem:** A reader needs Decision 101, its five amenders and two dated readings to learn what On The Loop may
-publish and which internal names are frozen, and the operator asked for 101 to be superseded in full (rec-4389).
+**Decision:** Superseded by Decision 290, which re-decides every clause (rec-5668). Clause map: cl.1 -> cl.1; cl.2 -> cl.7; cl.3 -> cl.6 (exception retired); cl.4 -> cl.2, cl.3, cl.4; cl.5 -> cl.3; cl.6 -> cl.5; cl.7 -> cl.8. Compacted in place (Decision 149), not archived, because Decision 101's stub and its citers resolve through it.
 
-**Intent:** Restate the current rule unchanged in one entry so Decision 101 compacts to a stub. Re-deciding the
-boundary, hosting and positioning is a later entry that supersedes this one (rec-5668); so is reconciling
-the audience with Decision 232 cl.2's archetypes, and so are the citations, other than those clause 4 names, that
-read Decision 101 as the boundary on committed content or CI logs, which clause 4 (the public site) does not hold.
-
-**Decision:**
-1. **External marks on external surfaces only.** On The Loop Labs Limited and On The Loop are the external marks and
-   Semanto is an internal roadmap name only (Decision 198 cl.1). External names apply only to external and marketing
-   surfaces.
-2. **Internal identifiers frozen.** An internal identifier changes only by a separate explicit decision. Frozen: the
-   agent-platform-* AWS resource prefixes and /agent-platform/* SSM paths, the agent_platform IAM profile and Glue
-   database, and project_id trading-system. Families an amendment of Decision 101 added: platform-security-* in
-   terraform/bootstrap only, for the IAM-change detector's resources and those Decision 270 cl.3 adds (Decision 202
-   cl.3), and /secret/ for secret values (Decision 237). The repository name left the freeze (Decision 171 cl.1) and
-   is otl-labs/ontheloop (Decision 218). A deep internal rename is deferred past MVP, its scope bounded only by a
-   future plan (Decision 75).
-3. **Marketing prose exception to Decision 86.** Marketing prose lives only in a top-level marketing/ directory,
-   outside docs/. It renders internal artefacts one way: it never feeds back into an agent's context and is never a
-   warehouse write source (Decision 84). The exception covers marketing prose and nothing else under docs/.
-4. **Public-content boundary.** The public site never publishes AWS account specifics (account IDs, infra topology,
-   VPC details, secret names), decision logs, or any content from docs/ or logs/. It markets On The Loop's engineering
-   and architecture and never publishes the trading alpha, performance figures or returns of an adopter product On The
-   Loop Labs hosts: performance claims carry investment-solicitation and securities-law risk. Performance figures mean
-   financial performance of any kind, not only investment performance, and financial figures of any kind are not
-   published (operator reading, 2026-10-17). The non-financial curves (coverage, freshness, accuracy, time to heal,
-   autonomy rung, and tokens and GB-seconds per verified merge) are engineering and may be published (Decision 221
-   cl.5). Decision 209 cl.3(1)'s public site, 209 cl.3(2)'s "public products monorepo", 220 cl.1's public surfaces and
-   221 cl.5's receipts are bound to this clause.
-5. **Hosting.** The public site is a static site on Cloudflare Pages built with Astro and Starlight, with no
-   hand-rolled build or hosting tooling (Decision 100), at onthelooplabs.com on Cloudflare-managed DNS (Decision 198).
-6. **Positioning.** The primary audience is data-engineering hiring managers and early adopters of On The Loop and of
-   On The Loop Labs' adopter products (Decision 198). The secondary aspiration is a source-available contributor
-   community, contributions needing an assignment or an equivalently broad grant (Decision 171 cl.5). A paid service
-   offering needs its own decision and plan: Decision 171 discharged its licence half and Decision 209 its boundary and
-   architecture, so a commercial surface, pricing and terms stay gated.
-7. **Carried forward.** Decision 171 keeps the relicence and contribution posture, 198 the company and the marks,
-   202 the CloudTrail detector, 209 the paywall and repository topology and 237 secrets in SSM; each keeps its amends.
-   A ruling change is a new entry superseding this one.
-
-**Options considered:** re-deciding the boundary, hosting and positioning here (rejected: restating and changing a
-rule are two outcomes, Decision 247, and the operator decides each clause in the entry that supersedes this one);
-taking an amender as a victim (rejected: 171, 198, 202, 209 and 237 each amend another Decision); one successor per
-subject now (rejected: only one entry can supersede 101 and nothing compacts in part, Decision 278 cl.5; the
-re-decision may split by subject).
-
-**Coverage (Decision 181 cl.2):** cl.1, cl.2 and cl.5 to cl.7 -- procedural, held by scout and plan critique, as is
-the stub's letter map; cl.3 -- validate_prose_allowlist sanctions marketing/**/*.md (file-router.yaml), its one-way
-rule procedural; cl.4 -- no public site exists, so no check enforces it, a residual owned by rec-4142 and
-rec-5668; the accounting -- validate_delegated_key_changes over the consolidation manifest.
-
-**Related:** Decision 101 (superseded), 171, 198, 202, 209 and 237 (carried forward), 75, 84, 86, 100, 127, 149, 218,
-220, 221, 232, 240, 242, 247, 270, 278; rec-4142, rec-4389.
+**Superseded by: Decision 290**
 
 ---
 
@@ -6007,6 +6026,8 @@ conditions:
 
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
+> **Amended by Decision 290 (2026-11-27):** Clause 3(1)'s marketing/ leaves this repository: marketing material lives in clause 3(2)'s public monorepo or clause 3(3)'s private one, whichever that repository's own decision names. Clause 3(2)'s monorepo is bound by Decision 290 cl.2's confidentiality boundary, and it carries financial or investment reporting only under its own explicit decision (Decision 290 cl.4).
+
 ---
 
 ## Decision 208: Fast-tier budget re-derived from the recorded CI population -- measured per-module cost gates and predicts alike (amends Decision 182) (Decided)
@@ -8830,6 +8851,8 @@ Asymmetric by half. The RENAME was reversible by an owner-executed rename-back o
 
 > **Update (2026-11-02):** Where "platform" or "product" here names a side of On The Loop, read it through the read_as rows of docs/contracts/glossary.yaml (Decision 240); no clause changes.
 
+> **Amended by Decision 290 (2026-11-27):** Clause 1's `project_id = trading-system` row leaves the freeze: Decision 200 cl.1 made project ids opaque ULIDs. The other FROZEN rows stand, and the complete list is docs/contracts/public-identity.yaml `frozen_identifiers.families` (Decision 290 cl.7).
+
 ---
 
 ## Decision 170: The registered-check contract gains a second, declarative output channel -- examined()/skipped() -- so a vacuous pass, a skip, and an enforced pass stop collapsing into one indistinguishable green, governed by a shrink-only adoption ratchet (Decided)
@@ -11050,6 +11073,8 @@ authored in DECISIONS.md then backfilled to `ops_decisions`, never written direc
 > as an `allowed_globs` entry and never as a `grandfathered_globs` one, since point 3's
 > grandfathered set is ratchet-only and may not grow. Points 2, 3 and 4 are unedited; see
 > Decision 171 for the full derivation.
+
+> **Amended by Decision 290 (2026-11-27):** point 1's marketing/**/*.md class is retired: this repository sanctions no marketing prose (Decision 290 cl.6); licence-and-attribution artefacts are unchanged.
 
 **Problem:**
 Decision 86 forbade new *standing prose-architecture / deliberation* documents and retired the
