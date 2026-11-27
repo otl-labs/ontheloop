@@ -25,7 +25,7 @@ Reject a plan that invents a third validation tier, treats mapped coverage or re
 
 4. **Targeted decision extraction + conflict-sweep, not a full-file read:** read only the decision sections named in the plan's context `Decision-scout verdict + CITE list` (locate each via `rg "^## Decision N:" docs/DECISIONS.md`), plus a conflict-sweep: `rg` 2-3 keywords drawn from the plan's approach over `^## Decision` headers in `docs/DECISIONS.md` to catch a contradiction the scout's CITE list omitted. Do not Read the full file; the decision-scout gate already paid that cost.
 
-5. **For IMPLEMENTATION plans:** Read the files listed in the plan's `scope` list to verify the plan's accuracy.
+5. **For IMPLEMENTATION plans:** Read every `scope` file to verify the plan's accuracy.
 
 5b. For IMPLEMENTATION plans, run `bin/venv-python -m scripts.roadmap.plan_obligations --plan <plan path>` and fold its report (companions, size headroom, unbuilt plans on the same files, undecidable acceptance) into the scope check above -- arithmetic is the tool's, adequacy is yours. With an approved-text sidecar, read the last `wording-check` gate row (never re-run it): REVISE when it is absent, not PASS, its digest differs from `approved_text record`, or its selection was degraded.
 
@@ -38,21 +38,21 @@ Reject a plan that invents a third validation tier, treats mapped coverage or re
 7. **North Star alignment is the decision scout's (Decision 243 clause 8):** quote its Serves line from the plan's `context`; never re-score it. Absent: a nit.
 
 8. **Evaluate Scope breadth (IMPLEMENTATION; one verifiable, revertible outcome, `/plan` Step 4):**
-   - For IMPLEMENTATION: Are all scope entries necessary? Too large (suggest split)? Does the Scope extend beyond the stated phase?
+   - For IMPLEMENTATION: Are all scope entries necessary? Too large (suggest split)? Beyond the stated phase?
 
 9. **Check phase dependencies:** Does this plan depend on work from a prior phase that is not yet complete? Cite specific ROADMAP phase entries.
 
-10. **Assess strategic risks:** Are there risks that could invalidate the approach without execution? Examples: external dependency not yet available, contradicts a pending decision, architectural assumption that hasn't been verified.
+10. **Assess strategic risks:** What could invalidate the approach before execution (an unavailable dependency, a pending decision, an unverified assumption)?
 
-11. **Check Acceptance Criteria:** Are all criteria verifiable and testable? Flag any that are vague, subjective, or untestable (e.g., "improved performance" without a metric).
+11. **Check Acceptance Criteria:** Flag any criterion that is vague, subjective or untestable ("improved performance" with no metric).
 
 12b. **Lambda deployment completeness (IMPLEMENTATION only):** VERIFY, do not re-derive -- planning
 Step 4 ran this. Recompute `compute_affected_artifacts(<scope files>)` ONCE and diff it against the
 artifacts the plan's `infrastructure_dependencies`/VP steps name; a set mismatch, or an artifact
 `active` per `src/lambdas/<slug>/manifest.yaml` missing a build, deploy, smoke-test or model-ID
-step => REVISE naming it. Stubs need no deploy (Decision 79).
+step => REVISE naming it. Stubs: no deploy (Decision 79).
 
-12c. **Verification Plan executable command check (IMPLEMENTATION plans only):** Every `verification_plan` entry MUST have a `command` field containing a literal executable shell command or Python one-liner; judge whether it exercises the feature rather than checking structure. FAIL any prose-only step. For V3 plans, every VP step's `phase` must be `pre-deploy` or `post-deploy`. If either check fails, recommend REVISE with the specific VP steps that need commands or tags added. Admin-only root in scope: REVISE unless deploy-paths.yaml admin_out_of_band.pre_merge_live_plan is met.
+12c. **Verification Plan executable command check (IMPLEMENTATION plans only):** Every `verification_plan` entry MUST have a `command` field containing a literal executable shell command or Python one-liner; judge whether it exercises the feature rather than checking structure. FAIL any prose-only step. For V3 plans, every VP step's `phase` must be `pre-deploy` or `post-deploy`. Either failing: REVISE naming the steps. Admin-only root in scope: REVISE unless deploy-paths.yaml admin_out_of_band.pre_merge_live_plan is met.
 
 12c-1. **Test-obligation adequacy:** For schema-version-4 IMPLEMENTATION plans, recommend REVISE
 when a behavior-changing scope file lacks a linked obligation, its test is structural-only or
@@ -70,9 +70,9 @@ Trigger condition 2 -- **Surface-retiring plan**: `scope` carries an `action: De
 - Required: a VP step proving the old surface dead; for a deleted writer, each caller disposed per `tier-item-lifecycle.yaml#replacement_closure_check` (5).
 - If missing, recommend REVISE: "Surface-retiring plan omits stale-reference sweep VP step: add a VP step that verifies the old surface is dead."
 
-12l. **closes_criteria check (follow-on plans, IMPLEMENTATION only):** If the plan's phase/context names an `in_progress` tier_item, `closes_criteria` MUST be non-empty; each ref must name a criterion carrying `status: open` in `docs/ROADMAP-PLATFORM.yaml`; and `acceptance_criteria` must map 1:1 onto the chosen open criteria. If any of these fail, recommend REVISE: "Follow-on plan omits or misdeclares closes_criteria: [specifics]." A plan targeting no in_progress tier_item is exempt from this check.
+12l. **closes_criteria check (follow-on plans, IMPLEMENTATION only):** If the plan's phase/context names an `in_progress` tier_item, `closes_criteria` MUST be non-empty; each ref must name a criterion carrying `status: open` in `docs/ROADMAP-PLATFORM.yaml`; and `acceptance_criteria` must map 1:1 onto the chosen open criteria. If any of these fail, recommend REVISE: "Follow-on plan omits or misdeclares closes_criteria: [specifics]." No in_progress tier_item: exempt.
 
-12m. **Tier fitness check:** `verification_tier` must satisfy the planning skill's Verification Tier Guidelines, narrowed by an intentional refinement (Decision 48/79) so comment-only `.tf` or docstring-only Python edits are not force-escalated: a **resource-affecting** `.tf` scope file (not comment-only) OR an **active-manifest** Lambda scope file (`status: active` in its manifest -- Decision 79; `status: stub` does not trigger this) => `V3`; any Python source scope file => `>= V2`. A lower declared tier than the qualifying scope requires => recommend REVISE citing the specific scope file and the tier it demands.
+12m. **Tier fitness check:** `verification_tier` must satisfy the planning skill's Verification Tier Guidelines, narrowed by an intentional refinement (Decision 48/79) so comment-only `.tf` or docstring-only Python edits are not force-escalated: a **resource-affecting** `.tf` scope file (not comment-only) OR an **active-manifest** Lambda scope file (`status: active` in its manifest, Decision 79; a stub does not) => `V3`; any Python source scope file => `>= V2`. A lower declared tier => REVISE citing the scope file and the tier it demands.
 
 12n. **Size headroom check (Decisions 128, 166):** For each scope row the 5b report marks over budget or NEAR_CAP, or whose planned change crosses its limit, the plan MUST include a decomposition step (facade package, Decision 80/104/124), a class relief-valve step measured at build time, or a justified raise step citing `# raise-approved: dec-NNN`. With none => REVISE: "Scope file [path] crosses or nears its size limit with no decomposition, relief or cited raise step -- decompose by default."
 
@@ -103,7 +103,7 @@ Ask the following five questions against the plan's chosen approach. For each, w
 
 ### Phase 3: Structured Output
 
-13. Produce this structured output:
+13. Produce this structured output, ending with one `PERSONA_RESULT: ` JSON line, one findings item per finding, in order:
 
 ```
 ## Plan Critique
@@ -152,6 +152,8 @@ Ask the following five questions against the plan's chosen approach. For each, w
 **Finding-Origin Attribution and severity:** blocking only when the finding states what reaches main if left unfixed and which control fails first, and (a) wrong behaviour, a wrong guarantee or a wrong operator-read instruction would reach main, or the first control that could catch it runs only after merge; (b) the build could not finish inside the plan's scope, approved text or VP commands without a plan amendment; or (c) it needs an operator decision. A check above that says REVISE or FAIL raises a finding this rule grades; 5c and 12p findings stay blocking. Every other finding is a nit carried to the build as a note (closure-step restatement of the build skill is never blocking); a Frame Challenge contradiction is never a nit; mechanical (a deterministic check could catch it -- name it) / critic judgement -- tag each finding, with a stable anchor (plan field path or VP step id)
 
 **Recommendation:** PROCEED (no blocking finding; list nits) / REVISE (any blocking finding) [with specific suggestions if REVISE]
+
+PERSONA_RESULT: {"verdict": "[PROCEED|REVISE]", "subject_sha": "[git rev-parse HEAD]", "subject_dirty": [true|false: uncommitted changes], "findings": [{"id": "[step id]:[anchor]", "severity": "[blocking|nit]", "origin": "[mechanical|judgement]", "anchor": "[plan field path or VP step id]"}]}
 ```
 
 14. If REVISE, list the changes needed before implementation. State each measured figure as a hypothesis with the command that produced it: the reviser will re-measure it and dispute, with evidence, any it cannot reproduce.
@@ -161,4 +163,4 @@ Ask the following five questions against the plan's chosen approach. For each, w
 
 ## Quality Gate
 
-Before output, confirm you read EVERY scope file (not just .md), can cite line numbers for the call sites and mocks your findings name, and your Files Read count matches the scope entry count; else read the missing files first.
+Before output, confirm you read EVERY scope file (not just .md) and can cite line numbers for the call sites and mocks your findings name; else read the missing files first.

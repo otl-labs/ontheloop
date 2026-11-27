@@ -185,6 +185,59 @@ def test_the_code_review_skill_prints_the_block_the_projection_reads() -> None:
     assert named == read
 
 
+_BARE = re.compile(r'(?<=": )\[(N|true\|false[^\]]*)\]')
+_CHOICE = re.compile(r"^\[(\w+(?:\|\w+)+)\]$")
+_NO_SUBJECT = {"decision_scout"}
+
+
+def _skill_block(persona_id: str) -> str:
+    row = next(r for r in load_index().personas if r.persona == persona_id)
+    skill = load_persona_contract(ROOT / row.contract).skill_tether.skill
+    text = (ROOT / ".claude" / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
+    lines = [ln for ln in text.splitlines() if ln.startswith(BLOCK_MARKER)]
+    assert len(lines) == 1, persona_id
+    return lines[0][len(BLOCK_MARKER) :]
+
+
+def _schema_keys(schema: dict[str, Any]) -> set[str]:
+    keys: set[str] = set()
+    for name, sub in schema.get("properties", {}).items():
+        keys |= {name} | _schema_keys(sub)
+    return keys | (_schema_keys(schema["items"]) if "items" in schema else set())
+
+
+def _fill(value: Any, schema: dict[str, Any], keys: set[str]) -> Any:
+    if isinstance(value, dict):
+        props = schema.get("properties", {})
+        keys |= set(value)
+        return {k: _fill(v, props[k], keys) if k in props else v for k, v in value.items()}
+    if isinstance(value, list):
+        assert len(value) == 1  # count-coupling-ok: the template shows one example item per list
+        return [_fill(value[0], schema["items"], keys)]
+    if "enum" in schema:
+        choice = _CHOICE.match(value)
+        assert choice and set(choice.group(1).split("|")) == set(schema["enum"]), (value, schema["enum"])
+        return schema["enum"][0]
+    assert isinstance(value, int if schema.get("type") == "integer" else str), value
+    return value
+
+
+def test_every_verdict_skill_prints_the_block_the_projection_reads() -> None:
+    for row in load_index().personas:
+        if row.persona not in LISTS:
+            continue
+        schema = projected_schema(row.persona, _schema(row.persona))
+        example = json.loads(_BARE.sub(lambda m: "1" if m.group(1) == "N" else "true", _skill_block(row.persona)))
+        keys: set[str] = set()
+        filled = _fill(example, schema, keys)
+        subject = set() if row.persona in _NO_SUBJECT else {"subject_sha", "subject_dirty"}
+        assert keys == _schema_keys(schema) | subject, row.persona
+        identity = RunIdentity("t1", "p1", "run-1", row.registry_key, "a" * 64, "in_session")
+        rows = project_result(identity, text="report\n" + _line(filled))
+        assert rows[0].parse_status == "parsed", row.persona
+        assert [r.kind for r in rows[1:]] == [s.kind for s in LISTS[row.persona]], row.persona
+
+
 def test_contract_fields_match_the_row() -> None:
     contract = load_contract(CONTRACT)
     assert contract.contract.class_.value == "A"
