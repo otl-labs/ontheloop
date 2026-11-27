@@ -1,0 +1,178 @@
+schema_version: 7
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: main-validate-timeout-and-unbuffered-log
+intent: >-
+  Stop main's post-merge full tier from being cancelled by its 60-minute job timeout and make its log show when each
+  check really ran, by raising main-validate's timeout-minutes to 90 and setting PYTHONUNBUFFERED=1 on its full-tier
+  step (rec-5726, rec-5727). A stopgap until the rec-5107 batching line lands.
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-main-validate-timeout-and-unbuffered-log.yaml
+phase: >-
+  ad_hoc_rec (soft-warn exception category: rec-5726, High, and rec-5727, Medium, both operator-directed 2026-11-27).
+  No tier_item is claimed, so the Tier Item Freshness Gate is skipped; closes_criteria is empty.
+closes_criteria: []
+cites: [dec:254, dec:281]
+amends: []
+introduces: []
+scope:
+  - file: .github/workflows/ci.yml
+    action: Modify
+    purpose: >-
+      Two edits in the main-validate job only. (1) timeout-minutes: 60 becomes timeout-minutes: 90. (2) The step named
+      "Validate full tier (ruff, mypy, pytest, DQ runner, verifier harness)" gains an env block with PYTHONUNBUFFERED:
+      "1" (string-quoted); its name, if and run lines are unchanged. No other job, step or key changes: pr-validate keeps
+      timeout-minutes: 50, the fast-tier step and every other job keep their timeouts and env.
+    new_imports: []
+  - file: tests/ci/test_main_validate_timeout.py
+    action: Create
+    purpose: >-
+      rec-5726's acceptance node test_main_validate_timeout_minutes_is_90: loads .github/workflows/ci.yml with
+      yaml.safe_load and asserts jobs["main-validate"]["timeout-minutes"] == 90 and jobs["pr-validate"]["timeout-minutes"]
+      == 50.
+    new_imports: []
+  - file: tests/ci/test_main_validate_unbuffered.py
+    action: Create
+    purpose: >-
+      rec-5727's acceptance node test_full_tier_step_sets_pythonunbuffered: finds main-validate's step by its exact name
+      (scripts.ci.deploy_gate.FULL_TIER_STEP), asserts its env maps PYTHONUNBUFFERED to the string "1" and its run is
+      still "python -m scripts.validate". A second node test_unbuffered_is_scoped_to_the_full_tier_step asserts no other
+      step of main-validate or pr-validate sets PYTHONUNBUFFERED and that neither job nor the workflow sets it at job or
+      workflow level.
+    new_imports: [scripts.ci.deploy_gate]
+bundled_recommendations: [rec-5726, rec-5727]
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - "bin/venv-python -m pytest tests/ci/test_main_validate_timeout.py::test_main_validate_timeout_minutes_is_90 -q passes (rec-5726's acceptance) and fails before the change."
+  - "bin/venv-python -m pytest tests/ci/test_main_validate_unbuffered.py::test_full_tier_step_sets_pythonunbuffered -q passes (rec-5727's acceptance) and fails before the change."
+  - "The diff to .github/workflows/ci.yml is exactly the two edits in scope row 1: pr-validate stays at 50 and no other job or step changes."
+  - "The first full-tier main-validate run after the merge shows per-check output spread across the run in its log timestamps (no single gap of 300s or more before pytest starts), and is not cancelled at 60 minutes; its run id is recorded."
+  - "rec-5726 and rec-5727 are closed by the build's squash-merge Resolves trailer once each acceptance holds (Decision 201)."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: rec-5726's acceptance node passes.
+    command: bin/venv-python -m pytest tests/ci/test_main_validate_timeout.py::test_main_validate_timeout_minutes_is_90 -q
+    expected: exit 0 with 1 passed; before the change the node does not exist and pytest exits non-zero
+    fix_if: the node fails; main-validate's timeout is not 90 or pr-validate's is not 50
+    hermetic: true
+    expected_literals: ["1 passed"]
+    graduation: waive
+    graduation_waiver_reason: >-
+      Pins a stopgap value the rec-5107 batching line (rec-5501) is expected to revisit; the node itself runs in every
+      full tier, so a registry row would only duplicate it.
+  - step: 2
+    phase: pre-deploy
+    action: rec-5727's acceptance node and the scoping node pass.
+    command: >-
+      bin/venv-python -m pytest tests/ci/test_main_validate_unbuffered.py::test_full_tier_step_sets_pythonunbuffered
+      tests/ci/test_main_validate_unbuffered.py::test_unbuffered_is_scoped_to_the_full_tier_step -q
+    expected: exit 0 with 2 passed; before the change the nodes do not exist and pytest exits non-zero
+    fix_if: a node fails; the env is missing, not the string "1", or set somewhere other than the full-tier step
+    hermetic: true
+    expected_literals: ["2 passed"]
+    graduation: waive
+    graduation_waiver_reason: >-
+      The nodes run in every full tier; a registry row would only duplicate them, and the rec-5107 line may move the
+      step.
+  - step: 3
+    phase: pre-deploy
+    action: The ci.yml diff holds only the two planned edits.
+    command: >-
+      git diff origin/main -- .github/workflows/ci.yml | grep -E '^[+-][^+-]' | sort
+    expected: >-
+      exactly four changed lines: the removed timeout-minutes 60 line, the added timeout-minutes 90 line, an added env
+      line and an added PYTHONUNBUFFERED line
+    fix_if: any other changed line; revert it
+    hermetic: false
+    graduation: not-applicable
+  - step: 4
+    phase: pre-deploy
+    action: Full tier, then HEAD attestation, after the build commit and rebase and before the push (handoff_policy); start it backgrounded from the top-level session with a 2 h limit.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: the full tier exits 0 and the validation result attests the current HEAD's tree
+    fix_if: any failure; fix and rerun the full tier from the start
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion).
+  - step: 5
+    phase: post-deploy
+    action: >-
+      CI real-run proof. Read the first push-event ci.yml run on main after the build's merge whose main-validate job
+      ran the full-tier step (not a plans-only fast-tier push), and its log.
+    command: >-
+      mcp__github__actions_list(method=list_workflow_runs, owner=otl-labs, repo=ontheloop, resource_id=ci.yml,
+      workflow_runs_filter={event: push, branch: main}); take the oldest run whose head_sha is the merge SHA or a later
+      first-parent commit; mcp__github__actions_list(method=list_workflow_jobs, owner=otl-labs, repo=ontheloop,
+      resource_id=<run id>) and take the job named main-validate; once it has completed,
+      mcp__github__get_job_logs(owner=otl-labs, repo=ontheloop, job_id=<job id>, return_content=true, tail_lines=20000)
+      and read the timestamps of the lines between the "Validate full tier" step start and the first pytest progress line.
+    expected: >-
+      the job's conclusion is not cancelled at 60 minutes (success, failure for an unrelated cause, or a cancel after
+      60 min only if it reached 90); the pre-pytest check output is spread across many distinct timestamps with no
+      single gap of 300s or more between consecutive lines (run 45990556155 had one 495s gap); the run id and job id are
+      recorded in the build's report
+    fix_if: >-
+      the log is still clumped (PYTHONUNBUFFERED not reaching the process) or the job was cancelled at 60 minutes (the
+      timeout did not take); report the run id and lines to the plan owner
+    hermetic: false
+  - step: 6
+    phase: post-deploy
+    action: rec-5726 and rec-5727 closed by the build's squash-merge Resolves trailer once their acceptance holds.
+    command: >-
+      bin/venv-python -c "from src.common import ducklake_reader_client as rc; rows,_=rc.fetch_recs_by_ids(rc.make_reader(profile='agent_platform'),['rec-5726','rec-5727']); [print(r['id'], r['status']) for r in rows]"
+    expected: Prints rec-5726 closed and rec-5727 closed.
+    fix_if: Still open after the closure job ran; read ci.yml's closure job log and report to the plan owner.
+    hermetic: false
+test_obligations:
+  - source: .github/workflows/ci.yml
+    behavior: main-validate's timeout is 90 while pr-validate stays at 50
+    verification_step: 1
+    test_selector: tests/ci/test_main_validate_timeout.py::test_main_validate_timeout_minutes_is_90
+    red_green_expectation: red before (node absent; main-validate reads 60), green after
+  - source: tests/ci/test_main_validate_timeout.py
+    behavior: the acceptance node for rec-5726
+    verification_step: 1
+    test_selector: tests/ci/test_main_validate_timeout.py::test_main_validate_timeout_minutes_is_90
+    red_green_expectation: red before (file absent), green after
+  - source: tests/ci/test_main_validate_unbuffered.py
+    behavior: the full-tier step alone sets PYTHONUNBUFFERED=1
+    verification_step: 2
+    test_selector: tests/ci/test_main_validate_unbuffered.py::test_full_tier_step_sets_pythonunbuffered
+    red_green_expectation: red before (file absent; the step has no env), green after
+constraints:
+  - "Scope is exactly the two edits the operator named on 2026-11-27: main-validate's timeout and the full-tier step's env. pr-validate keeps 50; main-canary.yml's canary job (also 60) is out of scope."
+  - "The full tier's checks, selection and budgets are unchanged; PYTHONUNBUFFERED changes output timing only, never a check outcome."
+  - "No existing test assertion is loosened (Decisions 181, 235)."
+  - "No rescue agents or workaround loops (Decision 55)."
+context:
+  - "rec-5726 (High, XS): 135 first-attempt full-tier runs on main 2026-11-18..27, daily p90 55-61 min, 6 cancelled by the 60-min timeout (runs 45990556155, 45886259667 finished pytest and were cut off 1-3 min short in pre-commit --all-files)."
+  - "rec-5727 (Medium, XS): stdout to a pipe is block-buffered, so run 45990556155's ~200 pre-pytest checks show a single 495s gap on whichever header flushed; unbuffered output is the prerequisite for targeting the slow checks."
+  - "Operator ruling 2026-11-27 (both recs' context): the two changes are sufficient until the rec-5107 batching line (rec-5501..5503) and SIT-to-PROD promotion land; a stopgap, not the capacity fix."
+  - "Cost: a public repository's standard GitHub-hosted runners carry no per-minute charge; the raise only lets a slow run finish instead of being cancelled and re-run (a cancel wastes ~60 job-minutes)."
+  - "Overlap: rec-5501 (ours, unplanned) will also edit main-validate (concurrency group, prev step); whichever lands second rebases. No other project's open PR touches ci.yml; coordinator log #1963 names none on main-validate (checked 2026-11-27)."
+  - "pr-validate's 50 is load-bearing: Decision 281 cl.3 derives the fast tier's forced-run ceiling from it (reversal condition ceiling-decoupled), so the test pins it beside main-validate's 90."
+  - "Decision 60 deferral (scout NOTE): 90 is a cancel ceiling, not a full-tier wall-clock budget. The full tier still has no recorded budget; any budget belongs to the rec-5107/rec-5501 batching line (Decision 254 cl.9)."
+  - "Main Canary (main-canary.yml, every 3 h) runs the same full tier under its own 60-minute timeout (Decision 254 cl.1) and can be cut off the same way; out of scope by the operator's ruling."
+  - "FULL_TIER_STEP's name is read by scripts/ci/deploy_gate.py, ci-rca's taxonomy and full-tier-range.yaml; the name is unchanged."
+  - "Decision-scout r1 FLAGS_FOUND, CITE dec:254, dec:281. SPIRIT NOTE 60 (no recorded full-tier budget): deferred, context line above. RELATED: 249, 205, 163, 244, 132/189, 226, 245/264, 201, 252, 142, 55, 184, 48."
+  - "Decisions triaged: 238 of 238. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2"
+  - "red_overlap (2026-11-27 14:05Z): {\"verdict\": \"clear\", \"slo_hours\": 4, \"reds\": []}."
+  - "Serves: mission 2/5 -- keeps the post-merge verifier finishing so deploy evidence keeps flowing, and makes check time measurable; a process-reliability stopgap."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:4977f93b68581f7d712ae3fc6fbb0f2b151cb95f63900dc02c58982584c85646"}  # pragma: allowlist secret
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - ".github/workflows/ci.yml -- main-validate timeout-minutes 90; PYTHONUNBUFFERED: \"1\" env on the full-tier step (scope row 1)."
+  - "tests/ci/test_main_validate_timeout.py and tests/ci/test_main_validate_unbuffered.py -- the acceptance nodes (scope rows 2-3)."
+  - "Execute Verification Plan steps 1-4; loop until pass; on unrecoverable failure stop and RCA (Decision 55)."
+  - "Merge with Resolves: rec-5726, rec-5727 in the squash body, on code-review PROCEED and green CI. Then steps 5-6 and report their results with the run ids."
+  - "Report: what was implemented, verification results"
