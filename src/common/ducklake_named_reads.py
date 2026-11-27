@@ -80,6 +80,49 @@ _RECS_RELATED_SQL = (
     "LIMIT least(CAST(? AS INTEGER), 100)"
 )
 
+# recs_by_tag (rec-5700): the seven binds are read once each, in params order, in the leading `args` CTE; every param is
+# required and empty string is the default for the optional filters. `p` holds the parsed values and the guard (error()
+# is referenced in WHERE so DuckDB cannot optimise it away); column names are explicit everywhere (no SELECT *).
+_RECS_BY_TAG_ZONE = "'[T ][0-9]{2}:[0-9]{2}.*(Z|[+-][0-9]{2}(:?[0-9]{2})?)$'"
+_RECS_BY_TAG_STATUSES = "['open', 'in_progress', 'closed', 'failed', 'declined', 'superseded']"
+_RECS_BY_TAG_STS = (
+    f"CASE status_v WHEN '' THEN ['open'] WHEN 'all' THEN {_RECS_BY_TAG_STATUSES} ELSE string_split(status_v, ',') END"
+)
+_RECS_BY_TAG_SQL = (
+    "WITH args AS (SELECT CAST(? AS VARCHAR) AS tag_v, CAST(? AS VARCHAR) AS status_v, CAST(? AS VARCHAR) AS since_v, "
+    "CAST(? AS VARCHAR) AS priority_v, CAST(? AS VARCHAR) AS source_v, CAST(? AS VARCHAR) AS before_v, "
+    "CAST(? AS VARCHAR) AS max_v), "
+    "p AS (SELECT tag_v, priority_v, source_v, "
+    f"{_RECS_BY_TAG_STS} AS sts, "
+    f"CASE WHEN since_v = '' THEN NULL ELSE CAST(since_v AS TIMESTAMPTZ) END AS since_ts, "
+    f"CASE WHEN before_v = '' THEN NULL ELSE CAST(split_part(before_v, '|', 1) AS TIMESTAMPTZ) END AS before_ts, "
+    "split_part(before_v, '|', 2) AS before_id, "
+    "CAST(max_v AS INTEGER) AS n, "
+    "CASE WHEN tag_v = '' THEN error('recs_by_tag: tag must not be empty') "
+    f"WHEN NOT list_has_all({_RECS_BY_TAG_STATUSES}, {_RECS_BY_TAG_STS}) "
+    "THEN error('recs_by_tag: status must be open, in_progress, closed, failed, declined, superseded, a comma list "
+    "of them, or all') "
+    f"WHEN since_v <> '' AND NOT regexp_matches(since_v, {_RECS_BY_TAG_ZONE}) "
+    "THEN error('recs_by_tag: since_ts needs an explicit Z or numeric offset') "
+    "WHEN before_v <> '' AND len(string_split(before_v, '|')) <> 2 "
+    "THEN error('recs_by_tag: before must be ts|id with exactly one |') "
+    f"WHEN before_v <> '' AND NOT regexp_matches(split_part(before_v, '|', 1), {_RECS_BY_TAG_ZONE}) "
+    "THEN error('recs_by_tag: before timestamp needs an explicit Z or numeric offset') "
+    "WHEN NOT regexp_matches(max_v, '^[1-9][0-9]{0,8}$') "
+    "THEN error('recs_by_tag: max_rows must be an integer of at least 1') END AS g FROM args) "
+    "SELECT r.id, r.title, r.status, r.priority, r.effort, r.source, r.file, r.tags, r.created_timestamp, "
+    "r.last_updated_timestamp, count(*) OVER () AS total "
+    "FROM p CROSS JOIN {tbl} r "
+    "WHERE p.g IS NULL AND list_contains(r.tags, p.tag_v) AND list_contains(p.sts, r.status) "
+    "AND (p.since_ts IS NULL OR r.last_updated_timestamp >= p.since_ts) "
+    "AND (p.priority_v = '' OR lower(r.priority) = lower(p.priority_v)) "
+    "AND (p.source_v = '' OR r.source = p.source_v) "
+    "AND (p.before_ts IS NULL OR r.last_updated_timestamp < p.before_ts "
+    "OR (r.last_updated_timestamp = p.before_ts AND r.id < p.before_id)) "
+    "ORDER BY r.last_updated_timestamp DESC, r.id DESC "
+    "LIMIT (SELECT least(n, 100) FROM p)"
+)
+
 
 @dataclass(frozen=True)
 class NamedRead:
@@ -145,6 +188,22 @@ NAMED_READS: dict[str, NamedRead] = {
                 "near paths, whole-token term hits); a relevance lookup, not a bulk path."
             ),
             agent_facing=False,
+        ),
+        NamedRead(
+            verb="recs_by_tag",
+            table="ops_recommendations",
+            sql=_RECS_BY_TAG_SQL,
+            params=("tag", "status", "since_ts", "priority", "source", "before", "max_rows"),
+            description=(
+                "Recommendations whose tags contain one tag, newest last_updated_timestamp first. Every param is required; "
+                "empty string means the default. status: empty means open, one value, a comma list, or all (every status). "
+                "since_ts: empty means no bound, else an ISO timestamp with explicit Z or offset, rows updated at or "
+                "after it. "
+                "priority (case-insensitive) and source: empty means any. before: empty means the first page, else the "
+                "ts|id of the last row of the previous page (last_updated_timestamp|id), rows strictly older. max_rows has "
+                "no default: an integer of at least 1, capped at 100. total counts every matching row past the cursor, "
+                "before the cap, so a caller sees truncation."
+            ),
         ),
         NamedRead(
             verb="open_recs_tally",

@@ -299,3 +299,145 @@ class TestRecsRelatedVerbV5:
 
     def test_no_pinned_verb_was_removed(self):
         assert (set(self._PINNED_DIGESTS) | set(self._PINNED_SELECT_STAR)) <= set(nr.NAMED_READS)
+
+
+# ---------------------------------------------------------------------------
+# recs_by_tag verb, rec-5700
+# ---------------------------------------------------------------------------
+
+_TAG_COLUMNS = (
+    "id",
+    "title",
+    "status",
+    "priority",
+    "effort",
+    "source",
+    "file",
+    "tags",
+    "created_timestamp",
+    "last_updated_timestamp",
+)
+
+
+def _tag_params(**kw: str) -> list[str]:
+    base = {"tag": "proj-a", "status": "", "since_ts": "", "priority": "", "source": "", "before": "", "max_rows": "100"}
+    base.update(kw)
+    return [base[p] for p in nr.NAMED_READS["recs_by_tag"].params]
+
+
+def _tag_con(rows: list[tuple]):
+    import duckdb  # noqa: PLC0415
+
+    from tests.fixtures import duckdb_connect  # noqa: PLC0415
+
+    con = duckdb_connect.connect()
+    con.execute("SET TimeZone='UTC'")
+    ddl = ", ".join(f"{c} VARCHAR" for c in _TAG_COLUMNS if c not in ("tags", "last_updated_timestamp", "created_timestamp"))
+    con.execute(f"CREATE TABLE t ({ddl}, tags VARCHAR[], created_timestamp TIMESTAMPTZ, last_updated_timestamp TIMESTAMPTZ)")
+    for r in rows:
+        con.execute("INSERT INTO t VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [*r[:7], r[7], r[8], r[8]])
+    assert duckdb is not None
+    return con
+
+
+def _tag_run(con, **kw: str) -> list[tuple]:
+    sql = nr.NAMED_READS["recs_by_tag"].sql.replace("{tbl}", "t")
+    return con.execute(sql, _tag_params(**kw)).fetchall()
+
+
+def _rec(i: str, tags, ts: str, status="open", priority="High", source="manual"):
+    return (i, f"title {i}", status, priority, "S", source, "f.py", tags, ts)
+
+
+def _tag_fixture():
+    return _tag_con(
+        [
+            _rec("rec-1", ["proj-a"], "2026-11-01T00:00:00+00:00"),
+            _rec("rec-2", ["proj-a", "proj-b"], "2026-11-02T00:00:00+00:00", priority="LOW", source="ci_rca"),
+            _rec("rec-3", ["proj-b"], "2026-11-03T00:00:00+00:00"),
+            _rec("rec-4", None, "2026-11-04T00:00:00+00:00"),
+            _rec("rec-5", ["proj-a"], "2026-11-05T00:00:00+00:00", status="closed"),
+            _rec("rec-6", ["proj-a"], "2026-11-06T00:00:00+00:00", status="declined"),
+            _rec("rec-7", ["proj-a"], "2026-11-02T00:00:00+00:00"),
+        ]
+    )
+
+
+def test_recs_by_tag_filters_and_orders_newest_first():
+    pytest.importorskip("duckdb", reason="env: duckdb is not installed in the fast tier")
+    con = _tag_fixture()
+    ids = lambda rows: [r[0] for r in rows]  # noqa: E731
+    assert ids(_tag_run(con)) == ["rec-7", "rec-2", "rec-1"]  # open default, tie on ts broken by id DESC
+    assert ids(_tag_run(con, tag="nope")) == []
+    assert ids(_tag_run(con, status="open,closed")) == ["rec-5", "rec-7", "rec-2", "rec-1"]
+    assert ids(_tag_run(con, status="all")) == ["rec-6", "rec-5", "rec-7", "rec-2", "rec-1"]
+    assert ids(_tag_run(con, since_ts="2026-11-02T00:00:00Z")) == ["rec-7", "rec-2"]  # at-or-after boundary
+    assert ids(_tag_run(con, since_ts="2026-11-02T01:00:00+01:00")) == ["rec-7", "rec-2"]
+    assert ids(_tag_run(con, priority="low")) == ["rec-2"]
+    assert ids(_tag_run(con, source="ci_rca")) == ["rec-2"]
+    rows = _tag_run(con, status="all", max_rows="2")
+    assert ids(rows) == ["rec-6", "rec-5"] and rows[0][-1] == 5  # total above the cap
+    # cursor: pages of 2 with a tie, no overlap and no gap
+    seen: list[str] = []
+    before = ""
+    while True:
+        page = _tag_run(con, status="all", max_rows="2", before=before)
+        if not page:
+            break
+        seen += ids(page)
+        last = page[-1]
+        before = f"{last[9].isoformat()}|{last[0]}"
+    assert seen == ["rec-6", "rec-5", "rec-7", "rec-2", "rec-1"]
+    assert len(_tag_run(_tag_many(150), max_rows="500")) == 100  # the cap of 100
+
+
+def _tag_many(n: int):
+    return _tag_con([_rec(f"rec-{i}", ["proj-a"], "2026-11-01T00:00:00+00:00") for i in range(n)])
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"tag": ""},
+        {"status": "bogus"},
+        {"status": "open,all"},
+        {"since_ts": "2026-11-02T00:00:00"},
+        {"since_ts": "2026-11-02"},
+        {"before": "2026-11-02T00:00:00Z"},
+        {"before": "2026-11-02T00:00:00Z|a|b"},
+        {"before": "2026-11-02T00:00:00|rec-1"},
+        {"max_rows": "0"},
+        {"max_rows": "-1"},
+        {"max_rows": "x"},
+    ],
+)
+def test_recs_by_tag_guards_raise(kw):
+    duckdb = pytest.importorskip("duckdb", reason="env: duckdb is not installed in the fast tier")
+
+    for con in (_tag_fixture(), _tag_con([])):  # also over a table with no matching rows
+        with pytest.raises(duckdb.Error):
+            _tag_run(con, **kw)
+
+
+def test_recs_by_tag_registry_shape():
+    import re  # noqa: PLC0415
+
+    v = nr.NAMED_READS["recs_by_tag"]
+    assert v.params == ("tag", "status", "since_ts", "priority", "source", "before", "max_rows")
+    assert re.sub(r"'[^']*'", "", v.sql).count("?") == len(v.params)
+    assert v.paginable is False and v.agent_facing is True
+    assert re.search(r"ORDER BY r\.last_updated_timestamp DESC, r\.id DESC LIMIT ", v.sql)
+    assert "SELECT *" not in v.sql
+    assert nr.NAMED_READS_VERSION == 6
+
+
+def test_recs_by_tag_status_vocabulary_matches_ops_contract():
+    from pathlib import Path  # noqa: PLC0415
+
+    import yaml  # noqa: PLC0415
+
+    cfg = yaml.safe_load(Path("config/agent/data_quality/ops.yaml").read_text(encoding="utf-8"))
+    tests = cfg["tables"]["ops_recommendations"]["columns"]["status"]["tests"]
+    accepted = next(t["accepted_values"]["values"] for t in tests if isinstance(t, dict) and "accepted_values" in t)
+    sql = nr.NAMED_READS["recs_by_tag"].sql
+    assert all(f"'{status}'" in sql for status in accepted)
