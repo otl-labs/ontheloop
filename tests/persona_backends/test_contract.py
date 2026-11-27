@@ -117,3 +117,43 @@ def test_warehouse_read_loads_verbs(tmp_path):
 def test_warehouse_read_naming_read_input_is_refused(tmp_path, capability):
     with pytest.raises(RunRefused, match="warehouse_read"):
         load(_copy(tmp_path, lambda d: d["capabilities"].append(capability)))
+
+
+def _tree_contract(tmp_path, mutate=None, caps=("read_tree:head",)):
+    def change(data):
+        data["capabilities"] += list(caps)
+        data["budget"]["read_tree"] = {
+            "max_calls": 5,
+            "max_read_bytes": 1000,
+            "max_search_results": 10,
+            "max_total_bytes": 9999,
+        }
+        data["failure_outputs"].append({"id": "review_incomplete", "meaning": "A read limit was reached."})
+        if mutate:
+            mutate(data)
+
+    return _copy(tmp_path, change)
+
+
+def test_read_tree_needs_its_budget_and_failure_output(tmp_path):
+    loaded = load(_tree_contract(tmp_path))
+    assert loaded.trees == ("head",) and loaded.read_tree_budget["max_calls"] == 5
+    assert load(FIXTURE).trees == () and load(FIXTURE).read_tree_budget is None
+    mutations = [
+        lambda d: d["budget"].pop("read_tree"),
+        lambda d: d["budget"].update(read_tree="x"),
+        lambda d: d["budget"]["read_tree"].pop("max_total_bytes"),
+        lambda d: d["budget"]["read_tree"].update(max_calls=True),
+        lambda d: d["budget"]["read_tree"].update(max_calls=0),
+        lambda d: d["failure_outputs"].pop(),
+    ]
+    for mutate in mutations:
+        with pytest.raises(RunRefused):
+            load(_tree_contract(tmp_path / str(mutations.index(mutate)), mutate))
+
+
+def test_read_tree_names_only_head_or_main(tmp_path):
+    assert load(_tree_contract(tmp_path / "a", caps=("read_tree:head", "read_tree:main"))).trees == ("head", "main")
+    for bad in ("read_tree:other", "read_tree:", "read_tree"):
+        with pytest.raises(RunRefused, match="names no tree"):
+            load(_tree_contract(tmp_path / bad.replace(":", "_"), caps=(bad,)))

@@ -177,14 +177,19 @@ def test_launcher_result_shape() -> None:
 def test_record_without_a_launcher_result(tmp_path: Path) -> None:
     work = _work(tmp_path, body=GOOD)
     assert keyed_run.record({}, work, ROOT, b"") == 0
-    assert json.loads((work / "results" / f"{ROUTE}.json").read_text()) == {"route": ROUTE, "failure": "launcher_no_result"}
+    assert json.loads((work / "results" / f"{ROUTE}.json").read_text()) == {
+        "route": ROUTE,
+        "failure": "launcher_no_result",
+        "reads_unknown": True,
+    }
 
 
 def test_record_carries_a_failure_file(tmp_path: Path) -> None:
     work = _work(tmp_path)
     (work / "prepared" / f"failure-{ROUTE}.json").write_text(json.dumps({"failure": "input_incomplete"}))
     keyed_run.record({}, work, ROOT, b"")
-    assert json.loads((work / "results" / f"{ROUTE}.json").read_text())["failure"] == "input_incomplete"
+    recorded = json.loads((work / "results" / f"{ROUTE}.json").read_text())
+    assert recorded["failure"] == "input_incomplete" and recorded["reads_unknown"] is True
 
 
 def test_request_reads_the_fallback_role_key_on_a_fallback_run(

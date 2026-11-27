@@ -297,3 +297,34 @@ def test_oversize_input_is_input_unusable(tmp_path: Path, monkeypatch: pytest.Mo
     failure = json.loads((out / f"failure-{PROBE}.json").read_text())
     assert failure["failure"] == "input_unusable" and "bytes" in failure["detail"]
     assert not (out / f"input-{PROBE}.json").exists()
+
+
+def _tree_base(tmp_path: Path, capabilities: list[str]) -> Path:
+    import yaml
+
+    base = _base(tmp_path, {}, slots=[], fixture=True)
+    (base / "docs/contracts/personas/r_one.yaml").write_text(
+        yaml.safe_dump({"guidance_slots": [], "capabilities": capabilities}), encoding="utf-8"
+    )
+    return base
+
+
+def test_head_tree_is_packed_only_for_read_tree_personas(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import tarfile
+
+    from scripts.personas import egress_trees
+
+    head = _snap(tmp_path, {FX: "NIT: a", "src/a.py": "a = 1\n", ".github/ci.yml": "on: push\n", ".git/HEAD": "x"})
+    kw = {"provider": None, "fixture_paths": [FX]}
+    out, body = _run(tmp_path / "t1", head, _tree_base(tmp_path / "t1", ["read_tree:head", "read_tree:main"]), **kw)
+    assert body is not None
+    with tarfile.open(out / "head.tar") as tar:
+        names = {m.name for m in tar.getmembers()}
+    assert {"src/a.py", ".github/ci.yml", FX} <= names and not any(n.startswith(".git/") for n in names)
+    assert not (_run(tmp_path / "t2", head, _tree_base(tmp_path / "t2", ["read_tree:main"]), **kw)[0] / "head.tar").exists()
+    assert not (_run(tmp_path / "t3", head, _tree_base(tmp_path / "t3", []), **kw)[0] / "head.tar").exists()
+    monkeypatch.setattr(egress_trees, "TREE_MAX_BYTES", 10)
+    out, body = _run(tmp_path / "t4", head, _tree_base(tmp_path / "t4", ["read_tree:head"]), **kw)
+    failure = json.loads((out / "failure-r_one.json").read_text())
+    assert body is None and failure["failure"] == "input_unusable" and "byte cap" in failure["detail"]
+    assert not (out / "head.tar").exists()

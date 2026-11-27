@@ -324,3 +324,11 @@ def test_local_root_session_and_run_rows() -> None:
     assert {r["execution_attempt"] for r in tables["telemetry_sessions"]} == {1}
     assert {(r["trigger"], r.get("workflow_run_id")) for r in tables["telemetry_agents"]} == {("manual", None)}
     assert {r["parser_version"] for rows in tables.values() for r in rows} == {2}
+
+
+def test_turn_reads_are_ignored_by_the_producer():
+    read = {"tree": "head", "op": "read", "path": "a.py", "result": "ok", "bytes": 10, "blob": "b" * 40}
+    plain = _turn()
+    with_reads = {**_turn(), "reads": [read]}
+    assert _calls(_map(_events([with_reads]))) == _calls(_map(_events([plain])))
+    assert _events([with_reads])["header"]["schema"] == 2

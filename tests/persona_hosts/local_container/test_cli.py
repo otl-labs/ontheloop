@@ -92,3 +92,23 @@ def test_cli_refuses_a_non_empty_out_dir_or_unreadable_input(tmp_path: Path, mon
     assert cli.main(_argv(tmp_path, out=tmp_path / "r")) == 3
     assert not (tmp_path / "r").exists()
     assert calls == []
+
+
+def test_tree_arguments_reach_run_image(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake(image: str, persona: str, payload: dict[str, Any], **kwargs: Any) -> RunImageResult:
+        seen.update(kwargs)
+        return RunImageResult(0, {}, {}, "", SIDECAR)
+
+    monkeypatch.setattr(cli, "run_image", fake)
+    _input(tmp_path)
+    head, main = tmp_path / "h", tmp_path / "m"
+    head.mkdir()
+    main.mkdir()
+    assert cli.main([*_argv(tmp_path), "--tree", f"head={head}", "--tree", f"main={main}"]) == 0
+    assert seen["trees"] == {"head": str(head.resolve()), "main": str(main.resolve())}
+    bad = [["--tree", "other=" + str(head)], ["--tree", f"head={head}", "--tree", f"head={main}"], ["--tree", "head"]]
+    bad += [["--tree", f"head={tmp_path / 'absent'}"], ["--tree", f"head={tmp_path}/a:b"], ["--tree", f"head={tmp_path}/a,b"]]
+    for extra in bad:
+        assert cli.main([*_argv(tmp_path, out=tmp_path / "out2"), *extra]) == 2, extra

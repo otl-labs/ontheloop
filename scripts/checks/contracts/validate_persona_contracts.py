@@ -46,6 +46,8 @@ _MONEY = re.compile(r"\b(cost|price|spend|currency|dollars?|usd|eur|gbp|money)\b
 _MONEY_KEY = re.compile(r"cost|price|spend|currency|dollar|usd|money", re.IGNORECASE)
 _VERDICT_TOKEN = re.compile(r"[A-Z][A-Z_]+")
 _SLOT_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
+_TREES = ("head", "main")
+_READ_TREE_CAPS = ("max_calls", "max_read_bytes", "max_search_results", "max_total_bytes")
 _HEAD_FILLED = ("change_id", "head_sha", "plan")
 _LEASH_PATHS = (
     _INDEX_REL,
@@ -93,6 +95,22 @@ def _vocabulary_failures(index: PersonaIndex, root: Path) -> list[str]:
     return out
 
 
+def _parameter_failures(persona: str, cap: Any, parameter: str | None, props: dict[str, Any], root: Path) -> list[str]:
+    where = f"{_LABEL}: {persona}: {cap.id}"
+    if cap.parameter is None:
+        return [f"{where} takes no parameter (parameter outside domain)"] if parameter is not None else []
+    if parameter is None:
+        return [f"{where} needs a parameter (parameter outside domain)"]
+    domain = cap.parameter.get("domain")
+    if domain == "input_blob" and parameter not in props:
+        return [f"{where} parameter '{parameter}' is not an input property (parameter outside domain)"]
+    if domain == "tree" and parameter not in _TREES:
+        return [f"{where} parameter '{parameter}' is not head or main (parameter outside domain)"]
+    if domain == "named_read" and parameter not in named_read_keys(root):
+        return [f"{where} parameter '{parameter}' is not a NAMED_READS key (parameter outside domain)"]
+    return []
+
+
 def _capability_failures(persona: str, caps: list[str], raw: dict[str, Any], index: PersonaIndex, root: Path) -> list[str]:
     out: list[str] = []
     vocab = {c.id: c for c in index.capability_vocabulary.capabilities}
@@ -110,25 +128,36 @@ def _capability_failures(persona: str, caps: list[str], raw: dict[str, Any], ind
         if parameter is not None and parameter in persona_ids:
             out.append(f"{_LABEL}: {persona}: capability {cap_id} parameter '{parameter}' is a persona id (persona_parameter)")
             continue
-        if cap.parameter is None:
-            if parameter is not None:
-                out.append(f"{_LABEL}: {persona}: capability {cap_id} takes no parameter (parameter outside domain)")
-        elif parameter is None:
-            out.append(f"{_LABEL}: {persona}: capability {cap_id} needs a parameter (parameter outside domain)")
-        elif cap.parameter.get("domain") == "input_blob" and parameter not in props:
-            out.append(
-                f"{_LABEL}: {persona}: {cap_id} parameter '{parameter}' is not an input property (parameter outside domain)"
-            )
-        elif cap.parameter.get("domain") == "named_read" and parameter not in named_read_keys(root):
-            out.append(
-                f"{_LABEL}: {persona}: {cap_id} parameter '{parameter}' is not a NAMED_READS key (parameter outside domain)"
-            )
+        out += _parameter_failures(persona, cap, parameter, props, root)
         if cap.effect == "write" and persona not in (cap.personas or []):
             out.append(
                 f"{_LABEL}: {persona}: write capability {cap_id} is not allowed here (edit_repo_outside_implement_agent)"
             )
         if raw.get("kind") in VERDICT_RULE_KINDS and cap.target == "repo":
             out.append(f"{_LABEL}: {persona}: a verdict or fixture contract names repo-target capability {cap_id}")
+    return out
+
+
+def _read_tree_failures(persona: str, raw: dict[str, Any], caps: list[str]) -> list[str]:
+    out: list[str] = []
+    named = [c for c in caps if parse_capability(c)[0] == "read_tree"]
+    if len(named) != len(set(named)):
+        out.append(f"{_LABEL}: {persona}: read_tree is named more than once (repeated capability)")
+    block = (raw.get("budget") or {}).get("read_tree")
+    if not named:
+        if block is not None:
+            out.append(f"{_LABEL}: {persona}: budget.read_tree without a read_tree capability")
+        return out
+    if not isinstance(block, dict):
+        return [*out, f"{_LABEL}: {persona}: a read_tree contract needs a budget.read_tree mapping"]
+    for key in sorted(set(block) - set(_READ_TREE_CAPS)):
+        out.append(f"{_LABEL}: {persona}: unknown key budget.read_tree.{key}")
+    for key in _READ_TREE_CAPS:
+        value = block.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            out.append(f"{_LABEL}: {persona}: budget.read_tree.{key} is missing or not a positive integer")
+    if "review_incomplete" not in {f.get("id") for f in raw.get("failure_outputs") or [] if isinstance(f, dict)}:
+        out.append(f"{_LABEL}: {persona}: a read_tree contract lists review_incomplete in failure_outputs")
     return out
 
 
@@ -410,6 +439,7 @@ def _contract_failures(row: Any, index: PersonaIndex, root: Path) -> list[str]:
     out += check_schema_dialect(raw["input_schema"], keywords, f"{_LABEL}: {persona}: input_schema")
     out += check_schema_dialect(raw["output_schema"], keywords, f"{_LABEL}: {persona}: output_schema")
     out += _capability_failures(persona, contract.capabilities, raw, index, root)
+    out += _read_tree_failures(persona, raw, contract.capabilities)
     out += _guidance_failures(persona, raw)
     out += _budget_failures(persona, raw["budget"], index, root)
     ids = {f.id for f in contract.failure_outputs}

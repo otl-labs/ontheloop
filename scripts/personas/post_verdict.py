@@ -105,6 +105,59 @@ def _escape(value: str) -> str:
     return " ".join(value.replace("<!--", "&lt;!--").split())
 
 
+READS_HEADER = "Reads"
+READS_PREFIX = "  | "
+READS_PATHS = 100
+READS_PATH_CHARS = 200
+
+
+def _path_line(path: Any) -> str:
+    text = str(path)
+    shown = text if text.isprintable() else repr(text)
+    return READS_PREFIX + "  " + _escape(shown)[:READS_PATH_CHARS]
+
+
+def reads_section(result: Any, room: int) -> str | None:
+    """The check text's Reads section for a routed result that carries reads or reads_unknown, bounded to room characters."""
+    if not isinstance(result, dict) or ("reads" not in result and not result.get("reads_unknown")):
+        return None
+    lines = [READS_HEADER]
+    reads = result.get("reads")
+    if isinstance(reads, list):
+        lines.append(f"{READS_PREFIX}read_tree calls: {len(reads)}")
+        counts: dict[tuple[str, str], int] = {}
+        for row in reads:
+            if isinstance(row, dict):
+                key = (_escape(str(row.get("tree"))), _escape(str(row.get("op"))))
+                counts[key] = counts.get(key, 0) + 1
+        lines += [f"{READS_PREFIX}{tree} {op}: {n}" for (tree, op), n in sorted(counts.items())]
+        if result.get("reads_dropped"):
+            lines.append(f"{READS_PREFIX}read records beyond the first 2000 were dropped")
+    else:
+        lines.append(f"{READS_PREFIX}read records unavailable")
+    try:
+        out = json.loads(str(result.get("stdout") or ""))
+    except ValueError:
+        out = None
+    if isinstance(out, dict) and out.get("outcome") == "failure" and out.get("failure") == "review_incomplete":
+        lines.append(f"{READS_PREFIX}review_incomplete: {_escape(str(out.get('detail') or ''))[:200]}")
+    unseen = result.get("not_examined")
+    if isinstance(unseen, list):
+        lines.append(f"{READS_PREFIX}not_examined: {len(unseen)}")
+        lines += [_path_line(path) for path in unseen[:READS_PATHS]]
+        if len(unseen) > READS_PATHS:
+            lines.append(f"{READS_PREFIX}{len(unseen) - READS_PATHS} more")
+    kept: list[str] = []
+    used = 0
+    for line in lines:
+        used += len(line) + 1
+        if used > room:
+            kept.append(f"{READS_PREFIX}[section cut at the text limit]")
+            break
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def success_output(root: Path, route_id: str, result: Any) -> dict[str, Any] | None:
     """The parsed output of a route's schema-valid, outcome-success result, else None."""
     if not (isinstance(result, dict) and result.get("route") == route_id):
@@ -254,6 +307,9 @@ def plan_all(root: Path, work: Path, repo: str, read_token: str | None) -> list[
                 root, work, route_id, resolution["head_sha"], fresh, os.environ.get("GITHUB_RUN_ID", "0")
             )
             text = rescout.with_input(text, line) if line else text
+        section = reads_section(result, TEXT_LIMIT - len(text or "") - 2) if allowlisted else None
+        if section:
+            text = f"{text}\n{section}" if text else section
         if info is not None:
             verdict, ids, out = info
             if conclusion == "failure":

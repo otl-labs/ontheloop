@@ -36,6 +36,8 @@ KEY_ROW_PREFIX = "ports.run_persona.litellm.api_key."  # pragma: allowlist secre
 JOB_ROLES = {"run": "primary", "run-fallback": "warm_fetched_escape_hatch"}
 SETTINGS = Path(".claude") / "settings.json"
 MAX_STDIN = 8 * 1024 * 1024
+MAX_READS = 2000
+TREE_CHUNK = 1 << 20
 ROUTE = re.compile(r"^[a-z][a-z0-9_]*$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
 WORKFLOW_PATH = ".github/workflows/persona-verdict.yml"
@@ -160,12 +162,41 @@ def job_role(env: Mapping[str, str]) -> str:
     return role
 
 
+def tree_names(root: Path, route: str) -> list[str]:
+    contract = execute._contract(root, route) or {}  # noqa: SLF001 -- the one contract loader
+    caps = contract.get("capabilities") or []
+    return [c.split(":", 1)[1] for c in caps if isinstance(c, str) and c.startswith("read_tree:") and ":" in c]
+
+
+def _stream_file(fd: int, path: Path) -> None:
+    with open(path, "rb") as handle:
+        while chunk := handle.read(TREE_CHUNK):
+            _write_all(fd, chunk)
+
+
+def _tree_fields(route: str, work: Path, root: Path) -> tuple[dict[str, Any], Path | None]:
+    names = tree_names(root, route)
+    if not names:
+        return {}, None
+    fields: dict[str, Any] = {"trees": names}
+    if "head" not in names:
+        return fields, None
+    tar = work / "prepared" / "head.tar"
+    try:
+        size = tar.stat().st_size
+    except OSError:
+        raise Refusal("head_tree") from None
+    fields["head_tree_bytes"] = size
+    return fields, tar
+
+
 def request(env: Mapping[str, str], work: Path, root: Path) -> int:
     """Return 0 after writing exactly one request object to fd 1, else 2 with nothing on stdout and one marker on stderr."""
     try:
         role = job_role(env)
         route, body = prepared_request(work, root)
         provider = role_provider(root, role)
+        tree_fields, tar = _tree_fields(route, work, root)
     except Refusal as exc:
         print(f"PERSONA-REQUEST REFUSED {exc}", file=sys.stderr, flush=True)
         return EXIT_REFUSED
@@ -182,7 +213,10 @@ def request(env: Mapping[str, str], work: Path, root: Path) -> int:
             os.dup2(scratch.fileno(), 1)
             os.dup2(scratch.fileno(), 2)
             key = _ssm_value(creds, env.get("PERSONA_AWS_REGION", ""), parameter)
-            _write_all(saved, json.dumps({"persona": route, "provider": provider, "input": body, "key": key}).encode("utf-8"))
+            line = {"persona": route, "provider": provider, "input": body, "key": key, **tree_fields}
+            _write_all(saved, json.dumps(line).encode("utf-8") + b"\n")
+            if tar is not None:
+                _stream_file(saved, tar)
         except Refusal as exc:
             failure = str(exc)
         except BaseException:  # noqa: BLE001 - nothing the failure carries may reach a stream
@@ -333,6 +367,50 @@ def record(env: Mapping[str, str], work: Path, root: Path, raw: bytes) -> int:
     return code
 
 
+def _reads(events: Any) -> tuple[list[dict[str, Any]], bool] | None:
+    turns = events.get("turns") if isinstance(events, dict) else None
+    if not isinstance(turns, list):
+        return None
+    reads: list[dict[str, Any]] = []
+    dropped = False
+    for turn in turns:
+        rows = turn.get("reads") if isinstance(turn, dict) else None
+        if rows is None:
+            continue
+        if not isinstance(rows, list):
+            return None
+        for row in rows:
+            if not isinstance(row, dict):
+                return None
+            if len(reads) >= MAX_READS:
+                dropped = True
+            else:
+                reads.append(row)
+    return reads, dropped
+
+
+def _clean_path(value: Any) -> str:
+    return "/".join(p for p in str(value).split("/") if p not in ("", "."))
+
+
+def _not_examined(body: Any, reads: list[dict[str, Any]]) -> list[str] | None:
+    hits = body.get("reference_hits") if isinstance(body, dict) else None
+    if not isinstance(hits, dict):
+        return None
+    read = {
+        _clean_path(r.get("path"))
+        for r in reads
+        if r.get("tree") == "head" and r.get("op") == "read" and r.get("result") == "ok"
+    }
+    out: set[str] = set()
+    for term in hits.get("terms") or []:
+        for hit in (term.get("hits") or []) if isinstance(term, dict) else []:
+            path = _clean_path(hit.get("path")) if isinstance(hit, dict) else ""
+            if path and hit.get("in_bundle") is False and path not in read:
+                out.add(path)
+    return sorted(out)
+
+
 def _record(env: Mapping[str, str], work: Path, root: Path, result: dict[str, Any] | None) -> int:
     doc = _json(work / "prepared" / "routes.json")
     routes = [r for r in (doc.get("routes") if isinstance(doc, dict) else None) or [] if isinstance(r, str) and ROUTE.match(r)]
@@ -350,10 +428,17 @@ def _record(env: Mapping[str, str], work: Path, root: Path, result: dict[str, An
     failure_file = _json(work / "prepared" / f"failure-{route}.json")
     if (work / "prepared" / f"failure-{route}.json").exists():
         failure = failure_file.get("failure") if isinstance(failure_file, dict) else None
-        put(route, {"route": route, "failure": failure if isinstance(failure, str) and failure else "input_unusable"})
+        put(
+            route,
+            {
+                "route": route,
+                "failure": failure if isinstance(failure, str) and failure else "input_unusable",
+                "reads_unknown": True,
+            },
+        )
         return 0
     if result is None:
-        put(route, {"route": route, "failure": "launcher_no_result"})
+        put(route, {"route": route, "failure": "launcher_no_result", "reads_unknown": True})
         return 0
     _telemetry(env, work, results, route, result.get("events"), root)
     try:
@@ -379,6 +464,21 @@ def _record(env: Mapping[str, str], work: Path, root: Path, result: dict[str, An
     }
     if guidance:
         recorded["guidance"] = guidance
+    found = _reads(result.get("events"))
+    resolution = _json(work / "prepared" / "resolution.json")
+    recorded["trees"] = {
+        "head": resolution.get("head_sha") if isinstance(resolution, dict) else None,
+        "main": checked_out_sha(root),
+    }
+    if found is None:
+        recorded["reads_unknown"] = True
+    else:
+        recorded["reads"] = found[0]
+        if found[1]:
+            recorded["reads_dropped"] = True
+        unseen = _not_examined(_json(work / "prepared" / f"input-{route}.json"), found[0])
+        if unseen is not None:
+            recorded["not_examined"] = unseen
     put(route, recorded)
     return 0
 

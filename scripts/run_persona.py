@@ -28,6 +28,8 @@ from scripts.llm import litellm_transport  # noqa: E402
 from src.persona_backends import RunAborted, RunRefused, run_persona, write_atomic  # noqa: E402
 
 MCP_SERVER_MODULE = "scripts.agent_sdk.mcp_server"
+TREES_ROOT = Path("/trees")
+TREE_NAMES = ("head", "main")
 _ENV_PREFIXES = ("AWS_", "DUCKLAKE_", "OTL_")
 _ENV_NAMES = frozenset(
     {
@@ -52,6 +54,10 @@ def server_parameters(environ: Mapping[str, str] = os.environ) -> StdioServerPar
     from mcp.client.stdio import StdioServerParameters  # noqa: PLC0415 -- lazy: a run without warehouse_read loads no mcp
 
     return StdioServerParameters(command=sys.executable, args=["-m", MCP_SERVER_MODULE], cwd=_ROOT, env=server_env(environ))
+
+
+def mounted_trees() -> dict[str, Path]:
+    return {name: TREES_ROOT / name for name in TREE_NAMES if (TREES_ROOT / name).is_dir()}
 
 
 async def _transport(*args: Any, **kwargs: Any) -> Any:
@@ -105,6 +111,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_tokens=args.max_tokens,
                 mcp_server=server_parameters,
                 role=args.role,
+                trees=mounted_trees() or None,
             )
         )
     except RunRefused as exc:
