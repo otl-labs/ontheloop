@@ -2,6 +2,101 @@
 
 The canonical corpus of ratified architectural and operational decisions, and the sole ETL source for the `ops_decisions` warehouse table (Decision 84). Fully-superseded entries move to `docs/DECISIONS_ARCHIVE.md` per the archival policy in Decision 146.
 
+## Decision 291: Identity-trusting DuckLake Lambdas in one entry -- reachable only through their Function URL or named API route under permissions-boundary Denies, and telemetry writes on their own functions with scoped catalog logins (supersedes Decision 213; amends Decision 91) (Decided)
+
+```yaml
+number: 291
+status: Decided
+decided_date: "2026-11-27"
+kind:
+  value: direction
+  justification: >-
+    Clause 5 keeps the scoped-login step behind explicit human direction, run by the operator, and clause 1 has every
+    new identity-trusting function covered by the boundary through a human-applied change; both are human gates.
+supersedes: [213]
+amends: [91]
+significance:
+  value: numbered_decision
+  justification: >-
+    It restates Decision 213's current rule with its five amenders' edits so 213 can compact (Decisions 149 and 278);
+    a dated note (considered) cannot retire an entry, and no contract holds the ingress invariant or the carve-out.
+```
+
+**Status:** Decided
+**Date:** 2026-11-27
+**Warehouse ID:** dec-291 (per Decision 84 backfill)
+
+**Problem:** A reader needs Decision 213 and five amenders to learn how an identity-trusting Lambda is reached and how
+telemetry writes are isolated (rec-5449).
+
+**Intent:** Restate the current rule unchanged in one entry so Decision 213 compacts to a stub.
+
+**Decision:**
+1. **Ingress invariant.** A handler may trust a signed caller field (requestContext.authorizer.iam) only when every
+   path to it other than its AWS_IAM Function URL and its named API route is closed; the API path's control points
+   are Decision 255 cl.2's. The permissions boundary carries three Denies on every identity-trusting function and, as
+   defence in depth, the shared writer and reader, each named by ARN or by a prefix covering it and every qualifier
+   (Decision 270 cl.4): lambda:InvokeFunction / InvokeAsync unless lambda:InvokedViaFunctionUrl is true;
+   lambda:AddPermission / RemovePermission / PutResourcePolicy / DeleteResourcePolicy; and
+   lambda:Create/UpdateEventSourceMapping on lambda:FunctionArn. Every bounded grant of
+   InvokeFunction on such a function carries the same condition. A new identity-trusting function is covered by the
+   boundary, through a human-applied bootstrap change, before it ships.
+2. **Telemetry writes on their own functions (amends Decision 91 cl.1).** Telemetry write verbs run on
+   agent-platform-ducklake-telemetry-writer under Decision 143 cl.3, never on the shared writer, which stays the sole
+   ops_* write authority and refuses telemetry boundaries; one write-time enforcement chokepoint serves each table,
+   the closed verb boundary covering both writers. Its role reaches S3 only on the telemetry catalog's data prefix and its
+   fenced blob root, never the production ducklake/ prefix, and it never carries a destructive or drop verb. An
+   identity-scoped verb set may live on its own function; OQ.15's thin-verb Lambdas are not reopened.
+3. **Scoped catalog logins.** The telemetry writer connects as its own SQL-created Postgres role, DML-only on its
+   catalog's metadata schema, with a connection limit and its own secret, defined in a version-controlled migration
+   the RDS swap re-runs. Decision 230 cl.3 holds one login per catalog binding and its closed table, Decision 239
+   cl.1 the reader's shared SELECT-only login, and Decision 216 the owner rule.
+4. **Detection.** CloudTrail data events are logged for the named functions on the Decision 202 trail; for the API
+   path the caller record is Decision 255 cl.4's access log.
+5. **Human-directed admin step.** Writing a scoped login's secret value and invoking ducklake_maintenance's
+   provision_telemetry_login happen only under explicit human direction, each mutation presented and accepted first
+   (Decision 204 cl.2 shape), and run as Decision 283 cl.3 states: an agent prepares them and the operator runs them
+   (Decision 256 cl.3). The password is never displayed or stored outside its /secret/ parameter (Decision 237
+   cl.6). Decision 230 cl.4 extends this to its catalog verbs and logins.
+6. **Budget.** This entry authorizes docs/contracts/iam-simulate-fixture.yaml's structural size budget at 650 for the
+   url-only simulate rows (Decision 165).
+7. **Carried forward.** Decision 216 keeps the owner rule and the smoke carve-out, Decision 230 the production catalog,
+   its logins and fence, Decision 237 the secret store, Decision 255 the API path and Decision 270 the prefix names;
+   Decisions 283 and 284 hold the admin tier and runtime rules 213 amended. A ruling change is a new entry
+   superseding this one.
+
+**Rationale:** The boundary is the one layer every bounded principal carries and agents cannot edit (Decision 143
+cl.1, Decision 285); it cannot see service principals or event source mappings, so those paths close at their own
+control points. lambda:InvokedViaFunctionUrl separates URL from direct calls (live probe, 2026-10-06).
+
+**Options considered:** taking 216 or 230 as victims (rejected: each holds a rule on another subject, and both
+together exceed the cap); restating the login table or the fence (rejected: Decision 230 holds them).
+
+**Coverage (Decision 181 cl.2):** cl.1 -- tests/checks/iam_tf/test_url_only_invoke_guard.py on the policy text, the
+post-apply simulate's url-only rows on the shared writer's ARN (explicitDeny), the telemetry writer's deploy gate (its
+own direct DryRun invoke is AccessDenied) and the handler's refusal of a missing requestContext. Residuals:
+PlatformAdmin (Decision 285 cl.3) and root are unbounded, alarmed by rec-4204; the repo checks that keep the boundary
+list, grant conditions and guard routing in sync (rec-4203); cl.5's per-mutation confirmation is
+instruction-enforced (rec-4098); rec-4205 and rec-4206 stay with Decision 230 cl.5.
+
+```yaml reversal-conditions
+decision: 291
+review_by: 2027-04-30
+on_trigger: "re-decide via /plan"
+conditions:
+  - id: condition-key-semantics-change
+    kind: manual
+    description: "AWS changes lambda:InvokedViaFunctionUrl semantics, the deploy gate's direct DryRun invoke stops returning AccessDenied, or the post-apply simulate's url-only rows stop reporting explicitDeny: re-decide clause 1 (from Decision 213)."
+  - id: scoped-login-blocks-verbs
+    kind: manual
+    description: "A scoped login cannot run a telemetry verb that needs no destructive privilege: re-examine the grant set before widening it; fired 2026-10-14 and resolved by Decision 216 cl.4 without widening (from Decision 213)."
+```
+
+**Related:** Decision 213 (superseded), 91 (amended), 216, 230, 237, 255 and 270 (carried forward), 143, 165, 181,
+202, 204, 239, 256, 283, 284, 285; rec-5449.
+
+---
+
 ## Decision 290: On The Loop's public identity re-decided -- one confidentiality boundary on every public surface, financial reporting in another repository, and the identity lists in one contract (supersedes Decision 286, amends Decisions 127, 171 and 209) (Decided)
 
 ```yaml
@@ -5728,60 +5823,12 @@ conditions:
 
 ## Decision 213: An identity-trusting Lambda is reachable only through its AWS_IAM Function URL, enforced in the permissions boundary; telemetry writes get their own function and their own scoped catalog login (amends Decision 81 clauses 1, 5, 6 and 7, Decision 91 clause 1 and Decision 126) (Decided)
 
-```yaml
-number: 213
-status: Decided
-decided_date: "2026-10-09"
-amends: [81, 91, 126]
-significance:
-  value: numbered_decision
-  justification: "Durable IAM and runtime-artifact commitments with reversal conditions: amends Decision 81 cl.1/5/6/7, 91 cl.1 and 126's admin tier; a governance note in ducklake_writer.yaml cannot carry a cross-function boundary invariant, and amendment_forms annotations cannot add the URL-only rule, the login model or an admin carve-out."
-```
-
-**Status:** Decided
+**Status:** Superseded
 **Date:** 2026-10-09
-**Warehouse ID:** dec-213 (per Decision 84 backfill)
 
-**Problem:** A direct lambda:Invoke delivers the caller's raw payload as the event, so any holder of lambda:InvokeFunction can forge requestContext.authorizer.iam. Telemetry derives the tenant from that field (Decision 200 cl.1). Telemetry verbs were headed for the shared ops writer, which every agent and CI identity can invoke and which carries production-destructive verbs, and every catalog-connecting Lambda shares one database login (created through the Neon API, so likely a neon_superuser member) that reaches both catalogs' metadata.
+**Decision:** Superseded by Decision 291, which restates its rule and names the amenders that keep their parts: Decision 216, Decision 230, Decision 237, Decision 255 and Decision 270; its amendments of Decisions 81 and 126 are held by Decisions 284 and 283, and its amendment of Decision 91 clause 1 is restated in Decision 291 cl.2. Point map: pt1 -> cl.1; pt2 -> cl.2 and Decision 284; pt3 -> cl.3 and Decision 216; pt4 -> cl.4; pt5 -> cl.5; pt6 -> cl.6. Compacted in place (Decision 149), not archived, because code and contracts still cite "Decision 213" by name.
 
-**Decision:**
-1. URL-only invariant. A handler may trust requestContext.authorizer.iam only when every non-URL path to it is closed. The permissions boundary carries three Deny statements naming by ARN each function whose handler trusts that field (today the telemetry writer) and, as defence in depth, the shared writer and reader: lambda:InvokeFunction / InvokeAsync unless lambda:InvokedViaFunctionUrl is true; lambda:AddPermission / RemovePermission / PutResourcePolicy / DeleteResourcePolicy; and lambda:Create/UpdateEventSourceMapping on lambda:FunctionArn. Every bounded identity's grant of lambda:InvokeFunction on such a function also carries the condition. A new identity-trusting function is named in the boundary, by a human-applied bootstrap change, before it ships.
-2. Telemetry write verbs run on agent-platform-ducklake-telemetry-writer under Decision 143 cl.3. Its role reaches S3 only on the telemetry catalog's data prefix and its fenced blob root, never the production ducklake/ prefix; it never carries a destructive or drop verb. The shared writer stays the sole ops_* write authority and keeps refusing telemetry boundaries. Amends Decision 81: cl.1's runtime artifacts are writer, reader, maintenance, maintenance_smoke, catalog_dr and telemetry_writer (catalog_dr was never listed); cl.5 (as widened by Decision 210) and cl.7 read as one write-time enforcement chokepoint per table, the closed boundary covering both writers. Amends Decision 91 cl.1: an identity-scoped verb set may live on its own function; OQ.15's thin-verb Lambdas are not reopened.
-3. Scoped catalog logins. The telemetry writer connects as its own SQL-created Postgres role, DML-only on its catalog's metadata schema, with a connection limit and its own secret; the role is defined in a version-controlled migration that the RDS swap re-runs. Schema migrations stay an admin step under the owner login.
-4. Detection. CloudTrail data events are logged for the named functions on the Decision 202 trail.
-5. Amends Decision 126's admin tier and, for this verb only, Decision 81 cl.6: an ADMIN-container agent may write the scoped login's secret value and invoke ducklake_maintenance's provision_telemetry_login (migration plus password) only under explicit human direction, presenting each mutation and executing it after the human accepts (the Decision 204 cl.2 shape). The password is never displayed or stored outside Secrets Manager.
-6. Authorizes docs/contracts/iam-simulate-fixture.yaml's structural budget at 650 for the URL-only simulate rows (Decision 165).
-
-**Rationale:** The boundary is the one layer every bounded principal carries and agents cannot edit (Decision 143 cl.1, Decision 144); a boundary cannot see service principals or event source mappings, so those paths are closed at their control points. Live probe 2026-10-06: the Function URL needs both InvokeFunction and InvokeFunctionUrl, and lambda:InvokedViaFunctionUrl separates URL from direct calls in identity evaluation.
-
-**Coverage (Decision 181 cl.2):** direct invoke by bounded principals -- the boundary Deny and the per-grant conditions; resource-policy and event-source paths -- the two further Denies; continuous proof -- the telemetry writer's deploy gate asserts a direct DryRun invoke is denied by the permissions boundary (the denial names it), and the post-apply simulate rows expect explicitDeny; defence in depth -- the handler rejects a missing requestContext. Residuals with owning recs: PlatformAdmin and root (unbounded by Decision 144 cl.3, trusted operators; alarm on non-URL invokes, rec-4204); the apply guard's EventBridge safe shape and the repo checks that keep the boundary list, grant conditions and guard routing in sync (rec-4203); before 2c, the PR CI role's writer invoke (rec-4205), create_ops_tables force_recreate on the CI-reachable writer (rec-4206), and the producer identity model with the telemetry writer's re-sizing (rec-4207); cl.5's per-mutation human confirmation is instruction-enforced (rec-4098).
-
-```yaml reversal-conditions
-decision: 213
-review_by: 2027-04-30
-on_trigger: "re-decide via /plan"
-conditions:
-  - id: condition-key-semantics-change
-    kind: manual
-    description: "AWS changes lambda:InvokedViaFunctionUrl semantics, the deploy gate's direct DryRun invoke stops returning AccessDenied, or the post-apply simulate's url-only rows stop reporting explicitDeny: re-decide clause 1."
-  - id: scoped-login-blocks-verbs
-    kind: manual
-    description: "The scoped login cannot run a telemetry verb that needs no destructive privilege: re-examine the grant set before widening it."
-```
-
-**Related:** Decision 81 (amended), 91 (amended), 126 (amended), 143 cl.1/cl.3, 144 cl.1/cl.3, 200 cl.1, 202, 204 cl.2, 210, 181 cl.2, 165, 84 I-1, 98, 107, 157, 177.
-
-> **Update (2026-10-09):** PLAN-url-only-invoke-guard step 8 measured that a principal whose own InvokeFunction grant is URL-only sees 'no identity-based policy allows' on a direct invoke, never the boundary's name, so the telemetry writer's deploy gate asserts AccessDenied for its own principal. The boundary Deny is proven by tests/checks/iam_tf/test_url_only_invoke_guard.py on the policy text, which names the telemetry writer, and by the post-apply simulate's url-only rows on the shared writer's ARN (same statement, explicitDeny). The reversal stanza's condition-key-semantics-change was re-armed to match.
-
-[Amendment 2026-10-14, Decision 216: cl.3's admin step is carved out for the disposable smoke catalog; the reversal condition scoped-login-blocks-verbs fired and was resolved without widening the grant set.]
-
-[Amendment 2026-10-20, Decision 230: cl.1's denies name the telemetry functions by one pattern, cl.3's logins are one per catalog binding from a closed table, cl.5's carve-out covers the two catalog verbs and the four logins, and rec-4205 and rec-4206 concern the shared ops writer and stay with the CI write narrowing plan.]
-
-[Amendment 2026-10-27, Decision 237: cl.5's scoped-login value lives in its /secret/ SecureString parameter; the password is never displayed or stored outside it.]
-
-[Amendment 2026-11-13, Decision 255: cl.1's invariant reads "every path other than the Function URL and the function's named API route is closed"; the API path's control points are Decision 255 cl.2, and for that path cl.4's caller record is the API access log.]
-
-[Amendment 2026-11-17, Decision 270: cl.1's Denies name each function by ARN or by a prefix that covers it and every qualifier (writer*, reader*, telemetry-*).]
+**Superseded by: Decision 291**
 
 ---
 
@@ -12884,6 +12931,8 @@ is now split into DuckLakeInvokeUrl and DuckLakeInvokeViaUrlOnly, so a direct in
 [Amendment 2026-10-25, PLAN-telemetry-reader-and-smoke-twin (Decision 236 cl.6): the telemetry reader serves its own verb set, the event verbs minus transcript_content.]
 
 [Amendment 2026-10-29, Decision 239: the telemetry content reader serves its own verb set, transcript_row_masked and session_transcript_masked.]
+
+> **Amended by Decision 291 (2026-11-27):** Decision 213 is compacted. Its note on clause 1 reads through Decision 291 cl.2, which restates that an identity-scoped verb set may live on its own function, and cl.1, which keeps direct invoke unauthorized.
 
 ---
 
