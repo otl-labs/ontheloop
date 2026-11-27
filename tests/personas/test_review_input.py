@@ -355,3 +355,17 @@ def test_unusable_base_files_are_input_unusable(tmp_path: Path, monkeypatch: pyt
     gone = _base(tmp_path)
     (gone / CONFIG_PATH).unlink()
     _unusable(tmp_path, monkeypatch, "input_unusable", ctx=ctx, base=gone)
+
+
+def test_code_reviewer_input_carries_reference_hits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    extra = {"docs/notes.md": "see src/sample/mod.py and src.sample.mod for details\n"}
+    body = _build(tmp_path, monkeypatch, _context(), extra)
+    doc = json.loads(body["reference_hits"])
+    by_term = {t["term"]: t for t in doc["terms"]}
+    assert {"src/sample/mod.py", "src.sample.mod"} <= set(by_term)
+    note = next(h for h in by_term["src.sample.mod"]["hits"] if h["path"] == "docs/notes.md")
+    assert note["in_bundle"] is False and doc["files_scanned"] > 0
+    own = next(h for h in by_term["src/sample/mod.py"]["hits"] if h["path"] == "docs/notes.md")
+    assert own["line"] == 1
+    schema = execute.schema_for(tmp_path / "base", PERSONA, "input")
+    assert "reference_hits" in schema["required"]

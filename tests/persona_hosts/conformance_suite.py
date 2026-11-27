@@ -91,14 +91,18 @@ def daemon() -> None:
         pytest.fail(f"docker unreachable: {proc.stderr.strip()[-300:]}")
 
 
-def _teardown_images(image_id: str, prebuilt: bool) -> list[str]:
-    """A prebuilt image is an input the suite never removes; a tree-built one is removed so no run leaves it dangling."""
-    return [] if prebuilt else [image_id]
+def _teardown_images(image_id: str, prebuilt: bool, shared: bool = False) -> list[str]:
+    """A prebuilt image is an input the suite never removes; a tree-built one is removed so no run leaves it dangling.
+
+    Under xdist the workers share one content-addressed image, so no worker may remove it while another still runs.
+    """
+    return [] if prebuilt or shared else [image_id]
 
 
 def test_teardown_keeps_a_prebuilt_image() -> None:
     assert _teardown_images("sha256:" + "a" * 64, prebuilt=True) == []
     assert _teardown_images("sha256:" + "a" * 64, prebuilt=False) == ["sha256:" + "a" * 64]
+    assert _teardown_images("sha256:" + "a" * 64, prebuilt=False, shared=True) == []
 
 
 @pytest.fixture(scope="module")
@@ -115,7 +119,7 @@ def image_id(daemon: None) -> Iterator[str]:
     try:
         yield image
     finally:
-        for ref in _teardown_images(image, prebuilt is not None):
+        for ref in _teardown_images(image, prebuilt is not None, "PYTEST_XDIST_WORKER" in os.environ):
             _docker("rmi", ref, check=False)
 
 
@@ -234,9 +238,9 @@ def test_unknown_persona_exits_2(adapter: str, image_id: str, env: dict[str, str
     assert result.exit_code == 2
 
 
-def _probe(adapter: str, image: str, network: str, code: str) -> subprocess.CompletedProcess[str]:
+def _probe(adapter: str, image: str, network: str, code: str, **extra: Any) -> subprocess.CompletedProcess[str]:
     argv = ARGV_BUILDERS[adapter](
-        image, FIXTURE, str(HERE), str(HERE), key_variable=None, network=network, entrypoint=["python", "-c", code]
+        image, FIXTURE, str(HERE), str(HERE), key_variable=None, network=network, entrypoint=["python", "-c", code], **extra
     )
     return subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
 
@@ -248,6 +252,21 @@ def test_process_is_non_root_and_cannot_write_the_app_tree(adapter: str, image_i
     )
     out = _probe(adapter, image_id, network, code)
     assert out.stdout.split() == ["10001", "DENIED"], out.stderr
+
+
+def test_named_tree_is_mounted_read_only(adapter: str, image_id: str, network: str, tmp_path: Path) -> None:
+    tree = tmp_path / "head"
+    tree.mkdir()
+    (tree / "probe.txt").write_text("tree-probe", encoding="utf-8")
+    os.chmod(tree, 0o755)
+    os.chmod(tree / "probe.txt", 0o644)
+    code = (
+        "print(open('/trees/head/probe.txt').read())\n"
+        "try:\n    open('/trees/head/new.txt','w')\n    print('WROTE')\nexcept OSError:\n    print('DENIED')"
+    )
+    out = _probe(adapter, image_id, network, code, trees={"head": str(tree)})
+    assert out.stdout.split() == ["tree-probe", "DENIED"], out.stderr
+    assert not (tree / "new.txt").exists()
 
 
 def test_dummy_key_never_reaches_stdout_or_events(adapter: str, image_id: str, env: dict[str, str], network: str) -> None:

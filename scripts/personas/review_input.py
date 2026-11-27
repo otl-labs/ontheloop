@@ -17,7 +17,7 @@ from typing import Any
 import yaml
 
 from scripts.checks.verification import validate_weakening_candidates as weakening
-from scripts.personas import materialise, route, snapshot
+from scripts.personas import materialise, reference_hits, route, snapshot
 from scripts.personas.materialise import Unusable
 from scripts.session import merge_checks
 
@@ -325,12 +325,14 @@ def build(root: Path, ctx: dict[str, Any]) -> dict[str, Any]:
     context_doc = _base_read(base, PROJECT_CONTEXT)
     if not context_doc.strip():
         raise Unusable("input_unusable", f"{PROJECT_CONTEXT} is empty at the base")
+    scope_files = _scope_files(root, entries, files)
     return {
         "plan": plan_text,
         "change_files": _change_files(files),
         "diff": review["diff"],
         "review_scope": json.dumps({"files": entries, "plan": plan_rel}, sort_keys=True),
-        "review_scope_files": _scope_files(root, entries, files),
+        "review_scope_files": scope_files,
+        "reference_hits": reference_hits.reference_hits(root, files, review["merge_base_texts"], scope_files, plan_rel),
         "project_context": context_doc,
         "review_exemptions": _section(_base_read(base, ARCHIVE), EXEMPTIONS_HEADER),
         "review_dispositions": _dispositions(base),

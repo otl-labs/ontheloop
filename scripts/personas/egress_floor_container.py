@@ -24,6 +24,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from scripts.personas import egress_floor as base
+from scripts.personas import egress_trees
 
 ROOT = Path(__file__).resolve().parents[2]
 BRIDGE = "br-persona"
@@ -35,7 +36,7 @@ PROXY_USER = "persona-egress-proxy"
 BRIDGE_IN = "EGRESS_BRIDGE_IN"
 BRIDGE_FWD = "EGRESS_BRIDGE_FWD"
 INSTALL_DIR = Path("/usr/local/lib/persona-egress")
-INSTALLED = ("egress_launcher.py", "egress_proxy.py", "egress_container_probe.py")
+INSTALLED = ("egress_launcher.py", "egress_proxy.py", "egress_container_probe.py", "egress_trees.py")
 SNAPSHOT = "snapshot.json"
 MANIFEST = "manifest.json"
 DROPIN = Path("/etc/systemd/system/docker.socket.d/zz-egress-floor.conf")
@@ -229,6 +230,21 @@ def install_files(snapshot: str, root: Path = ROOT, target: Path = INSTALL_DIR) 
     return all(os.stat(target / n).st_uid == 0 for n in (*INSTALLED, SNAPSHOT, MANIFEST))
 
 
+def install_main_tree(root: Path = ROOT, target: Path = INSTALL_DIR) -> bool:
+    """Root-held copy of main's tracked files at the run SHA; a failed copy leaves no trees/main and never fails the floor."""
+    destination = target / "trees" / "main"
+    try:
+        shutil.rmtree(destination, ignore_errors=True)
+        destination.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+        os.chmod(destination.parent, 0o755)
+        egress_trees.copy_tree(root, destination)
+    except (OSError, ValueError) as exc:
+        shutil.rmtree(destination, ignore_errors=True)
+        print(f"MAIN-TREE-SKIPPED {type(exc).__name__}")
+        return False
+    return True
+
+
 def write_sudoers() -> bool:
     pending = base.SUDOERS.with_name(base.SUDOERS.name + ".new")
     pending.write_text(SUDOERS_LINES, encoding="utf-8")
@@ -276,6 +292,7 @@ def apply() -> bool:
     ok = sh(network_argv())[0] == 0 and ok
     ok = sh([docker, "pull", f"{image}@{digest}"], PULL_TIMEOUT)[0] == 0 and ok
     ok = install_files(snapshot_text(image, digest)) and ok
+    install_main_tree()
     return write_sudoers() and ok
 
 

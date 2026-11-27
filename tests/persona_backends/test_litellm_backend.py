@@ -664,3 +664,10 @@ def test_role_input_refusal_reservation_and_probe_turn(tmp_path, monkeypatch):
     cut = fakes.Fill((attempt(FB, "outage"),), None, None, probe)
     _, events = drive(fakes.CapturingTransport([cut]), role=FB, clock=fakes.FakeClock())
     assert [e["probe_turn"] for e in events if "turn" in e] == [1]
+
+
+def test_read_tree_refusal_dispatch_and_cap(tmp_path):
+    kw = fakes.rt_kwargs(tmp_path)
+    with pytest.raises(RunRefused, match="needs a mounted tree"):
+        drive(T([final()]), contract=kw["contract"])
+    assert drive(T([fakes.RT_LIST] * 2 + [final()]), **kw)[0]["failure"] == "review_incomplete"

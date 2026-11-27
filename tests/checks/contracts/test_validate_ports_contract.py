@@ -294,7 +294,12 @@ def test_missing_contract_file_fails(tmp_path: Path, capsys: pytest.CaptureFixtu
 
 
 def test_skips_persona_rule_without_run_persona_port(root: Path) -> None:
-    _mutate(root, lambda d: d["ports"].remove(_port(d, "run_persona")))
+    def drop(d: dict[str, Any]) -> None:
+        d["ports"].remove(_port(d, "run_persona"))
+        for key in ("coupling_findings", "structural_assumptions"):
+            d[key] = [r for r in d[key] if "run_persona" not in r.get("ports", [])]
+
+    _mutate(root, drop)
     failed: list[str] = []
     validate_ports_contract(failed, root=root)
     assert failed == []

@@ -16,7 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from scripts.personas import egress_launcher, execute, guidance, resolve_pr, snapshot
+from scripts.personas import egress_launcher, egress_trees, execute, guidance, resolve_pr, snapshot
 from scripts.personas import route as route_mod
 
 Provider = Callable[[Path, dict[str, Any]], dict[str, Any]]
@@ -25,6 +25,26 @@ CASE_KEY = "_guidance_case"
 CASE_PREFIX = "GUIDANCE-CASE:"
 CASE_LINE = re.compile(r"^GUIDANCE-CASE: ([a-z][a-z0-9_]*)$")
 REQUEST_HEADROOM = 1024 * 1024
+
+
+def tree_names(base: Path, route_id: str) -> list[str]:
+    """The trees (head, main) the routed persona's contract names through read_tree:<tree>, in contract order."""
+    contract = execute._contract(base, route_id) or {}  # noqa: SLF001 -- the one contract loader
+    caps = contract.get("capabilities") or []
+    return [c.split(":", 1)[1] for c in caps if isinstance(c, str) and c.startswith("read_tree:") and ":" in c]
+
+
+def pack_head(root: Path, out: Path) -> None:
+    tar = out / "head.tar"
+    try:
+        egress_trees.pack(root, tar)
+        size = tar.stat().st_size
+    except OSError as exc:
+        tar.unlink(missing_ok=True)
+        raise Unusable("input_unusable", f"the head tree could not be packed ({type(exc).__name__})") from exc
+    if size > egress_trees.TREE_MAX_BYTES:
+        tar.unlink(missing_ok=True)
+        raise Unusable("input_unusable", f"the head tree is {size} bytes, over the {egress_trees.TREE_MAX_BYTES} byte cap")
 
 
 class Unusable(Exception):
@@ -148,6 +168,8 @@ def materialise(
             size = len(text.encode("utf-8"))
             if size > egress_launcher.MAX_REQUEST - REQUEST_HEADROOM:
                 raise Unusable("input_unusable", f"the input is {size} bytes, over the launcher request cap less headroom")
+            if "head" in tree_names(base_root if base_root is not None else execute.ROOT, route_id):
+                pack_head(root, out)
             (out / f"input-{route_id}.json").write_text(text, encoding="utf-8")
             print(f"PERSONA-VERDICT input {route_id} bytes={size}")
         except (Unusable, snapshot.SnapshotRefused) as exc:
