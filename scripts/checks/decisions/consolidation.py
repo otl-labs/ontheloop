@@ -460,6 +460,19 @@ def _carried_problems(tag: str, carried: list[Any], cons: int, supersedes: list[
     return problems
 
 
+def _compacted_history(supersedes: list, entries: dict[int, str], rows: dict[int, dict]) -> bool:
+    """Every victim's stub names one entry that is a superseded compacted stub whose title declares exactly the victims."""
+    blocks = [entries.get(n, "") for n in supersedes]
+    if not blocks or not all(is_compacted_stub(b) for b in blocks):
+        return False
+    targets = {(extract_superseded_by(b) or "").removeprefix("dec-") for b in blocks}
+    top = targets.pop() if len(targets) == 1 else ""
+    block = entries.get(int(top)) if top.isdigit() else None
+    if block is None or not is_compacted_stub(block) or not _superseded(rows, int(top), block):
+        return False
+    return _declared(block) == set(supersedes)
+
+
 def _manifest_problems(root: Path, rel: str, data: dict, ctx_in: dict, base_reader: BaseReaderFn) -> list[str]:
     tag, entries, rows = f"consolidation manifest {rel}", ctx_in["entries"], ctx_in["rows"]
     supersedes = data.get("supersedes")
@@ -470,10 +483,14 @@ def _manifest_problems(root: Path, rel: str, data: dict, ctx_in: dict, base_read
         None,
     )
     if cons is None:
+        if _compacted_history(supersedes, entries, rows):
+            return []
         return [f"{tag}: no entry's envelope supersedes exactly {sorted(supersedes)}"]
     if _superseded(rows, cons, entries[cons]):
         return []
     problems = []
+    if set(_extract_title_borne_supersedes(entries[cons].split("\n", 1)[0])) != set(supersedes):
+        problems.append(f"{tag}: Decision {cons}'s heading title does not declare (supersedes {sorted(supersedes)})")
     for n in supersedes:
         block = entries.get(n)
         if block is None or not is_compacted_stub(block) or extract_superseded_by(block) != f"dec-{cons:03d}":
