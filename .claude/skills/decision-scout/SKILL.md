@@ -5,7 +5,7 @@ description: "Use when: scope a proposed plan against active decisions, surface 
 
 ## Intent
 
-Given a proposed plan approach, read the north stars first (step 0), then surface every active decision that is relevant -- to cite, to contradict, as related work, or a spirit-alignment concern (SPIRIT, Phase 2) -- plus any roadmap tier_item its Scope touches (ROADMAP, step 8b). Triage is BOUNDED (Phase 1 step 1): the committed `docs/decisions-index.json` projection plus targeted reads of shortlisted entries; only the structured summary returns.
+Given a proposed plan approach, read the north stars first (step 0), then surface every relevant active decision (CITE, CONTRADICT, RELATED or SPIRIT, Phase 2) and any roadmap tier_item its Scope touches (ROADMAP, step 8b). Triage is BOUNDED (step 1): the committed `docs/decisions-index.json` projection plus targeted reads of shortlisted entries; only the structured summary returns.
 
 A BLOCKING `/plan` Step 6 gate whose output the parent and human trust as exhaustive.
 
@@ -13,7 +13,7 @@ A BLOCKING `/plan` Step 6 gate whose output the parent and human trust as exhaus
 
 See `docs/contracts/instruction-architecture.yaml` block `gate_subagent_retrieval` (isolation_rationale, bounded_retrieval).
 
-### Lambda / portal migration contract (T1.5 c1 owns this; rec-2774)
+### Lambda / portal migration contract (T1.5 c1 owns this)
 
 See the same contract's `gate_subagent_retrieval.substrate_swap_contract`.
 
@@ -27,14 +27,7 @@ See the same contract's `gate_subagent_retrieval.substrate_swap_contract`.
 
 1. **Triage source.** Read `docs/decisions-index.json` (rationale: `gate_subagent_retrieval.triage_source_provenance`). Derive **M** = count of `live: true` entries, never the max decision number (numbering gaps). Each live entry's `title`, `triage_excerpt` (<=320 chars), `currency` and `category_tags` is the Phase 2 signal -- never a whole-file load here.
 
-2. Read the caller's input brief, which is mandated to include:
-   - **Intent** (1-2 sentences, `/plan` Step 3)
-   - **Proposed approach** (`/plan` Steps 3-5 synthesis)
-   - **Scope file list** (`/plan` Step 4)
-   - **Verification Tier** (V1/V2/V3, `/plan` Step 5)
-   - **Explicitly cited decision IDs** (any the human or planning agent already named)
-
-If any of these inputs are absent in the prompt, return immediately with `Verdict: BLOCK` and a one-line note: "Caller did not provide [missing input]. Re-dispatch after [step] completes."
+2. Read the caller's brief: **Intent** (`/plan` Step 3), **Proposed approach** (Steps 3-5), **Scope file list** (Step 4), **Verification Tier** (Step 5) and **Explicitly cited decision IDs**. Any input absent: return `Verdict: BLOCK` and one line: "Caller did not provide [missing input]. Re-dispatch after [step] completes."
 
 ### Phase 2: Triage Each Decision
 
@@ -45,7 +38,7 @@ If any of these inputs are absent in the prompt, return immediately with `Verdic
    - **IRRELEVANT** -- discard. Tag- or `carried_by`-matched + non-IRRELEVANT + any SPIRIT candidate (step 8) =
      the final SHORTLIST.
 
-4. **Targeted read.** For every shortlisted entry, locate its heading (`rg -n "^## Decision N:" docs/DECISIONS.md`) and Read only that section (offset/limit to the next heading), never the source file wholesale. Confirm or refine the provisional classification against the full text; a SPIRIT quote (step 8) may be any verbatim sentence from that section, not only the excerpt.
+4. **Targeted read.** For every shortlisted entry, locate its heading (`rg -n "^## Decision N:" docs/DECISIONS.md`) and Read only that section (offset/limit to the next heading). Confirm or refine the provisional classification against the full text; a SPIRIT quote (step 8) may be any verbatim sentence from that section, not only the excerpt.
 
 5. For each CONTRADICT, attach a severity:
    - **BLOCK** -- the approach cannot proceed without violating the decision. Plan must pivot.
@@ -68,7 +61,7 @@ If any of these inputs are absent in the prompt, return immediately with `Verdic
 
 ### Phase 3: Structured Output
 
-9. Return exactly this output. Each section is mandatory even when empty -- render `None` there.
+9. Return exactly this output. Each section is mandatory even when empty -- render `None` there. The last line is one JSON object: one item per CONTRADICT, SPIRIT, ROADMAP row and CITE above, in order.
 
 ```
 ## Decision Scout Report
@@ -109,9 +102,10 @@ BLOCK = >=1 CONTRADICT at BLOCK severity; pivot before confirming. ROADMAP rows 
 Decisions triaged: N of M
 Roadmap items intersected: K; CONFLICT: c; RELATED: r
 (Planning agent: copy both count lines verbatim into the plan's scout context line. Copy the Serves line too.)
+PERSONA_RESULT: {"verdict": "[NO_FLAGS|FLAGS_FOUND|BLOCK]", "contradictions": [{"id": "contradict:[N]", "decision": [N], "severity": "[BLOCK|WARN|NOTE]"}], "spirit": [{"id": "spirit:[N|NS.n|mission]", "target": "[Decision N|NS.n|mission]", "severity": "[WARN|NOTE]"}], "roadmap": {"rows": [{"id": "roadmap:[T-N.M]", "item": "[T-N.M]", "lane": "[CONFLICT|CITE|RELATED]"}]}, "cite": [{"decision": [N]}]}
 ```
 
-10. Cap total response at ~1,200 words (ROADMAP share: <=150). Revisit: after 40 consecutive plans at `CONFLICT: 0`, ROADMAP demotes to a RELATED-only pointer list -- the intersection and integrity line keep running, only the judgement pass stops (never retire the lane).
+10. Cap total response at ~1,200 words (ROADMAP share: <=150). Revisit: after 40 consecutive plans at `CONFLICT: 0`, ROADMAP demotes to a RELATED-only pointer list (only the judgement pass stops; the lane never retires).
 
 ---
 
@@ -119,13 +113,11 @@ Roadmap items intersected: K; CONFLICT: c; RELATED: r
 
 Verify before returning:
 - [ ] You read north-star.yaml first, applied both mechanical shortlists (step 3) before judgment, and read ONLY shortlisted entries as targeted sections -- never a whole-file load
-- [ ] Every CITE and CONTRADICT entry names a decision number that exists in the index
-- [ ] Every CONTRADICT entry has both a clause-level citation AND a severity
+- [ ] Every CITE and CONTRADICT names an indexed decision; every CONTRADICT has a clause citation AND a severity
 - [ ] Verdict: NO_FLAGS | FLAGS_FOUND | BLOCK -- one exact string
 - [ ] "Decisions triaged: N of M" is present and N equals M (the live:true count from Phase 1 step 1)
 - [ ] Total length under 1,200 words; ROADMAP section, integrity line and copy instruction present, at most 5 rows shown, none marked BLOCK
-- [ ] Every SPIRIT flag carries a verbatim quote per gate (ii), no paraphrase
-- [ ] SPIRIT flags number <= 3, no decision appears in both SPIRIT and CONTRADICT, and no north star in CONTRADICT
+- [ ] SPIRIT flags: <= 3, each with a verbatim gate (ii) quote; no decision in both SPIRIT and CONTRADICT, and no north star in CONTRADICT
 - [ ] NORTH STAR carries a score
 
 If any checkbox is false, fix it before returning.
@@ -136,5 +128,5 @@ If any checkbox is false, fix it before returning.
 
 - **Over-citation (keyword-only or defensive).** Shortlist broadly (step 3), but CITE only when the decision's *clause* governs the approach's *action*; CITE only when omission would meaningfully harm the plan. Long form: `gate_subagent_retrieval.anti_patterns`.
 - **Hedged contradictions.** "This *might* contradict Decision N" is no classification: if undetermined, mark NOTE and hedge in the explanation.
-- **Editing files.** Read-only -- never modify a file, even to fix a typo; file a rec instead.
+- **Editing files.** Read-only: file a rec instead.
 - **SPIRIT over-citation.** The highest-noise lane -- an unquotable "this feels misaligned" is not a flag. Three well-grounded flags beat ten hedged ones.
