@@ -50,13 +50,24 @@ def _texts(monkeypatch: pytest.MonkeyPatch, before: str | None, after: str | Non
     monkeypatch.setattr(route, "_fetch_text", fake)
 
 
+@pytest.fixture(autouse=True)
+def _no_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GITHUB_WORKSPACE", raising=False)
+
+
+def _event(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str | None = None, conclusion: str = "success") -> None:
+    target = tmp_path / "event.json"
+    target.write_text(json.dumps({"workflow_run": {"path": path or route.TRIGGER_PATH, "conclusion": conclusion}}))
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(target))
+
+
 def _route(files: list[dict[str, Any]], root: Path, draft: bool = False, unknown: bool = False) -> list[str]:
     return route.route(files, unknown, draft, "o/r", "head", "base", "t", root)
 
 
 def test_live_tree_binds_no_verdict_persona() -> None:
-    assert route.bound_personas(ROOT) == set()
-    assert _route([_f("scripts/x.py")], ROOT) == []
+    assert route.bound_personas(ROOT) == {"code_reviewer"}
+    assert _route([_f("scripts/x.py")], ROOT) == ["code_reviewer"]
 
 
 def test_plan_class_pr_routes_scout_on_every_head_and_critic_on_ready_heads(
@@ -146,10 +157,10 @@ def test_fixture_only_diff_routes_the_fixture_personas(bound_root: Path) -> None
     assert _route(files, ROOT) == ["canary_persona"]
     assert route.fixture_paths(files, False) == [f"{base}{s}.txt" for s in names]
     assert _route(files[:1], ROOT) == ["canary_persona"]
-    assert _route([*files, _f("scripts/x.py")], ROOT) == []
-    assert _route([_f(f"{base}notes.md")], ROOT) == []
-    assert _route([_f(f"{base}proceed.txt", "removed")], ROOT) == []
-    assert _route(files, ROOT, unknown=True) == []
+    assert _route([*files, _f("scripts/x.py")], ROOT) == ["code_reviewer"]
+    assert _route([_f(f"{base}notes.md")], ROOT) == ["code_reviewer"]
+    assert _route([_f(f"{base}proceed.txt", "removed")], ROOT) == ["code_reviewer"]
+    assert _route(files, ROOT, unknown=True) == ["code_reviewer"]
     assert _route(files, bound_root) == ["canary_persona"]
 
 
@@ -184,6 +195,7 @@ def test_main_logs_routes_and_writes_the_routes_file(
     (tmp_path / "prepared" / "resolution.json").write_text(json.dumps(resolution))
     monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
     monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "out"))
+    _event(tmp_path, monkeypatch)
     files = [_f(f"{route.FIXTURE_DIR}proceed.txt")]
     monkeypatch.setattr(route, "changed_files", lambda *a: (files, False, "m"))
     assert route.main([]) == 0
@@ -196,7 +208,7 @@ def test_main_logs_routes_and_writes_the_routes_file(
         "rescout": {},
     }
     assert not (tmp_path / "prepared" / route.PLAN_INPUTS).exists()
-    assert (tmp_path / "out").read_text() == "routes=1\nfixture=true\nfallback_drill=false\n"
+    assert (tmp_path / "out").read_text() == "routes=1\nfixture=true\nfallback_drill=false\nkeyed=true\n"
 
 
 def test_main_writes_carried_and_rescout_and_keeps_routes_to_run(
@@ -211,6 +223,7 @@ def test_main_writes_carried_and_rescout_and_keeps_routes_to_run(
     monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
     monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "out"))
     monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    _event(tmp_path, monkeypatch)
     monkeypatch.setattr(route, "changed_files", lambda *a: ([_f(PLAN)], False, "m"))
     monkeypatch.setattr(route, "route", lambda *a, **k: ["code_reviewer", "decision_scout"])
     seen: list[Any] = []
@@ -219,15 +232,15 @@ def test_main_writes_carried_and_rescout_and_keeps_routes_to_run(
 
     def fake_decide(repo: str, token: Any, res: dict, routes: list, plans: list, unknown: bool, root: Path) -> Any:
         seen.append((routes, plans, unknown, root))
-        return rescout.Decision(["code_reviewer"], [entry], {}, inputs)
+        return rescout.Decision(["decision_scout"], [entry], {}, inputs)
 
     monkeypatch.setattr(rescout, "decide", fake_decide)
     assert route.main([]) == 0
-    assert seen == [(["code_reviewer", "decision_scout"], [PLAN], False, tmp_path / "main")]
+    assert seen == [(["decision_scout"], [PLAN], False, tmp_path / "main")]
     doc = json.loads((tmp_path / "prepared" / "routes.json").read_text())
-    assert doc["routes"] == ["code_reviewer"] and doc["carried"] == [entry] and doc["rescout"] == {}
+    assert doc["routes"] == ["decision_scout"] and doc["carried"] == [entry] and doc["rescout"] == {}
     assert json.loads((tmp_path / "prepared" / route.PLAN_INPUTS).read_text()) == inputs
-    assert capsys.readouterr().out.strip() == "PERSONA-VERDICT routes=1 code_reviewer carried=1"
+    assert capsys.readouterr().out.strip() == "PERSONA-VERDICT routes=1 decision_scout carried=1"
     assert (tmp_path / "out").read_text().startswith("routes=1\n")
     monkeypatch.setattr(
         rescout, "decide", lambda *a: rescout.Decision(["decision_scout"], [], {"decision_scout": "moved"}, None)
@@ -240,6 +253,7 @@ def test_main_writes_carried_and_rescout_and_keeps_routes_to_run(
 def test_an_override_resolution_yields_no_routes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+    _event(tmp_path, monkeypatch, route.OVERRIDE_PATH)
     monkeypatch.setattr(route, "changed_files", lambda *a: (_ for _ in ()).throw(AssertionError("compare")))
     res = {"resolved": True, "override": {"run_id": 1}, "head_sha": "a" * 40, "base_ref": "main", "draft": False}
     route.resolve_pr.RESOLUTION.parent.mkdir(parents=True)
@@ -253,6 +267,7 @@ def _main_fixture_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resolu
     (tmp_path / "prepared").mkdir(exist_ok=True)
     (tmp_path / "prepared" / "resolution.json").write_text(json.dumps(resolution))
     monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+    _event(tmp_path, monkeypatch)
     out = tmp_path / "out"
     monkeypatch.setenv("GITHUB_OUTPUT", str(out))
     monkeypatch.setattr(route, "changed_files", lambda *a: (files, False, "m"))
@@ -280,6 +295,7 @@ def test_fixture_output_is_true_only_for_a_probe_only_diff(
 def test_fixture_is_false_when_unresolved_or_an_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+    _event(tmp_path, monkeypatch, route.OVERRIDE_PATH)
     monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "out"))
     monkeypatch.setattr(route, "changed_files", lambda *a: (_ for _ in ()).throw(AssertionError("compare")))
     route.resolve_pr.RESOLUTION.parent.mkdir(parents=True)
@@ -307,3 +323,224 @@ def test_fallback_drill_only_on_fixture_diffs(
     resolution = {"resolved": True, "head_sha": "h", "base_ref": "main", "draft": False}
     out = _main_fixture_output(tmp_path, monkeypatch, resolution, files)
     assert f"fallback_drill={expected}\n" in out
+
+
+CODE_FILES = [_f("scripts/x.py")]
+VERDICT_APP = 5817535
+
+
+def _workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, advisory: str | None = None) -> None:
+    """A main checkout under GITHUB_WORKSPACE whose advisory_runs row defaults line is replaced by `advisory`."""
+    main = tmp_path / "ws" / "main"
+    (main / "docs/contracts").mkdir(parents=True)
+    (main / route.PERSONAS_CONTRACT).write_text((ROOT / route.PERSONAS_CONTRACT).read_text(encoding="utf-8"))
+    text = (ROOT / route.CONFIG).read_text(encoding="utf-8")
+    if advisory is not None:
+        old = 'defaults: {local: "enabled", cloud: "enabled"}'
+        assert text.count(old) == 1
+        text = text.replace(old, advisory) if advisory.startswith("defaults") else text
+    if advisory == "absent":
+        text = yaml.safe_dump(
+            {"settings": [r for r in yaml.safe_load(text)["settings"] if r["id"] != "gates.code_reviewer.advisory_runs"]}
+        )
+    (main / route.CONFIG).write_text(text)
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path / "ws"))
+
+
+def _drive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    files: list[dict[str, Any]],
+    path: str | None = route.CI_PATH,
+    conclusion: str = "success",
+    runs: Any = None,
+) -> tuple[dict[str, Any], str, str]:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "prepared").mkdir(exist_ok=True)
+    resolution = {"resolved": True, "head_sha": "h", "base_ref": "main", "draft": False, "number": 7, "allowlisted": True}
+    (tmp_path / "prepared" / "resolution.json").write_text(json.dumps(resolution))
+    monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+    out = tmp_path / "out"
+    out.write_text("")
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    if path is None:
+        monkeypatch.delenv("GITHUB_EVENT_PATH", raising=False)
+    else:
+        _event(tmp_path, monkeypatch, path, conclusion)
+    monkeypatch.setattr(route, "changed_files", lambda *a: (files, False, "m"))
+
+    def fake_get(url: str, token: Any) -> Any:
+        if isinstance(runs, Exception):
+            raise runs
+        return {"check_runs": runs or []}
+
+    monkeypatch.setattr(route.resolve_pr, "get_json", fake_get)
+    assert route.main([]) == 0
+    return json.loads(route.ROUTES.read_text()), out.read_text(), ""
+
+
+def test_code_reviewer_routes_on_code_pr_once_implemented(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    doc, out, _ = _drive(tmp_path, monkeypatch, CODE_FILES)
+    assert doc["routes"] == ["code_reviewer"]
+    assert out == "routes=1\nfixture=false\nfallback_drill=false\nkeyed=true\n"
+    doc, out, _ = _drive(tmp_path, monkeypatch, CODE_FILES, route.TRIGGER_PATH)
+    assert doc["routes"] == []
+    assert "keyed=false\n" in out
+
+
+def test_cancelled_ci_routes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    doc, out, _ = _drive(tmp_path, monkeypatch, CODE_FILES, conclusion="cancelled")
+    assert doc["routes"] == [] and "keyed=false\n" in out
+    assert "the CI run was cancelled" in capsys.readouterr().out
+
+
+def test_advisory_runs_off_skips_with_a_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _workspace(tmp_path, monkeypatch, 'defaults: {local: "disabled", cloud: "disabled"}')
+    doc, out, _ = _drive(tmp_path, monkeypatch, CODE_FILES)
+    assert doc["routes"] == [] and "keyed=false\n" in out
+    assert "PERSONA-VERDICT skip code_reviewer: advisory_runs disabled" in capsys.readouterr().out
+
+
+def _verdict_run(title: str, app: int = VERDICT_APP) -> dict[str, Any]:
+    return {"name": "persona-verdict/code_reviewer", "app": {"id": app}, "output": {"title": title}}
+
+
+def test_rerun_with_existing_check_skips(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    doc, _, _ = _drive(tmp_path, monkeypatch, CODE_FILES, runs=[_verdict_run("verdict PROCEED")])
+    assert doc["routes"] == [] and "already carries a verdict check" in capsys.readouterr().out
+    doc, _, _ = _drive(tmp_path, monkeypatch, CODE_FILES, runs=[_verdict_run("failure budget_exhausted")])
+    assert doc["routes"] == ["code_reviewer"]
+    doc, _, _ = _drive(tmp_path, monkeypatch, CODE_FILES, runs=[_verdict_run("verdict PROCEED", app=1)])
+    assert doc["routes"] == ["code_reviewer"]
+    monkeypatch.setattr(merge_checks, "verdict_app_id", lambda text: "the configuration does not parse")
+    doc, _, _ = _drive(tmp_path, monkeypatch, CODE_FILES, runs=[_verdict_run("verdict PROCEED")])
+    assert doc["routes"] == ["code_reviewer"] and "verdict app id unavailable" in capsys.readouterr().out
+    monkeypatch.undo()
+    monkeypatch.delenv("GITHUB_WORKSPACE", raising=False)
+    doc, _, _ = _drive(tmp_path, monkeypatch, CODE_FILES, runs=RuntimeError("boom"))
+    assert doc["routes"] == ["code_reviewer"] and "the check-runs read failed" in capsys.readouterr().out
+
+
+def test_fixture_routes_only_from_the_trigger_upstream(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fixture = [_f(f"{route.FIXTURE_DIR}proceed.txt")]
+    drill = [_f(route.DRILL_PATH, "added")]
+    for files in (fixture, drill):
+        doc, out, _ = _drive(tmp_path, monkeypatch, files)
+        assert doc["routes"] == []
+        assert "fixture=false\nfallback_drill=false\nkeyed=false\n" in out
+    doc, out, _ = _drive(tmp_path, monkeypatch, fixture, route.TRIGGER_PATH)
+    assert doc["routes"] == ["canary_persona"] and "fixture=true\n" in out and "keyed=true\n" in out
+
+
+def test_undeclared_upstream_path_routes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    doc, out, _ = _drive(tmp_path, monkeypatch, CODE_FILES, ".github/workflows/elsewhere/ci.yml")
+    assert doc["routes"] == [] and "keyed=false\n" in out
+    assert "undeclared upstream .github/workflows/elsewhere/ci.yml" in capsys.readouterr().out
+    doc, _, _ = _drive(tmp_path, monkeypatch, CODE_FILES, None)
+    assert doc["routes"] == [] and "undeclared upstream none" in capsys.readouterr().out
+    (tmp_path / "event.json").write_text(json.dumps({"workflow_run": {}}))
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(tmp_path / "event.json"))
+    assert route.main([]) == 0
+    assert json.loads(route.ROUTES.read_text())["routes"] == []
+    (tmp_path / "event.json").write_text("[1]")
+    assert route.main([]) == 0
+    (tmp_path / "event.json").write_text("{")
+    assert route.main([]) == 0
+    assert json.loads(route.ROUTES.read_text())["routes"] == []
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "defaults: {local: on, cloud: on}",
+        "defaults: {local: off, cloud: off}",
+        'defaults: {local: "maybe", cloud: "maybe"}',
+        'defaults: {local: "enabled", cloud: "disabled"}',
+        "defaults: null",
+    ],
+)
+def test_advisory_runs_absent_or_bad_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], line: str
+) -> None:
+    _workspace(tmp_path, monkeypatch, line)
+    doc, _, _ = _drive(tmp_path, monkeypatch, CODE_FILES)
+    assert doc["routes"] == []
+    assert "advisory_runs bad value" in capsys.readouterr().out
+
+
+def test_advisory_runs_absent_reads_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _workspace(tmp_path, monkeypatch, "absent")
+    doc, _, _ = _drive(tmp_path, monkeypatch, CODE_FILES)
+    assert doc["routes"] == ["code_reviewer"]
+
+
+def test_advisory_state_unreadable_or_duplicated_is_bad(tmp_path: Path) -> None:
+    assert route.advisory_state("code_reviewer", tmp_path)[0] == "bad"
+    target = tmp_path / route.CONFIG
+    target.parent.mkdir(parents=True)
+    target.write_text("settings: nope\n")
+    assert route.advisory_state("code_reviewer", tmp_path)[0] == "bad"
+    row = {"id": "gates.code_reviewer.advisory_runs", "defaults": {"local": "enabled", "cloud": "enabled"}}
+    target.write_text(yaml.safe_dump({"settings": [row, row]}))
+    assert route.advisory_state("code_reviewer", tmp_path)[0] == "bad"
+    target.write_text(yaml.safe_dump({"settings": [row]}))
+    assert route.advisory_state("code_reviewer", tmp_path) == ("enabled", "")
+    target.write_text(":\n  - [")
+    assert route.advisory_state("code_reviewer", tmp_path)[0] == "bad"
+
+
+def test_advisory_runs_reads_the_committed_row_as_enabled() -> None:
+    assert route.advisory_state("code_reviewer", ROOT) == ("enabled", "")
+
+
+def test_keyed_is_false_outside_the_two_admitted_forms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bound_root: Path
+) -> None:
+    assert route.is_keyed(["code_reviewer"], "ci", ROOT)
+    assert route.is_keyed(["canary_persona"], "trigger", ROOT)
+    assert not route.is_keyed([], "ci", ROOT)
+    assert not route.is_keyed(["code_reviewer", "decision_scout"], "ci", ROOT)
+    assert not route.is_keyed(["code_reviewer"], "trigger", ROOT)
+    assert not route.is_keyed(["decision_scout"], "trigger", bound_root)
+    assert not route.is_keyed(["canary_persona"], "ci", ROOT)
+    assert not route.is_keyed(["code_reviewer"], None, ROOT)
+    monkeypatch.setattr(route, "route", lambda *a, **k: ["code_reviewer", "decision_scout"])
+    doc, out, _ = _drive(tmp_path, monkeypatch, [_f(PLAN)], route.TRIGGER_PATH)
+    assert doc["routes"] == ["decision_scout"] and "keyed=false\n" in out
+
+
+def test_existing_verdict_read_pages_and_refuses_a_bad_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    pages: list[str] = []
+
+    def fake(url: str, token: Any) -> Any:
+        pages.append(url)
+        if url.rsplit("page=", 1)[1] in ("1", "2"):
+            return {"check_runs": [{"name": "other", "app": {"id": 1}}] * 100}
+        return {"check_runs": [_verdict_run("verdict REVISE")]}
+
+    monkeypatch.setattr(route.resolve_pr, "get_json", fake)
+    assert route._existing_verdict("o/r", "t", "h", "code_reviewer", VERDICT_APP)
+    assert len(pages) == 3
+    monkeypatch.setattr(route.resolve_pr, "get_json", lambda url, token: {"check_runs": [{"name": "o"}] * 100})
+    assert not route._existing_verdict("o/r", "t", "h", "code_reviewer", VERDICT_APP)
+    monkeypatch.setattr(route.resolve_pr, "get_json", lambda url, token: {"check_runs": "no"})
+    with pytest.raises(RuntimeError):
+        route._existing_verdict("o/r", "t", "h", "code_reviewer", VERDICT_APP)
+
+
+def test_unreadable_config_applies_no_rerun_skip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(route, "advisory_state", lambda persona, root: ("enabled", ""))
+    assert route._gate_ci_routes(["code_reviewer"], tmp_path, "o/r", None, "h") == ["code_reviewer"]
+    assert "verdict app id unavailable" in capsys.readouterr().out

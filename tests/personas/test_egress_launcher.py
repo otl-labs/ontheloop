@@ -328,7 +328,7 @@ def test_sigterm_and_sigint_kill_the_container_and_proxy_then_exit_one(
     with pytest.raises(SystemExit) as exc:
         HANDLERS[L.signal.SIGTERM](15, None)
     assert exc.value.code == 1 and seen == ["killed"]
-    assert L.BOUNDS == {"probe": 120, "run": 600}
+    assert L.BOUNDS == {"probe": 120, "run": 3600}
 
 
 def test_a_surviving_container_or_proxy_is_a_teardown_failure_on_the_normal_path(
@@ -442,3 +442,17 @@ def test_probe_mode_writes_the_input_file(tmp_path: Path, monkeypatch: pytest.Mo
     in_dir, _ = L.make_dirs(L.Session(), "probe", {"upstream": "report"}, install)
     target = Path(in_dir, "input.json")
     assert json.loads(target.read_text()) == {"upstream": "report"} and oct(os.stat(target).st_mode & 0o777) == "0o644"
+
+
+def test_run_bound_covers_every_keyed_contract_budget() -> None:
+    import yaml
+
+    from scripts.personas import execute
+
+    root = Path(__file__).resolve().parents[2]
+    keyed = execute.keyed_personas(root)
+    assert keyed
+    for persona in keyed:
+        contract = yaml.safe_load((root / execute.CONTRACTS / f"{persona}.yaml").read_text(encoding="utf-8"))
+        assert L.BOUNDS["run"] > contract["budget"]["max_wall_clock_seconds"]
+    assert L.MAX_REQUEST >= 64 * 1024 * 1024

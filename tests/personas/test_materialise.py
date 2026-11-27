@@ -278,3 +278,22 @@ def test_fixture_case_picks_the_base_value(tmp_path: Path) -> None:
     assert body is None and (out / "failure-r_one.json").exists()
     out, body = _case_run(tmp_path / "nonfix", "NIT: a", slots=["fixture_guidance"], fixture=False)
     assert body is None
+
+
+def test_materialise_prints_input_bytes_per_route(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = _snap(tmp_path, {FX: "BLOCKING: a\n"})
+    out = _out(tmp_path)
+    materialise.materialise(root, out, RES, [PROBE], [], usable=True, fixture_paths=[FX])
+    size = (out / f"input-{PROBE}.json").stat().st_size
+    assert capsys.readouterr().out.splitlines() == [f"PERSONA-VERDICT input {PROBE} bytes={size}"]
+    assert "code_reviewer" in materialise.PROVIDERS
+
+
+def test_oversize_input_is_input_unusable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _snap(tmp_path, {FX: "BLOCKING: a\n"})
+    out = _out(tmp_path)
+    monkeypatch.setattr(materialise.egress_launcher, "MAX_REQUEST", materialise.REQUEST_HEADROOM + 10)
+    materialise.materialise(root, out, RES, [PROBE], [], usable=True, fixture_paths=[FX])
+    failure = json.loads((out / f"failure-{PROBE}.json").read_text())
+    assert failure["failure"] == "input_unusable" and "bytes" in failure["detail"]
+    assert not (out / f"input-{PROBE}.json").exists()

@@ -20,6 +20,7 @@ PREPARE_OUTPUTS = {
     "allowlisted": "${{ steps.resolve.outputs.allowlisted }}",
     "fixture": "${{ steps.route.outputs.fixture }}",
     "fallback_drill": "${{ steps.route.outputs.fallback_drill }}",
+    "keyed": "${{ steps.route.outputs.keyed }}",
 }
 
 

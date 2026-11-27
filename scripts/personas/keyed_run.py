@@ -95,7 +95,7 @@ def prepared_request(work: Path, root: Path) -> tuple[str, dict[str, Any]]:
     if not isinstance(routes, list) or len(routes) != 1 or not isinstance(routes[0], str) or not ROUTE.match(routes[0]):
         raise Refusal("routes")
     route = routes[0]
-    if route not in execute.fixture_personas(root):
+    if route not in execute.keyed_personas(root):
         raise Refusal("route_kind")
     if (work / "prepared" / f"failure-{route}.json").exists():
         raise Refusal("failure_file")

@@ -54,6 +54,7 @@ CASES: list[tuple[str, str, Callable[[dict[str, Any]], None]]] = [
         lambda j: j["run"]["outputs"].update({"x": "${{ steps.run-persona.outputs.x }}"}),
     ),
     ("prepare-outputs-missing", "prepare's outputs", lambda j: j["prepare"]["outputs"].pop("fallback_drill")),
+    ("prepare-outputs-no-keyed", "prepare's outputs", lambda j: j["prepare"]["outputs"].pop("keyed")),
     ("prepare-outputs-literal", "prepare's outputs", lambda j: j["prepare"]["outputs"].update({"fallback_drill": "true"})),
     (
         "other-job-names-output",
@@ -98,3 +99,11 @@ def test_run_outputs_refused_when_run_lacks_the_persona_step() -> None:
     jobs = _jobs()
     jobs["run"]["steps"] = [s for s in jobs["run"]["steps"] if s.get("name") != "Run the fixture persona"]
     assert any("run job's outputs" in p for p in f.fallback_problems(jobs))
+
+
+def test_run_fallback_reading_fixture_is_refused() -> None:
+    jobs = _jobs()
+    keyed = "needs.prepare.outputs.keyed == 'true'"
+    assert keyed in jobs["run-fallback"]["if"]
+    jobs["run-fallback"]["if"] = jobs["run-fallback"]["if"].replace(keyed, "needs.prepare.outputs.fixture == 'true'")
+    assert any("condition" in p for p in k.keyed_problems({"jobs": jobs}))

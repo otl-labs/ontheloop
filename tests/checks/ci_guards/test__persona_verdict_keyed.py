@@ -96,6 +96,26 @@ RED = [
         _if("smoke", "${{ " + _without("github.event.workflow_run.event == 'pull_request'") + " }}"),
     ),
     (
+        "run-reading-fixture",
+        "run job condition is not",
+        _if("run", "${{ " + k.KEYED_CONDITION + " }}"),
+    ),
+    (
+        "smoke-reading-keyed",
+        "condition is not",
+        _if("smoke", "${{ " + k.CONDITIONS["run"] + " }}"),
+    ),
+    (
+        "refusal-reading-keyed",
+        "condition is not",
+        _if("refusal", "${{ " + k.CONDITIONS["run"] + " }}"),
+    ),
+    (
+        "run-without-keyed-conjunct",
+        "run job condition is not",
+        _if("run", "${{ " + k.CONDITIONS["run"].replace(" && needs.prepare.outputs.keyed == 'true'", "") + " }}"),
+    ),
+    (
         "another-secret",
         "other than secrets.GITHUB_TOKEN",
         _step_update(
@@ -403,3 +423,12 @@ def test_run_fallback_step_list_is_run_s() -> None:
     assert k._canonical_run_steps("run-fallback")[2]["id"] == "run-fallback-floor"
     for _name, message, edit in RED_FALLBACK:
         assert any(message in p for p in _problems(edit)), (_name, _problems(edit))
+
+
+def test_run_reads_keyed_and_smoke_and_refusal_read_fixture() -> None:
+    doc = _doc()
+    assert "outputs.keyed == 'true'" in str(doc["jobs"]["run"]["if"])
+    assert "outputs.fixture" not in str(doc["jobs"]["run"]["if"])
+    for name in ("smoke", "refusal"):
+        assert "outputs.fixture == 'true'" in str(doc["jobs"][name]["if"])
+        assert "outputs.keyed" not in str(doc["jobs"][name]["if"])

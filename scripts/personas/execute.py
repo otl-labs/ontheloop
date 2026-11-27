@@ -1,7 +1,8 @@
 """Schema helpers for the verdict chain's fixture persona (post_verdict and keyed_run read them).
 
-The contracts and the index are read as YAML. Only a route named in executor-personas.yaml's fixture_kind.personas has a
-schema here; any other route gets None, so a result for it is never judged against a schema it does not have.
+The contracts and the index are read as YAML. Only a route in keyed_personas (executor-personas.yaml's fixture_kind.personas
+plus the implemented verdict rows) has a schema here; any other route gets None, so a result for it is never judged against
+a schema it does not have.
 guidance_slots is the exception: it reads any persona's contract under the trusted root, fixture or not.
 registry_key is the second whole-index read: it answers any personas row's registry_key, fixture or not.
 """
@@ -45,8 +46,26 @@ def registry_key(root: Path, persona: str) -> str | None:
     return None
 
 
+def keyed_personas(root: Path) -> list[str]:
+    """The fixture_kind personas plus every verdict row whose implementation status is implemented."""
+    names = list(fixture_personas(root))
+    doc = _load(root / INDEX)
+    rows = doc.get("personas") if isinstance(doc, dict) else None
+    for row in rows if isinstance(rows, list) else []:
+        impl = row.get("implementation") if isinstance(row, dict) else None
+        if (
+            isinstance(row, dict)
+            and row.get("kind") == "verdict"
+            and isinstance(impl, dict)
+            and impl.get("status") == "implemented"
+            and str(row.get("persona")) not in names
+        ):
+            names.append(str(row["persona"]))
+    return names
+
+
 def _contract(root: Path, route_id: str) -> dict[str, Any] | None:
-    if route_id not in fixture_personas(root):
+    if route_id not in keyed_personas(root):
         return None
     doc = _load(root / CONTRACTS / f"{route_id}.yaml")
     return doc if isinstance(doc, dict) else None
