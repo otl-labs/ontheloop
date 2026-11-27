@@ -90,6 +90,7 @@ ENTRIES: tuple[Entry, ...] = (
         attr="validate_plan_documents",
         pre=True,
         pre_globs=(
+            "scripts/checks/_decision_chain.py",
             "docs/plans/**",
             "docs/ROADMAP-*",
             "docs/DECISIONS.md",
@@ -169,6 +170,7 @@ ENTRIES: tuple[Entry, ...] = (
         attr="validate_plan_scope_closure",
         pre=True,
         pre_globs=(
+            "scripts/checks/_decision_chain.py",
             "docs/plans/**",
             "docs/contracts/plan-obligations.yaml",
             "scripts/contract_rules.py",

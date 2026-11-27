@@ -30,8 +30,13 @@ def test_planted_couplings_found_per_kind(repo: Path) -> None:
         ("north_star_carrier", 9002): ("NS.9.carried_by", "confirmed", "move_carrier", "R-NS"),
         ("supersession_waiver", 9001): ("9003->9001", "confirmed", "delete_orphan_waiver", "R-WAIVER"),
         ("census_row", 9002): ("S5-9002", "confirmed", "remove_row", "R-CENSUS"),
-        ("manifest_reference", 9001): ("supersedes", "confirmed", "fails_resolve", "R-MANIFEST"),
-        ("manifest_reference", 9002): ("units.9001 pt1.held", "confirmed", "fails_resolve", "R-MANIFEST"),
+        ("manifest_reference", 9001): ("supersedes", "confirmed", "resolves_to_successor", "R-MANIFEST"),
+        ("manifest_held_token", 9002): (
+            "units.9001 pt1.held",
+            "confirmed",
+            "successor_must_carry_token",
+            "R-MANIFEST-HELD",
+        ),
         ("chain_edge", 9001): ("9003.amends", "confirmed", "victim_or_carry_forward", "R-CHAIN"),
         ("delegated_key", 9001): ("delegates:docs/contracts/thing.yaml#knob", "confirmed", "redelegate", "R-DELEG"),
         ("authorizing_marker", 9001): (
