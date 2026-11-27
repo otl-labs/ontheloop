@@ -14,7 +14,7 @@ Review the branch's changes and return a structured findings report to the calli
 Find and read the plan file for the current branch:
 1. Run `bin/venv-python -m scripts.roadmap.find_plan` to get the plan file path.
 2. If the output is `NOT_FOUND`, proceed without plan context (note this in the report).
-3. Otherwise read the plan file at the output path.
+3. Otherwise read the plan at that path.
 
 Use the **Intent** and **Acceptance Criteria** sections to anchor the review: verify the implementation delivered what was planned, not only that the code is technically sound.
 
@@ -22,9 +22,9 @@ Use the **Intent** and **Acceptance Criteria** sections to anchor the review: ve
 
 ## Step 0b: Load Exemptions
 
-Read the "Code Review Exemptions" section in `docs/DECISIONS_ARCHIVE.md`. If that section is absent, report "exemptions source unavailable" in your report instead of silently matching zero exemptions. These are findings reviewed by a human and marked as intentional, not-applicable, or accepted-risk.
+Read the "Code Review Exemptions" section in `docs/DECISIONS_ARCHIVE.md`. If it is absent, report "exemptions source unavailable" rather than silently matching none. These are findings reviewed by a human and marked as intentional, not-applicable, or accepted-risk.
 
-When generating your report, skip any issue that matches an exemption (file path + issue type match, not expired).
+Skip any issue matching an unexpired exemption (file path + issue type).
 
 Note in your report: "X issues matched exemptions and were not flagged."
 
@@ -32,7 +32,7 @@ Note in your report: "X issues matched exemptions and were not flagged."
 
 # Scoped Branch Code Review
 
-Review the current branch's changes within the scope the Review Process below builds; do not read the entire repository.
+Review the current branch's changes within the review scope built below, not the entire repository.
 
 ## Review Process
 
@@ -41,17 +41,16 @@ Review the current branch's changes within the scope the Review Process below bu
    a. Run `git diff --name-only origin/main` to get the list of changed files.
    b. Read the plan file (via `bin/venv-python -m scripts.roadmap.find_plan`) and parse its Scope table for planned files.
    c. For each Python file in the changed + planned sets, run `bin/venv-python -m scripts.extract_imports <file>` to collect `src.*` direct imports.
-   d. The review scope is: **changed files + planned files + files that correspond to the direct imports collected in step (c)**. Resolve import module paths to file paths using the project file layout (e.g., `src.common.config` → `src/common/config.py`).
-   e. Skip entire directories (e.g., `src/data/handlers/`) unless specific files in them appear in the scope above.
+   d. The review files are: **changed files + planned files + the files of the step (c) imports**, one level deep (e.g., `src.common.config` → `src/common/config.py`); test files only when `tests/` files are in the diff or the plan Scope. Report any issue in them.
+   e. Skip whole directories (e.g. `src/data/handlers/`) unless files in them are review files.
+   f. The change's reach is any other file that depends on what changed (a caller or importer of a changed function; a test, contract, document or config naming a changed path, module or symbol): search the repository for each. Report an issue there only when the change causes or depends on it (a broken call, a stale reference, a contract no longer met, a defect in code it now relies on), anchored where it breaks.
 
-   > **Report no issues in a file outside this scope.**
+   > **Review scope = review files + the change's reach; outside the review files, never report an issue the change neither causes nor depends on.**
 
 3. **Read project configuration** - pyproject.toml, requirements.txt, setup scripts, and CI/CD workflows.
 4. **Cross-reference** documentation claims against actual implementation.
 5. **For V3-tier plans, run the V3 Post-Deploy Evidence check** (see below) before producing the report.
 6. **Produce a single structured report** using the format below.
-
-**Direct-import scoping rule:** If a changed file imports `from src.common.config import Config`, then `src/common/config.py` is in scope. Do not recursively follow imports - only 1 level deep. Test files are in scope only if files under `tests/` appear in the diff or the plan Scope table.
 
 ---
 
@@ -74,7 +73,7 @@ For every issue in each dimension below, cite the file and line.
 - **Naming** - Descriptive and consistent? Python conventions (snake_case, PascalCase)?
 - **Function length** - Are functions doing too much?
 - **Comments and docstrings** - Do public functions/classes have docstrings? Are comments explaining *why*?
-- **Magic numbers/strings** - Are literal values extracted into named constants or config?
+- **Magic numbers/strings** - Are literal values moved into named constants or config?
 - **Code organisation** - Does module structure reflect logical boundaries? Are circular imports possible?
 
 ### 3. Testing
@@ -95,9 +94,9 @@ Any finding that claims a command or validation gate fails must include the exac
 ### 4. Maintainability and Scalability
 
 - **Coupling** - Are modules tightly coupled?
-- **Configuration** - Is behaviour driven by config rather than hardcoded values?
-- **Extensibility** - How easy is it to add a new data provider, feature, model, or deployment target?
-- **Async patterns** - Are async/await patterns used correctly? Are there blocking calls inside async contexts?
+- **Configuration** - Is behaviour config-driven rather than hard-coded?
+- **Extensibility** - How easy is it to add a data provider, feature, model or deployment target?
+- **Async patterns** - Is async/await used correctly, with no blocking calls in async contexts?
 - **Resource management** - Are connections, file handles, and sessions properly closed?
 - **Performance considerations** - N+1 queries, unnecessary data copies, unbounded loops?
 
@@ -109,9 +108,9 @@ Any finding that claims a command or validation gate fails must include the exac
 
 ### 6. Documentation Accuracy
 
-- **Completeness** - Does documentation cover setup, architecture, decisions, and contribution workflow?
-- **Freshness** - Does documentation match the current state of the code?
-- **Onboarding quality** - Could a new developer get the project running from the docs alone?
+- **Completeness** - Do the docs cover setup, architecture, decisions and contribution workflow?
+- **Freshness** - Do the docs match the current code?
+- **Onboarding quality** - Could a newcomer run the project from the docs alone?
 
 ---
 
@@ -162,8 +161,7 @@ apply.
 
 Raise a **High-priority finding** (drives `Verdict: REVISE` per the deterministic rule below) if:
 - The evidence artifact is absent from the PR entirely, or
-- It is present but does not name a real run URL (e.g. a placeholder, a local-only path, or no
-  URL at all), or
+- It is present but names no real run URL (a placeholder, a local-only path or none), or
 - It contradicts the plan's post-deploy expected outcomes (e.g. the invocation output shows an
   error or an unexpected result the plan did not anticipate).
 
