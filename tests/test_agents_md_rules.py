@@ -22,3 +22,14 @@ def test_named_verdict_command_exists() -> None:
 def test_gh_not_claimed_uninstalled() -> None:
     assert "deliberately not installed" not in AGENTS
     assert "gh CLI may ship with the cloud image" in AGENTS
+
+
+def test_full_tier_launch_is_a_tracked_background_task() -> None:
+    paragraphs = [" ".join(p.split()) for p in AGENTS.split("\n\n")]
+    named = [p for p in paragraphs if "10-min foreground cap" in p]
+    assert len(named) == 1
+    paragraph = named[0]
+    assert "`run_in_background: true`" in paragraph
+    assert "`timeout: 7200000`" in paragraph
+    assert "never `&`/`nohup`/`setsid`" in paragraph
+    assert "with a 2 h limit" not in AGENTS
