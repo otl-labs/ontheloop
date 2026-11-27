@@ -502,3 +502,101 @@ def test_key_text_flattens_nested_values_and_rejects_a_malformed_key(tmp_path: P
     assert c._key_text(tmp_path, "k.yaml#a.b") == "x c y"
     assert c._key_text(tmp_path, "not a key") is None
     assert c._key_text(tmp_path, "k.yaml#a.zz") is None
+
+
+def _moved(n: int, to: int, of: int | None = None) -> str:
+    title = f"Moved (supersedes Decision {of})" if of else "Moved"
+    return f"## Decision {n}: {title} (Decided)\n\n**Status:** Superseded\n\n**Superseded by: Decision {to}**\n\n---\n\n"
+
+
+def _successor(n: int, of: int, body: str = "The rule says iota here.", listed: bool = True) -> str:
+    env = f"```yaml\nnumber: {n}\nsupersedes: [{of}]\n```\n\n" if listed else ""
+    return f"## Decision {n}: Successor (Decided)\n\n{env}{body}\n\n---\n\n"
+
+
+def _idx(n: int, currency: str, **extra: Any) -> dict:
+    return {"number": n, "live": True, "currency": currency, "amends": []} | extra
+
+
+def _held_via(*hops: int, body: str = "The rule says iota here.", listed: bool = True) -> Callable[[dict], None]:
+    def mutate(spec: dict) -> None:
+        spec["rows"] = [r for r in spec["rows"] if r["number"] not in hops]
+        for i, n in enumerate(hops):
+            last = i == len(hops) - 1
+            if last:
+                spec["head"][n] = _successor(n, hops[i - 1], body, listed)
+            else:
+                spec["head"][n] = _moved(n, hops[i + 1], hops[i - 1] if i else None)
+            extra = {"supersedes": [hops[i - 1]]} if i else {}
+            spec["rows"].append(_idx(n, "current" if last else "superseded_compacted", **extra))
+
+    return mutate
+
+
+def _rowless_successor(spec: dict) -> None:
+    _held_via(7, 8)(spec)
+    spec["rows"] = [r for r in spec["rows"] if r["number"] != 8]
+
+
+def _carried_via(spec: dict) -> None:
+    spec["rows"] = [r for r in spec["rows"] if r["number"] != 3] + [_idx(3, "superseded_compacted"), _idx(5, "current")]
+    spec["head"][3] = _moved(3, 5)
+    spec["head"][5] = _successor(5, 3, "No amends edge.")
+
+
+def _no_header(spec: dict) -> None:
+    spec["head"][7] = _moved(7, 8)
+    spec["rows"][4]["currency"] = "superseded_compacted"
+
+
+def _inbound_only(spec: dict) -> None:
+    spec["head"][7] = ENTRY_7.replace("**Status:** Decided", "**Status:** Superseded")
+    spec["rows"][4]["currency"] = "superseded_pointer"
+
+
+def _cycle(spec: dict) -> None:
+    spec["head"][7], spec["head"][8] = _moved(7, 8, 8), _moved(8, 7, 7)
+    spec["rows"][4]["currency"] = "superseded_compacted"
+    spec["rows"].append(_idx(8, "superseded_compacted", supersedes=[7]))
+
+
+def _to_consolidator(spec: dict) -> None:
+    spec["head"][7] = _moved(7, 4)
+    spec["head"][4] = ENTRY_4.replace("Consolidating (Decided)", "Consolidating (supersedes Decision 7) (Decided)")
+    spec["rows"][4]["currency"] = "superseded_compacted"
+
+
+def _carried_through_victim(spec: dict) -> None:
+    spec["rows"] = [r for r in spec["rows"] if r["number"] != 3] + [_idx(3, "superseded_compacted")]
+    spec["head"][3] = _moved(3, 2)
+    spec["head"][2] = _stub(2, "pt1 -> sub").replace("Old (Decided)", "Old (supersedes Decision 3) (Decided)")
+
+
+RESOLVED: dict[str, tuple[Callable[[dict], None], str | None]] = {
+    "held through one hop": (_held_via(7, 8), None),
+    "held through two hops, the middle one a compacted stub declaring it in its title": (_held_via(7, 8, 10), None),
+    "held through a successor with no index row": (_rowless_successor, None),
+    "carried through a hop, successor amends nothing": (_carried_via, None),
+    "successor lacks the token": (_held_via(7, 8, body="kappa"), "token is absent from Decision 7 (-> 8)"),
+    "hop to a missing header": (_no_header, "held Decision 7 is absent, superseded or a victim"),
+    "superseded by inbound edge only": (_inbound_only, "held Decision 7 is absent, superseded or a victim"),
+    "supersession cycle": (_cycle, "held Decision 7 (-> 8 -> 7) is absent"),
+    "successor's index row lists it but its envelope and title do not": (
+        _held_via(7, 8, listed=False),
+        "held Decision 7 is absent, superseded or a victim",
+    ),
+    "carried victim": (_set_manifest(carried_forward=[3, 2]), "carried_forward Decision 2 is a victim"),
+    "held resolves to the consolidating entry": (_to_consolidator, "held Decision 7 (-> 4) is absent"),
+    "carried resolves through a victim to the consolidating entry": (
+        _carried_through_victim,
+        "carried_forward Decision 3 (-> 2 -> 4)",
+    ),
+}
+
+
+def test_carried_forward_and_held_resolve_through_supersession(tmp_path: Path) -> None:
+    for name, (mutate, expected) in RESOLVED.items():
+        spec = _spec()
+        mutate(spec)
+        found = _problems(tmp_path / "".join(ch if ch.isalnum() else "_" for ch in name), spec)
+        assert (found == []) if expected is None else any(expected in p for p in found), (name, found)
