@@ -14,7 +14,7 @@ from typing import Any, Callable, Optional
 
 import yaml
 
-from scripts.checks._decision_chain import resolve_live
+from scripts.checks._decision_chain import declared_supersedes, resolve_live
 from scripts.checks._decision_chain import superseded as _superseded
 from scripts.checks.decisions.envelope_rules import dotted_value, split_delegated_key
 from scripts.decisions_md import (
@@ -447,7 +447,7 @@ def _compacted_history(supersedes: list, entries: dict[int, str], rows: dict[int
     block = entries.get(int(top)) if top.isdigit() else None
     if block is None or not is_compacted_stub(block) or not _superseded(rows, int(top), block):
         return False
-    return _declared(block) == set(supersedes)
+    return declared_supersedes(block) == set(supersedes)
 
 
 def _manifest_problems(root: Path, rel: str, data: dict, ctx_in: dict, base_reader: BaseReaderFn) -> list[str]:
