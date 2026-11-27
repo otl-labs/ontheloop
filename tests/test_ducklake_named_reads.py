@@ -326,7 +326,7 @@ def _tag_params(**kw: str) -> list[str]:
 
 
 def _tag_con(rows: list[tuple]):
-    duckdb = pytest.importorskip("duckdb", reason="env: duckdb is not installed in the fast tier")
+    import duckdb  # noqa: PLC0415
 
     from tests.fixtures import duckdb_connect  # noqa: PLC0415
 
@@ -364,6 +364,7 @@ def _tag_fixture():
 
 
 def test_recs_by_tag_filters_and_orders_newest_first():
+    pytest.importorskip("duckdb", reason="env: duckdb is not installed in the fast tier")
     con = _tag_fixture()
     ids = lambda rows: [r[0] for r in rows]  # noqa: E731
     assert ids(_tag_run(con)) == ["rec-7", "rec-2", "rec-1"]  # open default, tie on ts broken by id DESC
