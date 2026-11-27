@@ -26,6 +26,7 @@ ENTRIES: tuple[Entry, ...] = (
         attr="validate_platform_roadmap",
         pre=True,
         pre_globs=(
+            "scripts/checks/_decision_chain.py",
             "docs/plans/**",
             "docs/ROADMAP-*",
             "docs/DECISIONS.md",
@@ -205,6 +206,7 @@ ENTRIES: tuple[Entry, ...] = (
         attr="validate_roadmap_liveness",
         pre=True,
         pre_globs=(
+            "scripts/checks/_decision_chain.py",
             "docs/ROADMAP-*",
             "docs/DECISIONS.md",
             "docs/DECISIONS_ARCHIVE.md",

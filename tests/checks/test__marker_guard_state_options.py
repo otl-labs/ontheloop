@@ -303,5 +303,10 @@ def test_kind_rule_through_authorization_failure(tmp_path: Path, monkeypatch: py
     assert fails("dec-301", "docs/x.py", {301: _entry(301, "direction")}) is False
     assert fails("dec-250", "docs/x.py", {250: _entry(250, "mechanism")}) is False
     stub = "## Decision 250: S\n\n**Superseded by: Decision 301**\n"
-    assert fails("dec-250", "docs/x.py", {250: stub, 301: _entry(301, "mechanism")}) is True
-    assert fails("dec-250", "docs/x.py", {250: stub, 301: _entry(301, "direction")}) is False
+    declared = {
+        k: _entry(301, k).replace("Decision 301: T", "Decision 301: T (supersedes Decision 250)")
+        for k in ("mechanism", "direction")
+    }
+    assert fails("dec-250", "docs/x.py", {250: stub, 301: declared["mechanism"]}) is True
+    assert fails("dec-250", "docs/x.py", {250: stub, 301: declared["direction"]}) is False
+    assert fails("dec-250", "docs/x.py", {250: stub, 301: _entry(301, "direction")}) is True

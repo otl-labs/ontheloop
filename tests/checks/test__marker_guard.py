@@ -4,7 +4,7 @@ by PLAN-verifier-weakening-guards, LSA-01 leg a, Decision 187).
 
 Carries the BULK of the new coverage this plan introduces: extractor shapes (class-table
 exclusion, comment immunity), the authorization rule (bare-root negative, band positive, no
-body tokenization), composite `dir::step-id` keys, the supersession hop, moved-from, the empty
+body tokenization), composite `dir::step-id` keys, the supersession chain walk, moved-from, the empty
 grandfather hook, and the cross-registry live-marker invariant + an independent-scan population
 cross-check. Thin binding assertions for each of the five consumer guards live alongside their
 own tests instead (mirror convention, Decision 131). TestCheckStateDiff exercises the new
@@ -159,31 +159,37 @@ class TestCompositeKeyAuthorization:
         assert failure is True
 
 
-class TestSupersessionHop:
-    """VP step 9: the Decision 149 compact-in-place coupling -- a compaction stub's body is
-    authorized via ONE hop to its superseder; a stub pointing at a stub is not chased further."""
+_FOO = "Names scripts/checks/foo.py.\n"
 
-    def test_supersession_hop_authorizes_via_superseding_decision_body(self) -> None:
-        bodies = {
-            1: "**Status:** Superseded\n**Date:** 2026-01-01\n**Decision:** See Decision 2.\n**Superseded by: Decision 2**\n",
-            2: "**Decision:** Authorizes scripts/checks/foo.py.\n",
-        }
-        assert authorization_failure("dec-1", "scripts/checks/foo.py", bodies) is False
 
-    def test_compaction_stub_with_non_authorizing_superseder_still_fails(self) -> None:
-        bodies = {
-            1: "**Status:** Superseded\n**Date:** 2026-01-01\n**Decision:** See Decision 2.\n**Superseded by: Decision 2**\n",
-            2: "**Decision:** Unrelated text entirely.\n",
-        }
-        assert authorization_failure("dec-1", "scripts/checks/foo.py", bodies) is True
+def _d(n: int, prev: int, to: int = 0) -> str:
+    return f"## Decision {n}: s (supersedes Decision {prev})\n\n" + (f"**Superseded by: Decision {to}**\n" if to else "")
 
-    def test_supersession_hop_is_one_hop_only_a_stub_pointing_at_a_stub_is_not_chased(self) -> None:
-        bodies = {
-            1: "**Superseded by: Decision 2**\n**Decision:** stub one.\n",
-            2: "**Superseded by: Decision 3**\n**Decision:** stub two, no mention.\n",
-            3: "**Decision:** Authorizes scripts/checks/foo.py.\n",
-        }
-        assert authorization_failure("dec-1", "scripts/checks/foo.py", bodies) is True
+
+def _k(kind: str) -> str:
+    head = "## Decision 900: s (supersedes Decision 2)\n\n```yaml\nnumber: 900\n"
+    return f"{head}kind:\n  value: {kind}\n  justification: j.\n```\n{_FOO}"
+
+
+SUPERSESSION = {
+    "declared_hop_authorizes": ({1: _d(1, 0, 2), 2: _d(2, 1) + _FOO}, False),
+    "undeclared_successor_not_consulted": ({1: _d(1, 0, 2), 2: "## Decision 2: s\n" + _FOO}, True),
+    "silent_successor_fails": ({1: _d(1, 0, 2), 2: _d(2, 1)}, True),
+    "two_hops_authorize": ({1: _d(1, 0, 2), 2: _d(2, 1, 3), 3: _d(3, 2) + _FOO}, False),
+    "mentioning_intermediate_decides": ({1: _d(1, 0, 2), 2: _d(2, 1, 3) + _FOO, 3: _d(3, 2)}, False),
+    "no_naming_body_fails": ({1: _d(1, 0, 2), 2: _d(2, 1, 3), 3: _d(3, 2)}, True),
+    "cycle_fails": ({1: _d(1, 2, 2), 2: _d(2, 1, 1)}, True),
+    "missing_successor_fails": ({1: _d(1, 0, 2)}, True),
+    "kind_judges_the_deciding_body": ({1: _d(1, 0, 2), 2: _d(2, 1, 900), 900: _k("mechanism")}, True),
+    "direction_past_floor_authorizes": ({1: _d(1, 0, 2), 2: _d(2, 1, 900), 900: _k("direction")}, False),
+}
+
+
+@patch("scripts.checks._marker_guard_state_options._floor", lambda _root: ("sampled", 279))
+@pytest.mark.parametrize("name", sorted(SUPERSESSION))
+def test_marker_authorizes_through_multi_hop_supersession(name: str) -> None:
+    bodies, failed = SUPERSESSION[name]
+    assert authorization_failure("dec-1", "scripts/checks/foo.py", bodies) is failed
 
 
 class TestLiveMarkerCorpusInvariant:

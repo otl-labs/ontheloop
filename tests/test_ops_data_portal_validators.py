@@ -309,6 +309,7 @@ def test_compute_automatable_valid():
         ".github/CODEOWNERS",
         "scripts/ci/executor_boundary_guard.py",
         "scripts/checks/executor/validate_executor_boundary.py",
+        "scripts/checks/_decision_chain.py",
     ],
 )
 def test_compute_automatable_executor_loop_kernel_path_is_never_automatable(file_path):

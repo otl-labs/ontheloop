@@ -233,6 +233,7 @@ ENTRIES: tuple[Entry, ...] = (
         attr="validate_telemetry_metadata_keys",
         pre=True,
         pre_globs=(
+            "scripts/checks/_decision_chain.py",
             "docs/contracts/telemetry_*.yaml",
             "docs/contracts/telemetry-metadata-keys.yaml",
             "config/telemetry/parser_versions.yaml",

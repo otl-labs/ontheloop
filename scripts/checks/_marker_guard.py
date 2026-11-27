@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import NamedTuple
 
 from scripts.checks import _common
+from scripts.checks._decision_chain import resolve_live
 from scripts.checks._marker_guard_state_options import (
     base_corpus,
     bodies_from_text,
@@ -37,14 +38,13 @@ from scripts.checks._marker_guard_state_options import (
     mentions,
     transition_failure,
 )
-from scripts.decisions_md import extract_superseded_by
 
 # Bounds this module's public surface to exactly the nine names
 # docs/contracts/marker-grammar.yaml's binding_surface.exports promises (eight at Slice B, plus
 # check_state_diff added by PLAN-verifier-weakening-guards) -- validate_marker_grammar_exports
 # pins that these nine are PRESENT and no more; __all__ additionally keeps the surface from
 # silently growing past what the contract documents (e.g. MarkerEntry, StateEntry,
-# RETRO_SCAN_GRANDFATHER, and the two re-exported scripts.decisions_md names stay importable by
+# RETRO_SCAN_GRANDFATHER stay importable by
 # explicit dotted access, but are not part of the promised star-import / documented surface).
 __all__ = [
     "RegistrySpec",
@@ -313,33 +313,24 @@ def authorization_failure(
 ) -> bool:
     """True (FAIL) iff `dec_id` does not authorize `key`.
 
-    Authorization succeeds when the cited Decision's body contains the key (or a >=2-segment
-    ancestor prefix of it) as a literal substring -- generated key-side, never by tokenizing
-    the body. When the cited Decision's own body doesn't authorize, ONE supersession hop is
-    tried: if that body carries the Decision 149 compact-in-place `**Superseded by: Decision
-    N**` marker, Decision N's body is also consulted (closes the Decision 149 compaction
-    interaction -- a compacted stub's body is reduced to a one-liner with no path mentions).
-    A `dec_id` with no matching header at all (bodies.get returns None) fails unconditionally --
-    this subsumes the historical existence-only check as the degenerate case with an empty
-    candidate corpus.
+    Authorization succeeds when a body names the key (or a >=2-segment ancestor prefix) as a literal
+    substring, generated key-side, never by tokenizing the body. The walk starts at the cited Decision and
+    follows its Superseded by chain through scripts/checks/_decision_chain.py resolve_live: a hop counts only
+    when the successor declares its predecessor (envelope supersedes or heading title), as in the consolidation
+    manifests; currency comes from body markers (no index rows are passed). The first body on the path that
+    mentions the key decides, and the kind rule judges that body. A `dec_id` with no header, a cycle, an
+    undeclared hop or a path with no naming body fails.
     """
     raw_targets = mention_candidates(key) if mention_candidates is not None else [key]
     candidates: list[str] = []
     for target in raw_targets:
         candidates.extend(_expand_ancestor_candidates(target))
 
-    body = bodies.get(_normalize_dec_id(dec_id))
-    if body is None:
-        return True
-    if _mentions_any(body, candidates, bounded):
-        return kind_failure(_normalize_dec_id(dec_id), body, _common.ROOT)
-
-    superseded_by = extract_superseded_by(body)
-    if superseded_by:
-        target_body = bodies.get(_normalize_dec_id(superseded_by))
-        if target_body is not None and _mentions_any(target_body, candidates, bounded):
-            return kind_failure(_normalize_dec_id(superseded_by), target_body, _common.ROOT)
-
+    number = _normalize_dec_id(dec_id)
+    for hop in dict.fromkeys(resolve_live(bodies, number)[1]):
+        body = bodies.get(hop)
+        if body is not None and _mentions_any(body, candidates, bounded):
+            return kind_failure(hop, body, _common.ROOT)
     return True
 
 
