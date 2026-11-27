@@ -122,3 +122,34 @@ def test_build_merge_reads_the_github_approval() -> None:
     entry = next(e for e in _DOC["amendment_log"] if "PLAN-coordinator-approval-run" in _flat(e["summary"]))
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(entry["date"]))
     assert entry["semantic_break"] is True
+
+
+def test_cross_workspace_key_lists_tags_and_marks_makeshift() -> None:
+    cw = _DOC["cross_workspace"]
+    assert "rec-5713" in cw["makeshift"] and "Decision 197" in cw["makeshift"]
+    assert "ws-" in cw["tag"]
+    for token in re.findall(r"\bws-[A-Za-z0-9-]+", cw["tag"]):
+        assert re.fullmatch(r"[a-z][a-z0-9-]*", token), token
+    for key in (
+        "tags_only",
+        "edit",
+        "claim",
+        "offer",
+        "take",
+        "decline",
+        "read",
+        "overlap",
+        "non_rec_notices",
+        "limits",
+    ):
+        assert isinstance(cw[key], str) and cw[key].strip(), key
+    assert "rec-5713" in cw["limits"] and "records no actor" in _flat(cw["limits"])
+    assert "workspace" in _DOC["terms"]
+    routing = yaml.safe_load((_ROOT / "docs" / "contracts" / "approval-routing.yaml").read_text(encoding="utf-8"))
+    assert "cross_workspace" not in routing["gated"]["yaml_keys"]["docs/contracts/coordinator.yaml"]
+    tags_only = _flat(cw["tags_only"])
+    assert "never write ownership into context or file" in tags_only and "rec_history" in tags_only
+    assert "cross_workspace" in _DOC["coordinator_operations"]["other_coordinators"]
+    recs = yaml.safe_load((_ROOT / "docs" / "contracts" / "ops_recommendations.yaml").read_text(encoding="utf-8"))
+    semantics = str(recs["fields"]["tags"]["semantics"])
+    assert "recs_by_tag" in semantics and "no NAMED_READS verb" not in semantics
