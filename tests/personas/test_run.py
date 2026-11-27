@@ -20,6 +20,7 @@ ALLOWED = {
     "snapshot": {"yaml"},
     "override": {"yaml"},
     "materialise": {"yaml", "pydantic"},
+    "review_context": {"yaml", "pydantic"},
     "execute": {"yaml"},
     "keyed_run": {"boto3", "botocore", "jsonschema", "yaml", "src"},
     "post_verdict": {"yaml", "jsonschema", "pydantic", *APP_TOKEN_ALLOWED},

@@ -43,13 +43,13 @@ PLACEHOLDER = "placeholder-no-key"
 CONTAINER_UID = 10001
 IN_MOUNT = "/run/persona/in"
 EVENTS_MOUNT = "/run/persona/events"
-MAX_REQUEST = 4 * 1024 * 1024
+MAX_REQUEST = 64 * 1024 * 1024
 MAX_RESULT = 4 * 1024 * 1024
 MAX_COUNTS_LINES = 4096
 MAX_COUNTS_LINE = 256
 COUNT_KEYS = {"ok", "outage", "inflight"}
 SETTLE_SECONDS = 0.3
-BOUNDS = {"probe": 120, "run": 600}
+BOUNDS = {"probe": 120, "run": 3600}
 GONE_SECONDS = 30.0
 GONE_STEP = 0.5
 KEYS = {"persona", "provider", "input", "key"}
@@ -77,7 +77,7 @@ def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def parse_request(raw: bytes, mode: str, providers: dict[str, Any]) -> dict[str, Any]:
     if len(raw) > MAX_REQUEST:
-        raise Refused("request over 4 MiB")
+        raise Refused(f"request over {MAX_REQUEST // (1024 * 1024)} MiB")
     try:
         data = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs)
     except UnicodeDecodeError as exc:

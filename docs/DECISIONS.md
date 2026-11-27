@@ -2250,6 +2250,8 @@ conditions:
 
 > **Update (2026-11-24):** A pull_request job's refusal (the Coverage line and the 2026-11-17 Update) is established without a live pull_request job: such a job could name the role only with the account id secret, and the persona path's pull_request trigger is secretless (Decision 205 cl.2). It rests on test_persona_verdict_role.py, which pins the one StringEquals trust statement with no pull_request subject; test_pull_request_claims_fail_the_trust_conditions, which shows GitHub's pull_request claims, with or without the Environment, fail the parsed conditions; and the refusal job's live AccessDenied (run 45166608964), which shows AWS enforcing the subject condition. The two tests are the enforcing checks. One residual is unproven live: a token with the Environment's subject but another job_workflow_ref, which a pull_request job naming the main-only Environment would carry if GitHub ran it. It rests on AWS evaluating job_workflow_ref, held by trust-claims-change.
 
+> **Update (2026-11-27):** The 2026-11-24 Update's premise that the persona path's pull_request trigger is secretless reads with Decision 205's 2026-11-27 Update: the CI upstream holds secrets of its own, and the pull_request refusal still rests on this role's one trust statement (cl.2), which no pull_request subject meets.
+
 ---
 
 ## Decision 262: A plan PR whose last decision-scout row is BLOCK fails its check, with no exemption and no agent override -- the operator's admin bypass merge is the release valve (amends Decision 83) (Decided)
@@ -6272,6 +6274,8 @@ conditions:
 > **Amended by Decision 254 (2026-11-12):** Clause 5's plans-only test reads the batch range prev..head, never the head commit alone, so a batch holding any non-plans commit runs the full tier (Decision 254 cl.1).
 
 > **Amended by Decision 271 (2026-11-17):** Clause 2's verdict identity on Actions is the dedicated verdict App, not the job's GITHUB_TOKEN; the merge gate counts a persona check only from that App (Decision 271 cl.1, cl.4).
+
+> **Update (2026-11-27):** (PLAN-code-reviewer-add) Clause 2's workflow_run upstream may also be the repository's own CI workflow, which holds secrets of its own. It qualifies because the verdict job reads from it only GitHub-set fields (such as the workflow path, head SHA and conclusion) and the head's check runs as data, never its artifacts or outputs, and the persona role's trust still refuses any pull_request subject (Decision 263 cl.2).
 
 ---
 

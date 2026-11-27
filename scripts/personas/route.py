@@ -29,6 +29,13 @@ SCOPE_CONTRACT = "docs/contracts/implement-scope-boundary.yaml"
 PERSONAS_CONTRACT = "docs/contracts/executor-personas.yaml"
 ROUTES = Path("prepared") / "routes.json"
 PLAN_INPUTS = "plan_inputs.json"
+CI_PATH = ".github/workflows/ci.yml"
+TRIGGER_PATH = ".github/workflows/persona-verdict-trigger.yml"
+OVERRIDE_PATH = resolve_pr.OVERRIDE_WORKFLOW
+UPSTREAM_PATHS = {CI_PATH: "ci", TRIGGER_PATH: "trigger", OVERRIDE_PATH: "override"}
+CONFIG = "docs/contracts/project-configuration.yaml"
+ADVISORY_STATES = ("enabled", "disabled")
+VERDICT_TITLE = "verdict "
 
 
 def changed_files(repo: str, base_ref: str, head_sha: str, token: str | None) -> tuple[list[dict[str, Any]], bool, str]:
@@ -205,6 +212,132 @@ def route(
     return sorted(sets & bound_personas(root))
 
 
+def code_personas() -> set[str]:
+    """The code-class personas, from merge_checks; these are the ones the CI upstream routes."""
+    return _persona_set("code", False)
+
+
+def _event() -> dict[str, Any]:
+    target = os.environ.get("GITHUB_EVENT_PATH")
+    if not target:
+        return {}
+    try:
+        with open(target, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def advisory_state(persona: str, root: Path) -> tuple[str, str]:
+    """(enabled or disabled or bad, reason) for gates.<persona>.advisory_runs; an absent row reads enabled."""
+    row_id = f"gates.{persona}.advisory_runs"
+    try:
+        data = yaml.safe_load((root / CONFIG).read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return "bad", "the configuration is unreadable"
+    settings = data.get("settings") if isinstance(data, dict) else None
+    if not isinstance(settings, list):
+        return "bad", "the configuration has no settings list"
+    rows = [r for r in settings if isinstance(r, dict) and r.get("id") == row_id]
+    if not rows:
+        return "enabled", ""
+    if len(rows) > 1:
+        return "bad", f"{row_id} appears more than once"
+    defaults = rows[0].get("defaults")
+    local = defaults.get("local") if isinstance(defaults, dict) else None
+    cloud = defaults.get("cloud") if isinstance(defaults, dict) else None
+    if local != cloud or type(local) is not str or local not in ADVISORY_STATES:
+        return "bad", f"{row_id} defaults are not the same enabled or disabled string"
+    return local, ""
+
+
+def _existing_verdict(repo: str, token: str | None, head_sha: str, persona: str, app: int) -> bool:
+    name = merge_checks.persona_check_name(persona)
+    page = 1
+    while page <= 10:
+        query = f"check_name={urllib.parse.quote(name, safe='')}&per_page=100&page={page}"
+        listed = resolve_pr.get_json(f"/repos/{repo}/commits/{head_sha}/check-runs?{query}", token)
+        rows = listed.get("check_runs") if isinstance(listed, dict) else None
+        if not isinstance(rows, list):
+            raise RuntimeError("check_runs is not a list")
+        for row in rows:
+            if not isinstance(row, dict) or row.get("name") != name or (row.get("app") or {}).get("id") != app:
+                continue
+            if str((row.get("output") or {}).get("title") or "").startswith(VERDICT_TITLE):
+                return True
+        if len(rows) < 100:
+            return False
+        page += 1
+    return False
+
+
+def _gate_ci_routes(routes: list[str], root: Path, repo: str, token: str | None, head_sha: str) -> list[str]:
+    kept: list[str] = []
+    for persona in routes:
+        state, reason = advisory_state(persona, root)
+        if state == "disabled":
+            print(f"PERSONA-VERDICT skip {persona}: advisory_runs disabled")
+            continue
+        if state == "bad":
+            print(f"PERSONA-VERDICT skip {persona}: advisory_runs bad value ({reason})")
+            continue
+        app: Any
+        try:
+            app = merge_checks.verdict_app_id((root / CONFIG).read_text(encoding="utf-8"))
+        except OSError:
+            app = "the configuration is unreadable"
+        if not isinstance(app, int) or isinstance(app, bool):
+            print(f"PERSONA-VERDICT note {persona}: re-run skip not applied, verdict app id unavailable")
+            kept.append(persona)
+            continue
+        try:
+            done = _existing_verdict(repo, token, head_sha, persona, app)
+        except Exception:  # noqa: BLE001 - a failed read applies no skip
+            print(f"PERSONA-VERDICT note {persona}: re-run skip not applied, the check-runs read failed")
+            kept.append(persona)
+            continue
+        if done:
+            print(f"PERSONA-VERDICT skip {persona}: this head already carries a verdict check")
+            continue
+        kept.append(persona)
+    return kept
+
+
+def filter_upstream(
+    upstream: str | None,
+    conclusion: str,
+    routes: list[str],
+    path: str,
+    root: Path,
+    repo: str,
+    token: str | None,
+    head_sha: str,
+) -> tuple[list[str], bool]:
+    """Apply the upstream rules to route()'s result; returns (routes, fixture_allowed)."""
+    code = code_personas()
+    if upstream not in ("ci", "trigger"):
+        print(f"PERSONA-VERDICT skip: undeclared upstream {path or 'none'}")
+        return [], False
+    if upstream == "trigger":
+        return [r for r in routes if r not in code], True
+    if conclusion == "cancelled":
+        print("PERSONA-VERDICT skip: the CI run was cancelled")
+        return [], False
+    kept = [r for r in routes if r in code]
+    if routes and not kept:
+        print("PERSONA-VERDICT skip: the CI upstream routes code-class personas only")
+    return _gate_ci_routes(kept, root, repo, token, head_sha), False
+
+
+def is_keyed(routes: list[str], upstream: str | None, root: Path) -> bool:
+    if len(routes) != 1:
+        return False
+    if upstream == "trigger":
+        return routes[0] in execute.fixture_personas(root)
+    return upstream == "ci" and routes[0] in code_personas()
+
+
 def main(argv: list[str]) -> int:
     resolution = json.loads(resolve_pr.RESOLUTION.read_text(encoding="utf-8"))
     token = os.environ.get("GH_TOKEN")
@@ -217,14 +350,22 @@ def main(argv: list[str]) -> int:
     carried: list[dict[str, Any]] = []
     rescout_map: dict[str, str] = {}
     inputs: dict[str, Any] | None = None
+    upstream: str | None = None
+    main_root = Path(os.environ["GITHUB_WORKSPACE"]) / "main" if os.environ.get("GITHUB_WORKSPACE") else ROOT
     if resolution.get("resolved") and not resolution.get("override"):
+        wr = _event().get("workflow_run")
+        wr = wr if isinstance(wr, dict) else {}
+        path = str(wr.get("path") or "")
+        upstream = UPSTREAM_PATHS.get(path)
         files, unknown, merge_base = changed_files(repo, resolution["base_ref"], resolution["head_sha"], token)
         routes = route(files, unknown, bool(resolution["draft"]), repo, resolution["head_sha"], merge_base, token)
+        routes, fixture_ok = filter_upstream(
+            upstream, str(wr.get("conclusion") or ""), routes, path, main_root, repo, token, resolution["head_sha"]
+        )
         plans = [str(f["filename"]) for f in plan_files(files)]
         paths = fixture_paths(files, unknown)
-        fixture = bool(fixture_routes(files, unknown))
+        fixture = fixture_ok and bool(fixture_routes(files, unknown))
         drill = fixture and fallback_drill(files, unknown)
-        main_root = Path(os.environ["GITHUB_WORKSPACE"]) / "main" if os.environ.get("GITHUB_WORKSPACE") else ROOT
         decision = rescout.decide(repo, token, resolution, routes, plans, unknown, main_root)
         routes, carried, rescout_map, inputs = decision.routes, decision.carried, decision.rescout, decision.inputs
     ROUTES.parent.mkdir(parents=True, exist_ok=True)
@@ -233,7 +374,11 @@ def main(argv: list[str]) -> int:
     if inputs is not None:
         (ROUTES.parent / PLAN_INPUTS).write_text(json.dumps(inputs, sort_keys=True), encoding="utf-8")
     print(f"PERSONA-VERDICT routes={len(routes)} {' '.join(routes)}".rstrip() + f" carried={len(carried)}")
+    keyed = is_keyed(routes, upstream, main_root)
     resolve_pr.write_output(
-        routes=str(len(routes)), fixture="true" if fixture else "false", fallback_drill="true" if drill else "false"
+        routes=str(len(routes)),
+        fixture="true" if fixture else "false",
+        fallback_drill="true" if drill else "false",
+        keyed="true" if keyed else "false",
     )
     return 0
