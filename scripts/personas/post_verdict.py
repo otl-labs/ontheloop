@@ -17,12 +17,14 @@ from typing import Any
 
 import jsonschema
 
-from scripts.personas import app_token, execute, override, rescout, resolve_pr
+from scripts.persona_contracts import findings
+from scripts.personas import app_token, execute, findings_record, override, rescout, resolve_pr
 
 SUCCESS_VERDICTS = frozenset({"NO_FLAGS", "FLAGS_FOUND", "PROCEED"})
 FAILURE_VERDICTS = frozenset({"BLOCK", "REVISE"})
 TEXT_LIMIT = 60000
 RETRIES = 3
+TITLE_CHARS = 200
 
 
 def _read(path: Path) -> Any:
@@ -202,8 +204,104 @@ def record_text(route_id: str, head_sha: str, verdict: str, ids: list[str], out:
         if isinstance(f, dict) and isinstance(f.get("id"), str)
     }
     for fid in ids:
-        lines.append(f"- {_escape(fid).replace(' ', '_')}: {_escape(titles.get(fid, ''))}")
+        lines.append(f"- {_escape(fid).replace(' ', '_')}: {_escape(titles.get(fid, ''))[:TITLE_CHARS]}")
     return "\n".join(lines)
+
+
+def outcome_of(root: Path, route_id: str, result: Any) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any] | None]:
+    """(run_outcome, failure_id, restricted result, parsed output) of a fresh route's result, as judge reads it."""
+    if not isinstance(result, dict) or result.get("route") != route_id:
+        return "host_failure", "no_result", None, None
+    if result.get("failure"):
+        return "host_failure", _failure_id(result["failure"]), None, None
+    if result.get("timed_out"):
+        return "host_failure", "timed_out", None, None
+    if result.get("exit_code") != 0:
+        return "host_failure", "non_zero_exit", None, None
+    try:
+        out = json.loads(str(result.get("stdout") or ""))
+    except ValueError:
+        return "host_failure", "unparseable_output", None, None
+    failed = isinstance(out, dict) and out.get("outcome") == "failure"
+    schema = execute.failure_schema_for(root, route_id) if failed else execute.schema_for(root, route_id, "output")
+    try:
+        if schema is None:
+            raise ValueError("no output schema")
+        jsonschema.validate(out, schema)
+    except (ValueError, jsonschema.ValidationError):
+        return "host_failure", "schema_invalid", None, None
+    if failed:
+        return "persona_failure", _failure_id(out.get("failure")), None, out
+    restricted = findings.restrict_result(route_id, out)
+    if restricted is None:
+        return "host_failure", "schema_invalid", None, None
+    return "verdict", None, restricted, out
+
+
+def _failure_id(value: Any) -> str:
+    return value if isinstance(value, str) and findings_record.SAFE.fullmatch(value) else "unknown"
+
+
+def _head_count(lines: list[str]) -> int:
+    n = 0
+    if lines and lines[0].startswith(override.RECORD_PREFIX):
+        n = 1
+    if len(lines) > n and rescout.INPUT_RE.match(lines[n]):
+        n += 1
+    return n
+
+
+def with_findings(text: str | None, line: str) -> str:
+    """The text with the findings line after its leading record and input lines."""
+    lines = (text or "").split("\n") if text else []
+    lines.insert(_head_count(lines), line)
+    return "\n".join(lines)
+
+
+def findings_line(
+    root: Path, route_id: str, result: Any, head_sha: str, outcome: tuple[str, str | None, dict[str, Any] | None, Any]
+) -> str | None:
+    """The findings line of a fresh covered route whose results record carries a run_ref, else None."""
+    ref = result.get("run_ref") if isinstance(result, dict) else None
+    if route_id not in findings.LISTS or not isinstance(ref, str):
+        return None
+    run_id, attempt = os.environ.get("GITHUB_RUN_ID", "0"), os.environ.get("GITHUB_RUN_ATTEMPT", "")
+    models = result.get("served_models")
+    facts = {
+        "route": route_id,
+        "head_sha": head_sha,
+        "run_id": run_id,
+        "run_attempt": int(attempt) if attempt.isdigit() else None,
+        "run_ref": ref,
+        "session_started_at": result.get("session_started_at"),
+        "definition_sha256": result.get("definition_sha256"),
+        "served_models": [m for m in models if isinstance(m, str)] if isinstance(models, list) else [],
+        "run_outcome": outcome[0],
+        "failure_id": outcome[1],
+    }
+    return findings_record.render(facts, outcome[2])
+
+
+def extra_titles(route_id: str, out: dict[str, Any] | None, shown: list[str], room: int) -> list[str]:
+    """'- <id>: <title>' lines for the findings not already in the blocking block, cut to room characters."""
+    lines: list[str] = []
+    used = 0
+    seen = set(shown)
+    if out is None:
+        return lines
+    for spec in findings.LISTS[route_id]:
+        for item in findings.items(out, spec.path):
+            fid = spec.finding_id(item)
+            if fid is None or fid in seen:
+                continue
+            seen.add(fid)
+            title = str(item.get("title") or item.get("summary") or item.get("reason") or "")
+            line = f"- {_escape(fid).replace(' ', '_')}: {_escape(title)[:TITLE_CHARS]}"
+            used += len(line) + 1
+            if used > room:
+                return lines
+            lines.append(line)
+    return lines
 
 
 def _override_form(
@@ -218,7 +316,8 @@ def _override_form(
     marker = {"run_id": approved["run_id"], "approver": who, "approved_at": approved["approved_at"]}
     kept = rescout.input_line(source if source is not None else record)
     mark = override.OVERRIDE_PREFIX + json.dumps(marker, sort_keys=True) + " -->"
-    text = record.split("\n", 1)[0] + "\n" + (kept + "\n" if kept else "") + mark
+    found = findings_record.line_of(source if source is not None else record)
+    text = record.split("\n", 1)[0] + "\n" + (kept + "\n" if kept else "") + (found + "\n" if found else "") + mark
     return title, summary, text
 
 
@@ -307,6 +406,15 @@ def plan_all(root: Path, work: Path, repo: str, read_token: str | None) -> list[
                 root, work, route_id, resolution["head_sha"], fresh, os.environ.get("GITHUB_RUN_ID", "0")
             )
             text = rescout.with_input(text, line) if line else text
+        if allowlisted and route_id in findings.LISTS:
+            outcome = outcome_of(root, route_id, result)
+            line = findings_line(root, route_id, result, resolution["head_sha"], outcome)
+            if line:
+                text = with_findings(text, line)
+                shown = list(info[1]) if info is not None else []
+                room = TEXT_LIMIT - len(text) - 2
+                extra = extra_titles(route_id, outcome[3], shown, room // 2)
+                text = "\n".join([text, *extra]) if extra else text
         section = reads_section(result, TEXT_LIMIT - len(text or "") - 2) if allowlisted else None
         if section:
             text = f"{text}\n{section}" if text else section

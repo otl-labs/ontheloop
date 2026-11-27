@@ -1,7 +1,9 @@
-"""The wake verb: one value-free PR comment per verdict run so a session subscribed to the PR wakes when checks land.
+"""The wake verb: one PR comment per verdict run so a session subscribed to the PR wakes when checks land.
 
-The comment carries one marker per (head SHA, route) pair not yet marked and never a verdict, title, summary, count or
-any text read from the PR or a result file; the verdict is read only from the persona-verdict/ check runs. A run whose
+The comment carries one marker per (head SHA, route) pair not yet marked and a code-built TLDR for people: one line per
+newly landed route whose every printed value is typed (findings_record.tldr_line), read only from the verdict-App check
+runs, never a title, summary or any text read from the PR or a result file. The check runs are authoritative: agents and
+the gate read the verdict only from the persona-verdict/ check runs. A run whose
 prepared artifact landed but which ends without every check run posted gets a value-free fault wake instead. Route ids
 are validated by pattern only; this module names no persona id and reads no branch name (PLAN-persona-verdict-wake).
 """
@@ -16,7 +18,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from scripts.personas import resolve_pr
+from scripts.personas import findings_record, override, resolve_pr
 
 BOT_LOGIN = "github-actions[bot]"
 ROUTES = Path("prepared") / "routes.json"
@@ -29,8 +31,9 @@ DIGITS = re.compile(r"[0-9]{1,20}")
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 WAKE_TEXT = (
     "Persona verdict check runs are posted for {sha} (run {url}). Automated wake signal for a watching session; "
-    "this comment carries no verdict - read the persona-verdict/ check runs on that head."
+    "the check runs are authoritative - read the persona-verdict/ check runs on that head."
 )
+TLDR_HEADER = "For people; the check run is authoritative. Snapshot at run {url}."
 FAULT_TEXT = (
     "Persona verdict run {url} for {sha} ended without posting every check run. Automated wake signal for a "
     "watching session; this comment carries no verdict - read that run."
@@ -75,6 +78,36 @@ def landed_names(repo: str, head_sha: str, token: str | None, sleep: Sleep) -> s
     except RuntimeError:
         return None
     return {str(r.get("name")) for r in rows if isinstance(r, dict)}
+
+
+def tldr_block(
+    repo: str, head_sha: str, routes: list[str], token: str | None, url: str, server: str, sleep: Sleep
+) -> str | None:
+    """The TLDR header and one typed line per route from the verdict App's check runs on the head; None when unreadable."""
+    try:
+        app = override.app_id()
+        rows = _paged(f"/repos/{repo}/commits/{head_sha}/check-runs", token, "check_runs", sleep)
+    except (override.Refused, RuntimeError):
+        return None
+    best: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        app_row = row.get("app") if isinstance(row, dict) else None
+        if not (isinstance(app_row, dict) and app_row.get("id") == app and type(row.get("id")) is int):
+            continue
+        name = str(row.get("name"))
+        if name not in best or row["id"] > best[name]["id"]:
+            best[name] = row
+    lines = [TLDR_HEADER.format(url=url)]
+    for route in routes:
+        run = best.get(f"{CHECK_PREFIX}{route}")
+        if run is None:
+            continue
+        record = findings_record.parse(str((run.get("output") or {}).get("text") or ""))
+        if record is not None and (record.get("route") != route or record.get("head_sha") != head_sha):
+            record = None
+        link = f"{server}/{repo}/runs/{run['id']}"
+        lines.append(findings_record.tldr_line(route, str(run.get("conclusion")), record, link))
+    return "\n".join(lines) if len(lines) > 1 else None
 
 
 def bot_marker_lines(repo: str, number: int, token: str | None, sleep: Sleep) -> set[str]:
@@ -163,8 +196,11 @@ def wake(work: Path, event: dict[str, Any], env: dict[str, str], sleep: Sleep = 
     new = [f"<!-- persona-verdict-wake:{head_sha}:{r} -->" for r in landed]
     new = [m for m in new if m not in markers_seen]
     if new:
+        text = WAKE_TEXT.format(sha=head_sha, url=url)
+        fresh = [r for r in landed if f"<!-- persona-verdict-wake:{head_sha}:{r} -->" in new]
+        tldr = tldr_block(repo, head_sha, fresh, token, url, server, sleep)
         try:
-            post_comment(repo, number, token, new, WAKE_TEXT.format(sha=head_sha, url=url), sleep)
+            post_comment(repo, number, token, new, f"{text}\n{tldr}" if tldr else text, sleep)
         except RuntimeError as exc:
             errors.append(str(exc))
     fault = env.get("POST_RESULT") != "success" or unlanded > 0

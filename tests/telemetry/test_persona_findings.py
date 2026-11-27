@@ -59,7 +59,7 @@ def test_code_review_findings_block_yields_one_row_per_finding() -> None:
         assert (r.tenant_id, r.project_id, r.agent_run_id, r.agent_type) == ("t1", "p1", "run-1", "code-review")
         assert (r.definition_sha256, r.lane) == ("a" * 64, "in_session")
         assert (r.subject_sha, r.subject_dirty) == (SHA, True)
-        assert (r.parse_status, r.projection_version, r.source_event_id) == ("parsed", 1, "ev-1")
+        assert (r.parse_status, r.projection_version, r.source_event_id) == ("parsed", 2, "ev-1")
         assert "Two issues" not in repr(r)
 
 
@@ -244,7 +244,7 @@ def test_contract_fields_match_the_row() -> None:
     assert contract.fields is not None
     assert all(f.derivation is not None and f.derivation["timing"] == "read" for f in contract.fields.values())
     assert list(contract.fields) == [f.name for f in dataclasses.fields(FindingRow)]
-    assert PROJECTION_VERSION == 1
+    assert PROJECTION_VERSION == 2
 
 
 @pytest.mark.parametrize("name", ["code_review_two_findings.txt", "code_review_no_findings.txt"])

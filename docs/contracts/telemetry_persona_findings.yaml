@@ -5,11 +5,11 @@
 contract:
   id: telemetry_persona_findings
   class: A
-  contract_version: 1
+  contract_version: 2
   status: draft
   description: >-
-    Class A schema contract for telemetry_persona_findings: one row per (agent_run_id, finding_ordinal) of a verdict
-    persona run (code_reviewer, plan_critic, decision_scout), derived at read from the run's result. Ordinal 0 is the
+    Class A schema contract for telemetry_persona_findings: one row per (lane, run_ref, finding_ordinal, projection_version) of a
+    verdict persona run (code_reviewer, plan_critic, decision_scout), derived at read from the run's result. Ordinal 0 is the
     run's verdict row, present on every run, so a run with no findings keeps its verdict; ordinals 1..N are the run's
     findings in result order. The run's identity (agent_type, definition_sha256) is read from its telemetry_agents
     rows, never re-derived. Finding text is never a field. Consumers: the dual-run agreement measure (T4.28 c5, T4.29
@@ -17,23 +17,28 @@ contract:
 fields:
   tenant_id:
     $ref: tenant-id.yaml#/contract/fields/tenant_id
-    dq_intent_local: {not_null: true}
-    governance_notes_local: The run's telemetry_agents.tenant_id, read, never re-derived (Decision 200).
+    dq_intent_local: {}
+    governance_notes_local: >-
+      The run's telemetry_agents.tenant_id, read, never re-derived (Decision 200). NULL is allowed on lane actions only: a
+      row read from a check run carries none until rec-5551 sends the run's rows (dated deferral, see governance_notes).
     derivation: {timing: read, derived_by: "library:scripts.persona_contracts.findings.project_result", formula: "the run's telemetry_agents.tenant_id", inputs: [telemetry_agents.tenant_id], realized: false}
   project_id:
     $ref: project-id.yaml#/contract/fields/project_id
-    dq_intent_local: {not_null: true}
-    governance_notes_local: The run's telemetry_agents.project_id, read, never re-derived (Decision 200).
+    dq_intent_local: {}
+    governance_notes_local: >-
+      The run's telemetry_agents.project_id, read, never re-derived (Decision 200). NULL is allowed on lane actions only
+      (dated deferral, see governance_notes).
     derivation: {timing: read, derived_by: "library:scripts.persona_contracts.findings.project_result", formula: "the run's telemetry_agents.project_id", inputs: [telemetry_agents.project_id], realized: false}
   agent_run_id:
     type: str
     iceberg_type: string
     nullable: false
-    description: The verdict persona run this row belongs to; telemetry_agents.agent_run_id.
+    description: The verdict persona run this row belongs to; telemetry_agents.agent_run_id. NULL on lane actions only.
     semantics: >-
-      Foreign key to telemetry_agents.agent_run_id. With finding_ordinal and projection_version it is the grain key.
+      Foreign key to telemetry_agents.agent_run_id on lane in_session; NULL on lane actions until rec-5551 sends the run's
+      rows (the writer derives it from tenant, project and entity_ref, so a client never can). The grain key is run_ref.
     populated_by: the projection (scripts/persona_contracts/findings.py), copied from the run's telemetry_agents rows.
-    dq_intent: {not_null: true}
+    dq_intent: {}
     derivation: {timing: read, derived_by: "library:scripts.persona_contracts.findings.project_result", formula: "the run's telemetry_agents.agent_run_id", inputs: [telemetry_agents.agent_run_id], realized: false}
   finding_ordinal:
     type: int
@@ -94,7 +99,7 @@ fields:
     semantics: >-
       The value of the result's verdict, which the persona's contract (docs/contracts/personas/<persona>.yaml
       output_schema.properties.verdict) enumerates; never normalised across personas. NULL when parse_status is not
-      parsed.
+      parsed or run_outcome is persona_failure.
     populated_by: the projection (scripts/persona_contracts/findings.py).
     dq_intent: {accepted_values: {values: [PROCEED, REVISE, NO_FLAGS, FLAGS_FOUND, BLOCK]}}
     derivation: {timing: read, derived_by: "library:scripts.persona_contracts.findings.project_result", formula: "result.verdict", inputs: [telemetry_transcripts.content], realized: false}
@@ -171,7 +176,7 @@ fields:
       parsed: the result validated against the persona's projected schema. block_absent: the text holds no result
       block. block_invalid: a block is present but fails validation. content_unavailable: no text was readable (absent,
       withheld or outside the read window). Any status but parsed yields only the verdict row, with verdict NULL; a
-      run is never dropped.
+      run is never dropped. A persona failure (run_outcome persona_failure) is parsed, ordinal 0 only, verdict NULL.
     populated_by: the projection (scripts/persona_contracts/findings.py).
     dq_intent: {not_null: true, accepted_values: {values: [parsed, block_absent, block_invalid, content_unavailable]}}
     derivation: {timing: read, derived_by: "library:scripts.persona_contracts.findings.project_result", formula: "the outcome of reading the result", inputs: [telemetry_transcripts.content], realized: false}
@@ -198,20 +203,73 @@ fields:
     populated_by: the projection (scripts/persona_contracts/findings.py), from its caller.
     dq_intent: {}
     derivation: {timing: read, derived_by: "library:scripts.persona_contracts.findings.project_result", formula: "the caller's transcript event_id", inputs: [telemetry_transcripts.event_id], realized: false}
+  run_ref:
+    type: str
+    iceberg_type: string
+    nullable: false
+    description: The run's telemetry_agents.entity_ref, the same string on both lanes; with lane, finding_ordinal and projection_version the grain key.
+    semantics: >-
+      litellm:gha:<run_id>/<run_attempt>/<job>/<retry_ordinal>/run on an Actions run, equal to the run's telemetry_agents
+      entity_ref and rendered by the same functions on both lanes; the in-session run's entity_ref otherwise.
+    populated_by: the projection (scripts/persona_contracts/findings.py), from its caller (a run's rows, or the check run's findings line).
+    dq_intent: {not_null: true}
+    derivation: {timing: read, derived_by: "library:scripts.persona_contracts.findings.project_result", formula: "the run's telemetry_agents.entity_ref", inputs: [telemetry_agents.entity_ref], realized: false}
+  run_outcome:
+    type: str
+    iceberg_type: string
+    nullable: false
+    description: "How the run ended: verdict, persona_failure, host_failure or unreadable."
+    semantics: >-
+      verdict: the result parsed. persona_failure: the persona returned a schema-valid failure object (failure_id names it).
+      host_failure: the run produced no usable result (no result, timeout, non-zero exit, unparseable or schema-invalid
+      output). unreadable: an in-session block that could not be read.
+    populated_by: the projection (scripts/persona_contracts/findings.py), from its caller.
+    dq_intent: {not_null: true, accepted_values: {values: [verdict, persona_failure, host_failure, unreadable]}}
+    derivation: {timing: read, derived_by: "library:scripts.persona_contracts.findings.project_result", formula: "how the result was read and how the run ended", inputs: [telemetry_transcripts.content], realized: false}
+  failure_id:
+    type: str
+    iceberg_type: string
+    nullable: true
+    description: The failure the run reported; NULL unless run_outcome is persona_failure or host_failure.
+    semantics: The persona contracts own the ids (the failure enum of each output_schema, the judge failure class); no accepted_values here.
+    populated_by: the projection (scripts/persona_contracts/findings.py), from its caller.
+    dq_intent: {}
+    derivation: {timing: read, derived_by: "library:scripts.persona_contracts.findings.project_result", formula: "the failure id the caller read", inputs: [telemetry_transcripts.content], realized: false}
+  served_model:
+    type: str
+    iceberg_type: string
+    nullable: true
+    description: The model that served the run, as the run's close row records it.
+    semantics: >-
+      actions: the last entry of the findings line's served_models (the run-close model). in_session: NULL in v2 (model-call
+      rows are not fetched; owner rec-5743).
+    populated_by: the projection (scripts/persona_contracts/findings.py), from its caller.
+    dq_intent: {}
+    derivation: {timing: read, derived_by: "library:scripts.persona_contracts.findings.project_result", formula: "the run-close model", inputs: [telemetry_agents.model], realized: false}
 governance_notes: >-
   DERIVED RELATION: no physical table holds these rows; every field is derived at read (Decision 199 cl.1) by the named
   library function scripts.persona_contracts.findings.project_result, which takes a run's identity and either its
   final response text or a run_persona result already validated against the persona's output_schema, and returns the
   rows. It reads the PERSONA_RESULT block (one line, block_marker then one JSON object) from text, validates it against
-  the persona contract's output_schema restricted to the verdict and the finding-list fields these field semantics name, and never raises. A
-  multi-run read through a named read verb, and the live read of in-session text through the masked content reader,
-  are rec-4434's second plan; until then realized is false. MATERIALIZATION (T2.52 c1): a physical copy is built only
+  the persona contract's output_schema restricted to the verdict and the finding-list fields these field semantics name, and never raises. The
+  multi-run read is the client read path scripts.persona_contracts.findings_read (both lanes, read-only), a reader verb
+  replacing it on the measured-read-cost trigger (Decision 199 cl.1 deferral); until then realized is false. ACTIONS LANE
+  (rec-5742): the interim source is the findings line '<!-- persona-verdict-findings v1 {...} -->' in the verdict-App
+  check run's text, read through the verdict_plane's Checks API with no named verb until rec-5551 moves actions rows onto
+  the telemetry verbs (NS.5 deferral); a later warehouse copy is a rebuildable derived table (Decision 221). DEFERRAL
+  2026-11-27 (Decision 200 cl.2, owner rec-5551): tenant_id, project_id and agent_run_id are NULL on rows read from a check
+  run until rec-5551 sends the run's rows with writer-minted ids; never computed client-side, and consumers never join
+  actions rows on those three fields. DEBTS: the finding-id check is loose (types and enums, not id patterns); decision_scout
+  anchor forms vary by list; subject_dirty is NULL on actions; in-session served_model is NULL in v2 (owner rec-5743).
+  The in-session read horizon is 90 days (Decision 239). MATERIALIZATION (T2.52 c1): a physical copy is built only
   on a named trigger: the offline evaluation lane T4.14 opening (it needs history beyond the content reader's 90
-  days), a verdict workflow whose content_policy is withheld (no stored text to derive from), or a measured read cost
-  (Decision 199's derived-read-too-costly). Such a copy is a rebuildable derived table, keyed by this grain and
+  days), or a measured read cost
+  (Decision 199's derived-read-too-costly). A verdict workflow whose content_policy is withheld is no trigger: the check
+  run's findings line is that workflow's interim actions source until rec-5551, so no physical copy falls due. Such a copy is a rebuildable derived table, keyed by this grain and
   projection_version, never a second journal (Decision 221). CAPTURE ONLY: no write-time filtering, no gating; never
   process_event rows. PERSONA FORMAT: the persona contracts own the result shape; a skill or contract change that
   alters it changes the run's definition_sha256, and the projection follows by a new projection_version.
 amendment_log:
   - {date: "2026-11-17", semantic_break: false, change_class: field_add, summary: "PLAN-persona-findings-contract (rec-4434, Decisions 199, 200, 231): first authoring: the derived relation, its grain, fields and materialization triggers.", migration_story: "New derived relation; no stored row exists."}
+  - {date: "2026-11-27", semantic_break: true, change_class: field_add, summary: "PLAN-persona-findings-actions-lane (rec-5742): grain now (lane, run_ref, finding_ordinal, projection_version); fields run_ref, run_outcome, failure_id, served_model added; tenant_id, project_id and agent_run_id NULL on lane actions (dated deferral, owner rec-5551); projection_version 2.", migration_story: "Derived relation with no stored row; readers pin projection_version 2."}
 previous_versions: []

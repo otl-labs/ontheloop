@@ -15,7 +15,7 @@ from typing import Any
 
 from scripts.persona_contracts import ROOT, load_contract, load_index
 
-PROJECTION_VERSION = 1
+PROJECTION_VERSION = 2
 BLOCK_MARKER = "PERSONA_RESULT: "
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -24,19 +24,21 @@ _LEAF_KEYS = ("type", "enum")
 
 @dataclass(frozen=True)
 class RunIdentity:
-    tenant_id: str
-    project_id: str
-    agent_run_id: str
+    tenant_id: str | None
+    project_id: str | None
+    agent_run_id: str | None
     agent_type: str
     definition_sha256: str | None
     lane: str
+    run_ref: str | None = None
+    served_model: str | None = None
 
 
 @dataclass(frozen=True)
 class FindingRow:
-    tenant_id: str
-    project_id: str
-    agent_run_id: str
+    tenant_id: str | None
+    project_id: str | None
+    agent_run_id: str | None
     finding_ordinal: int
     agent_type: str
     definition_sha256: str | None
@@ -52,6 +54,10 @@ class FindingRow:
     parse_status: str
     projection_version: int
     source_event_id: str | None
+    run_ref: str | None
+    run_outcome: str
+    failure_id: str | None
+    served_model: str | None
 
 
 def _str(item: dict[str, Any], key: str) -> str | None:
@@ -177,6 +183,29 @@ def projected_schema(persona: str, output_schema: dict[str, Any]) -> dict[str, A
     return root
 
 
+def items(obj: dict[str, Any], path: str) -> list[dict[str, Any]]:
+    return _items(obj, path)
+
+
+def restrict_result(persona: str, out: Any) -> dict[str, Any] | None:
+    """The schema-valid output cut to the verdict and the mapped finding keys, else None (persona id or registry key)."""
+    found = next((p for p in _personas().values() if p[0] == persona), _personas().get(persona))
+    if found is None or not isinstance(out, dict):
+        return None
+    persona_id, output_schema = found
+    if not _valid(out, projected_schema(persona_id, output_schema)):
+        return None
+    restricted: dict[str, Any] = {"verdict": out["verdict"]}
+    for spec in LISTS[persona_id]:
+        items = [{k: i[k] for k in spec.keys if k in i} for i in _items(out, spec.path)]
+        cursor = restricted
+        parts = spec.path.split(".")
+        for part in parts[:-1]:
+            cursor = cursor.setdefault(part, {})
+        cursor[parts[-1]] = items
+    return restricted
+
+
 _TYPES: dict[str, Callable[[Any], bool]] = {
     "object": lambda v: isinstance(v, dict),
     "array": lambda v: isinstance(v, list),
@@ -232,6 +261,8 @@ def project_result(
     result: dict[str, Any] | None = None,
     subject_sha: str | None = None,
     source_event_id: str | None = None,
+    run_outcome: str | None = None,
+    failure_id: str | None = None,
 ) -> list[FindingRow]:
     persona = _personas().get(identity.agent_type)
     if persona is None:
@@ -243,9 +274,19 @@ def project_result(
         status, obj = "parsed", result
     elif text is not None:
         status, obj = _read_block(text)
-    if status == "parsed" and not _valid(obj, projected_schema(persona_id, output_schema)):
+    outcome = run_outcome
+    if outcome == "host_failure":
+        status, obj = "content_unavailable", None
+    elif outcome == "persona_failure" or (status == "parsed" and isinstance(obj, dict) and obj.get("outcome") == "failure"):
+        outcome = "persona_failure"
+        fid = failure_id if failure_id is not None else (obj.get("failure") if isinstance(obj, dict) else None)
+        failure_id = fid if isinstance(fid, str) else None
+        status, obj = "parsed", {}
+    elif status == "parsed" and not _valid(obj, projected_schema(persona_id, output_schema)):
         status = "block_invalid"
-    parsed = status == "parsed"
+    parsed = status == "parsed" and outcome != "persona_failure"
+    if outcome is None or (outcome == "verdict" and not parsed):
+        outcome = "verdict" if parsed else "unreadable"
     sha = _sha(subject_sha) if subject_sha is not None else (_sha(obj.get("subject_sha")) if parsed else None)
     dirty = obj.get("subject_dirty") if parsed else None
     dirty = dirty if isinstance(dirty, bool) else None
@@ -271,6 +312,10 @@ def project_result(
             status,
             PROJECTION_VERSION,
             source_event_id,
+            identity.run_ref,
+            outcome,
+            failure_id,
+            identity.served_model,
         )
 
     rows = [row(0, "verdict", None, None, None, None)]
