@@ -462,10 +462,10 @@ def _carried_problems(tag: str, carried: list[Any], cons: int, supersedes: list[
 
 def _compacted_history(supersedes: list, entries: dict[int, str], rows: dict[int, dict]) -> bool:
     """Every victim's stub names one entry that is a superseded compacted stub whose title declares exactly the victims."""
-    blocks = [entries.get(n) for n in supersedes]
-    if not blocks or any(b is None or not is_compacted_stub(b) for b in blocks):
+    blocks = [entries.get(n, "") for n in supersedes]
+    if not blocks or not all(is_compacted_stub(b) for b in blocks):
         return False
-    targets = {extract_superseded_by(b).removeprefix("dec-") for b in blocks}
+    targets = {(extract_superseded_by(b) or "").removeprefix("dec-") for b in blocks}
     top = targets.pop() if len(targets) == 1 else ""
     block = entries.get(int(top)) if top.isdigit() else None
     if block is None or not is_compacted_stub(block) or not _superseded(rows, int(top), block):
