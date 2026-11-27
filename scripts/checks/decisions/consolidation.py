@@ -15,7 +15,13 @@ from typing import Any, Callable, Optional
 import yaml
 
 from scripts.checks.decisions.envelope_rules import dotted_value, split_delegated_key
-from scripts.decisions_md import extract_entry_envelope, extract_superseded_by, is_compacted_stub, iter_decision_sections
+from scripts.decisions_md import (
+    _extract_title_borne_supersedes,
+    extract_entry_envelope,
+    extract_superseded_by,
+    is_compacted_stub,
+    iter_decision_sections,
+)
 
 BaseReaderFn = Callable[[Path, str], Optional[str]]
 CONTRACT = "docs/contracts/decision-compaction.yaml"
@@ -307,6 +313,31 @@ def _superseded(rows: dict[int, dict], number: int, block: str) -> bool:
     return str(row.get("currency", "")).startswith("superseded") if row else bool(extract_superseded_by(block))
 
 
+def _live(rows: dict[int, dict], entries: dict[int, str], number: int) -> tuple[int | None, list[int]]:
+    path: list[int] = [number]
+    while (block := entries.get(number)) is not None and number not in path[:-1]:
+        if not _superseded(rows, number, block):
+            return number, path
+        nxt = extract_superseded_by(block).removeprefix("dec-")
+        if not nxt.isdigit() or int(nxt) not in entries:
+            return None, path
+        if number not in _declared(entries[int(nxt)]):
+            return None, path
+        number = int(nxt)
+        path.append(number)
+    return None, path
+
+
+def _declared(block: str) -> set[int]:
+    listed = (extract_entry_envelope(block) or {}).get("supersedes")
+    title = _extract_title_borne_supersedes(block.split("\n", 1)[0])
+    return set(title) | {n for n in (listed if isinstance(listed, list) else []) if isinstance(n, int)}
+
+
+def _via(path: list[int]) -> str:
+    return f" (-> {' -> '.join(map(str, path[1:]))})" if len(path) > 1 else ""
+
+
 def _unit_problems(root: Path, tag: str, unit: dict, ctx: dict) -> list[str]:
     uid, problems = unit.get("id"), []
     given = [d for d in _DISPOSITIONS if unit.get(d)]
@@ -332,10 +363,12 @@ def _target_problems(root: Path, tag: str, unit: dict, field: str, key: str, ctx
     uid, token = unit.get("id"), unit.get("token")
     if field == "held" and key.startswith("Decision "):
         n = key.split()[-1]
-        block = ctx["entries"].get(int(n)) if n.isdigit() else None
-        if block is None or _superseded(ctx["rows"], int(n), block) or int(n) in ctx["victims"]:
-            return [f"{tag}: unit {uid!r} held {key} is absent, superseded or a victim"]
-        return [] if token and _norm(str(token)) in _norm(block) else [f"{tag}: unit {uid!r} token is absent from {key}"]
+        live, path = _live(ctx["rows"], ctx["entries"], int(n)) if n.isdigit() and int(n) not in ctx["victims"] else (None, [])
+        if live is None or live == ctx["number"]:
+            return [f"{tag}: unit {uid!r} held {key}{_via(path)} is absent, superseded or a victim"]
+        block = ctx["entries"][live]
+        hit = token and _norm(str(token)) in _norm(block)
+        return [] if hit else [f"{tag}: unit {uid!r} token is absent from {key}{_via(path)}"]
     delegations = ctx["own"] if field != "held" else ctx["others"]
     cover = _covering(key, delegations)
     text = _key_text(root, key)
@@ -414,6 +447,19 @@ def _frozen_problems(
     return problems
 
 
+def _carried_problems(tag: str, carried: list[Any], cons: int, supersedes: list[int], ctx_in: dict) -> list[str]:
+    entries, rows, problems = ctx_in["entries"], ctx_in["rows"], []
+    for n in carried:
+        live, path = (None, [n]) if n in supersedes else _live(rows, entries, n)
+        edge = live != n or bool((rows.get(n) or {}).get("amends"))
+        if live is None or live == cons or not edge or f"Decision {n}" not in entries[cons]:
+            problems.append(
+                f"{tag}: carried_forward Decision {n}{_via(path)} is a victim, does not resolve to a live entry, "
+                "lost its amends edge or is unnamed"
+            )
+    return problems
+
+
 def _manifest_problems(root: Path, rel: str, data: dict, ctx_in: dict, base_reader: BaseReaderFn) -> list[str]:
     tag, entries, rows = f"consolidation manifest {rel}", ctx_in["entries"], ctx_in["rows"]
     supersedes = data.get("supersedes")
@@ -432,15 +478,7 @@ def _manifest_problems(root: Path, rel: str, data: dict, ctx_in: dict, base_read
         block = entries.get(n)
         if block is None or not is_compacted_stub(block) or extract_superseded_by(block) != f"dec-{cons:03d}":
             problems.append(f"{tag}: victim Decision {n} is not a compacted stub pointing at Decision {cons}")
-    for n in data.get("carried_forward") or []:
-        row, block = rows.get(n), entries.get(n)
-        if (
-            block is None
-            or _superseded(rows, n, block)
-            or not (row or {}).get("amends")
-            or f"Decision {n}" not in entries[cons]
-        ):
-            problems.append(f"{tag}: carried_forward Decision {n} is superseded, absent, lost its amends edge or is unnamed")
+    problems += _carried_problems(tag, data.get("carried_forward") or [], cons, supersedes, ctx_in)
     ctx = _context(root, cons, supersedes, entries, rows)
     seen: set[str] = set()
     for unit in data["units"]:
