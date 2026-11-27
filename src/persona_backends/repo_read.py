@@ -151,7 +151,10 @@ class ReadTree:
 
     def _walk(self, tree: str, parts: list[str]) -> tuple[Path | None, str, int]:
         current = self.trees[tree]
-        for index, part in enumerate(parts):
+        mode = stat.S_IFDIR
+        for part in parts:
+            if not stat.S_ISDIR(mode):
+                return None, "absent", 0
             current = current / part
             try:
                 mode = os.lstat(current).st_mode
@@ -161,12 +164,7 @@ class ReadTree:
                 return None, "refused", 0
             if stat.S_ISLNK(mode):
                 return None, "refused", 0
-            last = index == len(parts) - 1
-            if not last and not stat.S_ISDIR(mode):
-                return None, "absent", 0
-            if last:
-                return current, "ok", mode
-        return current, "ok", os.lstat(current).st_mode
+        return current, "ok", mode
 
     def _read(self, tree: str, parts: list[str], path: str, start: Any, end: Any) -> tuple[str, dict[str, Any]]:
         for bound in (start, end):

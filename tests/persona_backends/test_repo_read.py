@@ -116,3 +116,34 @@ def test_edge_paths_read_list_and_search(tmp_path):
     assert ".git" not in text and "linkdir" not in text
     text, record = _serve(reader, tree="head", op="read", path="src/big.txt")
     assert "[truncated: next line" in text and record["result"] == "ok"
+
+
+def test_os_errors_and_odd_inputs_are_refused_not_raised(tmp_path, monkeypatch):
+    root = _tree(tmp_path)
+    (root / "src" / "latin.txt").write_bytes(b"caf\xe9")
+    reader = ReadTree({"head": root}, {**BUDGET, "max_calls": 100, "max_total_bytes": 10**6})
+    assert _serve(reader, tree="head", op="read", path="src/latin.txt")[1]["result"] == "binary"
+    assert _serve(reader, tree="head", op="nope", path="x")[1]["result"] == "refused"
+    real_lstat, real_listdir, real_open = os.lstat, os.listdir, os.open
+
+    def lstat(path, *a, **k):
+        if str(path).endswith("zed.txt"):
+            raise PermissionError("no")
+        return real_lstat(path, *a, **k)
+
+    monkeypatch.setattr(os, "lstat", lstat)
+    assert _serve(reader, tree="head", op="read", path="src/zed.txt")[1]["result"] == "refused"
+    assert "zed.txt" not in _serve(reader, tree="head", op="list", path="src")[0]
+    monkeypatch.setattr(os, "lstat", real_lstat)
+    monkeypatch.setattr(os, "listdir", lambda p: (_ for _ in ()).throw(OSError("x")))
+    assert _serve(reader, tree="head", op="list", path="src")[1]["result"] == "refused"
+    monkeypatch.setattr(os, "listdir", real_listdir)
+
+    def opener(path, *a, **k):
+        if str(path).endswith(("a.py", "zed.txt")):
+            raise OSError("x")
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr(os, "open", opener)
+    assert _serve(reader, tree="head", op="read", path="src/a.py")[1]["result"] == "refused"
+    assert _serve(reader, tree="head", op="search", path="src", query="needle")[1]["result"] == "ok"
