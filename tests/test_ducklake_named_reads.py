@@ -326,7 +326,7 @@ def _tag_params(**kw: str) -> list[str]:
 
 
 def _tag_con(rows: list[tuple]):
-    import duckdb  # noqa: PLC0415
+    duckdb = pytest.importorskip("duckdb", reason="env: duckdb is not installed in the fast tier")
 
     from tests.fixtures import duckdb_connect  # noqa: PLC0415
 
@@ -411,7 +411,7 @@ def _tag_many(n: int):
     ],
 )
 def test_recs_by_tag_guards_raise(kw):
-    import duckdb  # noqa: PLC0415
+    duckdb = pytest.importorskip("duckdb", reason="env: duckdb is not installed in the fast tier")
 
     for con in (_tag_fixture(), _tag_con([])):  # also over a table with no matching rows
         with pytest.raises(duckdb.Error):
