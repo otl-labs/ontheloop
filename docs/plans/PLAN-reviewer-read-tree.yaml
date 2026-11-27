@@ -41,7 +41,8 @@ scope:
     exceed max_calls, or whose text would push the total over max_total_bytes, is not served and returns a cap record. One module; if
     it nears 500 SLOC, decompose into src/persona_backends/repo_read/ (Decision 128). list and search apply the same per-component rules
     to every entry they visit: ''.git'' directories, symlinks and non-regular files are skipped, never listed or searched. ReadTree(trees,
-    budget, deadline) checks a monotonic deadline between files in list and search.'
+    budget, deadline, clock) checks the run''s injectable clock (run_persona''s clock) against the deadline between files in list and
+    search.'
 - file: src/persona_backends/contract.py
   action: Modify
   purpose: 'BUILT gains read_tree; _split_capabilities returns the read_tree parameters (head, main; any other parameter refused); a
@@ -54,8 +55,9 @@ scope:
     read_tree to the server; each tool turn record carries reads (the turn''s read records, in call order). A cap record ends the run:
     the turn record is emitted, then end with output.failure(''review_incomplete'', ''<cap> reached after N calls, M bytes''), never
     a verdict. The workspace refusal is unchanged. The read_tree tool description states the contract''s four limits. If litellm_backend.py
-    nears 500 SLOC, move the tool dispatch into a sibling module (Decision 128). ReadTree takes the run''s deadline: list and search
-    check it between files and stop with a deadline record, which ends the run as review_incomplete; the tool call itself stays synchronous.'
+    nears 500 SLOC, move the tool dispatch into a sibling module (Decision 128). ReadTree takes the run''s deadline and its injectable
+    clock: list and search check it between files and stop with a deadline record, which ends the run as review_incomplete; the tool
+    call itself stays synchronous.'
 - file: src/persona_backends/events.py
   action: Modify
   purpose: turn_record takes reads (default empty list) and writes it on every turn record; header schema stays 2 (the producer ignores
@@ -67,20 +69,26 @@ scope:
     change (no window for fixture routes between the build merge and the re-pin).'
 - file: scripts/personas/egress_launcher.py
   action: Modify
-  purpose: 'argv is unchanged (probe or run only; the sudoers lines and their guard test stay exact). stdin becomes one JSON request
-    line (at most MAX_REQUEST, ending in a newline) optionally followed by raw tar bytes, so the head tree never counts against MAX_REQUEST
-    and pays no base64 cost. The request gains two optional run-mode keys: trees (a non-empty list of distinct strings, each head or
-    main; [] , a non-list or a non-string member is refused, as is trees in probe mode) and head_tree_bytes (a positive integer at most
-    egress_trees.TREE_MAX_BYTES, required when trees names head, refused otherwise); bytes after the request line without head_tree_bytes,
-    or fewer or more than it states, are refused. FILES gains egress_trees.py (manifest-checked). head: the launcher creates RUN_DIR/<session>/trees
-    owned by PROXY_USER (the unprivileged user the proxy already runs as) and streams the tar bytes to PYTHON -I -S INSTALL_DIR/egress_trees.py
-    extract RUN_DIR/<session>/trees/head <length>, run as PROXY_USER (user=/group= like the proxy, timeout 300 s; non-zero exit is LAUNCHER-REFUSED
-    head tree), so root never parses the tar; removed with the session directory. main: INSTALL_DIR/trees/main must lstat as a root-owned
-    directory, not a symlink, else LAUNCHER-REFUSED main tree (only for a request naming main). container_argv adds -v <host dir>:/trees/<name>:ro
-    per named tree, where the host dir is that launcher constant or its own session directory, never a caller value; the image tail
-    is unchanged. Builds on rec-5696/rec-5708''s raised run bound and request cap (PLAN-code-reviewer-add). Relief if the file nears
-    500 SLOC (81 headroom on 2026-11-27 main): move request-key checks into egress_trees.py, the fourth installed helper; never a raise
-    (Decision 128).'
+  purpose: 'argv is unchanged (probe or run only; the sudoers lines and their guard test stay exact). stdin framing: every request is
+    one JSON object followed by exactly one newline; the launcher reads sys.stdin.buffer.readline(MAX_REQUEST + 2) and refuses a line
+    not ending in a newline (no EOF-terminated line in either mode; launcher and writers come from main at the same SHA). All later
+    bytes are read from the same sys.stdin.buffer object, never fd 0, in bounded chunks: with no head tree the next read must be empty;
+    with one, exactly head_tree_bytes are relayed to the extract''s stdin and one more read must be empty, else refused. The request
+    gains two optional run-mode keys: trees (a non-empty list of distinct strings, each head or main; [], a non-list or a non-string
+    member is refused, as is trees in probe mode) and head_tree_bytes (type int, not bool, at least 1 and at most a launcher-local TREE_MAX_BYTES
+    that a test pins equal to egress_trees.TREE_MAX_BYTES, since the -I -S launcher cannot import it; required when trees names head,
+    refused otherwise). FILES gains egress_trees.py (manifest-checked). head, in this order: read the request line, take the lock, create
+    the session base (both RUN_DIR and the session base stay root 0700; never 0711) and <session>/trees owned by PROXY_USER, mode 0700;
+    set session.started so cleanup''s survivor wait covers the extract; start PYTHON -I -S INSTALL_DIR/egress_trees.py extract head
+    <length> with Popen(cwd=<session>/trees, user=PROXY_USER, group=its group, extra_groups=[]) so the relative destination needs search
+    permission only on the cwd; stderr inherited, not piped; killed at a 300 s bound; non-zero exit or a timeout is LAUNCHER-REFUSED
+    head tree; after exit 0, trees/head must lstat as a directory; then proxy_survivors() must be empty (no PROXY_USER process may exist
+    when the proxy starts), else LAUNCHER-REFUSED; only then the port and name check, make_dirs and start_proxy. main: INSTALL_DIR/trees/main
+    must lstat as a root-owned directory, not a symlink, with mode & 0o022 == 0, else LAUNCHER-REFUSED main tree (only for a request
+    naming main). container_argv adds -v <host dir>:/trees/<name>:ro per named tree, where the host dir is that launcher constant or
+    its own session directory, never a caller value; the image tail is unchanged. Builds on rec-5696/rec-5708''s raised run bound and
+    request cap (PLAN-code-reviewer-add). Relief if the file nears 500 SLOC (81 headroom on 2026-11-27 main): move the request-key checks
+    into a fourth installed helper run as a subprocess like egress_proxy.py; never a raise (Decision 128).'
 - file: scripts/personas/egress_trees.py
   action: Create
   purpose: 'Stdlib-only tree packer, installed beside the launcher (root launcher runs it as a subprocess) and imported from the checkout
@@ -91,7 +99,8 @@ scope:
     an existing dest, more than TREE_MAX_MEMBERS (200000) members, more than TREE_MAX_BYTES (1 GiB) of tar or of unpacked files, a member
     that is not a regular file or directory, an absolute or ''..'' name, a ''.git'' component, a NUL or control character, or a duplicate;
     files are written with O_NOFOLLOW|O_EXCL, 0644, directories 0755. The caps are deliberately high (operator ruling 2026-11-27 12:10
-    UTC; rec-5721 tunes them with the measured trajectory in context). CLI: extract DEST LENGTH reads the tar from stdin.'
+    UTC; rec-5721 tunes them with the measured trajectory in context). CLI: extract DEST LENGTH reads the tar from stdin. The relative
+    destination is resolved against the caller''s cwd (the launcher sets it).'
 - file: scripts/personas/egress_floor_container.py
   action: Modify
   purpose: 'INSTALLED gains egress_trees.py. After install_files, apply() replaces INSTALL_DIR/trees/main with egress_trees.copy_tree(ROOT,
@@ -113,22 +122,26 @@ scope:
     tree, the same container paths as the launcher; no image tail change.
 - file: src/persona_hosts/local_container/cli.py
   action: Modify
-  purpose: Repeatable --tree NAME=PATH passed to run_image.
+  purpose: Repeatable --tree NAME=PATH passed to run_image; a NAME outside head and main, a repeated NAME, a PATH that is not an existing
+    directory or that contains ':' or ',' (docker -v syntax) exits 2.
 - file: scripts/personas/keyed_run.py
   action: Modify
-  purpose: 'request_main adds trees (the routed contract''s read_tree parameters) and, when head is named, head_tree_bytes and the raw
-    bytes of prepared/head.tar after the request line (materialise''s failure file already covers an absent tar). _record writes reads
-    only from parsed events (at most 2000 entries, then reads_dropped; an empty list when the run made no read_tree call); when events
-    are absent or unreadable it writes reads_unknown: true instead, never an empty list. It records trees {head: prepared/resolution.json''s
-    head_sha, main: checked_out_sha(root)} so a replay knows both tree commits (Decision 231); when the prepared input carries reference_hits,
-    it writes not_examined: the hit paths whose in_bundle is false and that no ok read record of tree head names, sorted.'
+  purpose: 'request_main writes every request as the JSON object followed by exactly one newline (today json.dumps with no newline,
+    keyed_run.py:185); it adds trees (the routed contract''s read_tree parameters) and, when head is named, head_tree_bytes, then streams
+    prepared/head.tar after the line in bounded chunks, never as one in-memory value (materialise''s failure file already covers an
+    absent tar). _record writes reads only from parsed events (at most 2000 entries, then reads_dropped; an empty list when the run
+    made no read_tree call); when events are absent or unreadable it writes reads_unknown: true instead, never an empty list. It records
+    trees {head: prepared/resolution.json''s head_sha, main: checked_out_sha(root)} so a replay knows both tree commits (Decision 231);
+    when the prepared input carries reference_hits, it writes not_examined: the hit paths whose in_bundle is false and that no ok read
+    record of tree head names, sorted.'
 - file: scripts/personas/post_verdict.py
   action: Modify
   purpose: 'A routed result that carries reads or reads_unknown (every launcher result after this change, zero reads included) gets
     a Reads section appended to the check text: read_tree call counts by tree and op, the review_incomplete cap when the run ended on
     one, and not_examined (first 100 paths, then a count), inside TEXT_LIMIT. Each path is head-tree data: it is rendered through _escape
     on a line prefix override.FINDING_RE and rescout.input_line cannot match, and a path with a newline or control character is shown
-    as its repr. reads_unknown shows as ''read records unavailable'', never as zero calls.'
+    as its repr. reads_unknown shows as ''read records unavailable'', never as zero calls. The section starts with the exact header
+    line ''Reads'' (VP 6 greps ''^Reads'').'
 - file: scripts/personas/review_input.py
   action: Modify
   purpose: Calls scripts/personas/reference_hits.py for code_reviewer's reference_hits field (rec-5696's provider, PLAN-code-reviewer-add);
@@ -140,15 +153,17 @@ scope:
     whose head span overlaps a changed head line or that exists in merge_base_texts and not at head (dunder names and names under 5
     characters dropped). One whole-tree pass over the head snapshot (regular UTF-8 files up to 2 MiB; binaries, symlinks, ''.git'' and
     the plan''s own path skipped) matches the escaped terms as whole words; output JSON {terms: [{term, kind, source, hits: [{path,
-    line}], truncated}], files_scanned, files_skipped}, at most 50 hits per term and 150 terms, each hit marked in_bundle when that
-    file''s text is in review_scope_files. Head files are read as bytes, never imported or run. A sibling module from the start so review_input.py
-    keeps its headroom (Decision 128).'
+    line}], truncated}], files_scanned, files_skipped}, at most 50 hits per term and 150 terms, hits ranked code first (scripts/, src/,
+    tests/, .github/, then other files, docs/plans/ last) with at most one hit per file before any file gets a second, so plan history
+    never crowds out callers; each hit marked in_bundle when that file''s text is in review_scope_files. Head files are read as bytes,
+    never imported or run. A sibling module from the start so review_input.py keeps its headroom (Decision 128).'
 - file: scripts/checks/contracts/validate_persona_contracts.py
   action: Modify
   purpose: 'A contract naming read_tree names only read_tree:head or read_tree:main, carries budget.read_tree with the four positive
     integer caps and lists review_incomplete in failure_outputs; read_tree''s tree target is not a repo target, so the verdict repo-target
     refusal stays. A bool given as a cap, a repeated read_tree capability and an unknown key under budget.read_tree are each refused.
-    Relief if the file nears 500 SLOC (444 on 2026-11-27 main): the read_tree rules move into a sibling module.'
+    Relief if the file nears 500 SLOC (444 on 2026-11-27 main): the read_tree rules move into a sibling module. A zero or negative cap
+    and a budget.read_tree with no read_tree capability are refused too.'
 - file: docs/contracts/executor-personas.yaml
   action: Modify
   purpose: 'capability_vocabulary gains read_tree (effect read, target tree, parameter domain tree: head or main, binding backend_tool
@@ -167,10 +182,11 @@ scope:
     run_persona], status open, location src/persona_backends/repo_read.py, owning_item "T4.15:c12" (the fargate adapter); description:
     a contract naming read_tree assumes the host mounts each named tree read-only at /trees/<name>; github_actions_shell (the launcher,
     from root-held copies) and local_container do; fargate (rec-5555''s line), sandbox_runtime and sandbox_runtime_windows are open,
-    each discharging it on landing by passing the conformance leg conformance_suite.py::test_named_tree_is_mounted_read_only (named
-    inside description, since CouplingFinding forbids extra keys; Decision 212 cl.1-3). One amendment_log entry. ports.yaml is NEAR_CAP
-    (about 32 B of byte headroom on 2026-11-27): first compact older amendment_log rows to terse rows (amendment_compact) until the
-    row and its entry fit, measured on main at build time; never a raise (Decision 275 cl.3).'
+    each discharging it on landing by passing the conformance leg conformance_suite.py::test_named_tree_is_mounted_read_only (local_container;
+    github_actions_shell''s mounts are pinned by test_egress_launcher; named inside description, since CouplingFinding forbids extra
+    keys; Decision 212 cl.1-3). One amendment_log entry. ports.yaml is NEAR_CAP (about 32 B of byte headroom on 2026-11-27): first compact
+    older amendment_log rows to terse rows (amendment_compact) until the row and its entry fit, measured on main at build time; never
+    a raise (Decision 275 cl.3).'
 - file: docs/contracts/personas/code_reviewer.yaml
   action: Modify
   purpose: 'contract_version 3: required input reference_hits (description: shell pre-computation, JSON, over the head-tree snapshot:
@@ -206,13 +222,15 @@ scope:
     literal they assert is updated in the same node, never dropped).'
 - file: tests/personas/test_egress_launcher.py
   action: Modify
-  purpose: 'Adds test_run_mounts_named_trees_read_only (the head tar after the request line is extracted as PROXY_USER into the session
-    dir, main from INSTALL_DIR/trees/main; fixed -v lines; image tail and argv unchanged; a request and a tree each near their caps
-    pass) and test_bad_tree_requests_are_refused (trees in probe mode, [] , a non-list, a non-string member, unknown or repeated name,
-    head without head_tree_bytes, head_tree_bytes without head, a non-integer or over-cap length, short or trailing bytes, an extract
-    refusal, main tree missing, a symlink or not root-owned); the sudoers lines are unchanged. Graduated shard(s) persona-verdict-fixture-run-units,
-    persona-verdict-fallback-run-units kept: their selected nodes stay and pass (any pinned literal they assert is updated in the same
-    node, never dropped).'
+  purpose: 'Adds test_run_mounts_named_trees_read_only (the head tar after the request line is extracted by a Popen with cwd <session>/trees,
+    user and group PROXY_USER, extra_groups [] and the relative dest head; RUN_DIR and the session base stay 0700; main from INSTALL_DIR/trees/main;
+    fixed -v lines; image tail and argv unchanged; a request and a tree each near their caps pass), test_extract_runs_before_the_proxy_and_leaves_no_survivor
+    (order: extract, survivor check, port check, make_dirs, start_proxy; a surviving PROXY_USER process is refused) and test_bad_tree_requests_are_refused
+    (trees in probe mode, [], a non-list, a non-string member, unknown or repeated name, head without head_tree_bytes, head_tree_bytes
+    without head, a bool, non-integer, zero or over-cap length, a request line without a newline, short or trailing bytes, an extract
+    refusal or timeout, main tree missing, a symlink, not root-owned or group/world writable); TREE_MAX_BYTES equals egress_trees.TREE_MAX_BYTES;
+    the sudoers lines are unchanged. Graduated shard(s) persona-verdict-fixture-run-units, persona-verdict-fallback-run-units kept:
+    their selected nodes stay and pass (any pinned literal they assert is updated in the same node, never dropped).'
 - file: tests/personas/test_egress_trees.py
   action: Create
   purpose: test_pack_then_extract_keeps_dotfiles_and_skips_git_and_links (the extracted member list equals the source's regular files
@@ -238,7 +256,7 @@ scope:
     kept: their selected nodes stay and pass (any pinned literal they assert is updated in the same node, never dropped).'
 - file: tests/persona_hosts/local_container/test_cli.py
   action: Modify
-  purpose: Adds test_tree_arguments_reach_run_image (repeatable --tree NAME=PATH; a bad one exits 2).
+  purpose: Adds test_tree_arguments_reach_run_image (repeatable --tree NAME=PATH; each bad form named in cli.py's row exits 2).
 - file: tests/persona_hosts/conformance_suite.py
   action: Modify
   purpose: 'Adds test_named_tree_is_mounted_read_only, the persona_compute_host port leg for the ports.yaml row this plan adds (Decision
@@ -247,15 +265,16 @@ scope:
 - file: tests/personas/test_keyed_run.py
   action: Modify
   purpose: 'Adds test_record_carries_reads_and_not_examined (reads [] on a parsed result with no read_tree call; reads_unknown when
-    events are unreadable; not_examined counts only ok head reads; trees.head from resolution.json) and test_request_carries_the_head_tree_for_read_tree_personas
-    (request line, then head_tree_bytes raw bytes). Graduated shard(s) keyed-run-registry-key kept: their selected nodes stay and pass
+    events are unreadable; not_examined counts only ok head reads; trees.head from resolution.json) and test_request_bytes_reach_the_launcher_reader
+    (keyed_run.request''s real stdout bytes through os.pipe into the launcher''s stdin reader, for a no-tree route and a head route:
+    the parsed request and the exact tar bytes). Graduated shard(s) keyed-run-registry-key kept: their selected nodes stay and pass
     (any pinned literal they assert is updated in the same node, never dropped).'
 - file: tests/personas/test_post_verdict.py
   action: Modify
-  purpose: 'Adds test_check_text_carries_the_reads_section, including a hostile not_examined path (newline, ''<!--'', ''- x: y'') that
-    override.finding_titles and rescout.input_line do not parse. Graduated shard(s) persona-verdict-scout-carry-units, persona-verdict-fallback-run-units,
-    persona-verdict-fixture-run-units kept: their selected nodes stay and pass (any pinned literal they assert is updated in the same
-    node, never dropped).'
+  purpose: 'Adds test_check_text_carries_the_reads_section (the exact ''Reads'' header line), including a hostile not_examined path
+    (newline, ''<!--'', ''- x: y'') that override.finding_titles and rescout.input_line do not parse. Graduated shard(s) persona-verdict-scout-carry-units,
+    persona-verdict-fallback-run-units, persona-verdict-fixture-run-units kept: their selected nodes stay and pass (any pinned literal
+    they assert is updated in the same node, never dropped).'
 - file: tests/personas/test_review_input.py
   action: Modify
   purpose: Adds test_code_reviewer_input_carries_reference_hits (the field is present and comes from reference_hits.py).
@@ -264,13 +283,14 @@ scope:
   purpose: test_reference_hits_find_references_outside_the_bundle (a doc and a module outside review_scope referencing a changed function
     and a changed path appear with in_bundle false; a head file that writes a marker on import leaves none); test_reference_hits_terms_and_skips
     (removed names from merge_base_texts, dunder and short names dropped, files over 2 MiB, binaries and the plan path skipped, per-term
-    and term caps mark truncated).
+    and term caps mark truncated). test_code_callers_survive_plan_history (a term with more than 50 docs/plans mentions and one tests/
+    caller still lists the caller).
 - file: tests/checks/contracts/test_validate_persona_contracts.py
   action: Modify
   purpose: 'Adds test_read_tree_contract_rules (bad parameter, missing budget, missing failure output, a bool cap, a repeated capability
-    and an unknown budget key each refused; the real tree passes). Graduated shard(s) canary-guidance-evidence-guard, persona-registry-key-check,
-    persona-run-identity-contract, verdict-consistency-contract-rules kept: their selected nodes stay and pass (any pinned literal they
-    assert is updated in the same node, never dropped).'
+    and an unknown budget key, a zero or negative cap and a budget.read_tree without the capability each refused; the real tree passes).
+    Graduated shard(s) canary-guidance-evidence-guard, persona-registry-key-check, persona-run-identity-contract, verdict-consistency-contract-rules
+    kept: their selected nodes stay and pass (any pinned literal they assert is updated in the same node, never dropped).'
 - file: tests/persona_contracts/test_verdict_persona_contracts.py
   action: Modify
   purpose: test_capabilities_are_read_input_over_every_input_only admits, beside read_input over every input, only read_tree:head and
@@ -361,8 +381,10 @@ verification_plan:
   graduation_waiver_reason: a one-time live pin read-back
 - step: 6
   phase: post-deploy
-  action: 'Live read-back: on the first code PR after the re-pin, the persona-verdict/code_reviewer check posted by the verdict App
-    carries the Reads section (zero read_tree calls until rec-5725; not_examined from reference_hits).'
+  action: 'Live read-back: on the first code PR after the re-pin, read the persona-verdict/code_reviewer check runs on the head (mcp__github__
+    check-run read in a session, or the gh command below where gh is authenticated); the one posted by the verdict App carries the Reads
+    section (zero read_tree calls until rec-5725; not_examined from reference_hits). Record the run job''s free space on /run (df -B1
+    /run in its log, if shown) for rec-5721.'
   command: 'gh api repos/otl-labs/ontheloop/commits/<head_sha>/check-runs --jq ''.check_runs[] | select(.name=="persona-verdict/code_reviewer"
     and .app.id==<app_id>) | .output.text'' | grep -c ''^Reads''  # <app_id> = gates.verdict_app.app_id in docs/contracts/project-configuration.yaml
     on origin/main'
@@ -403,9 +425,9 @@ test_obligations:
   test_selector: tests/persona_backends/test_contract.py::test_read_tree_needs_its_budget_and_failure_output
   red_green_expectation: red before (node absent), green after
 - source: src/persona_backends/events.py
-  behavior: turn records carry reads and the producer still maps them
+  behavior: turn records carry reads (default empty list)
   verification_step: 1
-  test_selector: tests/turn_capture/test_litellm_producer.py::test_turn_reads_are_ignored_by_the_producer
+  test_selector: tests/persona_backends/test_litellm_backend_read_tree.py::test_reads_land_on_the_turn_record
   red_green_expectation: red before (node absent), green after
 - source: scripts/run_persona.py
   behavior: mounted trees under /trees reach run_persona; none mounted, none passed
@@ -416,6 +438,11 @@ test_obligations:
   behavior: trees mount read-only only from root-held copies; bad tree requests are refused; argv and sudoers unchanged
   verification_step: 2
   test_selector: tests/personas/test_egress_launcher.py::test_bad_tree_requests_are_refused
+  red_green_expectation: red before (node absent), green after
+- source: scripts/personas/egress_launcher.py
+  behavior: the extract runs unprivileged in its cwd before the proxy, and no PROXY_USER process survives it
+  verification_step: 2
+  test_selector: tests/personas/test_egress_launcher.py::test_extract_runs_before_the_proxy_and_leaves_no_survivor
   red_green_expectation: red before (node absent), green after
 - source: scripts/personas/egress_trees.py
   behavior: pack keeps dotfiles and drops .git and links; extract refuses bad members and leaves no dest
@@ -446,6 +473,11 @@ test_obligations:
   behavior: results carry reads, tree commits and not_examined
   verification_step: 2
   test_selector: tests/personas/test_keyed_run.py::test_record_carries_reads_and_not_examined
+  red_green_expectation: red before (node absent), green after
+- source: scripts/personas/keyed_run.py
+  behavior: every request ends in one newline and the head tar follows it byte-exact through the launcher reader
+  verification_step: 2
+  test_selector: tests/personas/test_keyed_run.py::test_request_bytes_reach_the_launcher_reader
   red_green_expectation: red before (node absent), green after
 - source: scripts/personas/post_verdict.py
   behavior: the check text carries the Reads section
@@ -499,8 +531,8 @@ constraints:
 - Decompose, never raise, a file that crosses its SLOC budget (Decision 128); persona-verdict.yml and its guards are not edited.
 - No rescue agents or workaround loops (Decision 55).
 context:
-- rec-5709 (primary). Blind Fable consult /mnt/project-files/code-reviewer-add/advisor-brief-2/ADVICE.md option b, operator agreed 2026-11-27
-  10:44 UTC.
+- rec-5724 (primary; this plan closes it). Parent rec-5709 waits on rec-5724 and rec-5725. Blind Fable consult /mnt/project-files/code-reviewer-add/advisor-brief-2/ADVICE.md
+  option b, operator agreed 2026-11-27 10:44 UTC.
 - 'Operator 2026-11-27 12:24 UTC: one plan (no split), built after PLAN-code-reviewer-add; split later only if critique demands it.'
 - 'Operator 2026-11-27 12:57 UTC: split rec-5709 (plan_wording_check cannot rehearse wording that needs unbuilt code, rec-5723): rec-5724
   this code half; rec-5725 the wording half (code_reviewer opts into read_tree, two-part review scope in both lanes, approval run),
@@ -520,8 +552,8 @@ context:
 - 'Live assumption: tracked files are 84,795,298 B on 2026-11-27 (git ls-files -z | xargs -0 stat -c %s | awk ''{s+=$1} END {print s}''),
   docs/plans/ 43,398,799 B of it; git archive''s gzip grew 11.8 MB (09-27), 16.1 MB (10-27), 23.3 MB (11-27). The head tar is uncompressed
   (about 90 MB), streamed raw after the request line, outside MAX_REQUEST, under a 1 GiB cap; rec-5721 tunes caps with this trajectory.
-  Only runs that route a read_tree persona carry it; the floor''s main copy is a direct file copy on every container run. UNPROVEN until
-  rec-5725''s first live read run.'
+  Only runs that route a read_tree persona carry it; the floor''s main copy is a direct file copy on every container run. /run is RAM-backed
+  tmpfs on hosted runners (size not measured; an out-of-space extract fails closed). UNPROVEN until rec-5725''s first live read run.'
 - 'Decision-scout r1 and r2 (pre-split; fingerprints in gate_rounds): NOTE 206 cl.7, NOTE/WARN 212, SPIRIT 231, WARN 282 answered in
   scope; 246 cites left with the wording (rec-5725).'
 - 'Operator 2026-11-27 13:14 UTC (decision card): confirmed the named loosening of test_capabilities_are_read_input_over_every_input_only
@@ -535,6 +567,8 @@ context:
 - 'Critique r2 REVISE (3 blocking, 8 nits), all folded: head tar uncompressed and streamed raw after the request line under its own
   1 GiB cap (CRI2-01, 02); the floor copies main directly and a failed copy skips main without failing the floor (CRI2-03); extract
   runs as PROXY_USER (CRI2-05).'
+- 'Critique r3 REVISE (3 blocking, 11 nits): the launcher row''s third blocking finding went to a convergence consult (/mnt/project-files/reviewer-read-tree/convergence-consult/RULING.md):
+  one more round, host-side unprivileged extract kept; all folded. The next escalation goes to the operator.'
 gate_rounds:
 - gate: decision-scout
   round: 1
@@ -761,6 +795,100 @@ gate_rounds:
     origin: mechanical
     anchor: verification_plan[6]
     subject: filter on gates.verdict_app.app_id
+    disposition: fixed
+- gate: plan-critique
+  round: 3
+  verdict: REVISE
+  blocking: 3
+  nits: 11
+  category_consistency: []
+  escalated: true
+  escalation_choice: one more round
+  escalation_decider: consult
+  findings:
+  - id: CRI3-01
+    severity: blocking
+    origin: judgement
+    anchor: scope[scripts/personas/egress_launcher.py]
+    subject: PROXY_USER extract cannot reach a dest under root 0700 dirs
+    disposition: fixed
+  - id: CRI3-02
+    severity: blocking
+    origin: judgement
+    anchor: scope[scripts/personas/egress_launcher.py]
+    subject: request-line framing not specified end to end
+    disposition: fixed
+  - id: CRI3-03
+    severity: blocking
+    origin: judgement
+    anchor: scope[scripts/personas/reference_hits.py]
+    subject: per-term hit cap fills with docs/plans before code callers
+    disposition: fixed
+  - id: CRI3-04
+    severity: nit
+    origin: judgement
+    anchor: scope[scripts/personas/egress_launcher.py]
+    subject: extract shares the proxy identity; survivor could impersonate the proxy
+    disposition: fixed
+  - id: CRI3-05
+    severity: nit
+    origin: judgement
+    anchor: scope[scripts/personas/egress_launcher.py]
+    subject: launcher cannot import egress_trees; local cap constant
+    disposition: fixed
+  - id: CRI3-06
+    severity: nit
+    origin: judgement
+    anchor: scope[tests/personas/test_egress_launcher.py]
+    subject: bool length, main mode bits, extract timeout
+    disposition: fixed
+  - id: CRI3-07
+    severity: nit
+    origin: judgement
+    anchor: context Live assumption
+    subject: /run is tmpfs on hosted runners
+    disposition: fixed
+  - id: CRI3-08
+    severity: nit
+    origin: mechanical
+    anchor: scope[src/persona_backends/repo_read.py]
+    subject: pass the injectable clock with the deadline
+    disposition: fixed
+  - id: CRI3-09
+    severity: nit
+    origin: mechanical
+    anchor: context[0]
+    subject: name rec-5724 primary
+    disposition: fixed
+  - id: CRI3-10
+    severity: nit
+    origin: mechanical
+    anchor: verification_plan[6]
+    subject: prefer mcp__github__ check-run read
+    disposition: fixed
+  - id: CRI3-11
+    severity: nit
+    origin: mechanical
+    anchor: scope[scripts/personas/post_verdict.py]
+    subject: pin the Reads header literal
+    disposition: fixed
+  - id: CRI3-12
+    severity: nit
+    origin: mechanical
+    anchor: scope[docs/contracts/ports.yaml]
+    subject: conformance leg covers local_container only
+    disposition: fixed
+  - id: CRI3-13
+    severity: nit
+    origin: mechanical
+    anchor: test_obligations[src/persona_backends/events.py]
+    subject: selector does not show turn_record writes reads
+    disposition: fixed
+  - id: CRI3-14
+    severity: nit
+    origin: judgement
+    anchor: scope[scripts/checks/contracts/validate_persona_contracts.py]
+    subject: zero or negative caps, stale budget, CLI bad forms
     disposition: fixed
 pre_implementation_checklist:
 - Branch confirmed not on main
