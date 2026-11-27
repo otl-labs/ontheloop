@@ -1,0 +1,340 @@
+schema_version: 7
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: persona-findings-actions-lane
+intent: >-
+  Give every GitHub Actions verdict persona run a durable, typed, text-free per-finding record in its verdict-App check
+  run, a code-built TLDR with a link to that check run in the existing wake comment, and a client-side read that returns
+  both lanes' telemetry_persona_findings rows for a UTC day window, so the code_reviewer dual-run (rec-5710, T4.28 c5)
+  and later the plan_critic and decision_scout dual-runs count agreement from per-finding rows and disagreements can be
+  mined for deterministic checks (NS.6).
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-persona-findings-actions-lane.yaml
+phase: >-
+  rec-5742 (split of rec-5254, the open half of rec-4434): the CAPTURE FROM DAY ONE prerequisite of T4.28 c3, T4.29 c2
+  and T4.30 c2 ("rec-4434 (per-finding rows) before dual-run starts"). rec-4434 and rec-5254 close only after this and
+  its sibling rec-5741 (the skills half) both close, so this plan flips no criterion.
+closes_criteria: []
+cites: [dec:118, dec:199, dec:200, dec:205, dec:212, dec:221, dec:229, dec:231, dec:235, dec:239, dec:271, dec:275, dec:279, dec:290]
+amends: []
+introduces: []
+scope:
+  - file: scripts/personas/findings_record.py
+    action: Create
+    purpose: >-
+      Stdlib-only render and parse of the check-text line '<!-- persona-verdict-findings v1 {...} -->' (keys route,
+      head_sha, run_id, run_attempt, run_ref, session_started_at, definition_sha256, served_models, run_outcome,
+      failure_id, result, findings_total, truncated, redacted; '<' and '>' JSON-escaped so the line cannot close its
+      comment; ids and anchors kept only when they match ^[A-Za-z0-9_./:#\[\]-]{1,200}$, else the string redacted and
+      counted; at most 200 findings), plus tldr_line(route, conclusion, record, url), the code-built TLDR line whose
+      every printed value is an integer, a route id or a value that matches the persona contracts' accepted values.
+  - file: scripts/personas/keyed_run.py
+    action: Modify
+    purpose: >-
+      The results record also keeps run_ref (litellm_run_ref(litellm_root_ref(the gha host-run ref)) from the host facts,
+      written even when the sidecar is deferred or no session started), session_started_at (from the rows file's
+      telemetry_agents rows when present, else null), definition_sha256 (the events header rendered_prompt_sha256 when it
+      is 64 hex) and served_models (the distinct, sorted model strings of attempts with outcome ok). Headroom 76 SLOC:
+      the build measures it and extracts a helper module if the edit would cross 500.
+  - file: scripts/personas/post_verdict.py
+    action: Modify
+    purpose: >-
+      Every fresh, allowlisted route whose persona findings.LISTS covers (code_reviewer, plan_critic, decision_scout;
+      success or failure, never a carried or un-allowlisted one, never a fixture route) gets the findings line
+      after the leading persona-verdict- lines (record, then input) and one titles block ('- <id>: <title>' per finding,
+      blocking ids first, each title cut at 200 characters, the plan-class blocking block extended rather than repeated),
+      then the Reads section in the room left; the titles block is cut before any machine line; run_outcome is verdict,
+      persona_failure (a schema-valid failure object, failure_id its failure) or host_failure (no usable result, timeout,
+      non-zero exit, unparseable or schema-invalid output, failure_id the judge failure class). _override_form and
+      plan_override copy the source text's findings line verbatim, as they copy the input line. The result object is
+      findings.restrict_result of the schema-valid output.
+  - file: scripts/personas/wake.py
+    action: Modify
+    purpose: >-
+      The wake comment for newly landed routes gains a code-built TLDR block after WAKE_TEXT: the header 'For people;
+      the check run is authoritative. Snapshot at run <url>.' and one findings_record.tldr_line per landed route, read
+      only from verdict-App check runs (override.app_id()) on the head, the highest check id per name; no findings line
+      gives the no-record form; an unreadable App id or listing gives no TLDR block, and the wake still posts. Titles,
+      summaries and check text other than the findings line are never printed. WAKE_TEXT and the module docstring drop
+      'carries no verdict' for 'the check runs are authoritative'. The fault comment is unchanged.
+  - file: scripts/persona_contracts/findings.py
+    action: Modify
+    purpose: >-
+      PROJECTION_VERSION 2. RunIdentity gains run_ref and served_model and its tenant_id, project_id and agent_run_id
+      become optional; FindingRow gains run_ref, run_outcome, failure_id and served_model (appended, contract order).
+      project_result takes run_outcome and failure_id: a persona failure (a parsed block or result whose outcome is
+      failure) projects one ordinal-0 row, parse_status parsed, verdict NULL, run_outcome persona_failure; a host failure
+      projects one row, parse_status content_unavailable, run_outcome host_failure; an unparsed in-session block is
+      run_outcome unreadable. restrict_result(persona, out) returns the projected_schema subset post writes.
+  - file: scripts/persona_contracts/findings_read.py
+    action: Create
+    purpose: >-
+      Read-only CLI and library (--day-from, --day-to, --lane both|in_session|actions, JSON lines out, typed rows and
+      gaps only, never text). in_session: telemetry_root_sessions over the window, scripts.telemetry_verify.rows
+      read_tree and decode_rows per root, the persona telemetry_agents close rows (agent_type a verdict persona
+      registry_key, observation_id set), the child session's last telemetry_transcripts row with purpose response and
+      origin agent, scripts.telemetry_content.fetch_row through content_reader, the stored entry decoded to its text,
+      project_result(text=...). actions: the window's persona-verdict.yml workflow runs whose display_title is
+      'persona-verdict pull_request <sha>', the check runs on each head posted by override.app_id() with a parsable
+      findings line, one per run_ref (highest check id), project_result(result=..., run_outcome=, failure_id=); a (head,
+      route) with no record is a gap (cancelled, carried or no_record), never a row. GitHub through
+      scripts.personas.resolve_pr.request with GH_TOKEN.
+  - file: docs/contracts/telemetry_persona_findings.yaml
+    action: Modify
+    purpose: >-
+      contract_version 2 (semantic_break true): grain one row per (lane, run_ref, finding_ordinal, projection_version);
+      new fields run_ref (not null; telemetry_agents.entity_ref), run_outcome (verdict | persona_failure | host_failure |
+      unreadable), failure_id (nullable; the persona contracts own the ids, no accepted_values) and served_model
+      (nullable; in-session NULL in v2, a named debt); tenant_id, project_id and agent_run_id NULL on rows read from a
+      check run until rec-5551 sends them (a dated governance-note deferral citing Decision 200 cl.2 and naming rec-5551
+      as owner; never computed client-side; the three fields' not_null notes say NULL is allowed on lane actions
+      only); the check run is the interim actions source, read through no named verb
+      until rec-5551 moves actions rows onto the telemetry verbs (NS.5 deferral), and a
+      later warehouse copy is a rebuildable derived table (Decision 221); the multi-run read is the client read path
+      scripts.persona_contracts.findings_read, a reader verb replacing it on the measured-read-cost trigger (Decision 199
+      cl.1 deferral); plan A's three wording debts (loose finding-id check, decision_scout anchor forms, subject_dirty
+      NULL on actions); in-session served_model NULL is a debt owned by rec-5743; 90-day in-session horizon (Decision
+      239); a new amendment_log row. Notice class (Decision 279).
+  - file: docs/contracts/ports.yaml
+    action: Modify
+    purpose: >-
+      One coupling_findings row (Decision 212 cl.3), status open, owning_item rec-5551: findings_read (and the contract's
+      actions lane) reads the verdict_plane's GitHub Checks API and workflow-run display titles beside the telemetry
+      reader, so the per-finding read assumes the verdict plane's change surface; the coupling ends when rec-5551's
+      warehouse copy serves actions rows through the telemetry verbs; plus a new amendment_log entry. NEAR_CAP (33 B of
+      byte headroom at planning): the build first compacts older amendment_log rows to terse rows
+      (contract-population.yaml amendment_log_retention), measured against main at build time, never a raise.
+  - file: docs/contracts/git-ops.yaml
+    action: Modify
+    purpose: >-
+      wake_signals.persona_verdict: 'It never carries a verdict' becomes: it carries the code-built TLDR (verdict,
+      counts by severity and origin, a link per check run) for people; agents and the merge gate read verdicts only
+      from the persona-verdict/ check runs. Notice class (only approved_text_binding is gated) plus a new amendment_log
+      entry. NEAR_CAP (115 B of byte headroom at planning): the same amendment_log compaction relief, measured at build.
+  - file: docs/ROADMAP-PLATFORM.yaml
+    action: Modify
+    purpose: >-
+      T4.32 c1's WAKE leg ('one value-free, idempotent wake') gains a dated bracket '[Amendment 2026-11-27,
+      PLAN-persona-findings-actions-lane (rec-5742): the wake comment also carries a code-built TLDR read from the
+      verdict-App check runs, for people; the check run stays the only verdict an agent or the gate reads]' (operator
+      ruling 2026-11-27); status unchanged.
+  - file: tests/personas/test_findings_record.py
+    action: Create
+    purpose: Round trip, caps and truncation, comment-safety, redaction and TLDR-from-typed-values nodes.
+  - file: tests/personas/test_keyed_run.py
+    action: Modify
+    purpose: The results record carries run_ref, session_started_at, definition_sha256 and served_models, and run_ref also when the sidecar is deferred.
+  - file: tests/personas/test_post_verdict_findings.py
+    action: Create
+    purpose: >-
+      Findings line and titles on fresh covered success and failure routes, none on carried or fixture routes, placement
+      after the record and input lines, override copy, and machine lines surviving a maximal result (beside
+      test_post_verdict.py, which stays unchanged: its fixture-route assertions keep holding, and it is at 412 of 500 SLOC).
+  - file: tests/personas/test_wake.py
+    action: Modify
+    purpose: >-
+      The exact-text node gains the TLDR block; new nodes for the TLDR read from verdict-App runs only, the no-record
+      form and the no-TLDR fallback; the forbidden-words check keeps refusing titles and summaries (operator-approved
+      change to the value-free rule, 2026-11-27).
+  - file: tests/persona_contracts/test_findings_projection_v2.py
+    action: Create
+    purpose: Persona failure, host failure, unreadable and run_ref/served_model projection nodes, and restrict_result.
+  - file: tests/persona_contracts/test_findings_read.py
+    action: Create
+    purpose: Hermetic read-path nodes over recorded verb and check-run fixtures (both lanes, foreign-App runs ignored, gaps, escaped entry decode, window bounds).
+  - file: tests/telemetry/test_persona_findings.py
+    action: Modify
+    purpose: test_contract_fields_match_the_row expects PROJECTION_VERSION 2 (the only edit; the sibling rec-5741 adds a node to this file).
+bundled_recommendations: []
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - tests/persona_contracts/test_findings_read.py::test_both_lanes_project_rows_and_foreign_app_runs_are_ignored passes (rec-5742 acceptance).
+  - A persona-verdict code_reviewer run on a real PR after merge posts a check run whose findings line findings_read projects into actions rows, and its wake comment carries the TLDR line linking that check run.
+  - findings_read returns in-session rows for a real past window through the existing verbs without writing anything.
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The new and changed nodes pass.
+    command: >-
+      bin/venv-python -m pytest tests/persona_contracts/test_findings_read.py tests/persona_contracts/test_findings_projection_v2.py
+      tests/personas/test_findings_record.py tests/personas/test_wake.py tests/personas/test_post_verdict_findings.py
+      tests/personas/test_keyed_run.py tests/telemetry/test_persona_findings.py -q
+    expected: exit 0, no failures
+    fix_if: a node fails or is missing; fix the module or create the node, never the assertion
+    hermetic: true
+    expected_literals:
+      - passed
+    graduation: graduate
+    graduation_check_id: persona-findings-actions-lane-units
+  - step: 2
+    phase: pre-deploy
+    action: The neighbouring persona suites and contract validators still pass.
+    command: >-
+      bin/venv-python -m pytest tests/personas/test_post_verdict.py tests/personas/test_override.py tests/personas/test_rescout.py tests/personas/test_route.py
+      tests/test_session_merge_checks.py tests/persona_contracts tests/checks/contracts/test_validate_ports_contract.py -q
+    expected: exit 0, no failures
+    fix_if: a node fails; fix the code, never the assertion
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: existing suites already run in the fast tier by path; this is a regression sweep of their neighbours
+  - step: 3
+    phase: pre-deploy
+    action: Live in-session read over a real past window (read-only, agent_platform profile), proving the masked-reader join.
+    command: >-
+      bin/venv-python -m scripts.persona_contracts.findings_read --day-from 2026-11-25 --day-to 2026-11-25 --lane in_session
+      | grep -c '"lane": "in_session"'
+    expected: a count of at least 1, with at least one row whose parse_status is parsed (the 25 Nov code review read in rec-4434 planning)
+    fix_if: zero rows; fix the join rule against the live rows (never widen the window to hide it); unreachable reader is a STOP
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: a live read of production telemetry, not a repository property
+  - step: 4
+    phase: pre-deploy
+    action: Full tier before handoff.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: >-
+      Full tier passes and --verify-head confirms it for the head. Start it as a harness-tracked background run (Bash
+      run_in_background, timeout 7200000) from the top-level session with HOME set to an empty directory.
+    fix_if: a failure in scope is fixed; one outside scope is a STOP to the plan owner; never loosen a check (Decision 235)
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: is the full tier itself
+  - step: 5
+    phase: post-deploy
+    action: 'The squash commit carries Resolves: rec-5742 and merge_step readback reads it.'
+    command: bin/venv-python -m scripts.session.merge_step readback --slug persona-findings-actions-lane --sha <merge_sha>
+    expected: readback OK naming rec-5742, then (after ci.yml's closure job) its status leg reads closed
+    fix_if: 'MISSING: follow merge_step recover'
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: a per-merge read-back, not a repository property
+  - step: 6
+    phase: post-deploy
+    action: >-
+      Live Actions lane: on the first code PR after the merge whose persona-verdict/code_reviewer check landed (the build
+      PR itself qualifies only after merge, since the verdict workflow runs from main), findings_read returns its rows.
+    command: >-
+      bin/venv-python -m scripts.persona_contracts.findings_read --day-from <merge_day> --day-to <merge_day_plus_1> --lane actions
+      | grep -c '"run_ref": "litellm:gha:'
+    expected: a count of at least 1 (one row per finding plus the verdict row of that run)
+    fix_if: zero rows while the check run exists; diagnose the findings line on that check run, fix forward on a new branch
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: a live post-merge observation of a GitHub check run
+  - step: 7
+    phase: post-deploy
+    action: The same run's wake comment carries the TLDR header and a line linking that check run.
+    command: >-
+      curl -s "https://api.github.com/repos/otl-labs/ontheloop/issues/<pr_number>/comments?per_page=100" |
+      grep -c 'For people; the check run is authoritative.'
+    expected: a count of at least 1
+    fix_if: zero; read the wake job log of that run and fix forward
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: a live post-merge observation of a PR comment
+test_obligations:
+  - source: scripts/persona_contracts/findings_read.py
+    behavior: both lanes project rows, and check runs by any app other than the verdict App are ignored
+    verification_step: 1
+    test_selector: tests/persona_contracts/test_findings_read.py::test_both_lanes_project_rows_and_foreign_app_runs_are_ignored
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/persona_contracts/findings_read.py
+    behavior: a head with a cancelled, carried or record-less route is a gap, never a row; one row set per run_ref
+    verification_step: 1
+    test_selector: tests/persona_contracts/test_findings_read.py::test_missing_records_are_gaps_and_reruns_dedupe_by_run_ref
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/persona_contracts/findings_read.py
+    behavior: the stored JSON-escaped transcript entry is decoded to text before projection, and no text is printed
+    verification_step: 1
+    test_selector: tests/persona_contracts/test_findings_read.py::test_escaped_entry_is_decoded_and_no_text_is_printed
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/persona_contracts/findings.py
+    behavior: a persona failure projects one parsed ordinal-0 row with run_outcome persona_failure and its failure_id
+    verification_step: 1
+    test_selector: tests/persona_contracts/test_findings_projection_v2.py::test_a_persona_failure_projects_one_parsed_row_with_its_failure_id
+    red_green_expectation: red before (today block_invalid), green after
+  - source: scripts/persona_contracts/findings.py
+    behavior: a host failure projects content_unavailable / host_failure, and run_ref and served_model reach every row
+    verification_step: 1
+    test_selector: tests/persona_contracts/test_findings_projection_v2.py::test_host_failure_and_run_identity_reach_every_row
+    red_green_expectation: red before (fields absent), green after
+  - source: scripts/personas/findings_record.py
+    behavior: the record round-trips, holds no free text, cannot close its comment and redacts unsafe ids and anchors
+    verification_step: 1
+    test_selector: tests/personas/test_findings_record.py::test_record_round_trips_and_holds_no_free_text
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/personas/findings_record.py
+    behavior: more than 200 findings are capped with findings_total and truncated set
+    verification_step: 1
+    test_selector: tests/personas/test_findings_record.py::test_record_caps_findings_and_marks_truncated
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/personas/findings_record.py
+    behavior: the TLDR line prints only integers, route ids and accepted values, else the no-record form
+    verification_step: 1
+    test_selector: tests/personas/test_findings_record.py::test_tldr_line_prints_typed_values_only
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/personas/post_verdict.py
+    behavior: every fresh allowlisted route gets the findings line and titles block after the record and input lines; carried ones get none
+    verification_step: 1
+    test_selector: tests/personas/test_post_verdict_findings.py::test_fresh_routes_get_the_findings_line_and_carried_ones_do_not
+    red_green_expectation: red before (no findings line), green after
+  - source: scripts/personas/post_verdict.py
+    behavior: a failed route records run_outcome and failure_id; an override keeps the findings line; machine lines survive a maximal result
+    verification_step: 1
+    test_selector: tests/personas/test_post_verdict_findings.py::test_failures_and_overrides_keep_a_findings_line_inside_the_text_limit
+    red_green_expectation: red before (no findings line), green after
+  - source: scripts/personas/keyed_run.py
+    behavior: the results record carries run_ref, session_started_at, definition_sha256 and served_models, run_ref also when telemetry is deferred
+    verification_step: 1
+    test_selector: tests/personas/test_keyed_run.py::test_record_carries_run_ref_definition_hash_and_served_models
+    red_green_expectation: red before (keys absent), green after
+  - source: scripts/personas/wake.py
+    behavior: the wake comment carries the code-built TLDR from verdict-App runs only, and posts without it when the App id or listing is unreadable
+    verification_step: 1
+    test_selector: tests/personas/test_wake.py::test_the_wake_comment_carries_a_tldr_from_verdict_app_runs_only
+    red_green_expectation: red before (no TLDR), green after
+  - source: docs/contracts/telemetry_persona_findings.yaml
+    behavior: the contract's fields equal the row's fields and PROJECTION_VERSION is 2
+    verification_step: 1
+    test_selector: tests/telemetry/test_persona_findings.py::test_contract_fields_match_the_row
+    red_green_expectation: red before (version 1, fields absent), green after
+constraints:
+  - No warehouse write, no new reader verb, no Lambda deploy, no workflow, job, permission or secret change, no image re-pin (persona-record and post run on the runner from main).
+  - "Never put finding text, titles or summaries in the findings line or the TLDR; titles appear only on their own '- <id>: <title>' lines in the check text, as plan personas do today."
+  - The merge gate and every agent read verdicts from check runs only; the TLDR is for people (Decision 271).
+  - The tenant_id, project_id and agent_run_id of an actions row are never computed client-side (Decision 200; docs/contracts/project-id.yaml).
+  - No rescue agents or workaround loops (Decision 55); never loosen a test to get green (Decision 235).
+context:
+  - "Decision-scout r2 FLAGS_FOUND; CITE dec:118,199,200,205,212,221,229,231,235,239,271,275,279,290. Decisions triaged: 239 of 239. Roadmap items intersected: 6; CONFLICT: 0; RELATED: 4. Serves: NS.6 4/5."
+  - "Scout dispositions: Dec 200 WARN deferral note (operator-approved NULL disposition, extended to agent_run_id); Dec 212 coupling row; Dec 231 NOTE rec-5743; NS.5/NS.1 NOTE deferrals owned by rec-5551; T4.32 c1 amended in this PR; dec:286 -> dec:290."
+  - "NS.4 NOTE: the TLDR is rendered by code from typed check-run values each run and stores no narrative (Decision 232 cl.7 reading); it is the operator's own ask (2026-11-27)."
+  - Operator approach 2026-11-27 (rec-5742 context; /mnt/project-files/rec-4434-plan-b/PRESENTATION.md, advisor-brief/ADVICE.md).
+  - Identity, TLDR source, check selection and placement settled on a blind consult (/mnt/project-files/rec-5742-plan/advisor-brief/ADVICE.md); agent_run_id cannot be read from the rows file (identity.py:187-197, project-id.yaml:27-28).
+  - Depends on rec-5724 (merged #2547, 1e15ad17); same files keyed_run.py and post_verdict.py.
+  - Sibling rec-5741 adds a node to tests/telemetry/test_persona_findings.py; whichever lands second rebases (append-only, no shared lines).
+  - The wake test change (value-free rule relaxed to typed values) is the operator's own ask, not a loosening; titles and summaries stay forbidden.
+  - "Graduated shards kept (selectors stay valid): persona-verdict-wake-verb, persona-verdict-scout-carry-units, keyed-run-registry-key, persona-findings-code-review-block, persona-findings-contract-matches-row, persona-findings-lists-cover-contracts, persona-findings-skill-block-in-step."
+  - rec-5725 (code_reviewer wording and hash) may land before or after; it must land before the dual-run window, not this plan.
+  - "Selection budget: breadth_waived (226 selected of 1419; predicted test half 185-703s against the 703s allowance); scope kept and breadth declared."
+  - in-session served_model is NULL in v2 (model-call rows are not fetched); owned by rec-5743 (filed by this planning session, Decision 231 NOTE).
+  - red_overlap verdict clear (no reds, slo 4h).
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:ee94e029231b3780feeef8bb1ad64e829837f23a34f5ad6cdaa09d5ba374a970'}
+  - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: 'v1:ea7d8d970e6ef7240997b918add060cd168691b51c76810a31f9d0b6059d95e2'}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - findings_record.py and its tests (stdlib only; wake imports it under pyyaml alone).
+  - findings.py v2 (RunIdentity, FindingRow, run_outcome, restrict_result) and the contract v2 with its amendment_log row.
+  - keyed_run.py results-record keys; post_verdict.py findings line, titles block and override copy.
+  - wake.py TLDR block; update WAKE_TEXT, the docstring and the wake tests.
+  - findings_read.py and its fixtures; run step 3 live.
+  - Execute the Verification Plan; on an unrecoverable V3 failure stop and RCA (Decision 55).
+  - 'Report: what was implemented, verification results'
