@@ -237,7 +237,7 @@ def _manifest_root(tmp_path: Path, target_present: bool) -> None:
     entry = _entry(
         4,
         extra=f"supersedes: [1]\ndelegates:\n  - key: {_MKEY}\n    change_rule: operator_approval\n    bounds: {{text: x}}\n",
-    )
+    ).replace("Entry 4 (Decided)", "Entry 4 (supersedes Decision 1) (Decided)")
     files = {
         DECISIONS: stub + entry,
         _MREL: yaml.safe_dump({"supersedes": [1], "units": [{"id": "1 decision p1", "delegated": [_MKEY]}]}),
