@@ -97,7 +97,10 @@ def test_three_verdict_personas_registered_pending() -> None:
         assert row["kind"] == "verdict"
         assert row["contract"] == contract
         assert row["rendered_prompt"] == rendered
-        assert row["implementation"] == {"status": "pending", "owning_item": add}
+        if persona == "code_reviewer":
+            assert row["implementation"] == {"status": "implemented", "location": "scripts/personas/review_input.py"}
+        else:
+            assert row["implementation"] == {"status": "pending", "owning_item": add}
 
 
 def test_verdict_enum_and_tether() -> None:

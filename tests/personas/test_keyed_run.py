@@ -80,3 +80,21 @@ def test_registry_key_is_none_for_a_malformed_key(tmp_path: Path) -> None:
     root = _tmp_root(tmp_path, lambda row: row.update(registry_key="Bad Key"))
     assert execute.registry_key(root, ROUTE) is None
     assert execute.registry_key(tmp_path / "empty", ROUTE) is None
+
+
+def test_implemented_verdict_route_is_accepted_and_pending_refused(tmp_path: Path) -> None:
+    schema = execute.schema_for(ROOT, "code_reviewer", "input")
+    assert schema is not None
+    body = dict.fromkeys(schema["required"], "x")
+    body["head_sha"] = SHA
+    work = tmp_path / "ok"
+    (work / "prepared").mkdir(parents=True)
+    (work / "prepared" / "routes.json").write_text(json.dumps({"routes": ["code_reviewer"]}))
+    (work / "prepared" / "input-code_reviewer.json").write_text(json.dumps(body))
+    assert keyed_run.prepared_request(work, ROOT) == ("code_reviewer", body)
+    pending = tmp_path / "pending"
+    (pending / "prepared").mkdir(parents=True)
+    (pending / "prepared" / "routes.json").write_text(json.dumps({"routes": ["decision_scout"]}))
+    with pytest.raises(keyed_run.Refusal) as exc:
+        keyed_run.prepared_request(pending, ROOT)
+    assert str(exc.value) == "route_kind"

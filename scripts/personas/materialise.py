@@ -16,7 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from scripts.personas import execute, guidance, resolve_pr, snapshot
+from scripts.personas import egress_launcher, execute, guidance, resolve_pr, snapshot
 from scripts.personas import route as route_mod
 
 Provider = Callable[[Path, dict[str, Any]], dict[str, Any]]
@@ -24,6 +24,7 @@ PROVIDERS: dict[str, Provider] = {}
 CASE_KEY = "_guidance_case"
 CASE_PREFIX = "GUIDANCE-CASE:"
 CASE_LINE = re.compile(r"^GUIDANCE-CASE: ([a-z][a-z0-9_]*)$")
+REQUEST_HEADROOM = 1024 * 1024
 
 
 class Unusable(Exception):
@@ -100,7 +101,16 @@ def build_input(
         provider = _fixture
     if provider is None:
         raise Unusable("input_incomplete", f"no input provider is registered for {route_id}")
-    provided = provider(root, {"route": route_id, "resolution": resolution, "fixture_paths": fixture_paths or []})
+    provided = provider(
+        root,
+        {
+            "route": route_id,
+            "resolution": resolution,
+            "fixture_paths": fixture_paths or [],
+            "plan_paths": plan_paths,
+            "base_root": base,
+        },
+    )
     case = provided.pop(CASE_KEY, None)
     fields.update(provided)
     try:
@@ -134,7 +144,12 @@ def materialise(
             if not usable:
                 raise Unusable("input_unusable", "the head snapshot was refused")
             body = build_input(root, route_id, resolution, plan_paths, fixture_paths, base_root=base_root)
-            (out / f"input-{route_id}.json").write_text(json.dumps(body, sort_keys=True), encoding="utf-8")
+            text = json.dumps(body, sort_keys=True)
+            size = len(text.encode("utf-8"))
+            if size > egress_launcher.MAX_REQUEST - REQUEST_HEADROOM:
+                raise Unusable("input_unusable", f"the input is {size} bytes, over the launcher request cap less headroom")
+            (out / f"input-{route_id}.json").write_text(text, encoding="utf-8")
+            print(f"PERSONA-VERDICT input {route_id} bytes={size}")
         except (Unusable, snapshot.SnapshotRefused) as exc:
             failure = exc.failure if isinstance(exc, Unusable) else "input_unusable"
             detail = exc.detail if isinstance(exc, Unusable) else str(exc)
@@ -157,3 +172,6 @@ def main(argv: list[str]) -> int:
         base_root=execute.ROOT,
     )
     return 0
+
+
+from scripts.personas import review_input  # noqa: E402,F401

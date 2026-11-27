@@ -21,9 +21,9 @@ import yaml
 from scripts.checks import _common, registry
 from scripts.checks.ci_guards._persona_verdict_keyed import (
     ACCOUNT_ENV,
+    CONDITIONS,
     FLOOR,
     FLOOR_CONTAINER,
-    KEYED_CONDITION,
     KEYED_JOBS,
     PERSONA,
     PROBE,
@@ -43,7 +43,9 @@ EVIDENCE = "docs/contracts/github-actions-evidence.yaml"
 PR_TYPES = ["opened", "ready_for_review", "reopened", "synchronize"]
 MKDIR = 'mkdir -p "$RUNNER_TEMP/work"'
 RUN_PREFIX = 'python3 -I "$GITHUB_WORKSPACE/main/scripts/personas/run.py" '
-VERBS = frozenset({"resolve", "route", "fetch", "materialise", "post", "wake", "inference-smoke", "key-refusal"})
+VERBS = frozenset(
+    {"resolve", "route", "fetch", "review-context", "materialise", "post", "wake", "inference-smoke", "key-refusal"}
+)
 REGION_ACTION = "./.github/actions/aws-region"
 KEYED_ENVIRONMENTS = frozenset({"smoke", "run", "run-fallback", "post"})
 KEYED_ID_TOKEN = frozenset({"smoke", "refusal", "run", "run-fallback", "post"})
@@ -73,11 +75,12 @@ ARTIFACT_DIRS = {
     "persona-verdict-wheels": "wheels",
 }
 UPLOAD_DIRS = {"persona-verdict-results-fallback": "results"}
-RUN_CONDITION = KEYED_CONDITION
-UPSTREAMS = ["persona-verdict-trigger", "persona-verdict-override"]
+RUN_CONDITION = CONDITIONS["run"]
+UPSTREAMS = ["persona-verdict-trigger", "persona-verdict-override", "CI"]
 VERDICT_RUN_NAME = "persona-verdict ${{ github.event.workflow_run.event }} ${{ github.event.workflow_run.head_sha }}"
 VERDICT_GROUP = (
     "persona-verdict-${{ github.event.workflow_run.head_repository.full_name }}-"
+    "${{ github.event.workflow_run.path }}-"
     "${{ github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.head_branch || "
     "github.event.workflow_run.id }}"
 )
@@ -230,6 +233,8 @@ def _python_step_problems(name: str, step: dict[str, Any]) -> list[str]:
         out.append(f"{VERDICT}: job {name} python step {run!r} lacks PERSONA_SNAPSHOT: {SNAPSHOT}")
     if step.get("working-directory") != WORKDIR:
         out.append(f"{VERDICT}: job {name} python step {run!r} working-directory is not {WORKDIR}")
+    if verb == "review-context" and name != "prepare":
+        out.append(f"{VERDICT}: the review-context verb runs in job {name}, not only in prepare")
     if verb in ("inference-smoke", "key-refusal") and name not in KEYED_JOBS:
         out.append(f"{VERDICT}: the {verb} verb runs in job {name}, not only in a keyed job")
     if name in RUN_JOBS:
@@ -425,6 +430,22 @@ def _wake_download_problems(job: dict[str, Any]) -> list[str]:
     return []
 
 
+REVIEW_CONTEXT_IF = "steps.resolve.outputs.allowlisted == 'true' && steps.route.outputs.routes != '0'"
+
+
+def _review_context_problems(job: dict[str, Any], names: list[str]) -> list[str]:
+    """Exactly one review-context step, in prepare, after route and before materialise, behind the allowlist and routes."""
+    if names.count("review-context") != 1:
+        return [f"{VERDICT}: prepare does not hold exactly one review-context step"]
+    at = names.index("review-context")
+    out: list[str] = []
+    if "route" not in names or "materialise" not in names or not names.index("route") < at < names.index("materialise"):
+        out.append(f"{VERDICT}: the review-context step is not after route and before materialise")
+    if _unwrap(_steps(job)[at].get("if", "")) != REVIEW_CONTEXT_IF:
+        out.append(f"{VERDICT}: the review-context step condition is not {REVIEW_CONTEXT_IF}")
+    return out
+
+
 def _prepare_problems(job: Any) -> list[str]:
     if not isinstance(job, dict):
         return []
@@ -435,6 +456,7 @@ def _prepare_problems(job: Any) -> list[str]:
     ]
     if "fetch" in names and "materialise" in names and names.index("fetch") > names.index("materialise"):
         out.append(f"{VERDICT}: the fetch step comes after the materialise step")
+    out.extend(_review_context_problems(job, names))
     for verb in ("fetch", "materialise"):
         if verb in names:
             step = _steps(job)[names.index(verb)]
