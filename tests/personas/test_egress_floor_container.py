@@ -184,6 +184,7 @@ def test_pull_has_its_own_timeout_and_the_pinned_digest(monkeypatch: pytest.Monk
     monkeypatch.setattr(F, "DROPIN", Path("/tmp/x-dropin/zz.conf"))
     monkeypatch.setattr(F, "TEARDOWN_PATH", Path("/tmp/x-teardown.service"))
     monkeypatch.setattr(F, "install_files", lambda s: True)
+    monkeypatch.setattr(F, "install_main_tree", lambda: True)
     monkeypatch.setattr(F, "write_sudoers", lambda: True)
     assert F.apply() is True
     pull = next(c for c in calls if len(c[0]) > 1 and c[0][1] == "pull")
@@ -405,3 +406,43 @@ def test_a_shared_role_is_refused() -> None:
     shared = {prefix: {**row, "role": "primary"} for prefix, row in F.PROVIDERS.items()}
     with pytest.raises(ValueError):
         F.snapshot_text("registry.example/img", "sha256:" + "a" * 64, shared)
+
+
+def _fake_root(tmp_path: Path) -> Path:
+    root = tmp_path / "root"
+    (root / ".git").mkdir(parents=True)
+    (root / "pkg" / "__pycache__").mkdir(parents=True)
+    (root / ".git" / "HEAD").write_text("x", encoding="utf-8")
+    (root / "pkg" / "a.py").write_text("a = 1\n", encoding="utf-8")
+    (root / "pkg" / "__pycache__" / "a.pyc").write_bytes(b"\x00")
+    (root / "top.txt").write_text("top\n", encoding="utf-8")
+    os.symlink("/etc/passwd", root / "swapped.txt")
+    return root
+
+
+def test_floor_installs_the_main_tree_root_owned(tmp_path: Path) -> None:
+    root, target = _fake_root(tmp_path), tmp_path / "install"
+    assert F.install_main_tree(root, target) is True
+    main = target / "trees" / "main"
+    found = {p.relative_to(main).as_posix() for p in main.rglob("*")}
+    assert found == {"pkg", "pkg/a.py", "top.txt"}
+    assert (
+        oct((main / "pkg" / "a.py").stat().st_mode & 0o777) == "0o644"
+        and oct((main / "pkg").stat().st_mode & 0o777) == "0o755"
+    )
+    assert not (main / "swapped.txt").exists() and not (main / "swapped.txt").is_symlink()
+    assert F.install_main_tree(root, target) is True
+
+
+def test_a_failed_main_copy_does_not_fail_the_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def boom(src: Path, dest: Path) -> None:
+        dest.mkdir()
+        raise OSError("disk")
+
+    monkeypatch.setattr(F.egress_trees, "copy_tree", boom)
+    target = tmp_path / "install"
+    assert F.install_main_tree(_fake_root(tmp_path), target) is False
+    assert not (target / "trees" / "main").exists() and "MAIN-TREE-SKIPPED OSError" in capsys.readouterr().out
+    assert "egress_trees.py" in F.INSTALLED

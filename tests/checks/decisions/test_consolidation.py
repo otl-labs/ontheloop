@@ -72,7 +72,7 @@ amends: [1]
 1. alpha beta
 
 """
-ENTRY_4 = """## Decision 4: Consolidating (Decided)
+ENTRY_4 = """## Decision 4: Consolidating (supersedes Decisions 1 and 2) (Decided)
 
 ```yaml
 number: 4
@@ -562,7 +562,7 @@ def _cycle(spec: dict) -> None:
 
 def _to_consolidator(spec: dict) -> None:
     spec["head"][7] = _moved(7, 4)
-    spec["head"][4] = ENTRY_4.replace("Consolidating (Decided)", "Consolidating (supersedes Decision 7) (Decided)")
+    spec["head"][4] = ENTRY_4.replace("(supersedes Decisions 1 and 2)", "(supersedes Decisions 1, 2 and 7)")
     spec["rows"][4]["currency"] = "superseded_compacted"
 
 
@@ -596,6 +596,65 @@ RESOLVED: dict[str, tuple[Callable[[dict], None], str | None]] = {
 
 def test_carried_forward_and_held_resolve_through_supersession(tmp_path: Path) -> None:
     for name, (mutate, expected) in RESOLVED.items():
+        spec = _spec()
+        mutate(spec)
+        found = _problems(tmp_path / "".join(ch if ch.isalnum() else "_" for ch in name), spec)
+        assert (found == []) if expected is None else any(expected in p for p in found), (name, found)
+
+
+def _compacted_cons(title: str = "(supersedes Decisions 1 and 2)", currency: str = "superseded_compacted") -> Callable:
+    def mutate(spec: dict) -> None:
+        stub = "**Status:** Superseded\n\n**Superseded by: Decision 5**\n\n---\n\n"
+        spec["head"][4], spec["head"][5] = f"## Decision 4: Consolidating {title} (Decided)\n\n{stub}", _successor(5, 4)
+        spec["rows"][3]["currency"] = currency
+        spec["rows"].append(_idx(5, "current", supersedes=[4]))
+        _drop(spec)
+
+    return mutate
+
+
+def _victims_split(spec: dict) -> None:
+    _compacted_cons()(spec)
+    spec["head"][2] = spec["head"][2].replace("**Superseded by: Decision 4**", "**Superseded by: Decision 6**")
+    spec["head"][6] = spec["head"][4].replace("Decision 4:", "Decision 6:")
+    spec["rows"].append(_idx(6, "superseded_compacted"))
+
+
+def _victim_unstubbed(spec: dict) -> None:
+    _compacted_cons()(spec)
+    spec["head"][2] = spec["head"][2].replace("**Status:** Superseded", "**Status:** Decided")
+
+
+def _cons_uncompacted(spec: dict) -> None:
+    _compacted_cons(currency="superseded_pointer")(spec)
+    spec["head"][4] = ENTRY_4.replace("supersedes: [1, 2]", "supersedes: [1]")
+
+
+NO_ENVELOPE = "no entry's envelope supersedes exactly [1, 2]"
+COMPACTED: dict[str, tuple[Callable[[dict], None], str | None]] = {
+    "compacted consolidator declaring its victims in its title": (_compacted_cons(), None),
+    "compacted consolidator whose title declares nothing": (_compacted_cons(""), NO_ENVELOPE),
+    "title declares more than the victims": (_compacted_cons("(supersedes Decisions 1, 2 and 7)"), NO_ENVELOPE),
+    "title declares fewer than the victims": (_compacted_cons("(supersedes Decision 1)"), NO_ENVELOPE),
+    "victims' markers name two entries": (_victims_split, NO_ENVELOPE),
+    "a victim is not a compacted stub": (_victim_unstubbed, NO_ENVELOPE),
+    "compacted consolidator whose row is live": (_compacted_cons(currency="current"), NO_ENVELOPE),
+    "superseded consolidator that is not compacted": (_cons_uncompacted, NO_ENVELOPE),
+    "live consolidator whose title declares nothing": (
+        lambda spec: spec["head"].update({4: ENTRY_4.replace(" (supersedes Decisions 1 and 2)", "")}),
+        "Decision 4's heading title does not declare (supersedes [1, 2])",
+    ),
+    "live consolidator whose title declares more": (
+        lambda spec: spec["head"].update(
+            {4: ENTRY_4.replace("(supersedes Decisions 1 and 2)", "(supersedes Decisions 1, 2 and 7)")}
+        ),
+        "Decision 4's heading title does not declare (supersedes [1, 2])",
+    ),
+}
+
+
+def test_a_manifest_whose_consolidating_entry_compacted_is_history(tmp_path: Path) -> None:
+    for name, (mutate, expected) in COMPACTED.items():
         spec = _spec()
         mutate(spec)
         found = _problems(tmp_path / "".join(ch if ch.isalnum() else "_" for ch in name), spec)

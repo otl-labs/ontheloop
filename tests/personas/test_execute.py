@@ -31,8 +31,29 @@ def test_a_fixture_route_has_input_and_output_schemas() -> None:
 
 
 def test_a_non_fixture_route_has_no_schema() -> None:
-    assert execute.schema_for(ROOT, "code_reviewer", "input") is None
-    assert execute.failure_schema_for(ROOT, "code_reviewer") is None
+    assert execute.schema_for(ROOT, "decision_scout", "input") is None
+    assert execute.failure_schema_for(ROOT, "decision_scout") is None
+    assert execute.schema_for(ROOT, "code_reviewer", "input") is not None
+    assert execute.failure_schema_for(ROOT, "code_reviewer") is not None
+
+
+def test_keyed_personas_are_fixtures_and_implemented_verdicts(tmp_path: Path) -> None:
+    keyed = execute.keyed_personas(ROOT)
+    assert "canary_persona" in keyed and "code_reviewer" in keyed
+    assert "decision_scout" not in keyed and "plan_critic" not in keyed
+    assert len(keyed) == len(set(keyed))
+    index = tmp_path / execute.INDEX
+    index.parent.mkdir(parents=True)
+    index.write_text(
+        "fixture_kind: {personas: [canary_persona]}\n"
+        "personas:\n"
+        "  - {persona: canary_persona, kind: verdict, implementation: {status: implemented}}\n"
+        "  - {persona: x, kind: verdict, implementation: {status: pending}}\n"
+        "  - {persona: y, kind: other, implementation: {status: implemented}}\n"
+        "  - not-a-row\n"
+    )
+    assert execute.keyed_personas(tmp_path) == ["canary_persona"]
+    assert execute.keyed_personas(tmp_path / "missing") == []
 
 
 def test_failure_schema_enumerates_the_contract_failures() -> None:
@@ -129,7 +150,7 @@ def test_valid_request_is_returned(tmp_path: Path) -> None:
     [
         ({"routes": []}, "routes"),
         ({"routes": [ROUTE, "x"]}, "routes"),
-        ({"route": "code_reviewer", "body": GOOD}, "route_kind"),
+        ({"route": "decision_scout", "body": GOOD}, "route_kind"),
         ({"body": {"change_id": "o/r#1"}}, "input"),
     ],
 )
@@ -156,14 +177,19 @@ def test_launcher_result_shape() -> None:
 def test_record_without_a_launcher_result(tmp_path: Path) -> None:
     work = _work(tmp_path, body=GOOD)
     assert keyed_run.record({}, work, ROOT, b"") == 0
-    assert json.loads((work / "results" / f"{ROUTE}.json").read_text()) == {"route": ROUTE, "failure": "launcher_no_result"}
+    assert json.loads((work / "results" / f"{ROUTE}.json").read_text()) == {
+        "route": ROUTE,
+        "failure": "launcher_no_result",
+        "reads_unknown": True,
+    }
 
 
 def test_record_carries_a_failure_file(tmp_path: Path) -> None:
     work = _work(tmp_path)
     (work / "prepared" / f"failure-{ROUTE}.json").write_text(json.dumps({"failure": "input_incomplete"}))
     keyed_run.record({}, work, ROOT, b"")
-    assert json.loads((work / "results" / f"{ROUTE}.json").read_text())["failure"] == "input_incomplete"
+    recorded = json.loads((work / "results" / f"{ROUTE}.json").read_text())
+    assert recorded["failure"] == "input_incomplete" and recorded["reads_unknown"] is True
 
 
 def test_request_reads_the_fallback_role_key_on_a_fallback_run(

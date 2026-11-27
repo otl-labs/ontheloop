@@ -14,6 +14,7 @@ import pytest
 
 from scripts.personas import egress_floor_container as floor
 from scripts.personas import egress_launcher as L
+from scripts.personas import egress_trees as T
 from src.persona_hosts.local_container import adapter
 
 HANDLERS: dict[Any, Any] = {}
@@ -23,7 +24,7 @@ IMAGE = "registry.example/img@sha256:" + "a" * 64
 
 
 def _install(tmp_path: Path, mutate: str | None = None) -> Path:
-    for name in ("egress_launcher.py", "egress_proxy.py", "egress_container_probe.py"):
+    for name in ("egress_launcher.py", "egress_proxy.py", "egress_container_probe.py", "egress_trees.py"):
         (tmp_path / name).write_bytes((Path(L.__file__).parent / name).read_bytes())
     (tmp_path / L.SNAPSHOT_NAME).write_text(json.dumps({"image": IMAGE, "providers": PROVIDERS}))
     files = {n: hashlib.sha256((tmp_path / n).read_bytes()).hexdigest() for n in L.FILES}
@@ -42,7 +43,7 @@ def _sub(base: Path, name: str) -> Path:
 def _req(**over: Any) -> bytes:
     body = {"persona": "code_reviewer", "provider": "deepseek/", "input": {}, "key": "k3y"}
     body.update(over)
-    return json.dumps({k: v for k, v in body.items() if v is not None}).encode()
+    return json.dumps({k: v for k, v in body.items() if v is not None}).encode() + b"\n"
 
 
 def _parse(raw: bytes, mode: str = "run") -> dict[str, Any]:
@@ -190,6 +191,7 @@ def _drive(
     stdin: bytes,
     listed: Any = False,
     survivors: list[int] | None = None,
+    setup: Any = None,
 ) -> tuple[int, list[str]]:
     install = _install(_sub(tmp_path, "i"))
     monkeypatch.setattr(L, "INSTALL_DIR", install)
@@ -209,7 +211,9 @@ def _drive(
     monkeypatch.setattr(L, "proxy_survivors", lambda: survivors or [])
     monkeypatch.setattr(L, "GONE_SECONDS", 0.0)
     monkeypatch.setattr(L.signal, "signal", lambda num, handler: HANDLERS.update({num: handler}))
-    monkeypatch.setattr(L.sys, "stdin", type("I", (), {"buffer": type("B", (), {"read": staticmethod(lambda n: stdin)})()})())
+    monkeypatch.setattr(L.sys, "stdin", type("I", (), {"buffer": io.BytesIO(stdin)})())
+    if setup is not None:
+        setup(install)
     return L.main([mode]), seen
 
 
@@ -328,7 +332,7 @@ def test_sigterm_and_sigint_kill_the_container_and_proxy_then_exit_one(
     with pytest.raises(SystemExit) as exc:
         HANDLERS[L.signal.SIGTERM](15, None)
     assert exc.value.code == 1 and seen == ["killed"]
-    assert L.BOUNDS == {"probe": 120, "run": 600}
+    assert L.BOUNDS == {"probe": 120, "run": 3600}
 
 
 def test_a_surviving_container_or_proxy_is_a_teardown_failure_on_the_normal_path(
@@ -442,3 +446,191 @@ def test_probe_mode_writes_the_input_file(tmp_path: Path, monkeypatch: pytest.Mo
     in_dir, _ = L.make_dirs(L.Session(), "probe", {"upstream": "report"}, install)
     target = Path(in_dir, "input.json")
     assert json.loads(target.read_text()) == {"upstream": "report"} and oct(os.stat(target).st_mode & 0o777) == "0o644"
+
+
+def test_run_bound_covers_every_keyed_contract_budget() -> None:
+    import yaml
+
+    from scripts.personas import execute
+
+    root = Path(__file__).resolve().parents[2]
+    keyed = execute.keyed_personas(root)
+    assert keyed
+    for persona in keyed:
+        contract = yaml.safe_load((root / execute.CONTRACTS / f"{persona}.yaml").read_text(encoding="utf-8"))
+        assert L.BOUNDS["run"] > contract["budget"]["max_wall_clock_seconds"]
+    assert L.MAX_REQUEST >= 64 * 1024 * 1024
+
+
+class _FakeExtract:
+    created: list["_FakeExtract"] = []
+    returncode_for_wait = 0
+    block = False
+
+    def __init__(self, argv: list[str], **kwargs: Any) -> None:
+        import threading
+
+        self.argv, self.kwargs, self.written, self.closed = argv, kwargs, [], False
+        self.killed = threading.Event()
+        self.stdin = self
+        self.write, self.kill = self.written.append, self.killed.set
+        self.close = lambda: setattr(self, "closed", True)
+        _FakeExtract.created.append(self)
+        if not _FakeExtract.block:
+            os.mkdir(Path(kwargs["cwd"]) / "head")
+
+    def poll(self) -> int | None:
+        return None if _FakeExtract.block and not self.killed.is_set() else 0
+
+    def wait(self) -> int:
+        if _FakeExtract.block:
+            self.killed.wait(5)
+            return -9
+        ORDER.append("extract")
+        return _FakeExtract.returncode_for_wait
+
+
+ORDER: list[str] = []
+TAR = b"T" * 700
+
+
+def _tree_setup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, main_tree: str | None = "ok", rc: int = 0, block: bool = False
+) -> Any:
+    _FakeExtract.created, _FakeExtract.returncode_for_wait, _FakeExtract.block = [], rc, block
+    ORDER.clear()
+    monkeypatch.setattr(L.pwd, "getpwnam", lambda name: type("E", (), {"pw_uid": 4242, "pw_gid": 4243})())
+    monkeypatch.setattr(L.subprocess, "Popen", lambda argv, **kwargs: _FakeExtract(argv, **kwargs))
+    monkeypatch.setattr(L, "TREE_SECONDS", 0.05 if block else 300)
+    real_lstat = os.lstat
+
+    def lstat(path: Any, *a: Any, **k: Any) -> os.stat_result:
+        info = real_lstat(path, *a, **k)
+        if str(path).endswith("trees/main") and main_tree in ("ok", "writable"):
+            return os.stat_result([*info[:4], 0, *info[5:]])
+        return info
+
+    monkeypatch.setattr(L.os, "lstat", lstat)
+
+    def tree_cli(*args: str, data: Any = None) -> None:
+        check = T.check_main if args[0] == "check-main" else lambda _: T.check_request(data)
+        try:
+            check(args[-1])
+        except T.TreesRefused as exc:
+            raise L.Refused(str(exc)) from exc
+
+    monkeypatch.setattr(L, "tree_cli", tree_cli)
+
+    def setup(install: Path) -> None:
+        monkeypatch.setattr(L, "MAIN_TREE", main := install / "trees" / "main")
+        if main_tree == "link":
+            (install / "trees").mkdir()
+            os.symlink(install, main)
+        elif main_tree is not None:
+            main.mkdir(parents=True)
+            os.chmod(main, 0o777 if main_tree == "writable" else 0o755)
+
+    return setup
+
+
+def _head_request(**over: Any) -> bytes:
+    return _req(trees=["head", "main"], head_tree_bytes=len(TAR), **over) + TAR
+
+
+def test_run_mounts_named_trees_read_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    setup = _tree_setup(monkeypatch, tmp_path)
+    modes: dict[str, str] = {}
+
+    def spy(install: Path) -> None:
+        setup(install)
+
+        def run(mode: str, argv: list[str]) -> tuple[int, bytes]:
+            modes["run_dir"] = oct(os.stat(L.RUN_DIR).st_mode & 0o777)
+            base = next(Path(L.RUN_DIR).glob("run-*"))
+            modes["base"] = oct(os.stat(base).st_mode & 0o777)
+            modes["trees"] = oct(os.stat(base / "trees").st_mode & 0o777)
+            seen_argv.extend(argv)
+            return 0, b"{}"
+
+        monkeypatch.setattr(L, "run_container", run)
+
+    seen_argv: list[str] = []
+    assert _drive(monkeypatch, tmp_path, "run", 0, {"a": 1}, _head_request(), setup=spy)[0] == 0
+    proc = _FakeExtract.created[0]
+    assert proc.kwargs["cwd"].endswith("/trees") and proc.kwargs["user"] == 4242 and proc.kwargs["group"] == 4243
+    assert proc.kwargs["extra_groups"] == [] and proc.kwargs["stdout"] == subprocess.DEVNULL
+    assert proc.argv[:5] == [L.PRLIMIT, "--nproc=1:1", L.PYTHON, "-I", "-S"]
+    assert proc.argv[-3:] == ["extract", "head", str(len(TAR))]
+    assert b"".join(proc.written) == TAR and proc.closed
+    assert modes == {"run_dir": "0o700", "base": "0o700", "trees": "0o700"}
+    heads, mains = ([a for a in seen_argv if a.endswith(f":/trees/{n}:ro")] for n in ("head", "main"))
+    assert heads[0].endswith("/trees/head:/trees/head:ro") and mains[0].endswith("/trees/main:/trees/main:ro")
+    assert str(tmp_path / "i") in mains[0] and seen_argv[seen_argv.index(IMAGE) :][:2] == [IMAGE, "--contract"]
+    assert not any("k3y" in a for a in seen_argv)
+
+
+def test_extract_runs_before_the_proxy_and_leaves_no_survivor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    setup = _tree_setup(monkeypatch, tmp_path)
+
+    def hooks(install: Path) -> None:
+        setup(install)
+        monkeypatch.setattr(L, "proxy_survivors", lambda: ORDER.append("survivors") or [])
+        monkeypatch.setattr(L, "port_in_use", lambda p: ORDER.append("port") and False)
+        monkeypatch.setattr(L, "make_dirs", lambda *a, **k: ORDER.append("make_dirs") or ("/in", "/ev"))
+        monkeypatch.setattr(L, "start_proxy", lambda *a: ORDER.append("proxy"))
+
+    assert _drive(monkeypatch, tmp_path, "run", 0, {"a": 1}, _head_request(), setup=hooks)[0] == 0
+    firsts = [ORDER.index(x) for x in ("extract", "survivors", "port", "make_dirs", "proxy")]
+    assert firsts == sorted(firsts) and len(set(firsts)) == 5
+
+    setup = _tree_setup(monkeypatch, tmp_path / "s")
+
+    def survivor(install: Path) -> None:
+        setup(install)
+        calls = iter([[4242]])
+        monkeypatch.setattr(L, "proxy_survivors", lambda: next(calls, []))
+
+    code, seen = _drive(monkeypatch, tmp_path / "s", "run", 0, {"a": 1}, _head_request(), setup=survivor)
+    assert code == 2 and seen == ["killed"]
+
+    setup = _tree_setup(monkeypatch, tmp_path / "t", block=True)
+    code, seen = _drive(monkeypatch, tmp_path / "t", "run", 0, {"a": 1}, _head_request(), setup=setup)
+    assert code == 2 and seen == ["killed"] and _FakeExtract.created[0].killed.is_set()
+
+
+def _h(**fields: Any) -> bytes:
+    return _req(trees=["head"], **fields)
+
+
+_BAD_TREE_REQUESTS = [
+    _h(), _req(trees=[], head_tree_bytes=1), _req(trees="head", head_tree_bytes=1), _req(trees=[1], head_tree_bytes=1),
+    _req(trees=["other"]), _req(trees=["main", "main"]), _req(trees=["main"], head_tree_bytes=5), _req(head_tree_bytes=5),
+    _h(head_tree_bytes=True), _h(head_tree_bytes="5"), _h(head_tree_bytes=0), _h(head_tree_bytes=(1 << 30) + 1),
+    _h(head_tree_bytes=700)[:-1] + TAR[:10], _h(head_tree_bytes=700) + TAR[:10], _h(head_tree_bytes=700) + TAR + b"x",
+    _req(trees=["main"]) + b"trailing", _req()[:-1],
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("stdin", _BAD_TREE_REQUESTS)
+def test_bad_tree_requests_are_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stdin: bytes) -> None:
+    code, seen = _drive(monkeypatch, tmp_path, "run", 0, None, stdin, setup=_tree_setup(monkeypatch, tmp_path))
+    assert code == 2 and "docker" not in " ".join(seen)
+
+
+def test_trees_in_probe_mode_an_extract_refusal_and_a_bad_main_tree_are_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def drive(name: str, mode: str, events: Any, stdin: bytes, **kw: Any) -> tuple[int, list[str]]:
+        setup = _tree_setup(monkeypatch, tmp_path / name, **kw)
+        return _drive(monkeypatch, tmp_path / name, mode, 0, events, stdin, setup=setup)
+
+    assert drive("p", "probe", None, _req(key=None, trees=["main"]))[0] == 2
+    assert drive("r", "run", None, _head_request(), rc=2)[0] == 2
+    for kind in (None, "link", "writable"):
+        assert drive(f"m{kind}", "run", None, _req(trees=["main"]), main_tree=kind) == (2, ["killed"])
+    assert drive("n", "run", {"a": 1}, _req(trees=["main"]))[0] == 0
+
+
+def test_the_sudoers_lines_name_only_probe_and_run() -> None:
+    assert floor.SUDOERS_LINES.count("NOPASSWD") == 2
+    assert floor.SUDOERS_LINES.endswith(f"{floor.LAUNCHER} run\n") and f"{floor.LAUNCHER} probe\n" in floor.SUDOERS_LINES

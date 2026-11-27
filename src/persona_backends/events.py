@@ -99,8 +99,9 @@ def turn_record(
     started_at_ms: int,
     ended_at_ms: int,
     probe_record: dict[str, Any] | None = None,
+    reads: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    return {
+    record = {
         "turn": turn,
         "role": role,
         "attempts": attempts,
@@ -118,6 +119,9 @@ def turn_record(
         "ended_at_ms": ended_at_ms,
         "probe_record": probe_record,
     }
+    if reads:
+        record["reads"] = list(reads)
+    return record
 
 
 def end_record(

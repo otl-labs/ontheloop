@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from collections.abc import Callable
 from pathlib import Path
@@ -80,3 +81,131 @@ def test_registry_key_is_none_for_a_malformed_key(tmp_path: Path) -> None:
     root = _tmp_root(tmp_path, lambda row: row.update(registry_key="Bad Key"))
     assert execute.registry_key(root, ROUTE) is None
     assert execute.registry_key(tmp_path / "empty", ROUTE) is None
+
+
+def test_implemented_verdict_route_is_accepted_and_pending_refused(tmp_path: Path) -> None:
+    schema = execute.schema_for(ROOT, "code_reviewer", "input")
+    assert schema is not None
+    body = dict.fromkeys(schema["required"], "x")
+    body["head_sha"] = SHA
+    work = tmp_path / "ok"
+    (work / "prepared").mkdir(parents=True)
+    (work / "prepared" / "routes.json").write_text(json.dumps({"routes": ["code_reviewer"]}))
+    (work / "prepared" / "input-code_reviewer.json").write_text(json.dumps(body))
+    assert keyed_run.prepared_request(work, ROOT) == ("code_reviewer", body)
+    pending = tmp_path / "pending"
+    (pending / "prepared").mkdir(parents=True)
+    (pending / "prepared" / "routes.json").write_text(json.dumps({"routes": ["decision_scout"]}))
+    with pytest.raises(keyed_run.Refusal) as exc:
+        keyed_run.prepared_request(pending, ROOT)
+    assert str(exc.value) == "route_kind"
+
+
+def _hits(*rows: tuple[str, bool]) -> str:
+    return json.dumps({"terms": [{"term": "t", "hits": [{"path": p, "line": 1, "in_bundle": b} for p, b in rows]}]})
+
+
+def _record_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, events: object, body: dict | None = None) -> dict:
+    work = tmp_path / "work"
+    (work / "prepared").mkdir(parents=True)
+    (work / "prepared" / "routes.json").write_text(json.dumps({"routes": [ROUTE], "plan_paths": []}))
+    (work / "prepared" / f"input-{ROUTE}.json").write_text(json.dumps(body or GOOD))
+    (work / "prepared" / "resolution.json").write_text(json.dumps({"head_sha": "b" * 40}))
+    monkeypatch.setattr(keyed_run, "checked_out_sha", lambda root: "c" * 40)
+    monkeypatch.setattr(keyed_run, "_telemetry", lambda *a: None)
+    raw = json.dumps({"exit_code": 0, "timed_out": False, "stdout": "{}", "events": events}).encode()
+    assert keyed_run.record(ENV, work, ROOT, raw) == 0
+    return json.loads((work / "results" / f"{ROUTE}.json").read_text())
+
+
+def test_record_carries_reads_and_not_examined(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    none = _record_reads(tmp_path / "a", monkeypatch, {"turns": [{"kind": "tool"}]})
+    assert none["reads"] == [] and none["trees"] == {"head": "b" * 40, "main": "c" * 40} and "not_examined" not in none
+    reads = [
+        {"tree": "head", "op": "read", "path": "./src/a.py", "result": "ok"},
+        {"tree": "head", "op": "read", "path": "src/b.py", "result": "refused"},
+        {"tree": "main", "op": "read", "path": "src/c.py", "result": "ok"},
+        {"tree": "head", "op": "search", "path": "src/d.py", "result": "ok"},
+    ]
+    body = {
+        **GOOD,
+        "reference_hits": _hits(
+            ("src/a.py", False), ("src/b.py", False), ("src/c.py", False), ("src/d.py", False), ("src/e.py", True)
+        ),
+    }
+    body["reference_hits"] = json.loads(body["reference_hits"])
+    got = _record_reads(tmp_path / "b", monkeypatch, {"turns": [{"reads": reads[:2]}, {"reads": reads[2:]}]}, body)
+    assert len(got["reads"]) == 4 and got["not_examined"] == ["src/b.py", "src/c.py", "src/d.py"]
+    many = [{"tree": "head", "op": "list", "path": str(i), "result": "ok"} for i in range(keyed_run.MAX_READS + 5)]
+    dropped = _record_reads(tmp_path / "c", monkeypatch, {"turns": [{"reads": many}]})
+    assert len(dropped["reads"]) == keyed_run.MAX_READS and dropped["reads_dropped"] is True
+    for unreadable in (None, {"turns": "x"}, {"turns": [{"reads": "x"}]}, {"turns": [{"reads": ["x"]}]}):
+        got = _record_reads(tmp_path / f"u{id(unreadable)}", monkeypatch, unreadable)
+        assert got["reads_unknown"] is True and "reads" not in got and got["trees"]["head"] == "b" * 40
+
+
+def _work(tmp_path: Path, body: dict) -> Path:
+    work = tmp_path / "work"
+    (work / "prepared").mkdir(parents=True)
+    (work / "prepared" / "routes.json").write_text(json.dumps({"routes": [ROUTE], "plan_paths": []}))
+    (work / "prepared" / f"input-{ROUTE}.json").write_text(json.dumps(body))
+    return work
+
+
+def _request_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, names: list[str], tar: bytes | None) -> bytes:
+    work = _work(tmp_path, body=GOOD)
+    if tar is not None:
+        (work / "prepared" / "head.tar").write_bytes(tar)
+    monkeypatch.setattr(keyed_run, "assume_role", lambda env: {})
+    monkeypatch.setattr(keyed_run, "_ssm_value", lambda creds, region, parameter: "KEY-1")
+    monkeypatch.setattr(keyed_run, "tree_names", lambda root, route: names)
+    out = tmp_path / "stdout"
+    saved = os.dup(1)
+    with out.open("wb") as handle:
+        os.dup2(handle.fileno(), 1)
+        try:
+            assert keyed_run.request({**ENV, "PERSONA_ROLE": "primary", "RUNNER_TEMP": str(tmp_path)}, work, ROOT) == 0
+        finally:
+            os.dup2(saved, 1)
+            os.close(saved)
+    return out.read_bytes()
+
+
+def _through_the_launcher_reader(raw: bytes, mode: str = "run") -> tuple[dict, bytes]:
+    import threading
+
+    from scripts.personas import egress_launcher as L
+
+    read_fd, write_fd = os.pipe()
+
+    def feed() -> None:
+        with os.fdopen(write_fd, "wb") as sink:
+            sink.write(raw)
+
+    threading.Thread(target=feed).start()
+    with os.fdopen(read_fd, "rb") as stream:
+        line = stream.readline(L.MAX_REQUEST + 2)
+        assert line.endswith(b"\n")
+        request = L.parse_request(line[:-1], mode, {"deepseek/": {}})
+        size = request.get("head_tree_bytes", 0)
+        return request, stream.read(size) + (b"EXTRA" if stream.read(1) else b"")
+
+
+def test_request_bytes_reach_the_launcher_reader(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    plain, tail = _through_the_launcher_reader(_request_bytes(tmp_path / "a", monkeypatch, [], None))
+    assert "trees" not in plain and "head_tree_bytes" not in plain and tail == b""
+    tar = bytes(range(256)) * 5000
+    request, tail = _through_the_launcher_reader(_request_bytes(tmp_path / "b", monkeypatch, ["head", "main"], tar))
+    assert request["trees"] == ["head", "main"] and request["head_tree_bytes"] == len(tar) and tail == tar
+    main_only, tail = _through_the_launcher_reader(_request_bytes(tmp_path / "c", monkeypatch, ["main"], None))
+    assert main_only["trees"] == ["main"] and "head_tree_bytes" not in main_only and tail == b""
+
+
+def test_a_head_route_without_its_tar_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    work = _work(tmp_path, body=GOOD)
+    monkeypatch.setattr(keyed_run, "tree_names", lambda root, route: ["head"])
+    assert keyed_run.request({**ENV, "PERSONA_ROLE": "primary"}, work, ROOT) == keyed_run.EXIT_REFUSED
+    captured = capfd.readouterr()
+    assert captured.out == "" and "REFUSED head_tree" in captured.err

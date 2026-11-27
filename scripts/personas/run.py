@@ -19,6 +19,7 @@ VERBS = {
     "route": "route",
     "fetch": "snapshot",
     "materialise": "materialise",
+    "review-context": "review_context",
     "persona-request": "keyed_run:request_main",
     "persona-record": "keyed_run:record_main",
     "post": "post_verdict",

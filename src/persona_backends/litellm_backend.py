@@ -10,14 +10,14 @@ import dataclasses
 import os
 import sys
 import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO
 
 from jsonschema import Draft202012Validator
 
 from src.persona_backends import events as ev
-from src.persona_backends import output, read_input
+from src.persona_backends import output, read_input, repo_read
 from src.persona_backends.contract import LoadedContract, RunRefused, load
 
 if TYPE_CHECKING:
@@ -101,6 +101,8 @@ class _Run:
         self.bridge: Any = None
         self.bridge_errors: tuple[type[BaseException], ...] = ()
         self.deadline = 0.0
+        self.read_tree: repo_read.ReadTree | None = None
+        self.turn_reads: list[dict[str, Any]] = []
 
     def emit(self, record: dict[str, Any]) -> None:
         self.events.append(record)
@@ -328,6 +330,7 @@ class _Run:
         self, result: Any, probe: int, started: int, returned: int, common: dict[str, Any]
     ) -> dict[str, Any] | None:
         texts: list[str] = []
+        self.turn_reads = []
         problem: BaseException | None = None
         tool_errors: tuple[type[BaseException], ...] = (asyncio.TimeoutError, *self.bridge_errors)
         try:
@@ -345,12 +348,21 @@ class _Run:
             tool_calls=[str(call["function"]["name"]) for call in result.tool_calls],
             tool_result_bytes=[len(text.encode("utf-8")) for text in texts],
             ended_at_ms=returned,
+            reads=self.turn_reads,
             **common,
         )
         if problem is not None and not isinstance(problem, asyncio.TimeoutError):
             raise self.abort("tool_server_error", str(problem)) from problem
         if problem is not None:
             return self.budget_failure("max_wall_clock_seconds reached during a warehouse call")
+        stop = next((r for r in self.turn_reads if r["result"] in ("cap", "deadline")), None)
+        if stop is not None and self.read_tree is not None:
+            what = stop.get("cap") or "run deadline"
+            return self.end(
+                output.failure(
+                    "review_incomplete", f"{what} reached after {self.read_tree.calls} calls, {self.read_tree.total} bytes"
+                )
+            )
         self.messages.append(result.message)
         for call, text in zip(result.tool_calls, texts, strict=True):
             self.messages.append({"role": "tool", "tool_call_id": call["id"], "content": text})
@@ -361,6 +373,10 @@ class _Run:
         name = function["name"]
         if name == "read_input" and self.loaded.blob_names:
             return read_input.serve(function["arguments"], self.blobs)
+        if name == "read_tree" and self.read_tree is not None:
+            text, record = self.read_tree.serve(function["arguments"])
+            self.turn_reads.append(record)
+            return text
         if self.bridge is not None and name in self.loaded.warehouse_verbs:
             return await asyncio.wait_for(self.bridge.call(name, function["arguments"]), self.deadline - self.clock())
         return "error: unknown tool"
@@ -384,6 +400,7 @@ async def run_persona(
     mcp_server: Callable[[], StdioServerParameters] | None = None,
     mcp_errlog: TextIO | None = None,
     role: str | None = None,
+    trees: Mapping[str, Path] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Run a persona; a given role pins the run to it (no in-process fail-over).
 
@@ -396,7 +413,12 @@ async def run_persona(
     if role is not None and role not in ("primary", _FALLBACK):
         raise RunRefused(f"role {role!r} is not one of primary, {_FALLBACK}")
     loaded = load(Path(contract_path))
+    for tree_name in loaded.trees:
+        if trees is None or tree_name not in trees:
+            raise RunRefused(f"read_tree:{tree_name} needs a mounted tree")
     tools = [read_input.tool_spec(loaded.blob_names)] if loaded.blob_names else []
+    if loaded.trees and loaded.read_tree_budget:
+        tools.append(repo_read.tool_spec(loaded.trees, loaded.read_tree_budget))
     head = ev.header(
         str(contract_path),
         loaded.persona,
@@ -411,6 +433,10 @@ async def run_persona(
     if refusal is not None:
         return run.end(refusal), run.events
     run.deadline = clock() + loaded.max_wall_clock_seconds
+    if loaded.trees and trees is not None and loaded.read_tree_budget:
+        run.read_tree = repo_read.ReadTree(
+            {name: trees[name] for name in loaded.trees}, loaded.read_tree_budget, run.deadline, clock
+        )
     if loaded.warehouse_verbs:
         result = await run.run_with_bridge(mcp_server, mcp_errlog)
     else:

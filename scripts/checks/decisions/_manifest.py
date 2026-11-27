@@ -87,6 +87,7 @@ ENTRIES: tuple[Entry, ...] = (
         # Promoted into --pre; this Entry is the authority.
         pre=True,
         pre_globs=(
+            "scripts/checks/_decision_chain.py",
             "docs/DECISIONS.md",
             "docs/DECISIONS_ARCHIVE.md",
             "config/decision_supersession_waivers.yaml",

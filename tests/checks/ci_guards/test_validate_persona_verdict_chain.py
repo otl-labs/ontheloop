@@ -68,6 +68,15 @@ def _jobs(d: Docs) -> dict[str, Any]:
     return d[1]["jobs"]
 
 
+def _rc_step(d: Docs) -> dict[str, Any]:
+    return copy.deepcopy(_step(_jobs(d)["prepare"], "review-context"))
+
+
+def _drop_rc(d: Docs) -> dict[str, Any]:
+    steps = _jobs(d)["prepare"]["steps"]
+    return steps.pop(steps.index(_step(_jobs(d)["prepare"], "review-context")))
+
+
 def _token_in_materialise(value: str) -> Callable[[Docs], None]:
     def edit(d: Docs) -> None:
         _step(_jobs(d)["prepare"], "materialise")["env"]["X"] = value
@@ -450,6 +459,10 @@ RED = [
             }
         ),
     ),
+    _red("review-context-in-smoke", "not only in prepare", lambda d: _jobs(d)["smoke"]["steps"].append(_rc_step(d))),
+    _red("review-context-missing", "exactly one review-context", lambda d: _drop_rc(d)),
+    _red("review-context-last", "not after route", lambda d: _jobs(d)["prepare"]["steps"].append(_drop_rc(d))),
+    _red("review-context-bare-if", "condition is not", lambda d: _step(_jobs(d)["prepare"], "review-context").pop("if")),
     _red(
         "keyprep-id-token", "holds id-token: write", lambda d: _jobs(d)["keyprep"]["permissions"].update({"id-token": "write"})
     ),

@@ -255,3 +255,54 @@ def test_guidance_home_outside_boundary_patterns_is_refused(tree: Path) -> None:
 def test_non_list_guidance_slots_is_off_schema(tree: Path) -> None:
     edit_contract(tree, _slot_mutation("not_a_list"), rerender=False)
     assert any("off its schema" in f for f in _run(tree))
+
+
+def _tree_contract(caps: list[str], budget: Any = "good", failure: bool = True) -> Callable[[dict[str, Any]], None]:
+    def edit(c: dict[str, Any]) -> None:
+        c["capabilities"] = [*c["capabilities"], *caps]
+        if budget == "good":
+            c["budget"]["read_tree"] = {
+                "max_calls": 5,
+                "max_read_bytes": 100,
+                "max_search_results": 10,
+                "max_total_bytes": 999,
+            }
+        elif budget is not None:
+            c["budget"]["read_tree"] = budget
+        if failure:
+            c["failure_outputs"] = [*c["failure_outputs"], {"id": "review_incomplete", "meaning": "A read limit was reached."}]
+
+    return edit
+
+
+def test_read_tree_contract_rules(tmp_path: Path) -> None:
+    def failures(name: str, edit: Callable[[dict[str, Any]], None]) -> list[str]:
+        root = build_tree(tmp_path / name)
+        edit_contract(root, edit, rerender=True)
+        return _run(root)
+
+    assert not [f for f in failures("ok", _tree_contract(["read_tree:head", "read_tree:main"])) if "read_tree" in f]
+    good = {"max_calls": 5, "max_read_bytes": 100, "max_search_results": 10, "max_total_bytes": 999}
+    bad = {
+        "parameter": (_tree_contract(["read_tree:other"]), "head or main"),
+        "bare": (_tree_contract(["read_tree"]), "needs a parameter"),
+        "no budget": (_tree_contract(["read_tree:head"], budget=None), "budget.read_tree mapping"),
+        "no failure output": (_tree_contract(["read_tree:head"], failure=False), "review_incomplete"),
+        "bool": (_tree_contract(["read_tree:head"], {**good, "max_calls": True}), "max_calls"),
+        "zero": (_tree_contract(["read_tree:head"], {**good, "max_calls": 0}), "max_calls"),
+        "negative": (_tree_contract(["read_tree:head"], {**good, "max_read_bytes": -1}), "max_read_bytes"),
+        "string": (_tree_contract(["read_tree:head"], {**good, "max_total_bytes": "9"}), "max_total_bytes"),
+        "float": (_tree_contract(["read_tree:head"], {**good, "max_search_results": 1.5}), "max_search_results"),
+        "missing key": (_tree_contract(["read_tree:head"], {k: v for k, v in good.items() if k != "max_calls"}), "max_calls"),
+        "unknown key": (
+            _tree_contract(["read_tree:head"], {**good, "max_depth": 3}),
+            "unknown key budget.read_tree.max_depth",
+        ),
+        "not a mapping": (_tree_contract(["read_tree:head"], [1]), "budget.read_tree mapping"),
+        "repeated": (_tree_contract(["read_tree:head", "read_tree:head"]), "more than once"),
+        "budget without capability": (_tree_contract([]), "without a read_tree capability"),
+    }
+    for name, (edit, needle) in bad.items():
+        found = failures(name.replace(" ", "_"), edit)
+        assert any(needle in f for f in found), (name, found)
+    assert _run() == []

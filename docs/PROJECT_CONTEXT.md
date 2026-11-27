@@ -6,7 +6,7 @@ Source stamp: ROADMAP-PLATFORM.yaml @ 8eb0d35afc9a02fa2f660b61176d12aedb395094; 
 
 ## Operating contract
 
-- Repository visibility: public. Never commit credentials, API keys, AWS account IDs, IAM ExternalIds, ARNs, internal hostnames, or confidential operational data; AGENTS.md's public-content boundary (Decision 101) says what is safe.
+- Repository visibility: public. Never commit credentials, API keys, AWS account IDs, IAM ExternalIds, ARNs, internal hostnames, or confidential operational data; AGENTS.md's boundary (Decision 290 cl.2) says what is safe.
 - Runtime surface: Ubuntu 24.04 / bash / Python 3.12+, always through `bin/venv-python`, never `python` or `python3`.
 - Branching: never edit or commit on `main`. Routine handoff is commit -> PR -> CI -> merge.
 - Terraform and Lambda deploys: agents take the governed path `docs/contracts/deploy-paths.yaml` selects; local apply/deploy is break-glass only, after explicit human direction.

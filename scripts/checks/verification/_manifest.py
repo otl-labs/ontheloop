@@ -228,6 +228,7 @@ ENTRIES: tuple[Entry, ...] = (
         attr="validate_admin_root_premerge_gate",
         pre=True,
         pre_globs=(
+            "scripts/checks/_decision_chain.py",
             "docs/plans/**",
             "docs/contracts/environment-taxonomy.yaml",
             "docs/contracts/protected-actions.yaml",

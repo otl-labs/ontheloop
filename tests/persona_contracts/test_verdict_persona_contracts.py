@@ -97,7 +97,10 @@ def test_three_verdict_personas_registered_pending() -> None:
         assert row["kind"] == "verdict"
         assert row["contract"] == contract
         assert row["rendered_prompt"] == rendered
-        assert row["implementation"] == {"status": "pending", "owning_item": add}
+        if persona == "code_reviewer":
+            assert row["implementation"] == {"status": "implemented", "location": "scripts/personas/review_input.py"}
+        else:
+            assert row["implementation"] == {"status": "pending", "owning_item": add}
 
 
 def test_verdict_enum_and_tether() -> None:
@@ -117,8 +120,10 @@ def test_capabilities_are_read_input_over_every_input_only() -> None:
     for persona, (contract, *_rest) in PERSONAS.items():
         c = _load(contract)
         inputs = set(c["input_schema"]["properties"]) - CONTROL_INPUTS
-        assert set(c["capabilities"]) == {f"read_input:{i}" for i in inputs}, persona
-        assert len(c["capabilities"]) == len(inputs)
+        reads = {f"read_input:{i}" for i in inputs}
+        assert {x for x in c["capabilities"] if not x.startswith("read_tree:")} == reads, persona
+        assert {x for x in c["capabilities"] if x.startswith("read_tree:")} <= {"read_tree:head", "read_tree:main"}, persona
+        assert len([x for x in c["capabilities"] if x.startswith("read_input:")]) == len(inputs)
 
 
 def test_input_roles_and_failure_ids() -> None:
@@ -129,7 +134,7 @@ def test_input_roles_and_failure_ids() -> None:
         | {"decisions", "roadmap_items", "plan_obligations", "affected_artifacts", "governance_contracts"},
         "code_reviewer": {"plan", "change_files", "diff", "review_scope", "review_scope_files", "project_context"}
         | {"review_exemptions", "review_dispositions", "weakening_candidates", "ci_results", "change_evidence"}
-        | {"review_guidance"},
+        | {"review_guidance", "reference_hits"},
     }
     common = {"budget_exhausted", "schema_invalid", "input_incomplete", "injection_suspected"}
     for persona, (contract, *_rest) in PERSONAS.items():

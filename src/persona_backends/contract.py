@@ -9,7 +9,9 @@ from typing import Any
 
 import yaml
 
-BUILT = frozenset({"read_input", "warehouse_read"})
+BUILT = frozenset({"read_input", "warehouse_read", "read_tree"})
+TREE_NAMES = ("head", "main")
+_READ_TREE_KEYS = ("max_calls", "max_read_bytes", "max_search_results", "max_total_bytes")
 _BUDGET_KEYS = ("max_turns", "max_wall_clock_seconds", "max_revisions")
 
 
@@ -33,6 +35,8 @@ class LoadedContract:
     blob_names: tuple[str, ...]
     warehouse_verbs: tuple[str, ...] = ()
     verdict_consistency: dict[str, Any] | None = None
+    trees: tuple[str, ...] = ()
+    read_tree_budget: dict[str, int] | None = None
 
 
 def _integer(budget: dict[str, Any], key: str) -> int:
@@ -69,13 +73,20 @@ def _rule_malformed(rule: Any) -> bool:
     return not (isinstance(cases, list) and bool(cases) and all(case_ok(c) for c in cases))
 
 
-def _split_capabilities(capabilities: tuple[str, ...], properties: dict[str, Any]) -> tuple[list[str], list[str]]:
+def _split_capabilities(capabilities: tuple[str, ...], properties: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
     blobs: list[str] = []
     verbs: list[str] = []
+    trees: list[str] = []
     for capability in capabilities:
         base, _, parameter = capability.partition(":")
         if base not in BUILT:
             raise RunRefused(f"capability {capability} is not built by the litellm backend")
+        if base == "read_tree":
+            if parameter not in TREE_NAMES:
+                raise RunRefused(f"capability {capability} names no tree (head or main)")
+            if parameter not in trees:
+                trees.append(parameter)
+            continue
         if base == "warehouse_read":
             if not parameter or parameter == "read_input":
                 raise RunRefused(f"capability {capability} names no named read")
@@ -85,7 +96,24 @@ def _split_capabilities(capabilities: tuple[str, ...], properties: dict[str, Any
         if not parameter or parameter not in properties:
             raise RunRefused(f"capability {capability} names no blob of input_schema")
         blobs.append(parameter)
-    return blobs, verbs
+    return blobs, verbs, trees
+
+
+def _read_tree_budget(data: dict[str, Any], trees: list[str], failure_ids: tuple[str, ...]) -> dict[str, int] | None:
+    if not trees:
+        return None
+    raw = (data.get("budget") or {}).get("read_tree")
+    if not isinstance(raw, dict):
+        raise RunRefused("a contract naming read_tree needs budget.read_tree")
+    values: dict[str, int] = {}
+    for key in _READ_TREE_KEYS:
+        value = raw.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise RunRefused(f"budget.read_tree.{key} is missing or not a positive integer")
+        values[key] = value
+    if "review_incomplete" not in failure_ids:
+        raise RunRefused("a contract naming read_tree needs a review_incomplete failure output")
+    return values
 
 
 def load(contract_path: Path) -> LoadedContract:
@@ -105,10 +133,11 @@ def load(contract_path: Path) -> LoadedContract:
         raise RunRefused("rendered prompt does not match rendered_prompt_sha256")
     capabilities = tuple(str(item) for item in data.get("capabilities") or [])
     properties = (data.get("input_schema") or {}).get("properties") or {}
-    blobs, verbs = _split_capabilities(capabilities, properties)
+    blobs, verbs, trees = _split_capabilities(capabilities, properties)
     budget = data.get("budget") or {}
     values = {key: _integer(budget, key) for key in _BUDGET_KEYS}
     failure_ids = tuple(str(row["id"]) for row in data.get("failure_outputs") or [] if isinstance(row, dict) and "id" in row)
+    read_tree_budget = _read_tree_budget(data, trees, failure_ids)
     rule = data.get("verdict_consistency")
     if rule is not None and _rule_malformed(rule):
         raise RunRefused("verdict_consistency is malformed")
@@ -127,4 +156,6 @@ def load(contract_path: Path) -> LoadedContract:
         blob_names=tuple(blobs),
         warehouse_verbs=tuple(verbs),
         verdict_consistency=rule,
+        trees=tuple(trees),
+        read_tree_budget=read_tree_budget,
     )

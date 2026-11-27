@@ -30,9 +30,14 @@ INSTALL_DIR = Path("/usr/local/lib/persona-egress")
 RUN_DIR = Path("/run/persona-egress")
 MANIFEST_NAME = "manifest.json"
 SNAPSHOT_NAME = "snapshot.json"
-FILES = ("egress_launcher.py", "egress_proxy.py", "egress_container_probe.py", SNAPSHOT_NAME)
+FILES = ("egress_launcher.py", "egress_proxy.py", "egress_container_probe.py", "egress_trees.py", SNAPSHOT_NAME)
 DOCKER = "/usr/bin/docker"
 PYTHON = "/usr/bin/python3"
+PRLIMIT = "/usr/bin/prlimit"
+TREES_MOUNT = "/trees"
+MAIN_TREE = INSTALL_DIR / "trees" / "main"
+TREE_SECONDS = 300
+TREE_CHUNK = 1 << 20
 NETWORK = "persona-egress"
 CONTAINER = "persona-egress-run"
 PROXY_USER = "persona-egress-proxy"
@@ -43,16 +48,16 @@ PLACEHOLDER = "placeholder-no-key"
 CONTAINER_UID = 10001
 IN_MOUNT = "/run/persona/in"
 EVENTS_MOUNT = "/run/persona/events"
-MAX_REQUEST = 4 * 1024 * 1024
+MAX_REQUEST = 64 * 1024 * 1024
 MAX_RESULT = 4 * 1024 * 1024
 MAX_COUNTS_LINES = 4096
 MAX_COUNTS_LINE = 256
 COUNT_KEYS = {"ok", "outage", "inflight"}
 SETTLE_SECONDS = 0.3
-BOUNDS = {"probe": 120, "run": 600}
+BOUNDS = {"probe": 120, "run": 3600}
 GONE_SECONDS = 30.0
 GONE_STEP = 0.5
-KEYS = {"persona", "provider", "input", "key"}
+KEYS = {"persona", "provider", "input", "key", "trees", "head_tree_bytes"}
 PERSONA = re.compile(r"^[a-z][a-z0-9_]*$")
 EXIT_REFUSED = 2
 
@@ -77,7 +82,7 @@ def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def parse_request(raw: bytes, mode: str, providers: dict[str, Any]) -> dict[str, Any]:
     if len(raw) > MAX_REQUEST:
-        raise Refused("request over 4 MiB")
+        raise Refused(f"request over {MAX_REQUEST // (1024 * 1024)} MiB")
     try:
         data = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs)
     except UnicodeDecodeError as exc:
@@ -168,13 +173,21 @@ def read_counts(session: Session, stream: Any) -> None:
 
 
 def container_argv(
-    mode: str, image: str, persona: str, provider: dict[str, Any], in_dir: str, events_dir: str, role: str | None = None
+    mode: str,
+    image: str,
+    persona: str,
+    provider: dict[str, Any],
+    in_dir: str,
+    events_dir: str,
+    role: str | None = None,
+    trees: dict[str, str] | None = None,
 ) -> list[str]:
     argv = [
         DOCKER, "run", "--rm", "--name", CONTAINER, "--read-only", "--tmpfs", "/tmp", "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges", "--user", f"{CONTAINER_UID}:{CONTAINER_UID}", "--pids-limit", "256",
         "--memory", "2g", "--dns", "0.0.0.0", "--network", NETWORK,
         "-v", f"{in_dir}:{IN_MOUNT}:ro", "-v", f"{events_dir}:{EVENTS_MOUNT}",
+        *[a for name, host in sorted((trees or {}).items()) for a in ("-v", f"{host}:{TREES_MOUNT}/{name}:ro")],
         "-e", f"{provider['base_variable']}=http://{GATEWAY}:{PROXY_PORT}",
         "-e", f"{provider['key_variable']}={PLACEHOLDER}",
     ]  # fmt: skip
@@ -271,9 +284,14 @@ class Session:
         self.started = False
         self.upstream: dict[str, int] | None = None
         self.reader: threading.Thread | None = None
+        self.extract: subprocess.Popen[bytes] | None = None
 
     def cleanup(self) -> bool:
         kill_container()
+        if self.extract is not None:
+            if self.extract.poll() is None:
+                self.extract.kill()
+            self.extract.wait()
         if self.proxy is not None and self.proxy.poll() is None:
             self.proxy.kill()
             self.proxy.wait()
@@ -324,9 +342,12 @@ def name_in_use() -> bool:
     return bool(done.stdout.strip())
 
 
-def make_dirs(session: Session, mode: str, persona_input: dict[str, Any], directory: Path) -> tuple[str, str]:
-    base = tempfile.mkdtemp(prefix="run-", dir=RUN_DIR)
-    session.dirs.append(base)
+def make_dirs(
+    session: Session, mode: str, persona_input: dict[str, Any], directory: Path, base: str | None = None
+) -> tuple[str, str]:
+    if base is None:
+        base = tempfile.mkdtemp(prefix="run-", dir=RUN_DIR)
+        session.dirs.append(base)
     in_dir, events_dir = os.path.join(base, "in"), os.path.join(base, "events")
     os.mkdir(in_dir, 0o755)
     os.mkdir(events_dir, 0o700)
@@ -404,30 +425,84 @@ def run_container(mode: str, argv: list[str]) -> tuple[int | None, bytes]:
     return proc.returncode, b"" if merged else out[:MAX_RESULT]
 
 
+def tree_cli(*args: str, data: dict[str, Any] | None = None) -> None:
+    argv = [PYTHON, "-I", "-S", str(INSTALL_DIR / "egress_trees.py"), *args]
+    try:
+        done = subprocess.run(argv, input=json.dumps(data or {}).encode(), capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise Refused(f"tree check failed: {type(exc).__name__}") from exc
+    if done.returncode:
+        raise Refused(done.stderr.decode("utf-8", errors="replace").strip().removeprefix("TREES-REFUSED ")[:200] or "trees")
+
+
+def relay_head(session: Session, base: str, length: int) -> str:
+    trees = os.path.join(base, "trees")
+    entry = pwd.getpwnam(PROXY_USER)
+    os.mkdir(trees, 0o700)
+    os.chown(trees, entry.pw_uid, entry.pw_gid)
+    session.started = True
+    argv = [PRLIMIT, "--nproc=1:1", PYTHON, "-I", "-S", str(INSTALL_DIR / "egress_trees.py"), "extract", "head", str(length)]
+    proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, cwd=trees, user=entry.pw_uid,
+                            group=entry.pw_gid, extra_groups=[])  # fmt: skip
+    session.extract = proc
+    assert proc.stdin is not None
+    timer = threading.Timer(TREE_SECONDS, proc.kill)
+    timer.start()
+    try:
+        left = length
+        while left and (chunk := sys.stdin.buffer.read(min(TREE_CHUNK, left))):
+            proc.stdin.write(chunk)
+            left -= len(chunk)
+        if left:
+            raise Refused("head tree stream is short")
+        proc.stdin.close()
+        if sys.stdin.buffer.read(1):
+            raise Refused("head tree stream has trailing bytes")
+        code = proc.wait()
+    except (BrokenPipeError, ValueError):
+        code = proc.wait()
+        raise Refused("head tree") from None
+    finally:
+        timer.cancel()
+    head = os.path.join(trees, "head")
+    if code != 0 or not os.path.isdir(head) or os.path.islink(head):
+        raise Refused("head tree")
+    if proxy_survivors():
+        raise Refused("a proxy-user process survived the head tree extract")
+    return head
+
+
 def serve(mode: str, session: Session) -> int:
     snapshot = check_install(INSTALL_DIR, Path(__file__).resolve())
-    request = parse_request(sys.stdin.buffer.read(MAX_REQUEST + 1), mode, snapshot["providers"])
+    line = sys.stdin.buffer.readline(MAX_REQUEST + 2)
+    if not line.endswith(b"\n"):
+        raise Refused("request line is not newline-terminated")
+    request = parse_request(line[:-1], mode, snapshot["providers"])
+    named = request.get("trees") or []
+    tree_cli("check-request", data={"mode": mode, **{k: request[k] for k in ("trees", "head_tree_bytes") if k in request}})
+    if "main" in named:
+        tree_cli("check-main", str(MAIN_TREE))
     provider = snapshot["providers"][request["provider"]]
     take_lock(session)
+    base = tempfile.mkdtemp(prefix="run-", dir=RUN_DIR)
+    session.dirs.append(base)
+    mounts: dict[str, str] = {}
+    if "head" in named:
+        mounts["head"] = relay_head(session, base, request["head_tree_bytes"])
+    elif sys.stdin.buffer.read(1):
+        raise Refused("unexpected bytes after the request")
+    if "main" in named:
+        mounts["main"] = str(MAIN_TREE)
     if port_in_use(PROXY_PORT) or port_in_use(DECOY_PORT) or name_in_use():
         raise Refused("the proxy port or the container name is in use")
-    in_dir, events_dir = make_dirs(session, mode, request["input"], INSTALL_DIR)
+    in_dir, events_dir = make_dirs(session, mode, request["input"], INSTALL_DIR, base)
     start_proxy(session, provider, request.get("key"), INSTALL_DIR)
     if mode == "probe":
         start_decoy(session)
     session.started = True
-    code, stdout = run_container(
-        mode,
-        container_argv(
-            mode,
-            snapshot["image"],
-            request["persona"],
-            provider,
-            in_dir,
-            events_dir,
-            provider.get("role") if mode == "run" else None,
-        ),
-    )
+    role = provider.get("role") if mode == "run" else None
+    argv = container_argv(mode, snapshot["image"], request["persona"], provider, in_dir, events_dir, role, mounts)
+    code, stdout = run_container(mode, argv)
     if mode == "run":
         threading.Event().wait(SETTLE_SECONDS)
     events = read_events(events_dir)

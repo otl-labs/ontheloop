@@ -70,6 +70,34 @@ def budget_contract(tmp_path: Path, max_turns: int) -> Path:
     return contract
 
 
+def rt_contract(tmp_path: Path, trees: tuple[str, ...] = ("head",), budget: dict[str, int] | None = None) -> Path:
+    import yaml
+
+    root = tmp_path / "rt"
+    (root / "rendered").mkdir(parents=True, exist_ok=True)
+    data = yaml.safe_load(FIXTURE.read_text(encoding="utf-8"))
+    data["capabilities"] += [f"read_tree:{t}" for t in trees]
+    limits = {"max_calls": 2, "max_read_bytes": 1000, "max_search_results": 5, "max_total_bytes": 100000}
+    data["budget"]["read_tree"] = budget or limits
+    data["failure_outputs"].append({"id": "review_incomplete", "meaning": "A read limit was reached."})
+    path = root / "fixture_persona.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    shutil.copy(PROMPT, root / "rendered" / "fixture_persona.txt")
+    return path
+
+
+def rt_trees(tmp_path: Path) -> dict[str, Path]:
+    head = tmp_path / "head"
+    head.mkdir(exist_ok=True)
+    (head / "a.txt").write_text("alpha\nbeta needle\n", encoding="utf-8")
+    return {"head": head}
+
+
+def rt_kwargs(tmp_path: Path, max_calls: int = 1) -> dict[str, Any]:
+    budget = {"max_calls": max_calls, "max_read_bytes": 1000, "max_search_results": 5, "max_total_bytes": 100000}
+    return {"contract": rt_contract(tmp_path, budget=budget), "trees": rt_trees(tmp_path)}
+
+
 def good_input(notes: str = "line one\nline two\nline three") -> dict[str, Any]:
     return {"change_id": "c1", "head_sha": SHA, "notes": notes}
 
@@ -188,3 +216,6 @@ def drive(transport, materialised=None, *, contract=FIXTURE, workspace=None, bac
             contract, good_input() if materialised is None else materialised, workspace, backend, transport=transport, **kwargs
         )
     )
+
+
+RT_LIST = tool({"tree": "head", "op": "list"}, name="read_tree")

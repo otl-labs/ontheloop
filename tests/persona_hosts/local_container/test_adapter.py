@@ -178,3 +178,10 @@ def test_run_image_refuses_mixed_or_bad_sidecar_arguments(monkeypatch: pytest.Mo
     monkeypatch.setattr(adapter.subprocess, "run", no_docker)
     with pytest.raises(ValueError):
         run_image(REF, "plan_critic", {}, key_variable=KEY, **kwargs)
+
+
+def test_run_argv_mounts_trees_read_only() -> None:
+    plain = run_argv(REF, "p", "/i", "/e", key_variable=None)
+    argv = run_argv(REF, "p", "/i", "/e", key_variable=None, trees={"main": "/m", "head": "/h"})
+    at = plain.index(REF)
+    assert argv == [*plain[:at], "-v", "/h:/trees/head:ro", "-v", "/m:/trees/main:ro", *plain[at:]]

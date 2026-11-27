@@ -22,10 +22,12 @@ from scripts.checks.misc.validate_persona_verdict_egress import DOCKER_TOKEN, _l
 VERDICT = ".github/workflows/persona-verdict.yml"
 KEYED_JOBS = ("keyprep", "smoke", "refusal", "run", "run-fallback")
 TIER_ROLES = ("primary", "warm_fetched_escape_hatch")
-KEYED_IF = (
+BASE_IF = (
     "!cancelled() && needs.prepare.result == 'success' && github.event.workflow_run.event == 'pull_request' && "
-    "needs.prepare.outputs.allowlisted == 'true' && needs.prepare.outputs.fixture == 'true'"
+    "needs.prepare.outputs.allowlisted == 'true'"
 )
+KEYED_IF = f"{BASE_IF} && needs.prepare.outputs.fixture == 'true'"
+RUN_IF = f"{BASE_IF} && needs.prepare.outputs.keyed == 'true'"
 KEYPREP_OK = "needs.keyprep.result == 'success'"
 KEYPREP_IF = "!cancelled() && needs.prepare.result == 'success'"
 KEYED_CONDITION = f"{KEYED_IF} && {KEYPREP_OK}"
@@ -33,8 +35,8 @@ CONDITIONS = {
     "keyprep": KEYPREP_IF,
     "smoke": KEYED_CONDITION,
     "refusal": KEYED_CONDITION,
-    "run": KEYED_CONDITION,
-    "run-fallback": run_fallback_condition(KEYED_IF, KEYPREP_OK),
+    "run": f"{RUN_IF} && {KEYPREP_OK}",
+    "run-fallback": run_fallback_condition(RUN_IF, KEYPREP_OK),
 }
 NEEDS = {
     "keyprep": ["prepare"],

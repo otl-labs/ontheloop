@@ -28,11 +28,11 @@ from scripts.decisions_md import (
     _extract_related_decisions,
     _extract_section,
     _extract_superseded_by,
-    _extract_title_borne_supersedes,
     _iter_decision_sections,
     decision_header_numbers,
     extract_amends_edges,
     extract_superseded_by,
+    extract_title_borne_supersedes,
     iter_decision_headings,
     iter_decision_sections,
     parse_decisions_md,
@@ -360,7 +360,7 @@ class TestAmendsEdgeExtraction:
 
 
 class TestTitleBorneSupersedesExtraction:
-    """DCG-08: _extract_title_borne_supersedes() -- the generic title-relation helper reused
+    """DCG-08: extract_title_borne_supersedes() -- the generic title-relation helper reused
     for the forward 'Supersedes Decision N' idiom, sharing extract_amends_edges' grammar."""
 
     def test_dec117_single_target(self) -> None:
@@ -368,17 +368,17 @@ class TestTitleBorneSupersedesExtraction:
             "Executor self-modification boundary -- capabilities.yaml is the code-level SSOT "
             "(Supersedes Decision 44) (Decided)"
         )
-        assert _extract_title_borne_supersedes(raw_title) == [44]
+        assert extract_title_borne_supersedes(raw_title) == [44]
 
     def test_dec52_plural_comma_multi_target(self) -> None:
         raw_title = "Bedrock Migration -- DeepSeek V3.2 Default (Supersedes Decisions 37, 40, 49)"
-        assert _extract_title_borne_supersedes(raw_title) == [37, 40, 49]
+        assert extract_title_borne_supersedes(raw_title) == [37, 40, 49]
 
     def test_dec42_does_not_match_inverse_superseded_by(self) -> None:
         """'Superseded by Decision 90' is the inverse direction -- a different whole word
         ('superseded', not 'supersedes') -- must not produce a forward edge."""
         raw_title = "Three-Tier Workflow Architecture (Superseded by Decision 90)"
-        assert _extract_title_borne_supersedes(raw_title) == []
+        assert extract_title_borne_supersedes(raw_title) == []
 
     def test_dec114_ignores_kg_dot_n_target(self) -> None:
         """'supersedes KG.11's ...' -- KG.11 is not 'Decision N'; must not be captured."""
@@ -386,7 +386,7 @@ class TestTitleBorneSupersedesExtraction:
             "Raise the ROADMAP-PLATFORM.yaml size ceiling to 10,000 lines and add a "
             "deterministic guard (supersedes KG.11's 2500-line/50K-token trigger) (Decided)"
         )
-        assert _extract_title_borne_supersedes(raw_title) == []
+        assert extract_title_borne_supersedes(raw_title) == []
 
     def test_dec113_ignores_prose_target(self) -> None:
         """'supersedes Identity Center ...' -- a prose target, not 'Decision N'."""
@@ -394,7 +394,7 @@ class TestTitleBorneSupersedesExtraction:
             "Ratify CD.26 -- Pattern-B agent auth (static-key + chained AssumeRole) "
             "supersedes Identity Center for the personal account (Decided)"
         )
-        assert _extract_title_borne_supersedes(raw_title) == []
+        assert extract_title_borne_supersedes(raw_title) == []
 
 
 class TestAmendsStaysIndexOnly:

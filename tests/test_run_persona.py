@@ -263,3 +263,33 @@ def test_unknown_role_exits_two(tmp_path, monkeypatch, capsys):
     assert run_persona.main([*_args(tmp_path), "--role", "other"]) == 2
     captured = capsys.readouterr()
     assert captured.err.startswith("refused:") and captured.out == "" and not t.calls
+
+
+def test_mounted_trees_reach_run_persona(tmp_path, monkeypatch):
+    (tmp_path / "head").mkdir()
+    (tmp_path / "main").write_text("a file, not a tree", encoding="utf-8")
+    monkeypatch.setattr(run_persona, "TREES_ROOT", tmp_path)
+    assert run_persona.mounted_trees() == {"head": tmp_path / "head"}
+    seen = {}
+
+    async def fake(*args, **kwargs):
+        seen.update(kwargs)
+        return {"outcome": "success"}, []
+
+    monkeypatch.setattr(run_persona, "run_persona", fake)
+    assert run_persona.main(_args(tmp_path)) == 0
+    assert seen["trees"] == {"head": tmp_path / "head"}
+
+
+def test_no_trees_when_none_mounted(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_persona, "TREES_ROOT", tmp_path / "absent")
+    assert run_persona.mounted_trees() == {}
+    seen = {}
+
+    async def fake(*args, **kwargs):
+        seen.update(kwargs)
+        return {"outcome": "success"}, []
+
+    monkeypatch.setattr(run_persona, "run_persona", fake)
+    assert run_persona.main(_args(tmp_path)) == 0
+    assert seen["trees"] is None

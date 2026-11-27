@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -75,6 +76,7 @@ def run_argv(
     docker: str = "docker",
     entrypoint: list[str] | None = None,
     role: str | None = None,
+    trees: Mapping[str, str] | None = None,
 ) -> list[str]:
     if role is not None and not _ROLE.match(role):
         raise ValueError(f"role {role!r} does not match {_ROLE.pattern}")
@@ -91,6 +93,8 @@ def run_argv(
         "--security-opt", "no-new-privileges", "--user", "10001:10001", "--network", network,
         "-v", f"{in_dir}:{_IN_MOUNT}:ro", "-v", f"{events_dir}:{_EVENTS_MOUNT}",
     ]  # fmt: skip
+    for name, host_dir in sorted((trees or {}).items()):
+        argv += ["-v", f"{host_dir}:/trees/{name}:ro"]
     for variable in (key_variable, base_url_variable):
         if variable is not None:
             argv += ["-e", variable]
@@ -147,6 +151,7 @@ def run_image(
     project_ref: str | None = None,
     agent: str | None = None,
     host_run: bytes | None = None,
+    trees: Mapping[str, str] | None = None,
 ) -> RunImageResult:
     sidecar = _host_run_sidecar(project_ref, agent, host_run)
     in_dir = tempfile.mkdtemp(prefix="persona-in-")
@@ -160,6 +165,7 @@ def run_image(
         argv = run_argv(
             image_ref, persona, in_dir, events_dir,
             key_variable=key_variable, base_url_variable=base_url_variable, network=network, docker=docker,
+            trees=trees,
         )  # fmt: skip
         try:
             proc = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_s)

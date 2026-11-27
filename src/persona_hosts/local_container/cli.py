@@ -2,6 +2,7 @@
 
 Usage: python -m src.persona_hosts.local_container.cli --image REF --persona ID --input PATH --out DIR
        --project-ref REF --agent KEY [--key-variable V] [--base-url-variable V] [--network N] [--timeout S]
+       [--tree NAME=PATH]...
 Exit: the container's own exit code once DIR is written. 2: refused before the run (non-empty DIR, unreadable input,
 bad sidecar or variable arguments), nothing written. 3: the run could not complete (docker unreachable, timeout),
 nothing written. The CLI's exit 2 and 3 are told apart from a container's by whether DIR was written.
@@ -27,6 +28,20 @@ def _read_input(path: Path) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
+def _trees(specs: list[str]) -> dict[str, str] | None:
+    trees: dict[str, str] = {}
+    for spec in specs:
+        name, _, path = spec.partition("=")
+        if name not in ("head", "main") or name in trees:
+            print(f"refused: --tree name {name!r} is not head or main, or is repeated", file=sys.stderr)
+            return None
+        if not path or ":" in path or "," in path or not Path(path).is_dir():
+            print(f"refused: --tree {name} path {path!r} is not an existing directory without ':' or ','", file=sys.stderr)
+            return None
+        trees[name] = str(Path(path).resolve())
+    return trees
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="local_container.cli")
     parser.add_argument("--image", required=True)
@@ -39,7 +54,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-url-variable", default=None)
     parser.add_argument("--network", default="bridge")
     parser.add_argument("--timeout", type=int, default=3700)
+    parser.add_argument("--tree", action="append", default=[], metavar="NAME=PATH")
     args = parser.parse_args(argv)
+    trees = _trees(args.tree)
+    if trees is None:
+        return 2
     if args.out.exists() and (not args.out.is_dir() or any(args.out.iterdir())):
         print(f"refused: {args.out} is not an empty directory", file=sys.stderr)
         return 2
@@ -58,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
             timeout_s=args.timeout,
             project_ref=args.project_ref,
             agent=args.agent,
+            trees=trees or None,
         )
     except ValueError as exc:
         print(f"refused: {exc}", file=sys.stderr)
