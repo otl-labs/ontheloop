@@ -1,0 +1,152 @@
+schema_version: 7
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: tracked-background-validate
+intent: >-
+  AGENTS.md tells agents to launch the full tier, and any other long validate run, as the Bash tool's own tracked
+  background task (run_in_background true, timeout 7200000) and never shell-detached, because a detached run dies
+  unseen when the idle CC-web container is reclaimed and the thread stalls (rec-5691). A drift-guard node pins the rule.
+plan_type: IMPLEMENTATION
+verification_tier: V2
+plan_path: docs/plans/PLAN-tracked-background-validate.yaml
+phase: >-
+  ad_hoc_rec (soft-warn exception category): operator-requested fix from the 2026-11-26 background-validation death
+  analysis. No tier_item is claimed and no exit criterion is closed.
+closes_criteria: []
+cites: [dec:279, dec:246, dec:281]
+scope:
+  - file: AGENTS.md
+    action: Modify
+    purpose: >-
+      Exactly the approved-text sidecar's two blocks under Git-ops procedure: drop the Presubmit tier bullet, which only
+      points at the table beneath it, and replace the full-tier paragraph under the table with the tracked-launch rule.
+      The file shrinks, so the S1 entry in config/prose_budgets.yaml is lowered to the new measured size in the same
+      commit (prose_budgets_ratchet_down sanction row).
+    new_imports: []
+  - file: tests/test_agents_md_rules.py
+    action: Modify
+    purpose: >-
+      Add test_full_tier_launch_is_a_tracked_background_task (rec-5691's acceptance node). It takes the AGENTS.md
+      paragraph that names the 10-min foreground cap, collapses its whitespace to single spaces (the sidecar wraps
+      "never" and the backticked list onto two lines), and asserts it contains the literals `run_in_background: true`,
+      `timeout: 7200000` and never `&`/`nohup`/`setsid` as whole substrings (never a per-token check for a bare
+      ampersand); it also asserts "with a 2 h limit" is absent from AGENTS.md. No other node changes.
+    new_imports: []
+bundled_recommendations: [rec-5691]
+followon_recs: []
+infrastructure_dependencies: []
+acceptance_criteria:
+  - "AGENTS.md equals main with the sidecar's blocks applied (approved_text verify passes)."
+  - "The new node passes on the build tree and fails on main."
+  - "config/prose_budgets.yaml's S1 entry equals the new measured root ambient load set."
+  - "rec-5691 is closed by the merge's Resolves trailer, its acceptance node passing."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The new node passes.
+    command: bin/venv-python -m pytest tests/test_agents_md_rules.py::test_full_tier_launch_is_a_tracked_background_task -q
+    expected: exit 0 with 1 passed; on main the node does not exist
+    fix_if: an assertion fails; read which literal is missing from the paragraph
+    hermetic: true
+    expected_literals: ["1 passed"]
+    graduation: waive
+    graduation_waiver_reason: The graduated shard agents-md-hook-canary-marker already runs every node in this file (file-level node_id), so a second shard would duplicate it.
+  - step: 2
+    phase: pre-deploy
+    action: AGENTS.md carries exactly the approved words and the rest of the file's nodes pass.
+    command: >-
+      bin/venv-python -m scripts.roadmap.approved_text verify --slug tracked-background-validate --base origin/main &&
+      bin/venv-python -m pytest tests/test_agents_md_rules.py -q && bin/venv-python -c "from scripts.checks.prose.prose_limits
+      import validate_prose_limits as v; f = []; v(f); raise SystemExit(1 if f else 0)"
+    expected: verify exits 0, the file's nodes pass, and validate_prose_limits reports no failure (S1 equals the measured bytes)
+    fix_if: verify names a difference (make AGENTS.md match the sidecar, never the reverse), or prose limits name S1 (re-measure and set it)
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: Reads origin/main, so it is not hermetic; the file-level shard already guards the nodes.
+  - step: 3
+    phase: pre-deploy
+    action: >-
+      Full tier, then HEAD attestation, after the build commit and rebase and before the push (handoff_policy). Launch
+      it as the new rule says: from the top-level session, a Bash call with run_in_background true and timeout 7200000,
+      the validate command itself, no shell detachment; say it started and end the turn.
+    command: bin/venv-python -m scripts.validate && bin/venv-python -m scripts.checks.validation_result --verify-head
+    expected: the full tier exits 0 and the validation result attests the current HEAD's tree
+    fix_if: any failure; fix and rerun the full tier from the start
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: A whole full-tier run; graduate steps may not invoke scripts.validate (recursion).
+  - step: 4
+    phase: post-deploy
+    action: rec-5691 is closed by the merge's Resolves trailer.
+    command: >-
+      AWS_PROFILE=agent_platform bin/venv-python -c "from src.common.ducklake_reader_client import fetch_recs_by_ids,
+      make_reader; rows, _ = fetch_recs_by_ids(make_reader(profile='agent_platform'), ['rec-5691']); print([(r['id'],
+      r['status']) for r in rows])"
+    expected: rec-5691 closed, after the closure job runs on the merge commit
+    fix_if: rec-5691 still open; read the closure job log for the refusal marker and fix its cause, never a direct status write
+    hermetic: false
+test_obligations:
+  - source: tests/test_agents_md_rules.py
+    behavior: AGENTS.md names the tracked background launch for long validate runs and forbids shell detachment
+    verification_step: 1
+    test_selector: tests/test_agents_md_rules.py::test_full_tier_launch_is_a_tracked_background_task
+    red_green_expectation: red before (the node does not exist on main, and main's paragraph lacks the literals), green after
+constraints:
+  - "AGENTS.md is gated (docs/contracts/approval-routing.yaml): the build changes only the sidecar's words."
+  - "S1 has zero headroom (config/prose_budgets.yaml); the sidecar shrinks AGENTS.md, so no raise is needed."
+  - "No existing assertion in tests/test_agents_md_rules.py is changed or loosened (Decision 235)."
+  - "No rescue agents or workaround loops (Decision 55)."
+context:
+  - "Evidence (2026-11-26 analysis, rec-5691 context): 6 validate runs in 5 of 23 build threads died 11-24..26, all shell-detached; a tracked 40-min run_in_background task held the container with an untracked heartbeat beside it, and with nothing tracked the heartbeat died about 3 min after the turn ended."
+  - "Byte cap: S1 root_ambient_load_set is 16676 with zero headroom, so the operator's longer draft was reshaped to fit (prose_budgets.yaml relief valve: trim the surface); the redundant Presubmit tier bullet goes."
+  - "rec-3039 (open) prescribes the opposite pattern (setsid nohup ... & disown, its acceptance greps overseer-dispatch.yaml for setsid). Not bundled: a different surface (dispatch briefs of the retiring overseer); its owner reconciles it with this rule before any build, flagged to the operator."
+  - "Decision-scout verdict FLAGS_FOUND (round 2, after main added Decision 289 and moved north_star; same verdict as round 1). CITE: 279, 246, 281. CONTRADICT: none. SPIRIT: 163 [WARN] (a universal rule ships as prose; the node pins wording, not the launch; dispositioned to rec-5695). RELATED: 254, 76, 127, 86, 139, 181, 203, 235, 132, 201, 55, 288. Decisions triaged: 238 of 238. Roadmap items intersected: 2; CONFLICT: 0; RELATED: 2 (T2.54, T4.23). Serves: NS.4 3/5."
+  - "Decision 163 WARN disposition: the structural guard is rec-5695 (a PreToolUse refusal of a shell-detached or untracked scripts.validate launch, Decision 203 hook pattern; depends on rec-5691), its own plan later, a different risk class (hook code). The operator chose 'Separate rec for a hook guard' on the decision card at 2026-11-26 22:35Z. It is a separate rec, not followon_recs, which holds only a half deferred at build time (planning skill Step 8)."
+  - "Wording check r1 PASS on base 4ff6cc19 (scratch worktree of origin/main holding only the sidecar's AGENTS.md edits; the check lowered S1 itself)."
+  - "Approval: Benjamin wrote approved, please proceed in this thread at 2026-11-26 20:04Z, after the proof results (counts as write the plan). The byte-cap reshape of his draft words comes back to him on the approval run, with the sidecar's exact words."
+  - "red_overlap verdict clear (no reds), 2026-11-26."
+  - "Unbuilt plans also scoping AGENTS.md (agent-proxy-signed-access, bootstrap-ci-gated-apply, hook-canary-evidence; the last also scopes tests/test_agents_md_rules.py): no shared words with this sidecar; whichever builds second rebases."
+  - "Plan owner: this planning session (thread Stop background validation runs dying); send scope gaps or amendments here."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:e67c23f2be74f6c0492b5bdeac3a9a861d8bcd184968309e91923654b6571c34"}  # pragma: allowlist secret
+  - {gate: wording-check, round: 1, verdict: PASS, digest: 740baa9a8c78626663add43f7c2b365bf4d463773580de25bd2fe896ad7eb5ad, base: 4ff6cc192b1028da55a05af21f534fd301988f75, selection: complete}  # pragma: allowlist secret
+  - gate: plan-critique
+    round: 1
+    verdict: REVISE
+    blocking: 1
+    nits: 6
+    findings:
+      - {id: TBV1-01, severity: blocking, origin: judgement, anchor: "context[4] Decision 163 WARN disposition", subject: "guard rec did not exist and the operator choice was unrecorded; rec-5695 filed after the operator chose a separate rec", disposition: fixed}
+      - {id: TBV1-02, severity: nit, origin: judgement, anchor: "context[2] rec-3039", subject: "rec-3039 prescribes the opposite pattern; context line now says so", disposition: fixed}
+      - {id: TBV1-03, severity: nit, origin: judgement, anchor: "scope[1].purpose", subject: "name the exact literals and collapse whitespace before matching", disposition: fixed}
+      - {id: TBV1-04, severity: nit, origin: mechanical, anchor: "execution_steps[2]", subject: "measure S1 on the build tree after the edit and rebase", disposition: fixed}
+      - {id: TBV1-05, severity: nit, origin: mechanical, anchor: "acceptance_criteria[2]", subject: "VP 2 gains a validate_prose_limits leg", disposition: fixed}
+      - {id: TBV1-06, severity: nit, origin: judgement, anchor: "context[3] scout line", subject: "name the two roadmap items (T2.54, T4.23)", disposition: fixed}
+      - {id: TBV1-07, severity: nit, origin: judgement, anchor: "none", subject: "an audit prompt quotes the old AGENTS.md text; out of scope, informational", disposition: disputed}
+  - gate: plan-critique
+    round: 2
+    verdict: PROCEED
+    blocking: 0
+    nits: 4
+    findings:
+      - {id: TBV2-01, severity: nit, origin: judgement, anchor: "scope[1].purpose", subject: "assert the backticked literals exactly and that one paragraph names the foreground cap", disposition: build-note}
+      - {id: TBV2-02, severity: nit, origin: judgement, anchor: "test_obligations[0].red_green_expectation", subject: "run the node body against main's AGENTS.md for the discriminating red", disposition: build-note}
+      - {id: TBV2-03, severity: nit, origin: mechanical, anchor: "test_obligations[0].source", subject: "obligation source names the test file; both paths are gate-exempt", disposition: build-note}
+      - {id: TBV2-04, severity: nit, origin: judgement, anchor: "context[2] rec-3039", subject: "record the rec-3039 conflict on that rec; routed to the coordinator handoff", disposition: build-note}
+  - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:a214b5a8689f3fa4ef6a05f9e666b7c1483710bf1b77986d334bc3ceb2c81571"}  # pragma: allowlist secret
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+execution_steps:
+  - "Set implementation_declared: true in this plan file in the build commit."
+  - "Apply the sidecar's two blocks to AGENTS.md exactly (docs/plans/approved/tracked-background-validate.yaml). Post: VP 2's approved_text verify passes."
+  - "Lower config/prose_budgets.yaml's S1 root_ambient_load_set to the new measured size (bin/venv-python -c 'import json; from scripts.preflight.prose_context import measure_prose_context as m; print(json.dumps(m()))'), measured on the build tree after the sidecar edit and the rebase (expected near 16671; the measurement wins); nothing else in that file changes."
+  - "Add test_full_tier_launch_is_a_tracked_background_task to tests/test_agents_md_rules.py. Post: VP 1 passes; on main it fails."
+  - "CLOSURE (implement skill Commit Flows): commit with Resolves: rec-5691; rebase; VP 3 launched per the new rule; push; PR titled build(tracked-background-validate); code review in a fresh context; merge on PROCEED and green CI with Resolves: rec-5691 in the squash body; then VP 4."
+  - "Report: what was implemented, verification results, run ids."
+  - "Build notes from critique r2 (not plan edits): TBV2-01 the node asserts the Python strings with backticks, exactly '`run_in_background: true`', '`timeout: 7200000`' and 'never `&`/`nohup`/`setsid`', after collapsing whitespace, and first asserts exactly one AGENTS.md paragraph contains '10-min foreground cap'; TBV2-02 show the discriminating red by running the node body against git show origin/main:AGENTS.md (or with the AGENTS.md edit stashed), not only by the node's absence; TBV2-03 the obligation source label is the test file, leave it; TBV2-04 is the planning session's (rec-3039 note), not a build step."
+rollback: Revert the build PR; AGENTS.md, the S1 entry and the test file return to main's state.
