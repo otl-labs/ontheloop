@@ -118,3 +118,12 @@ class TestValidateProseAllowlist:
         validate_prose_allowlist(failed, router_path=router)
         assert len(failed) == 1
         assert "allowed_globs" in failed[0]
+
+
+def test_marketing_prose_is_not_sanctioned() -> None:
+    import yaml
+
+    router = Path(__file__).resolve().parents[3] / "docs/contracts/file-router.yaml"
+    globs = yaml.safe_load(router.read_text(encoding="utf-8"))["prose_allowlist"]["allowed_globs"]
+    assert not path_allowed("marketing/blog/launch.md", globs)
+    assert not path_allowed("marketing/index.md", globs)
