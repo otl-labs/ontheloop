@@ -191,3 +191,17 @@ def test_scout_roadmap_id_pattern_matches_every_roadmap_item() -> None:
 def test_scout_report_template_unchanged() -> None:
     text = (ROOT / PERSONAS["decision_scout"][2]).read_text(encoding="utf-8")
     assert re.search(r"### Verdict\s*\n+\s*NO_FLAGS \| FLAGS_FOUND \| BLOCK", text)
+
+
+def test_code_reviewer_reads_trees_under_its_budget():
+    contract = _load(PERSONAS["code_reviewer"][0])
+    assert {"read_tree:head", "read_tree:main"} <= set(contract["capabilities"])
+    read_tree = contract["budget"]["read_tree"]
+    for key in ("max_calls", "max_read_bytes", "max_search_results", "max_total_bytes"):
+        assert isinstance(read_tree[key], int) and not isinstance(read_tree[key], bool) and read_tree[key] > 0
+    assert "review_incomplete" in {f["id"] for f in contract["failure_outputs"]}
+    rule = "the change neither causes nor depends on"
+    template = " ".join(contract["prompt_template"].split())
+    skill = " ".join((ROOT / PERSONAS["code_reviewer"][2]).read_text(encoding="utf-8").split())
+    assert rule in template
+    assert rule in skill

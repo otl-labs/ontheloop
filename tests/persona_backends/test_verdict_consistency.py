@@ -119,11 +119,11 @@ def _review_turn() -> str:
     return json.dumps(value)
 
 
-def test_real_code_reviewer_contradiction_is_schema_invalid():
+def test_real_code_reviewer_contradiction_is_schema_invalid(tmp_path):
     loaded = backend_contract.load(_real("code_reviewer"))
     turns = [final(_review_turn()) for _ in range(loaded.max_revisions + 1)]
     transport = ScriptedTransport(turns)
-    result, _ = drive(transport, _review_input(), contract=_real("code_reviewer"))
+    result, _ = drive(transport, _review_input(), contract=_real("code_reviewer"), trees={"head": tmp_path, "main": tmp_path})
     assert result["failure"] == "schema_invalid"
     assert "REVISE" in transport.calls[1]["messages"][-1]["content"]
 
