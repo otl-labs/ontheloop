@@ -13,7 +13,7 @@ from typing import Any
 
 import yaml
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 STUB_TEMPLATE_ID = "compacted-stub-v2"
 STUB_TEMPLATE = (
     "{header}\n\n**Status:** Superseded\n**Date:** {date}\n\n"
@@ -28,13 +28,16 @@ PROBE_STATES = frozenset({"breaks", "survives", "red_before", "not_run"})
 TIERS = ("possible", "probable", "confirmed")
 
 # kind -> (rule_id, effect, needs_disposition)
+# manifest_reference has one effect: a re-supersession through the supersedes key is unreachable (procedure step 1
+# takes live victims only).
 RULES: dict[str, tuple[str, str, bool]] = {
     "test_node": ("R-TEST", "retarget_or_retire_test", True),
     "graduated_record": ("R-RECORD", "retire_and_replace", True),
     "north_star_carrier": ("R-NS", "move_carrier", True),
     "supersession_waiver": ("R-WAIVER", "delete_orphan_waiver", True),
     "census_row": ("R-CENSUS", "remove_row", True),
-    "manifest_reference": ("R-MANIFEST", "fails_resolve", True),
+    "manifest_reference": ("R-MANIFEST", "resolves_to_successor", True),
+    "manifest_held_token": ("R-MANIFEST-HELD", "successor_must_carry_token", True),
     "chain_edge": ("R-CHAIN", "victim_or_carry_forward", True),
     "delegated_key": ("R-DELEG", "redelegate", True),
     "authorizing_marker": ("R-MARKER", "successor_must_mention_not_mechanism", True),

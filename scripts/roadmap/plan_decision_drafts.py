@@ -21,9 +21,9 @@ from scripts.checks.decisions import consolidation, decisions_size_measure, enve
 from scripts.decisions_md import (
     PLACEHOLDER_NUMBER,
     _extract_related_decisions,
-    _extract_title_borne_supersedes,
     extract_amends_edges,
     extract_entry_envelope,
+    extract_title_borne_supersedes,
     iter_decision_headings,
     iter_placeholder_headings,
 )
@@ -182,7 +182,7 @@ def _info_lines(number: str, title: str, block: str) -> list[str]:
     except ValueError:
         return []
     edges = (
-        set(extract_amends_edges(title)) | set(_extract_title_borne_supersedes(title)) | set(_extract_related_decisions(block))
+        set(extract_amends_edges(title)) | set(extract_title_borne_supersedes(title)) | set(_extract_related_decisions(block))
     )
     edges |= set(_int_list(env.get("supersedes")))
     out: list[str] = []
@@ -333,7 +333,7 @@ def drafted_entries(plan_path: str | Path, root: Path | None = None) -> list[dic
         env = extract_entry_envelope(text, placeholder=True) or {}
         kind = env.get("kind")
         amends = _int_list(env.get("amends")) or extract_amends_edges(title)
-        amends = sorted({*amends, *_int_list(env.get("supersedes")), *_extract_title_borne_supersedes(title)})
+        amends = sorted({*amends, *_int_list(env.get("supersedes")), *extract_title_borne_supersedes(title)})
         entries.append(
             {"title": title, "kind": kind.get("value") if isinstance(kind, dict) else None, "amends": amends, "block": text}
         )

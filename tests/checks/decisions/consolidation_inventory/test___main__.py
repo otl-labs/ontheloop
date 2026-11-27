@@ -30,7 +30,7 @@ def test_text_and_json_are_deterministic(repo: Path, capsys: pytest.CaptureFixtu
     _, raw = _run(capsys, "9001", "--root", str(repo), "--json")
     _, again = _run(capsys, "9001", "--root", str(repo), "--json")
     data = json.loads(raw)
-    assert raw == again and data["schema_version"] == 1 and data["stub_template"] == "compacted-stub-v2"
+    assert raw == again and data["schema_version"] == 2 and data["stub_template"] == "compacted-stub-v2"
     assert data["hits"] == sorted(data["hits"], key=lambda h: (h["kind"], h["victim"], h["locator"]))
 
 

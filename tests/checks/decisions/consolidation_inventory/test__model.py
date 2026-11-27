@@ -20,8 +20,8 @@ from scripts.checks.decisions.consolidation_inventory._model import (
 
 KINDS = {
     "test_node", "graduated_record", "north_star_carrier", "supersession_waiver", "census_row", "manifest_reference",
-    "chain_edge", "delegated_key", "authorizing_marker", "roadmap_citation", "roadmap_related", "size_budget",
-    "glossary_noted", "decision_list", "anchored_citation", "citation",
+    "manifest_held_token", "chain_edge", "delegated_key", "authorizing_marker", "roadmap_citation", "roadmap_related",
+    "size_budget", "glossary_noted", "decision_list", "anchored_citation", "citation",
 }  # fmt: skip
 
 
@@ -66,7 +66,7 @@ def test_inventory_filters_by_tier_and_serializes_sorted() -> None:
     assert [h.kind for h in inv.sorted_hits()] == ["census_row", "test_node"]
     assert [h.kind for h in inv.sorted_hits("confirmed")] == ["census_row"]
     data = inv.as_dict()
-    assert data["schema_version"] == 1 and data["stub_template"] == "compacted-stub-v2" and data["probe"] is None
+    assert data["schema_version"] == 2 and data["stub_template"] == "compacted-stub-v2" and data["probe"] is None
     assert "{amenders}" in STUB_TEMPLATE
     assert "{successor}" in STUB_TEMPLATE
 

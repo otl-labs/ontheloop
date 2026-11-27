@@ -23,7 +23,7 @@ required-marker change, no retro-enforcement of the historical band.
 
 DCG-08 decisions index (PLAN-dcg-decisions-index): adds the public extract_amends_edges()
 (forward "amends Decision N" title-relation extraction) plus the private
-_extract_title_borne_supersedes() sibling, both built on the shared
+extract_title_borne_supersedes() sibling, both built on the shared
 _extract_title_relation_targets() whitelist-continuation grammar -- never a relation-keyword
 blocklist, so a non-Decision target (CD.N, KG.N, prose like "Identity Center") is excluded
 structurally rather than enumerated. Surfaces two INDEX-ONLY parse_decisions_md row keys,
@@ -311,7 +311,7 @@ def derive_currency(row: dict, inbound_supersedes: set[int], inbound_amends: set
 
 
 # DCG-08 (PLAN-dcg-decisions-index) title-relation extraction, shared by the public
-# extract_amends_edges() and the private _extract_title_borne_supersedes(). Whitelist-
+# extract_amends_edges() and extract_title_borne_supersedes(). Whitelist-
 # continuation grammar, not a relation-keyword blocklist: after the relation word, the FIRST
 # target must be an immediately-adjacent "Decision(s) N" (_TITLE_RELATION_SEED_RE) -- so a
 # non-Decision target (CD.N, KG.N, prose like "Identity Center") never matches, with no need
@@ -377,7 +377,7 @@ def _extract_title_relation_targets(raw_title: str, relation_word: str) -> list[
     from a raw (unstripped) decision title, deduped, in first-occurrence order.
 
     Generic helper shared by extract_amends_edges (relation_word="amends") and the internal
-    _extract_title_borne_supersedes (relation_word="supersedes"). Never matches an inverse
+    extract_title_borne_supersedes (relation_word="supersedes"). Never matches an inverse
     phrasing ("amended by Decision N", "superseded by Decision N") because those are spelled
     as different whole words ("amended"/"superseded", not "amends"/"supersedes") -- \\b-bounded
     matching on the exact relation_word excludes them with no explicit direction check needed.
@@ -428,7 +428,7 @@ def extract_amends_edges(raw_title: str) -> list[int]:
     return _extract_title_relation_targets(raw_title, "amends")
 
 
-def _extract_title_borne_supersedes(raw_title: str) -> list[int]:
+def extract_title_borne_supersedes(raw_title: str) -> list[int]:
     """Forward 'Supersedes Decision(s) N' targets from a raw (unstripped) decision title.
 
     Internal counterpart to extract_amends_edges (DCG-08), reusing the same generic helper.
@@ -639,7 +639,7 @@ def parse_decisions_md(paths: Optional[list[Path]] = None) -> list[dict]:
                 "amends": list(envelope["amends"]) if envelope and envelope.get("amends") else extract_amends_edges(raw_title),
                 "title_supersedes": list(envelope["supersedes"])
                 if envelope and envelope.get("supersedes")
-                else _extract_title_borne_supersedes(raw_title),
+                else extract_title_borne_supersedes(raw_title),
                 "significance": envelope.get("significance", {}) if envelope else {},
                 "kind": envelope.get("kind") or {} if envelope else {},
                 "serves": list(envelope.get("serves") or []) if envelope else [],

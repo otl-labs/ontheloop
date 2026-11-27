@@ -161,3 +161,22 @@ def test_odd_shapes_are_skipped_without_raising(tmp_path: Path) -> None:
     assert [h.locator.split(":", 1)[1] for h in _run(s.decision_lists, tmp_path)[0]] == ["nest[0].decisions"]
     assert _run(s.markers, tmp_path)[0] == []
     assert [h.locator.split(":", 1)[1] for h in _run(s.waivers, tmp_path)[0]] == ["9001->2"]
+
+
+def test_inbound_manifest_references_to_a_victim_are_listed(tmp_path: Path) -> None:
+    stub = "## Decision {n}: s\n\n**Status:** Superseded\n\n**Superseded by: Decision 9005**\n\n"
+    live = "## Decision 9005: v\n\n```yaml\nnumber: 9005\nsupersedes: [9001]\n```\n\n**Status:** Decided\n"
+    _write(tmp_path, "docs/DECISIONS.md", "# Decisions\n\n" + stub.format(n=9001) + stub.format(n=9006) + live)
+    _write(
+        tmp_path,
+        "docs/decision-migration/consolidations/m.yaml",
+        "supersedes: [4]\ncarried_forward: [9001, 9006, 4]\nunits:\n"
+        "  - {id: u1, held: ['Decision 9001'], token: T1}\n  - {id: u2, held: ['Decision 9005'], token: T2}\n"
+        "  - {id: u3, held: ['Decision 9006'], token: T3}\n  - {id: u4, held: ['x.yaml#k'], token: T4}\n",
+    )
+    hits, _ = _run(s.manifests, tmp_path, (9005,))
+    assert sorted((h.kind, h.effect, h.locator.split(":", 1)[1], h.evidence[0].detail) for h in hits) == [
+        ("manifest_held_token", "successor_must_carry_token", "units.u1.held", "held Decision 9001 (-> 9005) token 'T1'"),
+        ("manifest_held_token", "successor_must_carry_token", "units.u2.held", "held Decision 9005 token 'T2'"),
+        ("manifest_reference", "resolves_to_successor", "carried_forward", "carried_forward Decision 9001 (-> 9005)"),
+    ]

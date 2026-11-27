@@ -14,9 +14,10 @@ from typing import Any, Callable, Optional
 
 import yaml
 
+from scripts.checks._decision_chain import resolve_live
+from scripts.checks._decision_chain import superseded as _superseded
 from scripts.checks.decisions.envelope_rules import dotted_value, split_delegated_key
 from scripts.decisions_md import (
-    _extract_title_borne_supersedes,
     extract_entry_envelope,
     extract_superseded_by,
     is_compacted_stub,
@@ -308,32 +309,6 @@ def _entries(root: Path) -> dict[int, str]:
     return found
 
 
-def _superseded(rows: dict[int, dict], number: int, block: str) -> bool:
-    row = rows.get(number)
-    return str(row.get("currency", "")).startswith("superseded") if row else bool(extract_superseded_by(block))
-
-
-def _live(rows: dict[int, dict], entries: dict[int, str], number: int) -> tuple[int | None, list[int]]:
-    path: list[int] = [number]
-    while (block := entries.get(number)) is not None and number not in path[:-1]:
-        if not _superseded(rows, number, block):
-            return number, path
-        nxt = extract_superseded_by(block).removeprefix("dec-")
-        if not nxt.isdigit() or int(nxt) not in entries:
-            return None, path
-        if number not in _declared(entries[int(nxt)]):
-            return None, path
-        number = int(nxt)
-        path.append(number)
-    return None, path
-
-
-def _declared(block: str) -> set[int]:
-    listed = (extract_entry_envelope(block) or {}).get("supersedes")
-    title = _extract_title_borne_supersedes(block.split("\n", 1)[0])
-    return set(title) | {n for n in (listed if isinstance(listed, list) else []) if isinstance(n, int)}
-
-
 def _via(path: list[int]) -> str:
     return f" (-> {' -> '.join(map(str, path[1:]))})" if len(path) > 1 else ""
 
@@ -363,7 +338,8 @@ def _target_problems(root: Path, tag: str, unit: dict, field: str, key: str, ctx
     uid, token = unit.get("id"), unit.get("token")
     if field == "held" and key.startswith("Decision "):
         n = key.split()[-1]
-        live, path = _live(ctx["rows"], ctx["entries"], int(n)) if n.isdigit() and int(n) not in ctx["victims"] else (None, [])
+        resolvable = n.isdigit() and int(n) not in ctx["victims"]
+        live, path = resolve_live(ctx["entries"], int(n), ctx["rows"]) if resolvable else (None, [])
         if live is None or live == ctx["number"]:
             return [f"{tag}: unit {uid!r} held {key}{_via(path)} is absent, superseded or a victim"]
         block = ctx["entries"][live]
@@ -450,7 +426,7 @@ def _frozen_problems(
 def _carried_problems(tag: str, carried: list[Any], cons: int, supersedes: list[int], ctx_in: dict) -> list[str]:
     entries, rows, problems = ctx_in["entries"], ctx_in["rows"], []
     for n in carried:
-        live, path = (None, [n]) if n in supersedes else _live(rows, entries, n)
+        live, path = (None, [n]) if n in supersedes else resolve_live(entries, n, rows)
         edge = live != n or bool((rows.get(n) or {}).get("amends"))
         if live is None or live == cons or not edge or f"Decision {n}" not in entries[cons]:
             problems.append(

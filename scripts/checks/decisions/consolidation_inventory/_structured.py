@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from scripts import decisions_md
+from scripts.checks._decision_chain import resolve_live
 from scripts.checks.decisions.consolidation_inventory._model import (
     BAD,
     MISSING,
@@ -28,6 +29,7 @@ CENSUS_REL = "audits/standards-cleanup-census.yaml"
 MANIFESTS_REL = "docs/decision-migration/consolidations"
 INDEX_REL = "docs/decisions-index.json"
 DECISIONS_REL = "docs/DECISIONS.md"
+ARCHIVE_REL = "docs/DECISIONS_ARCHIVE.md"
 ROADMAP_REL = "docs/ROADMAP-PLATFORM.yaml"
 GLOSSARY_REL = "docs/contracts/glossary.yaml"
 BUDGET_RELS = ("config/prose_budgets.yaml", "config/structural_size_budgets.yaml")
@@ -37,6 +39,7 @@ _ROADMAP_DONE = frozenset({"complete", "retired"})
 _MARKER = re.compile(r"#\s*([A-Za-z0-9_-]+):\s*dec-0*(\d+)")
 _SKIP = frozenset({"__pycache__", ".venv", "node_modules", ".git"})
 _KEY_DECISION_SKIPPED = frozenset({"noted_decisions"})
+_HELD_DECISION = re.compile(r"Decision (\d+)")
 
 
 def _ints(value: Any) -> set[int]:
@@ -168,24 +171,57 @@ def census(root: Path, victims: tuple[int, ...], gate: Gate, notes: list[dict[st
     return hits
 
 
+def _chain(root: Path) -> tuple[dict[int, str], dict[int, dict]]:
+    entries: dict[int, str] = {}
+    for rel in (DECISIONS_REL, ARCHIVE_REL):
+        for match, block in decisions_md.iter_decision_sections(read_text(root, rel) or ""):
+            entries.setdefault(int(match.group(1)), block)
+    rows = {r["number"]: r for r in _index_rows(root, []) if isinstance(r.get("number"), int)}
+    return entries, rows
+
+
+def _reaching(number: int, victim: int, chain: tuple[dict[int, str], dict[int, dict]]) -> str | None:
+    """The resolution path text when number is the victim or its Superseded by chain reaches it, else None."""
+    path = resolve_live(chain[0], number, chain[1])[1]
+    if victim not in path:
+        return None
+    return f" (-> {' -> '.join(map(str, path[1:]))})" if len(path) > 1 else ""
+
+
 def manifests(root: Path, victims: tuple[int, ...], gate: Gate, notes: list[dict[str, str]]) -> list[Hit]:
     base = root / MANIFESTS_REL
     hits: list[Hit] = []
     if not base.is_dir():
         return hits
+    chain = _chain(root)
     for path in sorted(base.glob("*.yaml")):
         rel = path.relative_to(root).as_posix()
         data = _yaml(root, rel, notes)
         if not isinstance(data, dict):
             continue
         for victim in victims:
-            for key in ("supersedes", "carried_forward"):
-                if victim in _ints(data.get(key)):
-                    hits.append(_hit("manifest_reference", victim, rel, key, gate))
+            if victim in _ints(data.get("supersedes")):
+                hits.append(_hit("manifest_reference", victim, rel, "supersedes", gate))
+            for number in sorted(_ints(data.get("carried_forward"))):
+                if (via := _reaching(number, victim, chain)) is not None:
+                    detail = f"carried_forward Decision {number}{via}"
+                    hits.append(_hit("manifest_reference", victim, rel, "carried_forward", gate, detail=detail))
             for unit in data.get("units") or []:
-                if isinstance(unit, dict) and any(_mentions(s, victim) for s in _strings(unit.get("held"))):
-                    hits.append(_hit("manifest_reference", victim, rel, f"units.{unit.get('id', '?')}.held", gate))
+                hits.extend(_held_hits(unit, victim, rel, gate, chain))
     return hits
+
+
+def _held_hits(unit: Any, victim: int, rel: str, gate: Gate, chain: tuple[dict[int, str], dict[int, dict]]) -> list[Hit]:
+    if not isinstance(unit, dict):
+        return []
+    found: list[Hit] = []
+    for held in _strings(unit.get("held")):
+        named = _HELD_DECISION.fullmatch(held.strip())
+        via = _reaching(int(named.group(1)), victim, chain) if named else ("" if _mentions(held, victim) else None)
+        if via is not None:
+            key, detail = f"units.{unit.get('id', '?')}.held", f"held {held}{via} token {unit.get('token')!r}"
+            found.append(_hit("manifest_held_token", victim, rel, key, gate, detail=detail))
+    return found
 
 
 def chain_edges(root: Path, victims: tuple[int, ...], gate: Gate, notes: list[dict[str, str]]) -> list[Hit]:
