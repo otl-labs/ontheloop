@@ -184,6 +184,7 @@ def projected_schema(persona: str, output_schema: dict[str, Any]) -> dict[str, A
 
 
 def items(obj: dict[str, Any], path: str) -> list[dict[str, Any]]:
+    """The dict items of the list at a dotted path of a result object (empty when absent)."""
     return _items(obj, path)
 
 

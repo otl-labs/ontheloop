@@ -226,7 +226,8 @@ def read_actions(
     for run in runs:
         match = TITLE.match(str(run.get("display_title")))
         if match:
-            heads.setdefault(match.group(1), str(run.get("conclusion")))
+            sha, conclusion = match.group(1), str(run.get("conclusion"))
+            heads[sha] = conclusion if heads.get(sha, "cancelled") == "cancelled" else heads[sha]
     rows: list[FindingRow] = []
     gaps: list[dict[str, str]] = []
     for head, conclusion in sorted(heads.items()):

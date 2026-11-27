@@ -237,3 +237,9 @@ def test_the_read_imports_no_writer_and_writes_nothing() -> None:
     assert not any(bad in name for name in names for bad in ("writer", "ops_data_portal", "file_rec", "update_rec"))
     assert '"POST"' not in text and '"PUT"' not in text and '"PATCH"' not in text and '"DELETE"' not in text
     assert 'request("GET"' in text
+
+
+def test_a_head_with_one_completed_run_is_not_a_cancelled_gap() -> None:
+    runs = [_run(HEAD, "cancelled"), _run(HEAD, "success")]
+    rows, gaps = findings_read.read_actions(Github({}, runs), "o/r", APP, "a", "b")
+    assert rows == [] and gaps == []
