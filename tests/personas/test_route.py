@@ -50,6 +50,11 @@ def _texts(monkeypatch: pytest.MonkeyPatch, before: str | None, after: str | Non
     monkeypatch.setattr(route, "_fetch_text", fake)
 
 
+@pytest.fixture(autouse=True)
+def _no_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GITHUB_WORKSPACE", raising=False)
+
+
 def _event(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str | None = None, conclusion: str = "success") -> None:
     target = tmp_path / "event.json"
     target.write_text(json.dumps({"workflow_run": {"path": path or route.TRIGGER_PATH, "conclusion": conclusion}}))
@@ -419,6 +424,7 @@ def test_rerun_with_existing_check_skips(
     doc, _, _ = _drive(tmp_path, monkeypatch, CODE_FILES, runs=[_verdict_run("verdict PROCEED")])
     assert doc["routes"] == ["code_reviewer"] and "verdict app id unavailable" in capsys.readouterr().out
     monkeypatch.undo()
+    monkeypatch.delenv("GITHUB_WORKSPACE", raising=False)
     doc, _, _ = _drive(tmp_path, monkeypatch, CODE_FILES, runs=RuntimeError("boom"))
     assert doc["routes"] == ["code_reviewer"] and "the check-runs read failed" in capsys.readouterr().out
 
