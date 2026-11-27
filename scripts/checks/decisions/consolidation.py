@@ -20,6 +20,7 @@ from scripts.checks.decisions.envelope_rules import dotted_value, split_delegate
 from scripts.decisions_md import (
     extract_entry_envelope,
     extract_superseded_by,
+    extract_title_borne_supersedes,
     is_compacted_stub,
     iter_decision_sections,
 )
@@ -465,7 +466,7 @@ def _manifest_problems(root: Path, rel: str, data: dict, ctx_in: dict, base_read
     if _superseded(rows, cons, entries[cons]):
         return []
     problems = []
-    if set(_extract_title_borne_supersedes(entries[cons].split("\n", 1)[0])) != set(supersedes):
+    if set(extract_title_borne_supersedes(entries[cons].split("\n", 1)[0])) != set(supersedes):
         problems.append(f"{tag}: Decision {cons}'s heading title does not declare (supersedes {sorted(supersedes)})")
     for n in supersedes:
         block = entries.get(n)
