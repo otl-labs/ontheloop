@@ -91,14 +91,18 @@ def daemon() -> None:
         pytest.fail(f"docker unreachable: {proc.stderr.strip()[-300:]}")
 
 
-def _teardown_images(image_id: str, prebuilt: bool) -> list[str]:
-    """A prebuilt image is an input the suite never removes; a tree-built one is removed so no run leaves it dangling."""
-    return [] if prebuilt else [image_id]
+def _teardown_images(image_id: str, prebuilt: bool, shared: bool = False) -> list[str]:
+    """A prebuilt image is an input the suite never removes; a tree-built one is removed so no run leaves it dangling.
+
+    Under xdist the workers share one content-addressed image, so no worker may remove it while another still runs.
+    """
+    return [] if prebuilt or shared else [image_id]
 
 
 def test_teardown_keeps_a_prebuilt_image() -> None:
     assert _teardown_images("sha256:" + "a" * 64, prebuilt=True) == []
     assert _teardown_images("sha256:" + "a" * 64, prebuilt=False) == ["sha256:" + "a" * 64]
+    assert _teardown_images("sha256:" + "a" * 64, prebuilt=False, shared=True) == []
 
 
 @pytest.fixture(scope="module")
@@ -115,7 +119,7 @@ def image_id(daemon: None) -> Iterator[str]:
     try:
         yield image
     finally:
-        for ref in _teardown_images(image, prebuilt is not None):
+        for ref in _teardown_images(image, prebuilt is not None, "PYTEST_XDIST_WORKER" in os.environ):
             _docker("rmi", ref, check=False)
 
 

@@ -14,6 +14,7 @@ import pytest
 
 from scripts.personas import egress_floor_container as floor
 from scripts.personas import egress_launcher as L
+from scripts.personas import egress_trees as T
 from src.persona_hosts.local_container import adapter
 
 HANDLERS: dict[Any, Any] = {}
@@ -473,12 +474,10 @@ class _FakeExtract:
         self.killed = threading.Event()
         self.stdin = self
         self.write, self.kill = self.written.append, self.killed.set
+        self.close = lambda: setattr(self, "closed", True)
         _FakeExtract.created.append(self)
         if not _FakeExtract.block:
             os.mkdir(Path(kwargs["cwd"]) / "head")
-
-    def close(self) -> None:
-        self.closed = True
 
     def poll(self) -> int | None:
         return None if _FakeExtract.block and not self.killed.is_set() else 0
@@ -501,12 +500,7 @@ def _tree_setup(
     _FakeExtract.created, _FakeExtract.returncode_for_wait, _FakeExtract.block = [], rc, block
     ORDER.clear()
     monkeypatch.setattr(L.pwd, "getpwnam", lambda name: type("E", (), {"pw_uid": 4242, "pw_gid": 4243})())
-    real_popen = subprocess.Popen
-
-    def popen(argv: Any, **kwargs: Any) -> Any:
-        return _FakeExtract(argv, **kwargs) if "cwd" in kwargs else real_popen(argv, **kwargs)
-
-    monkeypatch.setattr(L.subprocess, "Popen", popen)
+    monkeypatch.setattr(L.subprocess, "Popen", lambda argv, **kwargs: _FakeExtract(argv, **kwargs))
     monkeypatch.setattr(L, "TREE_SECONDS", 0.05 if block else 300)
     real_lstat = os.lstat
 
@@ -518,9 +512,17 @@ def _tree_setup(
 
     monkeypatch.setattr(L.os, "lstat", lstat)
 
+    def tree_cli(*args: str, data: Any = None) -> None:
+        check = T.check_main if args[0] == "check-main" else lambda _: T.check_request(data)
+        try:
+            check(args[-1])
+        except T.TreesRefused as exc:
+            raise L.Refused(str(exc)) from exc
+
+    monkeypatch.setattr(L, "tree_cli", tree_cli)
+
     def setup(install: Path) -> None:
-        monkeypatch.setattr(L, "MAIN_TREE", install / "trees" / "main")
-        main = install / "trees" / "main"
+        monkeypatch.setattr(L, "MAIN_TREE", main := install / "trees" / "main")
         if main_tree == "link":
             (install / "trees").mkdir()
             os.symlink(install, main)
@@ -611,24 +613,22 @@ _BAD_TREE_REQUESTS = [
 
 @pytest.mark.parametrize("stdin", _BAD_TREE_REQUESTS)
 def test_bad_tree_requests_are_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stdin: bytes) -> None:
-    setup = _tree_setup(monkeypatch, tmp_path)
-    code, seen = _drive(monkeypatch, tmp_path, "run", 0, None, stdin, setup=setup)
+    code, seen = _drive(monkeypatch, tmp_path, "run", 0, None, stdin, setup=_tree_setup(monkeypatch, tmp_path))
     assert code == 2 and "docker" not in " ".join(seen)
 
 
 def test_trees_in_probe_mode_an_extract_refusal_and_a_bad_main_tree_are_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    setup = _tree_setup(monkeypatch, tmp_path / "p")
-    assert _drive(monkeypatch, tmp_path / "p", "probe", 0, None, _req(key=None, trees=["main"]), setup=setup)[0] == 2
-    setup = _tree_setup(monkeypatch, tmp_path / "r", rc=2)
-    assert _drive(monkeypatch, tmp_path / "r", "run", 0, None, _head_request(), setup=setup)[0] == 2
-    for index, kind in enumerate((None, "link", "writable")):
-        setup = _tree_setup(monkeypatch, tmp_path / f"m{index}", main_tree=kind)
-        code, seen = _drive(monkeypatch, tmp_path / f"m{index}", "run", 0, None, _req(trees=["main"]), setup=setup)
-        assert code == 2 and seen == ["killed"], kind
-    setup = _tree_setup(monkeypatch, tmp_path / "n")
-    assert _drive(monkeypatch, tmp_path / "n", "run", 0, {"a": 1}, _req(trees=["main"]), setup=setup)[0] == 0
+    def drive(name: str, mode: str, events: Any, stdin: bytes, **kw: Any) -> tuple[int, list[str]]:
+        setup = _tree_setup(monkeypatch, tmp_path / name, **kw)
+        return _drive(monkeypatch, tmp_path / name, mode, 0, events, stdin, setup=setup)
+
+    assert drive("p", "probe", None, _req(key=None, trees=["main"]))[0] == 2
+    assert drive("r", "run", None, _head_request(), rc=2)[0] == 2
+    for kind in (None, "link", "writable"):
+        assert drive(f"m{kind}", "run", None, _req(trees=["main"]), main_tree=kind) == (2, ["killed"])
+    assert drive("n", "run", {"a": 1}, _req(trees=["main"]))[0] == 0
 
 
 def test_the_sudoers_lines_name_only_probe_and_run() -> None:
