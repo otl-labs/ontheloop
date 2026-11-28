@@ -157,7 +157,7 @@ def _record_rows(registry: dict[str, str], head: str, record: dict[str, Any]) ->
     if key is None or record.get("head_sha") != head or not isinstance(record.get("run_ref"), str):
         return []
     digest = record.get("definition_sha256")
-    models = record.get("served_models")
+    model = record.get("served_model")
     identity = RunIdentity(
         None,
         None,
@@ -166,7 +166,7 @@ def _record_rows(registry: dict[str, str], head: str, record: dict[str, Any]) ->
         digest if isinstance(digest, str) and HEX64.match(digest) else None,
         "actions",
         run_ref=record["run_ref"],
-        served_model=models[-1] if isinstance(models, list) and models and isinstance(models[-1], str) else None,
+        served_model=model if isinstance(model, str) and model else None,
     )
     failure = record.get("failure_id")
     result = record.get("result")

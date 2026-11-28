@@ -33,6 +33,7 @@ RECORD_KEYS = (
     "session_started_at",
     "definition_sha256",
     "served_models",
+    "served_model",
     "run_outcome",
     "failure_id",
     "result",

@@ -237,6 +237,10 @@ def test_record_carries_run_ref_definition_hash_and_served_models(tmp_path: Path
     got = json.loads((work / "results" / f"{ROUTE}.json").read_text())
     assert got["run_ref"] == "litellm:gha:1/1/run/1/run" and got["session_started_at"] == "2026-11-27T10:00:00Z"
     assert got["definition_sha256"] == "c" * 64 and got["served_models"] == ["m-a", "m-b"]
+    assert got["served_model"] == "m-b"
+    fallback = {"turns": [{"record": {"model": "b-model"}}, {"record": {"model": "a-model"}}, {"attempts": []}]}
+    assert keyed_run.served_model(fallback) == "a-model" and keyed_run.served_models(fallback) == ["a-model", "b-model"]
+    assert keyed_run.served_model({"turns": [{"record": {}}]}) is None and keyed_run.served_model(None) is None
     assert keyed_run.run_ref({**ENV, "GITHUB_JOB": "run-fallback"}) == "litellm:gha:1/1/run-fallback/1/run"
     (work / "results" / f"telemetry-{ROUTE}.json").unlink()
     monkeypatch.setattr(keyed_run, "_telemetry", lambda *a: None)

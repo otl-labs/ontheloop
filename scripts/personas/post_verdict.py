@@ -276,6 +276,7 @@ def findings_line(
         "session_started_at": result.get("session_started_at"),
         "definition_sha256": result.get("definition_sha256"),
         "served_models": [m for m in models if isinstance(m, str)] if isinstance(models, list) else [],
+        "served_model": result.get("served_model") if isinstance(result.get("served_model"), str) else None,
         "run_outcome": outcome[0],
         "failure_id": outcome[1],
     }

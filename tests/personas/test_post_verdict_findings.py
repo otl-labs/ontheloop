@@ -74,11 +74,19 @@ def _record(text: str) -> dict[str, Any]:
 
 def test_fresh_routes_get_the_findings_line_and_carried_ones_do_not(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     out = {"outcome": "success", "verdict": "REVISE", "findings": [_finding(1), _finding(2, "Low", "second")]}
-    text = _run(tmp_path / "a", monkeypatch, CODE, out, served_models=["m1"], definition_sha256="a" * 64)["text"]
+    text = _run(tmp_path / "a", monkeypatch, CODE, out, served_models=["m1"], served_model="m1", definition_sha256="a" * 64)[
+        "text"
+    ]
     lines = text.split("\n")
     rec = _record(text)
     assert lines[0].startswith(findings_record.LINE_PREFIX) and rec["run_ref"] == REF and rec["run_outcome"] == "verdict"
-    assert rec["served_models"] == ["m1"] and rec["findings_total"] == 2 and rec["head_sha"] == SHA and rec["run_attempt"] == 1
+    assert (
+        rec["served_models"] == ["m1"]
+        and rec["served_model"] == "m1"
+        and rec["findings_total"] == 2
+        and rec["head_sha"] == SHA
+        and rec["run_attempt"] == 1
+    )
     assert rec["result"]["verdict"] == "REVISE" and "title" not in json.dumps(rec) and "model text" not in text.split("\n")[0]
     assert lines[1:] == ["- src/x.py:1:testing: a title", "- src/x.py:2:testing: second"]
     no_ref = _run(tmp_path / "b", monkeypatch, CODE, out, run_ref=None)

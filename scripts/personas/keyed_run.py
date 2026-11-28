@@ -306,6 +306,17 @@ def run_ref(env: Mapping[str, str]) -> str | None:
     return refs.litellm_run_ref(refs.litellm_root_ref(host_run.render_host_run_ref(host)))
 
 
+def served_model(events: Any) -> str | None:
+    """The run-close model: the last turn whose record is a dict, as LitellmProducer.run_close_model picks it."""
+    turns = events.get("turns") if isinstance(events, dict) else None
+    for turn in reversed(turns if isinstance(turns, list) else []):
+        rec = turn.get("record") if isinstance(turn, dict) else None
+        if isinstance(rec, dict):
+            model = rec.get("model") or rec.get("requested_model")
+            return model if isinstance(model, str) and model else None
+    return None
+
+
 def served_models(events: Any) -> list[str]:
     turns = events.get("turns") if isinstance(events, dict) else None
     models: set[str] = set()
@@ -506,6 +517,7 @@ def _record(env: Mapping[str, str], work: Path, root: Path, result: dict[str, An
         recorded["session_started_at"] = started_at(results, route)
         recorded["definition_sha256"] = digest if isinstance(digest, str) and HEX64.match(digest) else None
         recorded["served_models"] = served_models(result.get("events"))
+        recorded["served_model"] = served_model(result.get("events"))
     found = _reads(result.get("events"))
     resolution = _json(work / "prepared" / "resolution.json")
     recorded["trees"] = {

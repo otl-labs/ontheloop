@@ -24,7 +24,14 @@ def _finding(n: int = 1) -> dict[str, Any]:
 
 
 def _line(route: str = "code_reviewer", ref: str = "litellm:gha:9/1/run/1/run", head: str = HEAD, **over: Any) -> str:
-    facts = {"route": route, "head_sha": head, "run_ref": ref, "run_outcome": "verdict", "served_models": ["m0", "m1"]} | over
+    facts = {
+        "route": route,
+        "head_sha": head,
+        "run_ref": ref,
+        "run_outcome": "verdict",
+        "served_models": ["m0", "m1"],
+        "served_model": "m0",
+    } | over
     result = None if facts["run_outcome"] != "verdict" else {"verdict": "REVISE", "findings": [_finding()]}
     return findings_record.render(facts, result)
 
@@ -67,7 +74,7 @@ def test_both_lanes_project_rows_and_foreign_app_runs_are_ignored() -> None:
         None,
         None,
         None,
-        "m1",
+        "m0",
         HEAD,
     )
     assert rows[1].finding_id == "a.py:1:testing" and rows[1].anchor == "a.py:1"
