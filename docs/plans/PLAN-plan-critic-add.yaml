@@ -78,7 +78,8 @@ scope:
     with no carried entry (no_scout: this covers the scout skipped because it already ran on this same head, and a disabled
     or unreadable gates.decision_scout.advisory_runs, since routes.json records no skipped route). A blocked
     plan_critic leaves routes and enters a rescout_blocked list with {route, lane, reason, scout_fingerprint,
-    head_fingerprint}; any unreadable input or fingerprint error blocks with reason unreadable (nothing runs on doubt).
+    head_fingerprint}; any unreadable input or fingerprint error, or more than one plan path, blocks with reason unreadable
+    (nothing runs on doubt).
 - file: scripts/personas/materialise.py
   action: Modify
   purpose: >-
@@ -152,8 +153,13 @@ scope:
     only the fallback_drill dispatch reaches (the job's condition: a real outage always writes a non-empty list). It writes
     primary_outage (any route) and outage_routes (space-separated, validated route ids) to GITHUB_OUTPUT once, in the run job
     only, composed from the outage markers results/outage-<route>.json that keyed_run's record writes (the markers' only
-    writer). Exit status: non-zero when any child of any route (request, launcher or record) exited non-zero, as pipefail
-    gives today, after every route ran. The launcher is unchanged and still serves one request per invocation.
+    writer). Exit status matches today's step, which runs under GitHub's default bash -e with no pipefail, so only
+    persona-record's status counts: exit 0 when every route's record exited 0, non-zero only when a record failed or the
+    sequencer itself refused (bad routes list, bad outage tokens, routes.json absent or unparseable: no route run, exit 1).
+    Request and launcher statuses never redden the step, so a refused or outage run still reaches the final container probe.
+    Per route it prints one fixed stderr line "PERSONA-SEQUENCE route=<id> ordinal=<k> request=<rc> launcher=<rc>
+    record=<rc>". The child argv are module constants: [sys.executable, "-I", RUN_PY, "persona-request"],
+    [sys.executable, "-I", RUN_PY, "persona-record"] (RUN_PY main's scripts/personas/run.py) and LAUNCHER_ARGV. The launcher is unchanged and still serves one request per invocation.
 - file: scripts/personas/keyed_run.py
   action: Modify
   purpose: >-
@@ -179,7 +185,8 @@ scope:
     fallback marker follows the routes the fallback ran: those with an outage marker results/outage-<route>.json in the
     primary results, or every route when the fallback ran with none (the drill). Only a route in that set with no fallback
     result is marked " (fallback role: no result)"; a route whose primary verdict stands keeps its unmarked title. 427 of 500
-    SLOC: the body builder and the outage-set reader go in a small helper; a crossing is decomposed, never raised.
+    SLOC: the body builder and the outage-set reader are functions in post_verdict.py (about +30); a crossing is decomposed,
+    never raised.
 - file: .github/workflows/persona-verdict.yml
   action: Modify
   purpose: >-
@@ -204,7 +211,10 @@ scope:
   purpose: want_outputs gains outage_routes; only the run and run-fallback jobs may name it.
 - file: scripts/checks/ci_guards/validate_persona_verdict_chain.py
   action: Modify
-  purpose: VERBS gains keyed-sequence, allowed only in the keyed run and run-fallback jobs. 463 of 500 SLOC.
+  purpose: >-
+    VERBS stays closed (the keyed-sequence line is matched as PERSONA, which _persona_verdict_keyed now defines, so any other
+    job's use is already refused as an unpinned argv); the run persona step's env pin (validate_persona_verdict_chain.py:214-224)
+    gains PERSONA_OUTAGE_ROUTES for run-fallback only. 463 of 500 SLOC.
 - file: scripts/checks/misc/_persona_verdict_container.py
   action: Modify
   purpose: >-
@@ -324,7 +334,10 @@ scope:
     sequencer holds no readable end of any pipe), test_each_route_gets_its_own_run_ordinal_and_run_ref (scout 1, critic 2,
     the two run_refs differ; a lone route is 1), test_fallback_runs_only_outage_routes,
     test_outage_routes_refuse_unknown_duplicate_or_malformed_tokens (no route runs, exit 1), test_empty_outage_routes_run_every_route,
-    test_outputs_written_once, test_exit_is_non_zero_when_any_route_record_fails.
+    test_outputs_written_once (also the outage-marker to primary_outage and outage_routes leg: the live-path successor of
+    test_fallback_chain.py's record GITHUB_OUTPUT branch), test_exit_follows_record_status_only (a refused request, a launcher
+    exit 2 and a container abort exit 4 leave exit 0 when records exit 0; a failed record exits non-zero),
+    test_sequence_line_per_route, test_child_argv_are_the_pinned_constants, test_absent_routes_json_refuses.
 - file: tests/personas/test_keyed_run.py
   action: Modify
   purpose: >-
@@ -363,7 +376,8 @@ scope:
 - file: tests/checks/ci_guards/test_validate_persona_verdict_chain_keyed_sequence.py
   action: Create
   purpose: >-
-    keyed-sequence runs only in keyed jobs, and the live workflow passes the chain check. New file because
+    the keyed-sequence line is the run jobs' persona step and is refused in any other job; run-fallback's env pin holds
+    PERSONA_OUTAGE_ROUTES and run's does not; the live workflow passes the chain check. New file because
     test_validate_persona_verdict_chain.py is 496 of 500; graduated shards persona-verdict-chain-shape and
     persona-verdict-wake-shape stay on that file, unchanged.
 - file: tests/fixtures/persona_verdict/plan_input/
@@ -438,7 +452,10 @@ verification_plan:
     tests/personas/test_keyed_sequence.py::test_outage_routes_refuse_unknown_duplicate_or_malformed_tokens
     tests/personas/test_keyed_sequence.py::test_empty_outage_routes_run_every_route
     tests/personas/test_keyed_sequence.py::test_outputs_written_once
-    tests/personas/test_keyed_sequence.py::test_exit_is_non_zero_when_any_route_record_fails
+    tests/personas/test_keyed_sequence.py::test_exit_follows_record_status_only
+    tests/personas/test_keyed_sequence.py::test_sequence_line_per_route
+    tests/personas/test_keyed_sequence.py::test_child_argv_are_the_pinned_constants
+    tests/personas/test_keyed_sequence.py::test_absent_routes_json_refuses
     tests/personas/test_post_verdict_rescout_blocked.py::test_rescout_blocked_posts_a_failure_titled_re_scout_required
     tests/personas/test_post_verdict_rescout_blocked.py::test_non_allowlisted_author_gets_no_rescout_body
     tests/personas/test_post_verdict_rescout_blocked.py::test_partial_fallback_marks_only_outage_routes
@@ -447,11 +464,11 @@ verification_plan:
     tests/personas/test_keyed_run.py::test_persona_route_selects_a_listed_route_and_refuses_others
     tests/personas/test_keyed_run.py::test_run_ordinal_without_route_or_malformed_defers
     tests/personas/test_wake.py::test_rescout_blocked_alone_never_wakes -q
-  expected: exit 0 with 18 passed
+  expected: exit 0 with 21 passed
   fix_if: a node fails; fix keyed_sequence, keyed_run or post_verdict, never the assertion
   hermetic: true
   expected_literals:
-  - 18 passed
+  - 21 passed
   graduation: graduate
   graduation_check_id: plan-critic-add-sequence
 - step: 3
@@ -530,14 +547,14 @@ verification_plan:
   action: >-
     Live read-back: on the first ready plan PR from an allow-listed author after merge (the build opens a ready plan-only PR
     from the operator's account carrying a fixture plan under docs/plans/ whose last decision-scout row matches, if none arrives
-    within a day, opening it as a draft and marking it ready so the draft-then-ready path runs, and closes it unmerged only
-    after VP 9), read the head's check runs and that head's persona-verdict run. A session
+    within a day, opened ready so both routes run on its first head, and closes it unmerged only after VP 9 and VP 10), read
+    the head's check runs and that head's persona-verdict run. A session
     without gh makes the same reads through mcp__github__ (pull_request_read get_check_runs, actions_list) and applies the same
     comparison.
   command: >-
     gh api repos/otl-labs/ontheloop/commits/<head_sha>/check-runs | jq -r '.check_runs[] | select(.name|startswith("persona-verdict/"))
     | [.name, .app.id, .conclusion, .output.title, ((.output.text // "") | capture("(?<ref>litellm:gha:[^ \n\"]+)").ref // "")]
-    | @tsv' && gh run view <run_id> --log | grep -E 'PERSONA-VERDICT|keyed-sequence route'
+    | @tsv' && gh run view <run_id> --log | grep -E 'PERSONA-VERDICT|PERSONA-SEQUENCE'
   expected: >-
     rows for persona-verdict/decision_scout and persona-verdict/plan_critic, both from <gates.verdict_app.app_id>; the critic's
     title starts 'verdict ' (its scout row matched) and the run's log shows both routes run in the one run job, decision_scout
@@ -562,6 +579,24 @@ verification_plan:
   hermetic: false
   graduation: waive
   graduation_waiver_reason: a one-time live proof of the coupling
+- step: 10
+  phase: post-deploy
+  action: >-
+    Live draft-then-ready proof (the routine path: Decision 205 cl.5 opens plan PRs as drafts): the build opens a second
+    fixture plan PR as a draft (the scout runs on its head), then marks the same head ready, and reads that head's check runs
+    and the ready_for_review run's log.
+  command: >-
+    gh api repos/otl-labs/ontheloop/commits/<draft_head_sha>/check-runs | jq -r '.check_runs[] |
+    select(.name|startswith("persona-verdict/")) | [.name, .conclusion, .output.title] | @tsv' && gh run view <ready_run_id>
+    --log | grep -E 'skip decision_scout|PERSONA-SEQUENCE'
+  expected: >-
+    the ready_for_review run logs rec-5749's skip of decision_scout (this head already carries a verdict check) and one
+    PERSONA-SEQUENCE line, route=plan_critic ordinal=1; persona-verdict/plan_critic's title starts 'verdict ' (its in-session
+    scout row matched, inputs fetched by the coupling); close both fixture PRs unmerged after
+  fix_if: a 're-scout required' title on a matching head, or no plan_critic row, is a STOP to the plan owner with the run id
+  hermetic: false
+  graduation: waive
+  graduation_waiver_reason: a one-time live proof of the in-session draft-then-ready path
 test_obligations:
 - source: scripts/personas/plan_input.py
   behavior: a plan PR snapshot yields a contract-valid plan_critic input with every required field
@@ -639,6 +674,11 @@ test_obligations:
   test_selector: tests/personas/test_keyed_sequence.py::test_each_route_gets_its_own_run_ordinal_and_run_ref
   red_green_expectation: red before (module absent), green after
 - source: scripts/personas/keyed_sequence.py
+  behavior: the step's exit follows persona-record's status only, as under today's bash -e step
+  verification_step: 2
+  test_selector: tests/personas/test_keyed_sequence.py::test_exit_follows_record_status_only
+  red_green_expectation: red before (module absent), green after
+- source: scripts/personas/keyed_sequence.py
   behavior: the launcher argv is the fixed sudo line, never built from input
   verification_step: 2
   test_selector: tests/personas/test_keyed_sequence.py::test_launcher_argv_is_the_fixed_sudo_line
@@ -684,7 +724,7 @@ test_obligations:
   test_selector: tests/checks/ci_guards/test__persona_verdict_fallback.py
   red_green_expectation: red before (the new pin nodes fail), green after
 - source: scripts/checks/ci_guards/validate_persona_verdict_chain.py
-  behavior: keyed-sequence runs only in the keyed jobs
+  behavior: the keyed-sequence line is accepted only as the run jobs' persona step
   verification_step: 3
   test_selector: tests/checks/ci_guards/test_validate_persona_verdict_chain_keyed_sequence.py
   red_green_expectation: red before (file absent), green after
@@ -720,8 +760,10 @@ constraints:
 - >-
   Guard floor (Decision 235 cl.5): the container egress guard's launcher pin moves from the YAML persona line to a text pin on
   main's keyed_sequence.py (same argv, still checked on every tree by validate_persona_verdict_egress), and the floor test's
-  plain-job refusal re-anchors to the chain guard's keyed-sequence rule. Named here for the operator's confirmation on the plan
-  PR; the build does not start without it.
+  plain-job refusal re-anchors to the chain guard's keyed-sequence rule. The request and record child argv, guard-pinned in the
+  YAML line today, become module constants pinned by test_child_argv_are_the_pinned_constants (a unit node, not a guard);
+  at runtime sudoers still admits only the launcher's probe and run. Named here for the operator's confirmation; the build
+  does not start without it.
 - >-
   Security code: the keyed job, its sequencer and its guard change, so the build brings the operator the final diff for his word
   before merge (coordinator standing_authorisation: hook and other security code).
@@ -748,8 +790,10 @@ context:
   telemetry-event-envelope.yaml LL-1 and telemetry_agents.yaml already define; no grammar, contract or job change. A keyed job
   can now hold more than one telemetry sidecar and rows file (results/telemetry-<route>.json), which the rec-5551 send reads.
 - >-
-  Why two routes: rec-5749's scout routes on every plan PR's first ready head (no prior Actions record), and the critic routes
-  there too, so without the sequence neither would run. Under the actions scout lane the coupling blocks the critic whenever the
+  Why two routes: the pair occurs when a plan PR is opened ready (its first head has no prior Actions scout record) or a push
+  to a ready PR moves the scout inputs; there both route, and without the sequence neither would run. On the routine
+  draft-then-ready path the scout runs on the draft head and the ready_for_review run on that head skips it, so the critic
+  runs alone (VP 10). Under the actions scout lane the coupling blocks the critic whenever the
   scout routes, so the pair only occurs while the scout's verdict_source reads in_session.
 - >-
   Fingerprint basis: the coupling computes over main's tree (rescout.fingerprints), so a head whose cited Decision text changed
@@ -819,6 +863,20 @@ gate_rounds:
   round: 5
   verdict: FLAGS_FOUND
   scout_input_fingerprint: v1:b8e8648ff72f3daf424b736d13a1a02b200e0de02bcbd2ad771f1e602968cad8
+- gate: plan-critique
+  round: 3
+  verdict: REVISE
+  blocking: 2
+  nits: 6
+  findings:
+  - {id: R3-B1, severity: blocking, origin: judgement, anchor: "scope[scripts/personas/keyed_sequence.py]", subject: "exit rule assumes pipefail; the step runs under bash -e, so failed or outage routes would redden the run job and skip the final container probe", disposition: fixed}
+  - {id: R3-B2, severity: blocking, origin: judgement, anchor: "verification_plan[step 8]", subject: "draft-then-ready path runs the critic alone at ordinal 1; VP 8 expected pair cannot hold; context 'first ready head' wrong", disposition: fixed}
+  - {id: R3-N1, severity: nit, origin: mechanical, anchor: "scope[scripts/checks/ci_guards/validate_persona_verdict_chain.py]", subject: "run persona step env pin needs PERSONA_OUTAGE_ROUTES for run-fallback; VERBS addition unnecessary", disposition: fixed}
+  - {id: R3-N2, severity: nit, origin: judgement, anchor: "verification_plan[step 8].command", subject: "log grep needs a keyed-sequence route marker no scope row requires", disposition: fixed}
+  - {id: R3-N3, severity: nit, origin: judgement, anchor: "context[1]", subject: "test_fallback_chain shard ends at record's GITHUB_OUTPUT branch production no longer takes", disposition: fixed}
+  - {id: R3-N4, severity: nit, origin: judgement, anchor: "scope[scripts/personas/keyed_sequence.py]", subject: "child request/record argv no longer guard-pinned; pin as constants in a unit node; name the residual to the operator", disposition: fixed}
+  - {id: R3-N5, severity: nit, origin: judgement, anchor: "scope[scripts/personas/critique_coupling.py]", subject: "outcomes unstated for absent routes.json and for more than one plan path", disposition: fixed}
+  - {id: R3-N6, severity: nit, origin: judgement, anchor: "scope[scripts/personas/post_verdict.py]", subject: "'small helper' is a function in post_verdict.py or an unscoped new module", disposition: applied-wording}
 pre_implementation_checklist:
 - Branch confirmed not on main
 - rec-5749's plan merged and its build merged; merge_checks.TRIGGER_KEYED_PERSONAS exists on main
@@ -850,7 +908,7 @@ execution_steps:
   container guard's persona-line nodes, the pending-example moves in test_execute.py and test_keyed_run.py, and
   test_three_verdict_personas_registered_pending); a candidate outside those is a STOP to the plan owner.
 - Run VP 6 (full tier), open the PR, get the code review verdict per its verdict_source, bring the operator the final diff (constraint 6), merge on his word and green CI.
-- 'After merge: VP 7, then VP 8 and VP 9 on the first ready plan PR; report the run ids and figures to the coordinator for rec-5762.'
+- 'After merge: VP 7, then VP 8 and VP 9 on a ready-opened plan PR and VP 10 on a draft-then-ready one; report the run ids and figures to the coordinator for rec-5762.'
 work_areas: []
 rollback: >-
   Set gates.plan_critic.advisory_runs to "disabled" to stop runs at once; revert the squash commit to restore the single-keyed
