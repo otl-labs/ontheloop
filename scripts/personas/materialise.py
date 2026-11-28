@@ -196,4 +196,4 @@ def main(argv: list[str]) -> int:
     return 0
 
 
-from scripts.personas import review_input  # noqa: E402,F401
+from scripts.personas import review_input, scout_input  # noqa: E402,F401

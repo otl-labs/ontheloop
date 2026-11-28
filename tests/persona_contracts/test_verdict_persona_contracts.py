@@ -99,6 +99,8 @@ def test_three_verdict_personas_registered_pending() -> None:
         assert row["rendered_prompt"] == rendered
         if persona == "code_reviewer":
             assert row["implementation"] == {"status": "implemented", "location": "scripts/personas/review_input.py"}
+        elif persona == "decision_scout":
+            assert row["implementation"] == {"status": "implemented", "location": "scripts/personas/scout_input.py"}
         else:
             assert row["implementation"] == {"status": "pending", "owning_item": add}
 
