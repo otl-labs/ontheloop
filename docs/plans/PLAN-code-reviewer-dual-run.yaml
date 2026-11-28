@@ -41,17 +41,30 @@ scope:
       verdict on the same head is PROCEED (an in-session Critical or High the Actions lane missed or graded below High,
       with no Critical or High of its own); not_a_break: an Actions-only finding, an Actions REVISE on an in-session
       PROCEED, any nit, and a head where both lanes reach REVISE on different Critical or High findings
-      (divergent_high); skip_reasons [no_pair, actions_failure, in_session_failure, unstable, cancelled_by_push,
-      pr_closed_before_verdict, advisory_disabled, no_in_session_lane] (a PR not opened by an /implement session, such as
-      an operator or ad-hoc PR, is no_in_session_lane and never counts toward unpaired_share);
+      (divergent_high); a head is a PR commit that has a persona-verdict workflow run, or the PR's last tip, never a
+      non-tip commit (CDR3-02); skip_reasons [no_pair, actions_failure, in_session_failure, unstable, cancelled_by_push,
+      pr_closed_before_verdict, advisory_disabled, not_routed, no_in_session_lane] (no_in_session_lane: a PR whose
+      branch is not a claude/ session branch, or whose changed paths are confined to docs/audit-prompts/, the pairing
+      rule as registered, CDR3-06; not_routed: the head's persona-verdict run concluded success with no code_reviewer
+      route, which is no failure);
+      mark precedence per PR (CDR3-04): pending while open; else uncounted (uncounted_reason calibrating,
+      before_counting_starts, straddle or window_edge); else break if any paired head breaks; else skipped (the
+      first head's skip_reason) when no head paired; else counted, its skipped heads listed per head;
       retry: a failed Actions run is replaced by a later run_ref on the same head when one already exists, else it is
       an actions_failure skip (nobody is asked to re-run; CDR2-07); ceilings {unpaired_share: 0.30, no_verdict_share:
-      0.10, divergent_high_share: 0.20} over the window's code PRs (a PR is in the window when a CI-upstream persona-verdict workflow run on one of its heads
-      was created inside it, as read_actions lists them, so a head with no code_reviewer run still counts toward the
-      shares; CDR2-09), above any of which the window is invalid; actions_only_revise_share (an Actions REVISE on
+      0.10, divergent_high_share: 0.20} over the heads of the window's code PRs other than no_in_session_lane PRs
+      (unpaired_share counts no_pair and in_session_failure heads; no_verdict_share counts actions_failure,
+      cancelled_by_push and pr_closed_before_verdict heads; unstable, advisory_disabled and not_routed heads count
+      toward neither; divergent_high_share is divergent_high heads over paired heads; CDR3-05) (a PR is in the window
+      when a persona-verdict workflow run on one of its heads was created inside it, as read_actions lists them by
+      run-name, so a head with no code_reviewer run still counts toward the shares; CDR2-09, CDR3-07), above any of
+      which the window is invalid; actions_only_revise_share (an Actions REVISE on
       an in-session PROCEED) is printed with no ceiling, for the flip plan and the operator (CDR1-08);
       validity_min_in_session_revise: 5 (same-code pairs, seeds included); variance {heads: 20, actions_attempts: 3,
-      in_session_runs_on_seeds: 2, max_changed_heads: 1}; reset_sources (each a change restarts the count at the first
+      in_session_runs_on_seeds: 2, max_changed_heads: 1} (how a second Actions attempt is obtained is rec-5753's to
+      settle before n is set, since route.py:255-302 skips code_reviewer on a head that already carries a verdict
+      check; a row edit before n is set is not a reset; until then the read uses only the attempts that exist,
+      CDR3-03); reset_sources (each a change restarts the count at the first
       counted pair after it): actions definition_sha256, actions served_model, in-session definition_sha256, in-session
       served_model, the code_reviewer selection that scripts/llm/tier_selection.resolve returns from
       docs/contracts/project-configuration.yaml and docs/contracts/inference-provider.yaml (litellm_persona_selection:
@@ -84,17 +97,19 @@ scope:
   - file: scripts/personas/dual_run/__main__.py
     action: Create
     purpose: >-
-      CLI: python -m scripts.personas.dual_run --persona code_reviewer --day-from D --day-to D [--profile P]. Reads
-      the Actions lane through scripts.persona_contracts.findings_read.read_actions over D..D and the in-session lane
-      through read_in_session over the day before day_from through day_to, so a review in a session that started the
-      previous UTC day still pairs (CDR2-04); the window's PRs and their changed paths through the GitHub REST API
+      CLI: python -m scripts.personas.dual_run --persona code_reviewer --day-from D --day-to D [--profile P]. Lists
+      the window's PRs from the persona-verdict runs that read_actions finds over D..D, then reads each such PR whole
+      (CDR3-02): the Actions lane from the creation day of its earliest head's run and the in-session lane from two
+      days before that, each through day_to, so earlier heads and sessions that began on an earlier UTC day still
+      pair (CDR2-04); a PR whose read would exceed findings_read's 7-day window reads uncounted with uncounted_reason
+      window_edge; the window's PRs and their changed paths through the GitHub REST API
       (GH_TOKEN, as findings_read does); the registration and records from origin/main (git show). Prints one JSON
       object with the keys registration_sha256, judge_tree_sha, persona, status, n, window, prs, resets, streak,
       validity, ceilings, actions_only_revise_share, variance, divergent_high and undisposed (disagreements with no
       record). prs lists every code PR (scripts/ci/push_scope.py confined_to_plans false) as
       {change_id (the PR number as a string), mark (counted, uncounted, pending, skipped or break), skip_reason (from
-      skip_reasons, null unless skipped), uncounted_reason (calibrating, before_counting_starts or straddle, null
-      unless uncounted), heads: [{head_sha, actions_run_ref, in_session_run_ref, outcome}]} (CDR2-03). Exit 0 on
+      skip_reasons, null unless skipped), uncounted_reason (calibrating, before_counting_starts, straddle or
+      window_edge, null unless uncounted), heads: [{head_sha, actions_run_ref, in_session_run_ref, outcome}]} (CDR2-03). Exit 0 on
       success, 1 on a typed error line naming a class word only, never a body, token or value.
   - file: scripts/personas/dual_run/registration.py
     action: Create
@@ -108,14 +123,17 @@ scope:
   - file: scripts/personas/dual_run/pairing.py
     action: Create
     purpose: >-
-      Builds every pair of each code PR from findings_read rows and the PR list (heads from the PR's commits listing,
-      so a merged or closed PR keeps its heads): in-session rows with subject_dirty false and subject_sha equal to an
+      Builds every pair of each code PR from findings_read rows and the PR list (heads are the PR's commits that have
+      a persona-verdict run, plus its last tip, from the PR's commits listing so a merged or closed PR keeps them;
+      a non-tip commit with no run is never a head, CDR3-02): in-session rows with subject_dirty false and subject_sha equal to an
       Actions head of that PR, one pair per such head; a PR with none is a no_pair skip; a head whose Actions run was
       cancelled is cancelled_by_push, a head with no Actions run because the PR closed first is
       pr_closed_before_verdict, a head when gates.code_reviewer.advisory_runs (git show of
       docs/contracts/project-configuration.yaml at the main commit current when the head's persona-verdict run was
       created, parsed by the same rule as scripts/personas/route.advisory_state) read other than enabled is
-      advisory_disabled, and a PR whose branch is not a claude/ session branch is no_in_session_lane;
+      advisory_disabled, a head whose run concluded success with no code_reviewer route is not_routed, and a PR whose
+      branch is not a claude/ session branch, or whose changed paths are confined to docs/audit-prompts/, is
+      no_in_session_lane;
       a failed Actions run is replaced by a later run_ref on the same head when one exists, else an actions_failure
       skip; an
       in-session row whose parse_status is not parsed is an in_session_failure skip.
@@ -193,11 +211,17 @@ scope:
       pushed head (git status clean, HEAD equal to the pushed head); do not read the persona-verdict/code_reviewer
       check run or its wake comment before it returns; its Critical or High findings are fixed as Step 5's are (a new
       commit, the full tier again, a push, and a fresh head review of the new head); Medium and Low become recs as in
-      Step 5. Before any further push or merge of that PR, wait (event-driven, never polling) until the persona-verdict
-      workflow run that the head's CI completion starts has concluded, whatever its outcome, or its fault wake has
-      arrived, so the candidate arm is never cancelled (CDR1-02) and the wait always ends even when no
-      code_reviewer check will post (CDR2-02); skip the wait when gates.code_reviewer.advisory_runs on origin/main
-      reads other than "enabled"; only then may the check's status be read, and its findings are never acted on while the row is not closed.
+      Step 5. Before any further push or merge of that PR, read that head's persona-verdict runs once (mcp__github__actions_list
+      on persona-verdict.yml, matched by the run-name's head sha, and that run's jobs) (CDR3-01): if no run is in
+      progress, go ahead; if one is in progress and its persona run job has started, wait for that head's wake or
+      fault comment, the same comment-wake reliance as the CI-green comment (docs/contracts/git-ops.yaml
+      wake_signals), because the wake job's silent skips are all decided before a persona run job starts
+      (scripts/personas/wake.py:145-175) and only cancellation, which this hold prevents, skips the wake job
+      (persona-verdict.yml if !cancelled()); if it is in progress but no persona run job has started, read once more
+      at the session's next wake of any kind and go ahead after that second read whatever it shows. A head lost
+      this way reads as cancelled_by_push or pr_closed_before_verdict and counts toward no_verdict_share. Skip the
+      read when gates.code_reviewer.advisory_runs on origin/main reads other than "enabled". No sleep, poll loop or
+      timer is used; only then may the check's status be read, and its findings are never acted on while the row is not closed.
       Guards (CDR1-16): run git fetch origin main first; an unparseable file or an unknown status means no head review,
       and the session files a rec; a wake comment that arrives before the head review returns is ignored and never
       put in the subagent's prompt.
@@ -275,6 +299,7 @@ verification_plan:
       tests/personas/test_dual_run.py::test_both_revise_on_different_highs_is_divergent_high_not_a_break
       tests/personas/test_dual_run.py::test_a_pr_whose_first_paired_head_breaks_reads_as_a_break
       tests/personas/test_dual_run.py::test_a_pr_with_three_agreeing_heads_adds_one_to_the_streak
+      tests/personas/test_dual_run.py::test_a_pr_with_a_head_before_day_from_is_read_whole_or_uncounted
       tests/personas/test_dual_run.py::test_pairs_need_a_clean_in_session_review_of_the_same_head
       tests/personas/test_dual_run.py::test_skips_are_typed_and_ceilings_invalidate_the_window
       tests/personas/test_dual_run.py::test_registration_counts_only_after_n_lock
@@ -355,9 +380,10 @@ verification_plan:
       run to conclude; after merge the read-back over the merge day reads this PR as uncounted with at least one
       paired head (CDR2-04).
     command: >-
-      bin/venv-python -m scripts.personas.dual_run --persona code_reviewer --day-from <merge_day> --day-to <merge_day>
-      --profile agent_platform | bin/venv-python -c "import json,sys; d=json.load(sys.stdin);
+      bin/venv-python -m scripts.personas.dual_run --persona code_reviewer --day-from <day of the PR's first pushed head>
+      --day-to <merge_day> --profile agent_platform | bin/venv-python -c "import json,sys; d=json.load(sys.stdin);
       e=[p for p in d['prs'] if p['change_id']=='<this_pr_number>'];
+      print([(p['mark'], p['skip_reason'], p['uncounted_reason']) for p in e]);
       raise SystemExit(0 if len(e)==1 and e[0]['mark']=='uncounted' and any(h['in_session_run_ref'] and h['actions_run_ref'] for h in e[0]['heads']) else 1)"
     expected: >-
       exit 0. A skip fails the step, with one exception: actions_failure or in_session_failure, reported with the
@@ -394,6 +420,11 @@ test_obligations:
     behavior: a merged PR with several agreeing paired heads adds one to the streak; an open PR is pending; a straddling PR is uncounted
     verification_step: 1
     test_selector: tests/personas/test_dual_run.py::test_a_pr_with_three_agreeing_heads_adds_one_to_the_streak
+    red_green_expectation: red before (package absent), green after
+  - source: scripts/personas/dual_run/__main__.py
+    behavior: a window PR is read back to its earliest head on both lanes, or reads uncounted window_edge past the 7-day read limit; non-tip commits with no run are not heads
+    verification_step: 1
+    test_selector: tests/personas/test_dual_run.py::test_a_pr_with_a_head_before_day_from_is_read_whole_or_uncounted
     red_green_expectation: red before (package absent), green after
   - source: scripts/personas/dual_run/judge.py
     behavior: every paired head of a PR is judged and the PR breaks if any paired head breaks, even when its last head agrees
@@ -432,8 +463,10 @@ test_obligations:
     red_green_expectation: red before (served_model null), green after
   - source: .claude/commands/implement.md
     behavior: >-
-      the trial head review is dispatched on the clean pushed head while the row is calibrating or counting, and the
-      wait ends on the persona-verdict run's conclusion or fault wake and is skipped when advisory_runs is not enabled
+      the trial head review is dispatched on the clean pushed head while the row is calibrating or counting; before a
+      further push or merge the session reads the head's persona-verdict run once, waits for the wake or fault
+      comment only when a persona run job has started, goes ahead after a second read otherwise, never sleeps or
+      polls, and skips the read when advisory_runs is not enabled
     verification_step: 1
     test_selector: tests/personas/test_dual_run.py::test_implement_command_dispatches_the_trial_head_review
     red_green_expectation: red before (subsection absent), green after
@@ -500,6 +533,7 @@ context:
   - "Graduated shards kept unchanged: instruction-surface-boundary and persona-findings-actions-lane-units name test files this plan only adds nodes to; their listed nodes stay as they are."
   - "Build note (CDR2-14): verify that the --pre test selection maps audits/dual-run/** to tests/personas/test_dual_run.py; if it does not, rec-5751 and rec-5753 (the record-writing plans) name that node in their own VPs."
   - "No new warehouse table: dispositions are git records (operator fork 5); the data-modeling walk applies to tables only."
+  - "Critique r3 escalated (a third blocking finding on the implement.md row); the Decision 287 convergence consult ruled CDR3-01 holds and chose one more round (brief and ruling: /mnt/project-files/code-reviewer-dual-run/convergence-consult/). Any later escalation goes to the operator."
   - "Owning planner: thread 'Plan code reviewer dual-run rec-5710' (this session); plan defects route here."
 gate_rounds:
   - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:f4e5cfd117227523c15cb475339ef935bed5516ac89e8ad2ef7e8a08eca7bfd4"}
@@ -550,6 +584,24 @@ gate_rounds:
       - {id: CDR2-12, severity: nit, origin: judgement, anchor: "scope[registration.py].purpose", subject: "a shallow clone would silently truncate the history the count reads", disposition: fixed}
       - {id: CDR2-13, severity: nit, origin: judgement, anchor: "scope", subject: "pairing.py reads advisory_runs but was not in the row's readers", disposition: fixed}
       - {id: CDR2-14, severity: nit, origin: judgement, anchor: "scope[contract-population.yaml].purpose", subject: "fast-tier selection of the records test on a records-only PR is unverified", disposition: build-note}
+  - gate: plan-critique
+    round: 3
+    verdict: REVISE
+    blocking: 2
+    nits: 6
+    escalated: true
+    escalation_choice: one more round
+    escalation_decider: consult
+    category_consistency: []
+    findings:
+      - {id: CDR3-01, severity: blocking, origin: judgement, anchor: "scope[.claude/commands/implement.md].purpose", subject: "the trial wait's end state, the persona-verdict run concluding, has no event a subscribed session receives", disposition: fixed}
+      - {id: CDR3-02, severity: blocking, origin: judgement, anchor: "scope[__main__.py].purpose; scope[pairing.py].purpose", subject: "heads before day_from were silently dropped and non-tip commits were not excluded as heads", disposition: fixed}
+      - {id: CDR3-03, severity: nit, origin: judgement, anchor: "scope[docs/contracts/persona-dual-run.yaml].purpose variance", subject: "route.py skips code_reviewer on a verdict-bearing head, so a second Actions attempt is unreachable", disposition: fixed}
+      - {id: CDR3-04, severity: nit, origin: judgement, anchor: "scope[count.py].purpose; scope[__main__.py].purpose mark", subject: "the per-PR mark had no precedence", disposition: fixed}
+      - {id: CDR3-05, severity: nit, origin: judgement, anchor: "scope[docs/contracts/persona-dual-run.yaml].purpose ceilings", subject: "which skip reasons feed which share was unstated", disposition: fixed}
+      - {id: CDR3-06, severity: nit, origin: judgement, anchor: "scope[pairing.py].purpose", subject: "the no_in_session_lane rule and its registered meaning disagreed", disposition: fixed}
+      - {id: CDR3-07, severity: nit, origin: mechanical, anchor: "scope[docs/contracts/persona-dual-run.yaml].purpose ceilings", subject: "the CI-upstream qualifier cannot be read from the run listing", disposition: fixed}
+      - {id: CDR3-08, severity: nit, origin: mechanical, anchor: "verification_plan step 6", subject: "VP6's window could miss the PR and printed no mark before exit", disposition: fixed}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
