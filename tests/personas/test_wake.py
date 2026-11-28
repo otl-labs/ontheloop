@@ -1,4 +1,4 @@
-"""The wake verb: one value-free comment per run, bot-only exact markers, allowlist and fork skips, fault wake."""
+"""The wake verb: one comment per run with a typed TLDR, bot-only exact markers, allowlist and fork skips, fault wake."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from scripts.personas import wake
+from scripts.personas import findings_record, wake
 
 ROOT = Path(__file__).resolve().parents[2]
 SHA = "a" * 40
@@ -39,12 +39,14 @@ class Fake:
         self.checks_fail = False
         self.comments_fail = False
         self.post_statuses: list[int] = []
+        self.runs: list[dict[str, Any]] | None = None
 
     def request(self, method: str, url: str, token: str | None, body: Any = None, accept: str = "") -> tuple[int, bytes]:
         if method == "GET" and "/check-runs" in url:
             if self.checks_fail:
                 return 500, b""
-            return 200, json.dumps({"check_runs": [{"name": f"persona-verdict/{r}"} for r in self.landed]}).encode()
+            rows = self.runs if self.runs is not None else [{"name": f"persona-verdict/{r}"} for r in self.landed]
+            return 200, json.dumps({"check_runs": rows}).encode()
         if method == "GET":
             if self.comments_fail:
                 return 500, b""
@@ -112,7 +114,56 @@ def test_one_comment_with_four_markers_and_exact_text(tmp_path: Path, fake: Fake
     assert _run(tmp_path) == 0
     assert len(fake.posts) == 1
     assert fake.posts[0] == "\n".join([*(_marker(r) for r in ROUTES), wake.WAKE_TEXT.format(sha=SHA, url=RUN_URL)])
-    assert not any(word in fake.posts[0] for word in FORBIDDEN)
+    assert "carries no verdict" not in fake.posts[0] and "authoritative" in fake.posts[0]
+
+
+APP = 99
+
+
+def _record_text(route: str, verdict: str = "REVISE", head: str = SHA) -> str:
+    result = {
+        "verdict": verdict,
+        "findings": [{"id": "a:1:testing", "severity": "High", "origin": "judgement", "anchor": "a:1"}],
+    }
+    facts = {"route": route, "head_sha": head, "run_ref": "litellm:gha:77/1/run/1/run", "run_outcome": "verdict"}
+    return "<!-- persona-verdict-record v1 {} -->\n" + findings_record.render(facts, result) + "\n- a:1:testing: SECRET TITLE"
+
+
+def _run_row(route: str, cid: int, app: int = APP, text: str | None = None, conclusion: str = "failure") -> dict[str, Any]:
+    out = {"title": "SECRET TITLE", "summary": "SECRET SUMMARY", "text": _record_text(route) if text is None else text}
+    return {"name": f"persona-verdict/{route}", "id": cid, "conclusion": conclusion, "app": {"id": app}, "output": out}
+
+
+def test_the_wake_comment_carries_a_tldr_from_verdict_app_runs_only(
+    tmp_path: Path, fake: Fake, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(wake.override, "app_id", lambda: APP)
+    _prepare(tmp_path)
+    fake.runs = [
+        _run_row("route_a", 5),
+        _run_row("route_a", 3, text='<!-- persona-verdict-findings v1 {"route":"route_a","run_outcome":"verdict"} -->'),
+        _run_row("route_b", 6, app=7),
+        _run_row("route_c", 8, text="no record here", conclusion="success"),
+        _run_row("route_d", 9, text=_record_text("route_other")),
+    ]
+    assert _run(tmp_path) == 0
+    body = fake.posts[0]
+    link = "https://github.com/o/r/runs/"
+    assert "For people; the check run is authoritative. Snapshot at run " + RUN_URL + "." in body
+    assert f"persona-verdict/route_a (failure): REVISE 1 findings High=1 judgement=1 {link}5" in body
+    assert "route_b" not in body.split("For people;")[1]
+    assert f"persona-verdict/route_c (success): no findings record {link}8" in body
+    assert f"persona-verdict/route_d (failure): no findings record {link}9" in body
+    assert "SECRET" not in body
+    fake.posts.clear()
+    fake.comments.clear()
+    monkeypatch.setattr(wake.override, "app_id", lambda: (_ for _ in ()).throw(wake.override.Refused("no verdict App")))
+    assert _run(tmp_path) == 0 and len(fake.posts) == 1 and "For people" not in fake.posts[0]
+    fake.comments.clear()
+    fake.posts.clear()
+    monkeypatch.setattr(wake.override, "app_id", lambda: APP)
+    fake.runs = [_run_row("elsewhere", 4)]
+    assert _run(tmp_path) == 0 and "For people" not in fake.posts[0]
 
 
 def test_a_second_call_posts_nothing(tmp_path: Path, fake: Fake) -> None:

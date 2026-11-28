@@ -443,6 +443,17 @@ def test_fresh_covered_check_records_the_cite_merged_fingerprint(tmp_path: Path,
     work, bodies = _fresh_work(tmp_path / "c", monkeypatch, {"outcome": "failure", "failure": "input_unusable", "detail": "d"})
     post_verdict.post_all(ROOT, work, "o/r", "t")
     assert "text" not in bodies[0][1]["output"]
+    for name, out, inputs in (
+        ("d", SCOUT_OUT, False),
+        ("e", {"outcome": "failure", "failure": "input_unusable", "detail": "d"}, True),
+    ):
+        work, bodies = _fresh_work(tmp_path / name, monkeypatch, out, inputs=inputs)
+        path = work / "results" / f"{SCOUT}.json"
+        path.write_text(json.dumps({**json.loads(path.read_text()), "run_ref": "litellm:gha:900/1/run/1/run"}))
+        post_verdict.post_all(ROOT, work, "o/r", "t")
+        text = bodies[-1][1]["output"]["text"]
+        assert post_verdict.rescout.input_line(text) is None
+        assert post_verdict.findings_record.LINE_PREFIX in text
 
 
 def test_override_form_keeps_the_input_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

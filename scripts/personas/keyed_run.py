@@ -25,7 +25,7 @@ import yaml
 
 from scripts.personas import execute, oidc_assume, telemetry_rows
 from src.persona_hosts import image_pin
-from src.turn_capture import host_run, transcript
+from src.turn_capture import host_run, refs, transcript
 
 ROOT = Path(__file__).resolve().parents[2]
 ENV_SUFFIX = ":environment:persona-verdict"
@@ -40,6 +40,9 @@ MAX_READS = 2000
 TREE_CHUNK = 1 << 20
 ROUTE = re.compile(r"^[a-z][a-z0-9_]*$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
+DIGITS = re.compile(r"^[0-9]{1,20}$")
+ATTEMPT = re.compile(r"^[0-9]{1,6}$")
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
 WORKFLOW_PATH = ".github/workflows/persona-verdict.yml"
 EXIT_REFUSED = 2
 STATUS_LABELS = {2: "REFUSED", 3: "DEFERRED", 4: "HALT"}
@@ -294,6 +297,47 @@ def sidecar_bytes(env: Mapping[str, str], root: Path, agent: str) -> bytes | Non
     return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+def run_ref(env: Mapping[str, str]) -> str | None:
+    """The run's telemetry_agents entity_ref (retry ordinal 1), rendered as the producer does; None for invalid run facts."""
+    run_id, attempt, job = env.get("GITHUB_RUN_ID", ""), env.get("GITHUB_RUN_ATTEMPT", ""), env.get("GITHUB_JOB", "")
+    if not (DIGITS.match(run_id) and ATTEMPT.match(attempt) and job in JOB_ROLES):
+        return None
+    host = host_run.HostRun("", "", "withheld", run_id, attempt, job, 1, "workflow_run", "", WORKFLOW_PATH, "", "", None)
+    return refs.litellm_run_ref(refs.litellm_root_ref(host_run.render_host_run_ref(host)))
+
+
+def served_model(events: Any) -> str | None:
+    """The run-close model: the last turn whose record is a dict, as LitellmProducer.run_close_model picks it."""
+    turns = events.get("turns") if isinstance(events, dict) else None
+    for turn in reversed(turns if isinstance(turns, list) else []):
+        rec = turn.get("record") if isinstance(turn, dict) else None
+        if isinstance(rec, dict):
+            model = rec.get("model") or rec.get("requested_model")
+            return model if isinstance(model, str) and model else None
+    return None
+
+
+def served_models(events: Any) -> list[str]:
+    turns = events.get("turns") if isinstance(events, dict) else None
+    models: set[str] = set()
+    for turn in turns if isinstance(turns, list) else []:
+        rec = turn.get("record") if isinstance(turn, dict) else None
+        model = (rec.get("model") or rec.get("requested_model")) if isinstance(rec, dict) else None
+        if isinstance(model, str) and model:
+            models.add(model)
+    return sorted(models)
+
+
+def started_at(results: Path, route: str) -> str | None:
+    doc = _json(results / f"telemetry-{route}.json")
+    for batch in (doc.get("batches") if isinstance(doc, dict) else None) or []:
+        for row in (batch.get("rows") if isinstance(batch, dict) and batch.get("table") == "telemetry_agents" else None) or []:
+            value = row.get("session_started_at") if isinstance(row, dict) else None
+            if isinstance(value, str):
+                return value
+    return None
+
+
 def launcher_result(raw: bytes) -> dict[str, Any] | None:
     try:
         data = json.loads(raw.decode("utf-8"))
@@ -417,7 +461,10 @@ def _record(env: Mapping[str, str], work: Path, root: Path, result: dict[str, An
     results = work / "results"
     results.mkdir(parents=True, exist_ok=True)
 
+    ref = run_ref(env)
+
     def put(route: str, value: dict[str, Any]) -> None:
+        value = {**value, "run_ref": ref} if ref else value
         (results / f"{route}.json").write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
 
     if len(routes) != 1:
@@ -464,6 +511,13 @@ def _record(env: Mapping[str, str], work: Path, root: Path, result: dict[str, An
     }
     if guidance:
         recorded["guidance"] = guidance
+    if ref:
+        header = result["events"].get("header") if isinstance(result.get("events"), dict) else None
+        digest = header.get("rendered_prompt_sha256") if isinstance(header, dict) else None
+        recorded["session_started_at"] = started_at(results, route)
+        recorded["definition_sha256"] = digest if isinstance(digest, str) and HEX64.match(digest) else None
+        recorded["served_models"] = served_models(result.get("events"))
+        recorded["served_model"] = served_model(result.get("events"))
     found = _reads(result.get("events"))
     resolution = _json(work / "prepared" / "resolution.json")
     recorded["trees"] = {

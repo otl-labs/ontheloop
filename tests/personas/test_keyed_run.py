@@ -209,3 +209,62 @@ def test_a_head_route_without_its_tar_is_refused(
     assert keyed_run.request({**ENV, "PERSONA_ROLE": "primary"}, work, ROOT) == keyed_run.EXIT_REFUSED
     captured = capfd.readouterr()
     assert captured.out == "" and "REFUSED head_tree" in captured.err
+
+
+def _rows_file(results: Path, route: str) -> None:
+    rows = {"batches": [{"table": "telemetry_agents", "rows": [{"session_started_at": "2026-11-27T10:00:00Z"}]}]}
+    (results / f"telemetry-{route}.json").write_text(json.dumps(rows))
+
+
+def test_record_carries_run_ref_definition_hash_and_served_models(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    events = {
+        "header": {"rendered_prompt_sha256": "c" * 64},
+        "turns": [
+            {"record": {"model": "m-b", "requested_model": "req"}},
+            {"record": {"requested_model": "m-a"}},
+            {"record": {"model": "m-b"}},
+            {"attempts": [{"model": "attempt-only"}]},
+        ],
+    }
+    work = tmp_path / "work"
+    (work / "prepared").mkdir(parents=True)
+    (work / "prepared" / "routes.json").write_text(json.dumps({"routes": [ROUTE], "plan_paths": []}))
+    (work / "prepared" / f"input-{ROUTE}.json").write_text(json.dumps(GOOD))
+    (work / "results").mkdir()
+    monkeypatch.setattr(keyed_run, "_telemetry", lambda env, w, results, route, ev, root: _rows_file(results, route))
+    raw = json.dumps({"exit_code": 0, "timed_out": False, "stdout": "{}", "events": events}).encode()
+    assert keyed_run.record(ENV, work, ROOT, raw) == 0
+    got = json.loads((work / "results" / f"{ROUTE}.json").read_text())
+    assert got["run_ref"] == "litellm:gha:1/1/run/1/run" and got["session_started_at"] == "2026-11-27T10:00:00Z"
+    assert got["definition_sha256"] == "c" * 64 and got["served_models"] == ["m-a", "m-b"]
+    assert got["served_model"] == "m-b"
+    fallback = {"turns": [{"record": {"model": "b-model"}}, {"record": {"model": "a-model"}}, {"attempts": []}]}
+    assert keyed_run.served_model(fallback) == "a-model" and keyed_run.served_models(fallback) == ["a-model", "b-model"]
+    assert keyed_run.served_model({"turns": [{"record": {}}]}) is None and keyed_run.served_model(None) is None
+    assert keyed_run.run_ref({**ENV, "GITHUB_JOB": "run-fallback"}) == "litellm:gha:1/1/run-fallback/1/run"
+    (work / "results" / f"telemetry-{ROUTE}.json").unlink()
+    monkeypatch.setattr(keyed_run, "_telemetry", lambda *a: None)
+    bad = {"header": {"rendered_prompt_sha256": "short"}, "turns": "x"}
+    raw = json.dumps({"exit_code": 0, "timed_out": False, "stdout": "{}", "events": bad}).encode()
+    assert keyed_run.record(ENV, work, ROOT, raw) == 0
+    got = json.loads((work / "results" / f"{ROUTE}.json").read_text())
+    assert (got["session_started_at"], got["definition_sha256"], got["served_models"]) == (None, None, [])
+
+
+def test_early_return_records_carry_run_ref_or_null(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def run(name: str, env: dict[str, str], failure_file: bool, raw: bytes) -> dict:
+        work = tmp_path / name
+        (work / "prepared").mkdir(parents=True)
+        (work / "prepared" / "routes.json").write_text(json.dumps({"routes": [ROUTE], "plan_paths": []}))
+        if failure_file:
+            (work / "prepared" / f"failure-{ROUTE}.json").write_text(json.dumps({"failure": "input_incomplete"}))
+        assert keyed_run.record(env, work, ROOT, raw) == 0
+        return json.loads((work / "results" / f"{ROUTE}.json").read_text())
+
+    ref = "litellm:gha:1/1/run/1/run"
+    assert run("a", ENV, True, b"")["run_ref"] == ref
+    assert run("b", ENV, False, b"not json")["run_ref"] == ref
+    got = run("c", {**ENV, "GITHUB_RUN_ID": "x1"}, False, b"not json")
+    assert "run_ref" not in got and got["failure"] == "launcher_no_result"
+    assert "run_ref" not in run("d", {**ENV, "GITHUB_JOB": "other"}, True, b"")
+    assert keyed_run.run_ref({**ENV, "GITHUB_RUN_ATTEMPT": ""}) is None
