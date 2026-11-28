@@ -37,7 +37,7 @@ scope:
       MASK_AWS_ROLE_ID_ACCOUNT_PART (telemetry-arrival.yml:55-63's form); one shell step that reads
       /agent-platform/ducklake/telemetry_writer_url with aws ssm get-parameter, emits ::add-mask:: for the URL and its
       bare host before anything else, and exports DUCKLAKE_TELEMETRY_WRITER_URL (transport.URL_ENV) to GITHUB_ENV; the
-      send step (GH_TOKEN github.token) running .venv/bin/python -m scripts.personas.telemetry_send with the cursor path;
+      send step (GH_TOKEN github.token) running .venv/bin/python -m scripts.personas.telemetry_send --repo ${{ github.repository }} with the cursor path; each run step carries the id its baseline entry names;
       actions/cache/save of the new cursor with key persona-telemetry-sent-${{ github.run_id }}-${{ github.run_attempt }},
       if always() (a crash before the cursor is written leaves no path, which the save step reports as a warning, never a
       failure). Header comment: why the name sits outside the glob, why no filter, and that it is an alarm watched by
@@ -45,49 +45,57 @@ scope:
   - file: scripts/personas/telemetry_send.py
     action: Create
     purpose: >-
-      Imports exactly: stdlib; scripts.telemetry_capture.transport and responses; scripts.telemetry_capture.ci_pass
-      (project_ref_home); scripts.personas.resolve_pr (request, for API GETs only); scripts.personas.execute
-      (registry_key); src.turn_capture.litellm_producer (PRODUCER, PARSER_VERSION, PRODUCER_VERSION);
-      src.turn_capture.observations (OBSERVATION_COLUMNS); src.turn_capture.sessions (SESSION_COLUMNS, AGENT_COLUMNS).
-      Never imported by persona code. main(argv) with --cursor PATH and --dry-run (lists, admits, downloads and
-      validates, sends nothing, writes no cursor). Outcome per artifact is exactly one of handled, foreign, unreadable,
-      baselined, expired_unseen, empty, invalid, unsent, sent. (1) List artifacts named persona-verdict-results (job
-      run) and persona-verdict-results-fallback (job run-fallback) (GET /repos/{repo}/actions/artifacts?name=...
-      &per_page=100, paged, capped at 10 pages), keeping those created in the last 72 h. A listing non-200 or a cap hit
-      without a short page is listing_incomplete: the run is red. (2) Cursor first: a JSON file {ids: {artifact id:
-      expires_at}} of artifacts already handled, pruned past 96 h; ids in it are skipped as handled before any other call
-      (Decision 88). A missing or unreadable cursor prints cursor=missing and starts a baseline: every admitted
-      artifact that is already expired is recorded as baselined (counted, never red), so the next run never reds on
-      artifacts that expired before the sweep could see them. With a present cursor, an admitted expired artifact absent
-      from it is expired_unseen and reds the run (Decision 250's loss alarm; never the enforcing check of
-      telemetry_agents' arrival residual, rec-4951). (3) Provenance from GitHub's records only, for unhandled artifacts:
-      artifact.workflow_run.repository_id and head_repository_id equal the repository's id (GET /repos/{repo}, once),
-      head_branch main, and the run (GET /actions/runs/{id}, at most once per run id per sweep) has path
-      .github/workflows/persona-verdict.yml and event workflow_run. A proven mismatch is foreign (skipped, never sent,
-      never red, recorded handled); a non-200 or missing field on either GET is unreadable (Decision 250 cl.2): the run
-      is red and the id stays out of the cursor so the next tick retries. (4) Download each unexpired admitted artifact:
-      refuse (invalid) when the listing's size_in_bytes exceeds 5 MiB; GET .../artifacts/{id}/zip with Authorization
-      through an opener whose redirect handler follows nothing, read the 302 Location, then GET that URL with no
-      Authorization header and read at most 5 MiB + 1 bytes into memory (over the cap is invalid). A non-200/302 answer
-      or a transport error is unsent; a corrupt zip is invalid. Read only members named telemetry-<route>.json at the
-      zip root, route a key registry_key resolves over main, each at most 5 MiB uncompressed (else invalid); never
-      extract to disk, never read any other member (the verdict file holds persona output); no rows member is empty.
-      (5) Validate each document: keys exactly batches, diagnostics, parser_version, producer, producer_version
+      Imports exactly: stdlib; scripts.telemetry_capture.transport (make_client, Budget) and responses;
+      scripts.telemetry_capture.runner (_describe, _Sender, _Stop: reused, never re-implemented; persona rows hold no
+      transcripts, so its blob delivery never runs); scripts.telemetry_capture.ci_pass (project_ref_home);
+      scripts.personas.resolve_pr (request, for API GETs only); scripts.personas.execute (registry_key);
+      src.turn_capture.litellm_producer (PRODUCER, PARSER_VERSION, PRODUCER_VERSION); src.turn_capture.observations
+      (OBSERVATION_COLUMNS); src.turn_capture.sessions (SESSION_COLUMNS, AGENT_COLUMNS). Never imported by persona
+      code. main(argv) with --repo OWNER/NAME (the workflow passes github.repository; Decision 212), --cursor PATH and
+      --dry-run (lists, admits, downloads and validates, sends nothing, writes no cursor). The denominator is runs, not
+      artifacts: GitHub drops an expired artifact from every listing (probed 2026-11-28, critique r2), so the loss alarm
+      counts runs whose upload succeeded and whose artifact is gone. Outcome per run is one of handled, foreign,
+      unreadable, baselined, expired_unseen, no_upload, sent, empty, invalid, unsent. (1) List completed runs of
+      persona-verdict.yml created in the last 72 h (GET /repos/{repo}/actions/workflows/persona-verdict.yml/runs?
+      created=>=...&status=completed&per_page=100, paged, capped at 10 pages). A listing non-200 or a cap hit without a
+      short page is listing_incomplete: the run is red. (2) Cursor first: a JSON file {runs: {run id: recorded_at}}
+      pruned past 96 h; listed run ids in it are skipped as handled before any other call (Decision 88). (3) Provenance
+      from the run record only: repository.id and head_repository.id equal the repository's id (GET /repos/{repo},
+      once), head_branch main, path .github/workflows/persona-verdict.yml, event workflow_run. A proven mismatch is
+      foreign (never sent, never red, recorded). A missing field, or a non-200 on any GET below, is unreadable (Decision
+      250 cl.2): the run is red and the run id stays out of the cursor, so the next tick retries it. (4) Per admitted run,
+      GET /actions/runs/{id}/artifacts once and keep the unexpired artifacts named persona-verdict-results (job run) and
+      persona-verdict-results-fallback (job run-fallback). With none, GET /actions/runs/{id}/jobs once: a run or
+      run-fallback job whose step 'Upload verdict results' or 'Upload fallback verdict results' concluded success is
+      expired_unseen (Decision 250's loss alarm; red once, then recorded, so one lost run reds one sweep), else
+      no_upload (recorded). A missing or unreadable cursor prints cursor=missing and turns expired_unseen into baselined
+      (counted, never red), so the first sweep and a cache eviction never red on runs that expired before the sweep
+      could see them. This alarm is never the enforcing check of telemetry_agents' arrival residual (rec-4951). (5)
+      Download each kept artifact: refuse (invalid) when its size_in_bytes exceeds 5 MiB; GET .../artifacts/{id}/zip
+      with Authorization through an opener whose redirect handler follows nothing, read the 302 Location, then GET that
+      URL with no Authorization header and read at most 5 MiB + 1 bytes into memory (over the cap is invalid). A
+      non-200/302 answer or a transport error is unsent; a corrupt zip or duplicate member names is invalid. Read only
+      members named telemetry-<route>.json at the zip root, route a key registry_key resolves over main, each through a
+      bounded read of at most 5 MiB + 1 bytes (never ZipInfo.file_size; over is invalid); never extract to disk, never
+      read any other member (the verdict file holds persona output); no rows member is empty. (6) Validate each
+      document: keys exactly batches, diagnostics, parser_version, producer, producer_version
       (telemetry_rows.rows_document); producer, parser_version and producer_version equal litellm_producer's constants;
-      batches only telemetry_observations, telemetry_agents and telemetry_sessions, in that order; each row's keys
-      within OBSERVATION_COLUMNS, AGENT_COLUMNS or SESSION_COLUMNS; every telemetry_agents row's workflow_run_id equal
-      to the artifact's run id and host_run_ref starting gha:<run id>/ with the job the artifact name binds (run or
-      run-fallback). A failed document is invalid and reds the run (main's own code wrote it). (6) Send each valid
-      document through transport.make_client (the env URL, SigV4 under the ambient CI credentials) as append_telemetry
-      bodies chunked by transport.chunk, project_ref from ci_pass.project_ref_home, batch order kept; responses.classify
-      handles OK, REGISTER_TENANT once, RECHUNK by halving; any other answer, or a 409 conflict (Decision 207), is
-      unsent. Sent, empty, foreign, baselined and invalid ids are recorded handled (invalid stays red that run and is
-      not re-read); unsent and unreadable ids are not, so the next tick retries them. (7) Print one line
-      'PERSONA_TELEMETRY_SEND listed=N handled=N foreign=N unreadable=N baselined=N sent=N rows=N empty=N invalid=N
-      unsent=N expired_unseen=N listing=complete|incomplete cursor=present|missing' plus one 'sent run=<id>
-      attempt=<n> route=<route>' line per document; never a URL, host, response body or exception message (fixed
-      reason tokens only, Decision 290 cl.2). Exit 1 when unreadable, invalid, unsent or expired_unseen is non-zero or
-      the listing is incomplete, else 0. Writes the updated cursor before exiting (not under --dry-run).
+      batches only telemetry_observations, telemetry_agents and telemetry_sessions, in that order; each row's keys within
+      OBSERVATION_COLUMNS, AGENT_COLUMNS or SESSION_COLUMNS; every telemetry_agents row's workflow_run_id equal to the
+      run id and host_run_ref starting gha:<run id>/ with the job the artifact name binds. A failed document is invalid
+      and reds the run (main's own code wrote it). (7) Send: one transport.make_client per sweep (the env URL, SigV4 under
+      the ambient CI credentials, a CaptureState in a temporary directory as ci_pass builds it, Budget.start(600) inside
+      the job's 15 minutes) and one runner._describe per sweep (a mismatch stops the sweep red, every remaining run
+      unsent); per document a runner._Sender (project_ref from ci_pass.project_ref_home) sends the batches in order,
+      handling OK, register_tenant once, rechunk by halving and redeliver; a _Stop, including a 409 conflict (Decision
+      207) or the deadline, is unsent with its reason token. A run is recorded in the cursor once every kept artifact is
+      sent, empty or invalid (invalid stays red that sweep and is not re-read); unsent and unreadable runs are not, so the
+      next tick retries them. (8) Print one line 'PERSONA_TELEMETRY_SEND runs=N handled=N foreign=N unreadable=N
+      baselined=N no_upload=N expired_unseen=N sent=N rows=N empty=N invalid=N unsent=N listing=complete|incomplete
+      cursor=present|missing' plus one 'sent run=<id> attempt=<n> route=<route>' line per document; never a URL, host,
+      response body or exception message (fixed reason tokens only, Decision 290 cl.2). Exit 1 when unreadable,
+      invalid, unsent or expired_unseen is non-zero or the listing is incomplete, else 0. Writes the updated cursor
+      before exiting (not under --dry-run).
   - file: tests/personas/test_telemetry_send.py
     action: Create
     purpose: >-
@@ -96,12 +104,14 @@ scope:
       under project_ref, and captured stdout and stderr hold neither the URL nor its host even when the writer errors);
       test_foreign_artifacts_are_skipped_never_sent (wrong repository id, head repository, branch, path and event, one case
       each); test_document_validation_refuses_and_reds (extra key, wrong producer or version, unknown table, unknown column,
-      wrong run id, wrong host_run_ref job, oversize listing size, oversize body, oversize member, corrupt zip,
-      non-telemetry member never read); test_cursor_skips_handled_and_reds_on_expired_unseen (present cursor skips
-      handled ids before any provenance call; expired unseen reds; pruning at 96 h; and a two-run case: a missing cursor
-      baselines expired artifacts and exits 0, then a second run with that cursor and the same listing exits 0);
-      test_unreadable_provenance_and_listing_red_and_retry (403 and 5xx on the run GET, non-200 on the repo GET, a
-      listing non-200 and a page-cap hit each red the run and leave the id out of the cursor; one run GET per run id);
+      wrong run id, wrong host_run_ref job, oversize listing size, oversize body, oversize member by bounded read,
+      duplicate member names, corrupt zip, non-telemetry member never read); test_cursor_skips_handled_and_reds_on_expired_unseen
+      (the fake API drops expired artifacts from every listing, as GitHub does: a present cursor skips handled runs
+      before any other call; a run whose upload step succeeded and whose artifact is gone reds once and a second sweep
+      with the written cursor exits 0; a run with no successful upload step is no_upload; a missing cursor baselines and
+      exits 0; pruning at 96 h); test_unreadable_provenance_and_listing_red_and_retry (403 and 5xx on the artifacts or
+      jobs GET, non-200 on the repo GET, a missing run field, a listing non-200 and a page-cap hit each red the sweep and
+      leave the run out of the cursor);
       test_zip_redirect_carries_no_token_and_is_bounded (the second request carries no Authorization header, the first
       follows no redirect, and an over-cap body is refused after cap + 1 bytes); test_writer_answers_drive_the_exit_code
       (OK, register_tenant once, rechunk, 409 conflict and transport failure); test_summary_line_prints_counts_only.
@@ -120,6 +130,13 @@ scope:
       Add test_sent_actions_runs_are_not_read_as_in_session: a root session whose telemetry_agents rows are a litellm
       top-level gha run (observation_id NULL, host_run_ref gha:...) yields no in_session row, pinning the existing
       observation_id filter that keeps sent Actions rows out of the in-session lane until rec-5752 joins them.
+  - file: config/composite_action_body_baseline.yaml
+    action: Modify
+    purpose: >-
+      r3_workflows entries, one per inline run body of persona-telemetry-send.yml, each step given an id
+      (install-python-dependencies-venv, resolve-the-telemetry-writer-url, send-persona-telemetry) with its measured line
+      count, as telemetry-arrival.yml's rows at lines 377-379 (validate_composite_action_shell_bodies, Decision 162 R3).
+      Bodies stay short; none needs a raise marker. 469 lines at planning (392 effective); re-measure.
   - file: config/ci_rca_taxonomy.yaml
     action: Modify
     purpose: >-
@@ -213,24 +230,24 @@ verification_plan:
   - step: 5
     phase: pre-deploy
     action: Read-only live probe that a retained results artifact holds a rows file of the validated shape (dry run, no send).
-    command: D=$(mktemp -d) && GH_TOKEN=$(gh auth token) bin/venv-python -m scripts.personas.telemetry_send --cursor "$D/cursor.json" --dry-run
-    expected: exit 0 and a PERSONA_TELEMETRY_SEND line with listed >= 1, unreadable=0, invalid=0 and unsent=0 (a results artifact of run 46093899188 held telemetry-code_reviewer.json at planning)
-    fix_if: invalid > 0 on main's own artifacts, fix the validator against the real document, never widen it past the producer's columns; unsent on the token-free storage GET, fix the download; if gh holds no token in the session, the step is BLOCKED, recorded so in the PR body, and VP 6 is the first live download (the token-forwarding and size-cap risks are pinned offline by test_zip_redirect_carries_no_token_and_is_bounded)
+    command: D=$(mktemp -d) && GH_TOKEN=$(gh auth token) bin/venv-python -m scripts.personas.telemetry_send --repo otl-labs/ontheloop --cursor "$D/cursor.json" --dry-run
+    expected: exit 0 and a PERSONA_TELEMETRY_SEND line with runs >= 1, unreadable=0, invalid=0 and unsent=0 (a results artifact of run 46093899188 held telemetry-code_reviewer.json at planning)
+    fix_if: invalid > 0 on main's own artifacts, fix the validator against the real document, never widen it past the producer's columns; unsent on the token-free storage GET, fix the download; if gh holds no token in the session, or the agent proxy refuses the storage redirect host, the step is BLOCKED (never read as a download bug), recorded so in the PR body, and VP 6 is the first live download (the token-forwarding and size-cap risks are pinned offline by test_zip_redirect_carries_no_token_and_is_bounded)
     hermetic: false
     graduation: waive
     graduation_waiver_reason: a live, non-hermetic probe of retained artifacts that expire within a day
   - step: 6
     phase: post-deploy
     action: Dispatch the sweep on main after a keyed verdict run has uploaded results within the last day, and read its run.
-    command: "Accepted form, MCP steps then shell: mcp__github__actions_run_trigger(owner=otl-labs, repo=ontheloop, workflow_id=persona-telemetry-send.yml, ref=main); export RUN_ID=<that run's id> RUN_DAY=<its UTC date>; mcp__github__get_job_logs for its send job written to $D/pts.log (D=$(mktemp -d)); then grep -E 'PERSONA_TELEMETRY_SEND .*sent=[1-9]' $D/pts.log && ! grep -Eqi 'lambda-url|execute-api' $D/pts.log && echo host-absent"
+    command: "Accepted form, MCP steps then shell: mcp__github__actions_run_trigger(owner=otl-labs, repo=ontheloop, workflow_id=persona-telemetry-send.yml, ref=main); once it completes, mcp__github__actions_get(method=get_workflow_run) on it and require conclusion success; mcp__github__get_job_logs for its send job written to $D/pts.log (D=$(mktemp -d)); then grep -E 'PERSONA_TELEMETRY_SEND .*sent=[1-9]' $D/pts.log && ! grep -Eqi 'lambda-url|execute-api' $D/pts.log && echo host-absent"
     expected: run conclusion success; the summary line shows sent >= 1, unreadable=0, invalid=0, unsent=0; prints host-absent
     fix_if: unsent or invalid; read the fixed reason token and fix forward on a new branch; a host in the log is a security finding (file it and surface it at once)
     hermetic: false
   - step: 7
     phase: post-deploy
     action: The sent run's rows are in production telemetry with writer-minted ids.
-    command: "bin/venv-python -c \"from scripts.telemetry_capture import read_route as r; n=r.make_routed_reader('agent_platform').named; import os; d=os.environ['RUN_DAY']; rows=[x for x in n('telemetry_root_sessions', day_from=d, day_to=d) if str(x.get('host_run_ref') or '').startswith('gha:'+os.environ['SENT_RUN_ID']+'/')]; print(len(rows), all(x.get('session_id') and x.get('tenant_id') and x.get('project_id') for x in rows))\""
-    expected: prints a count of at least 1 and True (SENT_RUN_ID is a run id from a 'sent run=' line of VP 6's log)
+    command: "bin/venv-python -c \"from scripts.telemetry_capture import read_route as r; n=r.make_routed_reader('agent_platform').named; import os; d=os.environ['SENT_RUN_DAY']; rows=[x for x in n('telemetry_root_sessions', day_from=d, day_to=d) if str(x.get('host_run_ref') or '').startswith('gha:'+os.environ['SENT_RUN_ID']+'/')]; print(len(rows), all(x.get('session_id') and x.get('tenant_id') and x.get('project_id') for x in rows))\""
+    expected: prints a count of at least 1 and True (SENT_RUN_ID is a run id from a 'sent run=' line of VP 6's log and SENT_RUN_DAY that persona run's created_at UTC date, the day telemetry_root_sessions windows on; Decision 96)
     fix_if: zero rows after a success run; check the writer's answer counts in the send log, then the reader's catalog route; fix forward
     hermetic: false
   - step: 8
@@ -257,12 +274,12 @@ test_obligations:
     test_selector: tests/personas/test_telemetry_send.py::test_document_validation_refuses_and_reds
     red_green_expectation: red before (module absent), green after
   - source: scripts/personas/telemetry_send.py
-    behavior: handled artifacts are skipped, a missing cursor baselines expired artifacts, and an expired artifact never seen reds the run only with a present cursor
+    behavior: handled runs are skipped, a run whose upload succeeded but whose artifact expired unsent reds one sweep, and a missing cursor baselines instead of reding
     verification_step: 1
     test_selector: tests/personas/test_telemetry_send.py::test_cursor_skips_handled_and_reds_on_expired_unseen
     red_green_expectation: red before (module absent), green after
   - source: scripts/personas/telemetry_send.py
-    behavior: an unreadable provenance record or an incomplete listing reds the run and the artifact is retried next tick
+    behavior: an unreadable run record or an incomplete listing reds the sweep and the run is retried next tick
     verification_step: 1
     test_selector: tests/personas/test_telemetry_send.py::test_unreadable_provenance_and_listing_red_and_retry
     red_green_expectation: red before (module absent), green after
@@ -286,6 +303,11 @@ test_obligations:
     verification_step: 1
     test_selector: tests/ci/test_persona_verdict_unpublished_hosts.py::test_no_covered_job_lists_the_telemetry_writer_host
     waiver_reason: a guard over files this plan leaves unchanged, so it is green before and after; its value is the regression pin rec-5358 names
+  - source: config/composite_action_body_baseline.yaml
+    behavior: every inline run body of the sweep is registered
+    verification_step: 4
+    command: bin/venv-python -m scripts.validate --pre
+    red_green_expectation: red before (validate_composite_action_shell_bodies refuses an unregistered body), green after
   - source: config/ci_rca_taxonomy.yaml
     behavior: the sweep is a watched, not-a-gate workflow ci-rca listens to
     verification_step: 4
@@ -326,13 +348,14 @@ constraints:
   - No rescue agents or workaround loops (Decision 55).
 context:
   - "Decision-scout r3 FLAGS_FOUND; CITE dec:88,200,205,207,212,250,255,263,267,275,282,290,291. Decisions triaged: 240 of 240. Roadmap items intersected: 9; CONFLICT: 0; RELATED: 8. Serves: NS.6 3/5."
-  - "Scout dispositions: r1 WARN 267 -> dispatcher-bot guard, not registered; r1 WARN 212 -> SA-14 and PC-01 rows with SA-02 byte relief; r1 NOTE 250 and 88 -> the cursor (skip handled, red on expired_unseen); r2 SPIRIT WARN 263 -> provenance from GitHub's records (repository ids, branch, path, event), each with a refusal case; r3 NOTE 250 -> telemetry_agents' arrival residual (data-modeling-standard.yaml, rec-4951) gains main's persona-verdict.yml runs as a denominator source, and expired_unseen is a loss alarm, never that residual's enforcing check; r3 CITE 267 -> register name corrected; 101 and 213 compacted, cited as 290 and 291."
+  - "Scout dispositions: r1 WARN 267 -> dispatcher-bot guard, not registered; r1 WARN 212 -> SA-14 and PC-01 rows with SA-02 byte relief; r1 NOTE 250 and 88 -> the cursor (skip handled, red on expired_unseen); r2 SPIRIT WARN 263 -> provenance from GitHub's records (repository ids, branch, path, event), each with a refusal case; r3 NOTE 250 -> telemetry_agents' arrival residual (data-modeling-standard.yaml:526, rec-4951) names the GitHub Actions runs of the CI agents, read here as covering persona-verdict.yml runs (no edit; rec-4951 owns the declaration), and expired_unseen is a loss alarm, never that residual's enforcing check; r3 CITE 267 -> register name corrected; 101 and 213 compacted, cited as 290 and 291."
   - "Operator 2026-11-28: rec-5358 option 2 (keyless separate job, the portal CI uses; rejected a GitHub secret and a public-safe route), recorded on rec-5358; sender identity = the existing CI branch role (card), narrower role is rec-5754. Blind Fable consult: /mnt/project-files/actions-telemetry-send/advisor-brief/ADVICE.md (adopted: sweep over per-run, forward-with-validation, red alarm watched by ci-rca, follow-ons; adapted: retention stays 1 day because two checks pin it, so the cron is hourly; the consult's results/ member prefix corrected to zip root, probed)."
-  - "Why a sweep: about 85-100 persona-verdict runs a day (Actions API, 2026-11-27); a per-run sender cannot skip no-op runs from GitHub-set fields. GitHub delivers about one hourly tick in five here (Decision 267), so a 1-day artifact gets several sends; the cursor turns a missed one into a red."
-  - "Probes this session: persona-verdict runs report path .github/workflows/persona-verdict.yml, event workflow_run, head_branch main (100 of 100 listed); artifact 15243045373 (run 46093899188) lists workflow_run.repository_id, head_repository_id and head_branch, and its zip root holds code_reviewer.json and telemetry-code_reviewer.json (parser_version 2, producer litellm, producer_version litellm-2; agents rows carry workflow_run_id and host_run_ref gha:46093899188/1/run/1). UNPROVEN until VP 6: that the writer accepts litellm rows from the branch role (both are declared, the writer validates), and that list-artifacts keeps returning expired artifacts with expired true (inferred from the API shape)."
+  - "Why a sweep: about 85-100 persona-verdict runs a day (Actions API, 2026-11-27); a per-run sender cannot skip no-op runs from GitHub-set fields. GitHub delivers about one hourly tick in five here (Decision 267), so a 1-day artifact gets several chances; a run whose upload succeeded and whose artifact expired unsent reds one sweep."
+  - "Why a cron and not workflow_run: ci-rca listens to the sender by workflow_run, and a sender triggered by persona-verdict's completion would make ci-rca a fourth workflow_run level, past GitHub's three (telemetry-arrival.yml:8-10)."
+  - "Probes this session: persona-verdict runs report path .github/workflows/persona-verdict.yml, event workflow_run, head_branch main (100 of 100 listed); artifact 15243045373 (run 46093899188) lists workflow_run.repository_id, head_repository_id and head_branch, and its zip root holds code_reviewer.json and telemetry-code_reviewer.json (parser_version 2, producer litellm, producer_version litellm-2; agents rows carry workflow_run_id and host_run_ref gha:46093899188/1/run/1). Probed FALSE (critique r2, 2026-11-28 14:34Z): GitHub keeps no expired artifact in the name listing or a run's artifacts listing (run 45933482494's upload succeeded, its artifacts total_count is 0), hence the run denominator. UNPROVEN until VP 6: that the writer accepts litellm rows from the branch role (both are declared, the writer validates)."
   - "Writer bodies are idempotent insert-only MERGE (ducklake_telemetry_writer.yaml:268; Decision 207): a re-send is a no-op, a differing re-send under a stored key is a 409 the sweep counts unsent."
   - "Decision 205: the 2026-11-27 Update (verdict job reads no upstream artifact) binds persona jobs; this sender is deterministic, not persona compute (cl.3), so no amendment."
-  - "findings_read side effect: sent rows give each Actions run a root session, but its telemetry_agents rows are top-level (observation_id NULL, telemetry_agents.yaml:92-96), so read_in_session's filter skips them; the new node pins it."
+  - "findings_read side effect: sent rows give each Actions run a root session, but its telemetry_agents rows are top-level (observation_id NULL, telemetry_agents.yaml:92-96), so read_in_session's filter skips them; the new node pins it. Each sent root still costs read_in_session one read_tree call in its window (Neon egress, Decision 88); rec-5752's join is where a host_run_ref pre-filter belongs."
   - "c7 TELEMETRY amendment text (consult Q7, adapted): [Amendment 2026-11-28, PLAN-persona-telemetry-send, rec-5551, the operator's 2026-11-28 ruling (rec-5358): TELEMETRY -- no job in .github/workflows/persona-verdict*.yml writes telemetry, so no covered job's list holds the writer's host; each keyed run leaves its rows file in its results artifact, and a keyless job in .github/workflows/persona-telemetry-send.yml, outside the covered files, sends it through scripts/telemetry_capture's transport under the CI branch role, reading the host at run time from the account's parameter store and never printing it. That job runs no egress filter, a named accepted residual: it holds no inference key, admits only artifacts GitHub records as main's persona-verdict.yml runs, and treats the rows file as data.]"
   - "Shared files: config/ci_rca_taxonomy.yaml 494 of 500 (also scoped by bootstrap-ci-gated-apply, bootstrap-trusted-pr-plan, ci-policy-plan-time-lambda-arns, environment-gates-fail-closed, merge-annotate-producer, trusted-plan-cutover; whichever builds second re-measures; rec-5710 shares no file); ports.yaml also scoped by agent-proxy-signed-access, environment-gates-fail-closed, merge-annotate-producer, scheduled-workflow-dispatch, telemetry-capture-hook-labels, telemetry-claude-p-capture-adapter (whichever builds second re-measures bytes); ci-rca.yml also by merge-annotate-producer, scheduled-workflow-dispatch, telemetry-claude-p-capture-adapter; ROADMAP-PLATFORM.yaml also by loop-candidate-decisions, operator-decision-journal-kind (rebase only)."
   - "Follow-ons filed at planning: rec-5752 (findings ids join, ends the NULL deferral), rec-5754 (narrow sender role, remove the persona-verdict role's writer grants, dated Update on Decision 263), rec-5755 (results upload when the persona step fails)."
@@ -363,6 +386,23 @@ gate_rounds:
       - {id: N9, severity: nit, origin: judgement, anchor: "scope[1].purpose", subject: "unspecified outcomes for page cap, download non-200, corrupt zip, oversize; each stated, artifact name bound to job", disposition: fixed}
       - {id: N10, severity: nit, origin: judgement, anchor: "scope[1].purpose", subject: "import list contradicted itself; exact list with AGENT_COLUMNS", disposition: fixed}
       - {id: N11, severity: nit, origin: judgement, anchor: "scope[0].purpose", subject: "cache save after a crash; stated as a warning", disposition: fixed}
+  - gate: plan-critique
+    round: 2
+    verdict: REVISE
+    blocking: 2
+    nits: 9
+    findings:
+      - {id: B1, severity: blocking, origin: judgement, anchor: "scope[1].purpose", subject: "GitHub drops expired artifacts from listings (probed), so the alarm could never fire; denominator is now runs whose upload succeeded, red once then recorded", disposition: fixed}
+      - {id: B2, severity: blocking, origin: mechanical, anchor: "scope", subject: "new inline run bodies need config/composite_action_body_baseline.yaml r3_workflows entries; scope row, step ids and obligation added", disposition: fixed}
+      - {id: N1, severity: nit, origin: judgement, anchor: "verification_plan[4]", subject: "no repository source; --repo argument, VP 5 proxy refusal is BLOCKED", disposition: fixed}
+      - {id: N2, severity: nit, origin: judgement, anchor: "verification_plan[6]", subject: "VP 7 windowed on the sweep day; uses the persona run's created_at day", disposition: fixed}
+      - {id: N3, severity: nit, origin: judgement, anchor: "scope[1].purpose", subject: "describe, Limits and Budget unnamed; reuses runner._describe and _Sender, Budget.start(600)", disposition: fixed}
+      - {id: N4, severity: nit, origin: judgement, anchor: "scope[1].purpose", subject: "member size by bounded read, duplicate member names refused", disposition: fixed}
+      - {id: N5, severity: nit, origin: judgement, anchor: "context", subject: "rec-4951 residual text read as covering persona runs, no edit, stated", disposition: fixed}
+      - {id: N6, severity: nit, origin: mechanical, anchor: "closes_criteria", subject: "carried; phase names why", disposition: fixed}
+      - {id: N7, severity: nit, origin: mechanical, anchor: "infrastructure_dependencies[0]", subject: "carried; data-only asset stated", disposition: fixed}
+      - {id: N8, severity: nit, origin: judgement, anchor: "verification_plan[5]", subject: "VP 6 now reads the run conclusion before the log grep", disposition: fixed}
+      - {id: N9, severity: nit, origin: judgement, anchor: "context", subject: "read_tree egress per sent root noted, pre-filter belongs to rec-5752", disposition: fixed}
 pre_implementation_checklist:
   - Branch confirmed not on main
   - docs/PROJECT_CONTEXT.md read
