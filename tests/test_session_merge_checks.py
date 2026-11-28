@@ -305,3 +305,9 @@ def test_persona_pins_cover_every_persona_name(app: int | None) -> None:
 def test_fingerprint_personas_are_plan_class() -> None:
     assert mc.FINGERPRINT_PERSONAS
     assert all(mc.PERSONA_CLASSES.get(p) == "plan" for p in mc.FINGERPRINT_PERSONAS)
+
+
+def test_trigger_keyed_personas_are_a_closed_plan_class_list() -> None:
+    assert mc.TRIGGER_KEYED_PERSONAS == frozenset({"decision_scout"})  # count-coupling-ok: a closed allowlist
+    assert all(mc.PERSONA_CLASSES.get(p) == "plan" for p in mc.TRIGGER_KEYED_PERSONAS)
+    assert not mc.TRIGGER_KEYED_PERSONAS & mc.READY_HEAD_PERSONAS

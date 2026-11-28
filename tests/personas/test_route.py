@@ -66,8 +66,9 @@ def _route(files: list[dict[str, Any]], root: Path, draft: bool = False, unknown
 
 
 def test_live_tree_binds_no_verdict_persona() -> None:
-    assert route.bound_personas(ROOT) == {"code_reviewer"}
+    assert route.bound_personas(ROOT) == {"code_reviewer", "decision_scout"}
     assert _route([_f("scripts/x.py")], ROOT) == ["code_reviewer"]
+    assert _route([_f(PLAN, "added")], ROOT) == ["decision_scout"]
 
 
 def test_plan_class_pr_routes_scout_on_every_head_and_critic_on_ready_heads(
@@ -160,7 +161,7 @@ def test_fixture_only_diff_routes_the_fixture_personas(bound_root: Path) -> None
     assert _route([*files, _f("scripts/x.py")], ROOT) == ["code_reviewer"]
     assert _route([_f(f"{base}notes.md")], ROOT) == ["code_reviewer"]
     assert _route([_f(f"{base}proceed.txt", "removed")], ROOT) == ["code_reviewer"]
-    assert _route(files, ROOT, unknown=True) == ["code_reviewer"]
+    assert _route(files, ROOT, unknown=True) == ["code_reviewer", "decision_scout"]
     assert _route(files, bound_root) == ["canary_persona"]
 
 
@@ -223,6 +224,13 @@ def test_main_writes_carried_and_rescout_and_keeps_routes_to_run(
     monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
     monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "out"))
     monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    (tmp_path / "main/docs/contracts").mkdir(parents=True)
+    (tmp_path / "main" / route.CONFIG).write_text(
+        yaml.safe_dump(
+            {"settings": [{"id": "gates.verdict_app.app_id", "defaults": {"local": VERDICT_APP, "cloud": VERDICT_APP}}]}
+        )
+    )
+    monkeypatch.setattr(route.resolve_pr, "get_json", lambda url, token: {"check_runs": []})
     _event(tmp_path, monkeypatch)
     monkeypatch.setattr(route, "changed_files", lambda *a: ([_f(PLAN)], False, "m"))
     monkeypatch.setattr(route, "route", lambda *a, **k: ["code_reviewer", "decision_scout"])
@@ -336,9 +344,12 @@ def _workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, advisory: str | 
     (main / route.PERSONAS_CONTRACT).write_text((ROOT / route.PERSONAS_CONTRACT).read_text(encoding="utf-8"))
     text = (ROOT / route.CONFIG).read_text(encoding="utf-8")
     if advisory is not None:
+        row = "  - id: gates.code_reviewer.advisory_runs\n"
+        head, sep, tail = text.partition(row)
         old = 'defaults: {local: "enabled", cloud: "enabled"}'
-        assert text.count(old) == 1
-        text = text.replace(old, advisory) if advisory.startswith("defaults") else text
+        assert sep and tail.count(old) >= 1
+        tail = tail.replace(old, advisory, 1) if advisory.startswith("defaults") else tail
+        text = head + sep + tail
     if advisory == "absent":
         text = yaml.safe_dump(
             {"settings": [r for r in yaml.safe_load(text)["settings"] if r["id"] != "gates.code_reviewer.advisory_runs"]}
@@ -511,12 +522,17 @@ def test_keyed_is_false_outside_the_two_admitted_forms(
     assert not route.is_keyed([], "ci", ROOT)
     assert not route.is_keyed(["code_reviewer", "decision_scout"], "ci", ROOT)
     assert not route.is_keyed(["code_reviewer"], "trigger", ROOT)
-    assert not route.is_keyed(["decision_scout"], "trigger", bound_root)
+    assert route.is_keyed(["decision_scout"], "trigger", bound_root)
+    assert not route.is_keyed(["plan_critic"], "trigger", bound_root)
+    assert not route.is_keyed(["code_reviewer"], "trigger", bound_root)
+    assert not route.is_keyed(["decision_scout"], "ci", bound_root)
+    assert not route.is_keyed(["plan_critic"], "ci", bound_root)
+    assert not route.is_keyed(["canary_persona", "decision_scout"], "trigger", bound_root)
     assert not route.is_keyed(["canary_persona"], "ci", ROOT)
     assert not route.is_keyed(["code_reviewer"], None, ROOT)
     monkeypatch.setattr(route, "route", lambda *a, **k: ["code_reviewer", "decision_scout"])
     doc, out, _ = _drive(tmp_path, monkeypatch, [_f(PLAN)], route.TRIGGER_PATH)
-    assert doc["routes"] == ["decision_scout"] and "keyed=false\n" in out
+    assert doc["routes"] == ["decision_scout"] and "keyed=true\n" in out
 
 
 def test_existing_verdict_read_pages_and_refuses_a_bad_shape(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -542,5 +558,5 @@ def test_unreadable_config_applies_no_rerun_skip(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(route, "advisory_state", lambda persona, root: ("enabled", ""))
-    assert route._gate_ci_routes(["code_reviewer"], tmp_path, "o/r", None, "h") == ["code_reviewer"]
+    assert route._gate_routes(["code_reviewer"], tmp_path, "o/r", None, "h") == ["code_reviewer"]
     assert "verdict app id unavailable" in capsys.readouterr().out

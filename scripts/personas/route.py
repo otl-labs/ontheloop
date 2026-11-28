@@ -272,7 +272,7 @@ def _existing_verdict(repo: str, token: str | None, head_sha: str, persona: str,
     return False
 
 
-def _gate_ci_routes(routes: list[str], root: Path, repo: str, token: str | None, head_sha: str) -> list[str]:
+def _gate_routes(routes: list[str], root: Path, repo: str, token: str | None, head_sha: str) -> list[str]:
     kept: list[str] = []
     for persona in routes:
         state, reason = advisory_state(persona, root)
@@ -320,21 +320,25 @@ def filter_upstream(
         print(f"PERSONA-VERDICT skip: undeclared upstream {path or 'none'}")
         return [], False
     if upstream == "trigger":
-        return [r for r in routes if r not in code], True
+        fixtures = set(execute.fixture_personas(root))
+        models = [r for r in routes if r not in code and r not in fixtures]
+        passed = [r for r in routes if r not in code and r in fixtures]
+        gated = set(_gate_routes(models, root, repo, token, head_sha))
+        return [r for r in routes if r in gated or r in passed], True
     if conclusion == "cancelled":
         print("PERSONA-VERDICT skip: the CI run was cancelled")
         return [], False
     kept = [r for r in routes if r in code]
     if routes and not kept:
         print("PERSONA-VERDICT skip: the CI upstream routes code-class personas only")
-    return _gate_ci_routes(kept, root, repo, token, head_sha), False
+    return _gate_routes(kept, root, repo, token, head_sha), False
 
 
 def is_keyed(routes: list[str], upstream: str | None, root: Path) -> bool:
     if len(routes) != 1:
         return False
     if upstream == "trigger":
-        return routes[0] in execute.fixture_personas(root)
+        return routes[0] in execute.fixture_personas(root) or routes[0] in merge_checks.TRIGGER_KEYED_PERSONAS
     return upstream == "ci" and routes[0] in code_personas()
 
 

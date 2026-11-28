@@ -28,6 +28,7 @@ APP = "github-actions"
 PERSONA_CLASSES = {"code_reviewer": "code", "decision_scout": "plan", "plan_critic": "plan"}
 READY_HEAD_PERSONAS = frozenset({"plan_critic"})
 FINGERPRINT_PERSONAS = frozenset({"decision_scout"})
+TRIGGER_KEYED_PERSONAS = frozenset({"decision_scout"})
 SOURCES = ("in_session", "actions")
 VERDICT_APP_ROW = "gates.verdict_app.app_id"
 _ROW_ID = re.compile(r"^gates\.([A-Za-z0-9_]+)\.verdict_source$")
