@@ -1,0 +1,319 @@
+schema_version: 7
+handoff_policy:
+  full_validation_required_before_commit: true
+  timeout_disposition: blocked
+slug: persona-telemetry-send
+intent: >-
+  Send every GitHub Actions verdict persona run's telemetry rows (tokens, served model, latency, retries) to the
+  production telemetry writer from one keyless scheduled job outside the covered verdict workflows, so Actions runs
+  are measurable like in-session runs before the first persona flip (NS.6), without the writer's host ever appearing
+  in a public file or job log (the operator's 2026-11-28 ruling on rec-5358, option 2).
+plan_type: IMPLEMENTATION
+verification_tier: V3
+plan_path: docs/plans/PLAN-persona-telemetry-send.yaml
+phase: >-
+  T4.32 (rec-5551, part D of the rec-5545 split): records c1's MODEL leg for Actions runs and names c7's ENDPOINTS
+  writer-host source. c1 stays open (other legs) and c7 is met, so the plan closes no criterion and adds dated
+  amendments only (Decision 136).
+closes_criteria: []
+cites: [dec:88, dec:200, dec:205, dec:207, dec:212, dec:250, dec:255, dec:263, dec:267, dec:275, dec:282, dec:290, dec:291]
+amends: []
+introduces: []
+scope:
+  - file: .github/workflows/persona-telemetry-send.yml
+    action: Create
+    purpose: >-
+      The keyless sender, deliberately named outside .github/workflows/persona-verdict*.yml (validate_persona_verdict_egress
+      covers every id-token job there, and its filter prints every allowed host). name persona-telemetry-send; triggers
+      schedule cron '23 * * * *' (a shape sensor_liveness.cron_period_seconds accepts) and workflow_dispatch; concurrency
+      group persona-telemetry-send, cancel-in-progress false. One job send: if (github.event_name != 'workflow_dispatch' ||
+      github.actor != 'otl-workflow-dispatcher[bot]') && github.ref == 'refs/heads/main' (Decision 267 cl.3; never
+      registered in .github/agents/schedule.yaml); runs-on ubuntu-latest; timeout-minutes 15; permissions exactly
+      contents read, actions read, id-token write; no Environment; no egress filter. Steps, every action SHA-pinned as
+      elsewhere in the repo: checkout (persist-credentials false); ./.github/actions/aws-region; setup-python 3.12;
+      venv install of requirements.txt (telemetry-arrival.yml's form); actions/cache/restore of the cursor (key prefix
+      persona-telemetry-sent-); aws-actions/configure-aws-credentials for agent-platform-github-ci-branch with
+      MASK_AWS_ROLE_ID_ACCOUNT_PART (telemetry-arrival.yml:55-63's form); one shell step that reads
+      /agent-platform/ducklake/telemetry_writer_url with aws ssm get-parameter, emits ::add-mask:: for the URL and its
+      bare host before anything else, and exports DUCKLAKE_TELEMETRY_WRITER_URL (transport.URL_ENV) to GITHUB_ENV; the
+      send step (GH_TOKEN github.token) running .venv/bin/python -m scripts.personas.telemetry_send with the cursor path;
+      actions/cache/save of the new cursor with key persona-telemetry-sent-${{ github.run_id }}-${{ github.run_attempt }},
+      if always(). Header comment: why the name sits outside the glob, why no filter, and that it is an alarm watched by
+      ci-rca, never a gate.
+  - file: scripts/personas/telemetry_send.py
+    action: Create
+    purpose: >-
+      Stdlib plus scripts.telemetry_capture.transport and responses; never imported by persona code. main(argv) with
+      --cursor PATH (and --dry-run for tests). (1) List artifacts named persona-verdict-results and
+      persona-verdict-results-fallback (GET /repos/{repo}/actions/artifacts?name=...&per_page=100, paged, capped at 10
+      pages) via scripts.personas.resolve_pr.request, keeping those created in the last 72 h. (2) Provenance from GitHub's
+      records only, each failure a counted skip named foreign, never red and never sent: artifact.workflow_run.repository_id
+      and head_repository_id equal the repository's own id (GET /repos/{repo}), head_branch main, and the run (GET
+      /actions/runs/{id}, one call per run id) has path .github/workflows/persona-verdict.yml and event workflow_run.
+      (3) Cursor: a JSON file of artifact ids already handled (sent, or read and holding no rows file) with their
+      expires_at, pruned past 96 h; a missing or unreadable cursor is an empty one and prints cursor=missing. Handled ids
+      are skipped (Decision 88). An admitted artifact that is expired and absent from a present cursor is counted
+      expired_unseen and makes the run red (Decision 250's loss alarm); with cursor=missing it is counted, never red.
+      (4) Download each unexpired admitted artifact's zip (GET .../artifacts/{id}/zip, redirect followed) into memory,
+      refusing over 5 MiB compressed; read only members named telemetry-<route>.json at the zip root, route in the
+      persona registry (scripts.personas.execute.registry_key over main), each at most 5 MiB uncompressed; never extract
+      to disk, never read any other member (the verdict file holds persona output). (5) Validate each document: keys
+      exactly batches, diagnostics, parser_version, producer, producer_version (telemetry_rows.rows_document); producer,
+      parser_version and producer_version equal src.turn_capture.litellm_producer's constants; batches only
+      telemetry_observations, telemetry_agents and telemetry_sessions, in that order; each row's keys within that table's
+      litellm column set (OBSERVATION_COLUMNS, SESSION_COLUMNS and the agents columns the producer writes); every
+      telemetry_agents row's workflow_run_id equal to the artifact's run id and host_run_ref starting gha:<run id>/ with
+      job run or run-fallback. A failed document is counted invalid and makes the run red (main's own code wrote it).
+      (6) Send each valid document through transport.make_client (the env URL, SigV4 under the ambient CI credentials)
+      as append_telemetry bodies chunked by transport.chunk, project_ref from main's configuration
+      (ci_pass.project_ref_home), batch order kept; responses.classify handles OK, REGISTER_TENANT once, RECHUNK by
+      halving; any other answer, or a 409 conflict (Decision 207), counts the document unsent. (7) Print one line
+      'PERSONA_TELEMETRY_SEND listed=N foreign=N handled=N sent=N rows=N empty=N invalid=N unsent=N expired_unseen=N
+      cursor=present|missing' plus one 'sent run=<id> attempt=<n> route=<route>' line per document; never a URL, host,
+      response body or exception message (fixed reason tokens only, Decision 290 cl.2). Exit 1 when invalid, unsent or
+      expired_unseen is non-zero, else 0. Writes the updated cursor before exiting.
+  - file: tests/personas/test_telemetry_send.py
+    action: Create
+    purpose: >-
+      Offline tests with a fake GitHub API and a fake writer client: the rec-5551 acceptance node
+      test_rows_file_is_sent_without_publishing_writer_host (a valid document is sent as chunked append_telemetry bodies
+      under project_ref, and captured stdout and stderr hold neither the URL nor its host even when the writer errors);
+      test_foreign_artifacts_are_skipped_never_sent (wrong repository id, head repository, branch, path and event, one case
+      each); test_document_validation_refuses_and_reds (extra key, wrong producer or version, unknown table, unknown column,
+      wrong run id, wrong host_run_ref job, oversize member, non-telemetry member never read); test_cursor_skips_handled_and_reds_on_expired_unseen
+      (present cursor skips handled ids; expired unseen reds; missing cursor never reds; pruning at 96 h);
+      test_writer_answers_drive_the_exit_code (OK, register_tenant once, rechunk, 409 conflict and transport failure);
+      test_summary_line_prints_counts_only.
+  - file: tests/ci/test_persona_verdict_unpublished_hosts.py
+    action: Create
+    purpose: >-
+      rec-5358's acceptance node test_no_covered_job_lists_the_telemetry_writer_host: no job in
+      .github/workflows/persona-verdict*.yml and no row of config/persona_verdict_egress.yaml lists a lambda-url,
+      execute-api or telemetry host form, and none reads the writer URL parameter. Plus
+      test_the_sender_sits_outside_the_covered_glob_and_holds_no_key: persona-telemetry-send.yml is outside the glob, has
+      exactly the plan's permissions, no secrets but AWS_ACCOUNT_ID and AWS_ROLE_ID_ACCOUNT_PART, the github_ci_branch
+      role, no harden-runner step, the Decision 267 guard, an accepted cron shape and the add-mask step before the send.
+  - file: tests/persona_contracts/test_findings_read.py
+    action: Modify
+    purpose: >-
+      Add test_sent_actions_runs_are_not_read_as_in_session: a root session whose telemetry_agents rows are a litellm
+      top-level gha run (observation_id NULL, host_run_ref gha:...) yields no in_session row, pinning the existing
+      observation_id filter that keeps sent Actions rows out of the in-session lane until rec-5752 joins them.
+  - file: config/ci_rca_taxonomy.yaml
+    action: Modify
+    purpose: >-
+      One workflows-map row: persona-telemetry-send: {tier: not_a_gate, ci_rca: watched, owner: platform, rationale:
+      "rec-5551 keyless persona telemetry sweep; red on an unsent or lost rows file; files no rec itself."}. Headroom 6
+      lines at planning; other unbuilt plans also add rows (see context); whichever builds second re-measures.
+  - file: .github/workflows/ci-rca.yml
+    action: Modify
+    purpose: Add "persona-telemetry-send" to on.workflow_run.workflows so a red sweep is diagnosed (Decision 250 cl.4).
+  - file: docs/ROADMAP-PLATFORM.yaml
+    action: Modify
+    purpose: >-
+      Append to T4.32 c7's text the dated amendment quoted in context (TELEMETRY), and to c1's text: [Amendment
+      2026-11-28, PLAN-persona-telemetry-send, rec-5551: the CREDENTIAL leg's role keeps its writer grants unused; Actions
+      runs' telemetry is sent by the keyless sweep c7's TELEMETRY amendment names, under the CI branch role (operator
+      2026-11-28); removing the unused grants is rec-5754]. Notice class (Decision 279).
+  - file: docs/contracts/telemetry_persona_findings.yaml
+    action: Modify
+    purpose: >-
+      Every rec-5551 mention (the tenant_id, project_id and agent_run_id NULL notes, the governance_notes ACTIONS LANE,
+      DEFERRAL and MATERIALIZATION sentences) is re-pointed: rows are now sent by persona-telemetry-send.yml, and the
+      join that fills the three ids and moves the actions lane onto the telemetry verbs is rec-5752. One amendment_log
+      row, with the compaction Decision 282 cl.1 requires; byte budget per Decision 275.
+  - file: docs/contracts/ports.yaml
+    action: Modify
+    purpose: >-
+      Decision 212 cl.3: SA-14 adds the Actions artifacts API (listing by name, the workflow_run provenance fields, the
+      zip download) and scripts/personas/telemetry_send.py; PC-01's transport.py client list adds telemetry_send.py
+      beside ci_pass.py. One terse amendment_log row. Byte relief first (50218 of 50251 B at planning; amendment_log
+      already fully terse): SA-02's parenthetical '(measured in 2.1.302: ... usable witness)' (269 B) becomes
+      '(measured: docs/plans/PLAN-telemetry-stop-turn-close.yaml)', lossless by citation (Decision 275 cl.4 relief order).
+bundled_recommendations: [rec-5358]
+followon_recs: []
+infrastructure_dependencies:
+  - >-
+    No Terraform or IAM change. agent-platform-github-ci-branch already trusts main's workflow subject, holds
+    TelemetryWriterInvokeCI and TelemetryWriterInvokeCIViaUrlOnly (Decision 291 cl.1) and ssm Get* on
+    parameter/agent-platform/*, and cannot read /secret/* (terraform/personal/oidc_ci_roles.tf, oidc.tf:90-91); it is
+    already a declared writer class (docs/contracts/telemetry-writer-principals.yaml). No Lambda-packaged file is in scope.
+acceptance_criteria:
+  - "rec-5551's node tests/personas/test_telemetry_send.py::test_rows_file_is_sent_without_publishing_writer_host passes."
+  - "rec-5358's node tests/ci/test_persona_verdict_unpublished_hosts.py::test_no_covered_job_lists_the_telemetry_writer_host passes."
+  - ".github/workflows/persona-verdict.yml and config/persona_verdict_egress.yaml are unchanged against origin/main."
+  - "After merge, a dispatched persona-telemetry-send run on main ends success with sent >= 1 and its log holds no lambda-url or execute-api text."
+  - "The sent run's telemetry_agents rows read back from production telemetry with writer-minted tenant_id and project_id."
+verification_plan:
+  - step: 1
+    phase: pre-deploy
+    action: The new sender and host-guard nodes pass.
+    command: bin/venv-python -m pytest tests/personas/test_telemetry_send.py tests/ci/test_persona_verdict_unpublished_hosts.py tests/persona_contracts/test_findings_read.py::test_sent_actions_runs_are_not_read_as_in_session -q
+    expected: exit 0, no failures or errors
+    fix_if: a node fails; fix the code, never the assertion
+    hermetic: true
+    expected_literals: [passed]
+    graduation: waive
+    graduation_waiver_reason: these are the test_obligations selectors pr-validate already runs on every PR; a registry row would duplicate them
+  - step: 2
+    phase: pre-deploy
+    action: The neighbouring suites the change reaches pass.
+    command: bin/venv-python -m pytest tests/personas/test_telemetry_rows.py tests/personas/test_keyed_run.py tests/persona_contracts/test_findings_read.py tests/checks/misc tests/checks/ci_guards/test_validate_persona_verdict_chain.py tests/convergence_health/test_dispatch_integrity.py tests/convergence_health/test_sensor_liveness_dispatch.py -q
+    expected: exit 0
+    fix_if: a node fails; fix the code, never the assertion
+    hermetic: false
+    graduation: waive
+    graduation_waiver_reason: broad neighbouring suites already in the fast and full tiers; not a single standing check
+  - step: 3
+    phase: pre-deploy
+    action: The covered verdict workflow and its egress list are untouched.
+    command: git fetch origin main --quiet && git diff --quiet origin/main -- .github/workflows/persona-verdict.yml config/persona_verdict_egress.yaml && echo unchanged
+    expected: prints unchanged, exit 0
+    fix_if: a diff exists; revert it (this plan never edits either file)
+    hermetic: false
+    graduation: not-applicable
+  - step: 4
+    phase: pre-deploy
+    action: The contracts the plan edits stay inside their budgets and validate.
+    command: bin/venv-python -m scripts.validate --pre
+    expected: exit 0 (structural size budgets, amendment_log retention, ci_rca taxonomy, egress and chain checks green)
+    fix_if: a budget or contract check fails; apply the named relief, never a raise
+    hermetic: false
+    graduation: not-applicable
+  - step: 5
+    phase: pre-deploy
+    action: Read-only live probe that a retained results artifact holds a rows file of the validated shape (dry run, no send).
+    command: GH_TOKEN=<token with actions read> bin/venv-python -m scripts.personas.telemetry_send --cursor /tmp/pts-cursor.json --dry-run
+    expected: exit 0 and a PERSONA_TELEMETRY_SEND line with listed >= 1 and invalid=0 (a results artifact of run 46093899188 held telemetry-code_reviewer.json at planning)
+    fix_if: invalid > 0 on main's own artifacts; fix the validator against the real document, never widen it past the producer's columns
+    hermetic: false
+    graduation: not-applicable
+  - step: 6
+    phase: post-deploy
+    action: Dispatch the sweep on main after a keyed verdict run has uploaded results within the last day, and read its run.
+    command: "mcp__github__actions_run_trigger(owner=otl-labs, repo=ontheloop, workflow_id=persona-telemetry-send.yml, ref=main), then mcp__github__get_job_logs on that run's send job saved to /tmp/pts.log && grep -E 'PERSONA_TELEMETRY_SEND .*sent=[1-9]' /tmp/pts.log && ! grep -Eqi 'lambda-url|execute-api' /tmp/pts.log && echo host-absent"
+    expected: run conclusion success; the summary line shows sent >= 1, invalid=0, unsent=0; prints host-absent
+    fix_if: unsent or invalid; read the fixed reason token and fix forward on a new branch; a host in the log is a security finding (file it and surface it at once)
+    hermetic: false
+  - step: 7
+    phase: post-deploy
+    action: The sent run's rows are in production telemetry with writer-minted ids.
+    command: "bin/venv-python -c \"from scripts.telemetry_capture import read_route as r; n=r.make_routed_reader('agent_platform').named; rows=[x for x in n('telemetry_root_sessions', day_from='<run_day>', day_to='<run_day>') if str(x.get('host_run_ref') or '').startswith('gha:<run_id>/')]; print(len(rows), all(x.get('session_id') for x in rows))\""
+    expected: prints a count of at least 1 and True
+    fix_if: zero rows after a success run; check the writer's answer counts in the send log, then the reader's catalog route; fix forward
+    hermetic: false
+  - step: 8
+    phase: post-deploy
+    action: rec-5551 and rec-5358 read back closed after the merge's Resolves trailer and their acceptance nodes pass on main.
+    command: bin/venv-python -m pytest tests/personas/test_telemetry_send.py::test_rows_file_is_sent_without_publishing_writer_host tests/ci/test_persona_verdict_unpublished_hosts.py::test_no_covered_job_lists_the_telemetry_writer_host -q && recs_by_ids for rec-5551,rec-5358 via src.common.ducklake_reader_client
+    expected: both nodes pass and both recs read status closed
+    fix_if: a rec still open; close it through ops_data_portal with the merge sha after its node passes on main
+    hermetic: false
+test_obligations:
+  - source: scripts/personas/telemetry_send.py
+    behavior: a valid rows file is sent as chunked append_telemetry bodies and neither the writer URL nor its host is ever printed
+    verification_step: 1
+    test_selector: tests/personas/test_telemetry_send.py::test_rows_file_is_sent_without_publishing_writer_host
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/personas/telemetry_send.py
+    behavior: an artifact whose run is not main's persona-verdict.yml in this repository is skipped and never sent
+    verification_step: 1
+    test_selector: tests/personas/test_telemetry_send.py::test_foreign_artifacts_are_skipped_never_sent
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/personas/telemetry_send.py
+    behavior: a document outside the producer's shape or bound to another run is refused and reds the run
+    verification_step: 1
+    test_selector: tests/personas/test_telemetry_send.py::test_document_validation_refuses_and_reds
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/personas/telemetry_send.py
+    behavior: handled artifacts are skipped and an expired artifact never seen reds the run, but only with a present cursor
+    verification_step: 1
+    test_selector: tests/personas/test_telemetry_send.py::test_cursor_skips_handled_and_reds_on_expired_unseen
+    red_green_expectation: red before (module absent), green after
+  - source: scripts/personas/telemetry_send.py
+    behavior: writer answers map to sent or unsent and the exit code
+    verification_step: 1
+    test_selector: tests/personas/test_telemetry_send.py::test_writer_answers_drive_the_exit_code
+    red_green_expectation: red before (module absent), green after
+  - source: .github/workflows/persona-telemetry-send.yml
+    behavior: the sender is outside the covered glob, keyless, unfiltered, guarded against the dispatcher bot and masks the URL before sending
+    verification_step: 1
+    test_selector: tests/ci/test_persona_verdict_unpublished_hosts.py::test_the_sender_sits_outside_the_covered_glob_and_holds_no_key
+    red_green_expectation: red before (workflow absent), green after
+  - source: tests/ci/test_persona_verdict_unpublished_hosts.py
+    behavior: no covered verdict job lists or reads the telemetry writer's host
+    verification_step: 1
+    test_selector: tests/ci/test_persona_verdict_unpublished_hosts.py::test_no_covered_job_lists_the_telemetry_writer_host
+    waiver_reason: a guard over files this plan leaves unchanged, so it is green before and after; its value is the regression pin rec-5358 names
+  - source: config/ci_rca_taxonomy.yaml
+    behavior: the sweep is a watched, not-a-gate workflow ci-rca listens to
+    verification_step: 4
+    command: bin/venv-python -m scripts.validate --pre
+    red_green_expectation: red before (validate_ci_rca_adjudication refuses a new workflow without a row), green after
+  - source: .github/workflows/ci-rca.yml
+    behavior: ci-rca listens to the sweep's completions
+    verification_step: 4
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: one list entry the taxonomy check reads together with the row; covered by the same validate run
+  - source: docs/contracts/ports.yaml
+    behavior: the artifacts-API assumption and the new client are recorded inside the byte budget
+    verification_step: 4
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: a contract record, checked by the structural byte budget and amendment_log retention checks in validate
+  - source: docs/contracts/telemetry_persona_findings.yaml
+    behavior: the dated deferral names its new owner rec-5752
+    verification_step: 4
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: field-semantics text; the contract checks in validate cover its shape and budget
+  - source: docs/ROADMAP-PLATFORM.yaml
+    behavior: T4.32 c1 and c7 carry the dated amendments
+    verification_step: 4
+    command: bin/venv-python -m scripts.validate --pre
+    waiver_reason: roadmap prose; the roadmap schema checks in validate cover its shape
+  - source: tests/persona_contracts/test_findings_read.py
+    behavior: sent Actions runs never appear as in-session findings rows
+    verification_step: 1
+    test_selector: tests/persona_contracts/test_findings_read.py::test_sent_actions_runs_are_not_read_as_in_session
+    waiver_reason: pins existing behaviour (the observation_id filter), so it is green before and after
+constraints:
+  - persona-verdict.yml and config/persona_verdict_egress.yaml are never edited (shared 489 of 500 effective lines; dual-run and persona-add plans also edit them).
+  - No job in .github/workflows/persona-verdict*.yml writes telemetry; the sender never runs an egress filter and never prints the URL, its host, a response body or an exception message.
+  - The sender reads only telemetry-<route>.json members, never the verdict file or any other member, and sends nothing an artifact's provenance does not admit.
+  - Graduated shard persona-findings-actions-lane-units is kept unchanged; this plan only adds a test to test_findings_read.py and renames or removes none of the shard's node ids.
+  - No IAM, Terraform, Lambda, secret or Environment change; no artifact retention change (validate_persona_verdict_chain and _persona_verdict_keyed pin retention-days 1).
+  - Never skip, disable or loosen a test or check to get green (Decision 235); a budget overrun takes the named relief, never a raise.
+  - No rescue agents or workaround loops (Decision 55).
+context:
+  - "Decision-scout r2 FLAGS_FOUND; CITE dec:88,200,205,207,212,250,255,263,267,275,282,290,291. Decisions triaged: 240 of 240. Roadmap items intersected: 9; CONFLICT: 0; RELATED: 8. Serves: NS.6 3/5."
+  - "Scout dispositions: r1 WARN 267 -> dispatcher-bot guard, not registered; r1 WARN 212 -> SA-14 and PC-01 rows with SA-02 byte relief; r1 NOTE 250 and 88 -> the cursor (skip handled, red on expired_unseen); r2 SPIRIT WARN 263 -> provenance from GitHub's records (repository ids, branch, path, event), each with a refusal case; 101 and 213 compacted, cited as 290 and 291."
+  - "Operator 2026-11-28: rec-5358 option 2 (keyless separate job, the portal CI uses; rejected a GitHub secret and a public-safe route), recorded on rec-5358; sender identity = the existing CI branch role (card), narrower role is rec-5754. Blind Fable consult: /mnt/project-files/actions-telemetry-send/advisor-brief/ADVICE.md (adopted: sweep over per-run, forward-with-validation, red alarm watched by ci-rca, follow-ons; adapted: retention stays 1 day because two checks pin it, so the cron is hourly; the consult's results/ member prefix corrected to zip root, probed)."
+  - "Why a sweep: about 85-100 persona-verdict runs a day (Actions API, 2026-11-27); a per-run sender cannot skip no-op runs from GitHub-set fields. GitHub delivers about one hourly tick in five here (Decision 267), so a 1-day artifact gets several sends; the cursor turns a missed one into a red."
+  - "Probes this session: persona-verdict runs report path .github/workflows/persona-verdict.yml, event workflow_run, head_branch main (100 of 100 listed); artifact 15243045373 (run 46093899188) lists workflow_run.repository_id, head_repository_id and head_branch, and its zip root holds code_reviewer.json and telemetry-code_reviewer.json (parser_version 2, producer litellm, producer_version litellm-2; agents rows carry workflow_run_id and host_run_ref gha:46093899188/1/run/1). UNPROVEN until VP 6: that the writer accepts litellm rows from the branch role (both are declared, the writer validates), and that list-artifacts keeps returning expired artifacts with expired true (inferred from the API shape)."
+  - "Writer bodies are idempotent insert-only MERGE (ducklake_telemetry_writer.yaml:268; Decision 207): a re-send is a no-op, a differing re-send under a stored key is a 409 the sweep counts unsent."
+  - "Decision 205: the 2026-11-27 Update (verdict job reads no upstream artifact) binds persona jobs; this sender is deterministic, not persona compute (cl.3), so no amendment."
+  - "findings_read side effect: sent rows give each Actions run a root session, but its telemetry_agents rows are top-level (observation_id NULL, telemetry_agents.yaml:92-96), so read_in_session's filter skips them; the new node pins it."
+  - "c7 TELEMETRY amendment text (consult Q7, adapted): [Amendment 2026-11-28, PLAN-persona-telemetry-send, rec-5551, the operator's 2026-11-28 ruling (rec-5358): TELEMETRY -- no job in .github/workflows/persona-verdict*.yml writes telemetry, so no covered job's list holds the writer's host; each keyed run leaves its rows file in its results artifact, and a keyless job in .github/workflows/persona-telemetry-send.yml, outside the covered files, sends it through scripts/telemetry_capture's transport under the CI branch role, reading the host at run time from the account's parameter store and never printing it. That job runs no egress filter, a named accepted residual: it holds no inference key, admits only artifacts GitHub records as main's persona-verdict.yml runs, and treats the rows file as data.]"
+  - "Shared files: config/ci_rca_taxonomy.yaml 494 of 500 (also scoped by bootstrap-ci-gated-apply, bootstrap-trusted-pr-plan, ci-policy-plan-time-lambda-arns, environment-gates-fail-closed, merge-annotate-producer, trusted-plan-cutover; whichever builds second re-measures; rec-5710 shares no file); ports.yaml also scoped by agent-proxy-signed-access, environment-gates-fail-closed, merge-annotate-producer, scheduled-workflow-dispatch, telemetry-capture-hook-labels, telemetry-claude-p-capture-adapter (whichever builds second re-measures bytes); ci-rca.yml also by merge-annotate-producer, scheduled-workflow-dispatch, telemetry-claude-p-capture-adapter; ROADMAP-PLATFORM.yaml also by loop-candidate-decisions, operator-decision-journal-kind (rebase only)."
+  - "Follow-ons filed at planning: rec-5752 (findings ids join, ends the NULL deferral), rec-5754 (narrow sender role, remove the persona-verdict role's writer grants, dated Update on Decision 263), rec-5755 (results upload when the persona step fails)."
+  - "Owner: this planning thread (Plan warehouse send for Actions telemetry rec-5551)."
+gate_rounds:
+  - {gate: decision-scout, round: 1, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:564e910dc54bf10a1cc137d478833f7fc8baab8ffe9cd90fe171ac06db08960d"}
+  - {gate: decision-scout, round: 2, verdict: FLAGS_FOUND, scout_input_fingerprint: "v1:75d0b12c1e491a9fa17ff8048b8841c86ddfc58599ff32b66b04f0627110b64a"}
+pre_implementation_checklist:
+  - Branch confirmed not on main
+  - docs/PROJECT_CONTEXT.md read
+  - only the plan-cited decision sections
+  - All files in scope located and readable
+  - Acceptance criteria understood and verifiable
+  - "Re-run bin/venv-python -m scripts.ci_rca.red_overlap --plan docs/plans/PLAN-persona-telemetry-send.yaml before starting"
+execution_steps:
+  - "Pre: on the build branch, re-measure ports.yaml bytes, ci_rca_taxonomy.yaml lines and persona-verdict.yml (unchanged) against main. Post: numbers recorded in the PR body."
+  - "scripts/personas/telemetry_send.py and tests/personas/test_telemetry_send.py per scope (offline fakes only; no network in tests)."
+  - ".github/workflows/persona-telemetry-send.yml and tests/ci/test_persona_verdict_unpublished_hosts.py; the taxonomy row and the ci-rca.yml entry."
+  - "ports.yaml: apply the SA-02 byte relief first, then SA-14, PC-01 and the amendment_log row; telemetry_persona_findings.yaml re-pointing with its amendment_log row and compaction; the ROADMAP T4.32 c1 and c7 amendments (texts in scope and context)."
+  - "Add the findings_read pinning node; run VP 1-5 (VP 5 read-only, needs a GH token with actions read; if none is available in the session, record it UNPROVEN and rely on VP 6)."
+  - "Execute the Verification Plan; on an unrecoverable V3 failure stop and RCA (Decision 55)."
+  - "Report: what was implemented, verification results"
+rollback: >-
+  Revert the build PR: the sweep stops, nothing else depends on it, and rows already sent stay (append-only; they are
+  true telemetry). No infrastructure to undo.
