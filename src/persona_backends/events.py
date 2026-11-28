@@ -30,8 +30,8 @@ class Capture:
     probe_record: Any = None
 
 
-def canonical_json(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, indent=2, ensure_ascii=False)
+def canonical_json(value: Any, *, indent: int | None = 2) -> str:
+    return json.dumps(value, sort_keys=True, indent=indent, ensure_ascii=False)
 
 
 def input_sha256(materialised_input: dict[str, Any]) -> str:
