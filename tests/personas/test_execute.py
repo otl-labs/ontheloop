@@ -31,8 +31,9 @@ def test_a_fixture_route_has_input_and_output_schemas() -> None:
 
 
 def test_a_non_fixture_route_has_no_schema() -> None:
-    assert execute.schema_for(ROOT, "decision_scout", "input") is None
-    assert execute.failure_schema_for(ROOT, "decision_scout") is None
+    assert execute.schema_for(ROOT, "plan_critic", "input") is None
+    assert execute.failure_schema_for(ROOT, "plan_critic") is None
+    assert execute.schema_for(ROOT, "decision_scout", "input") is not None
     assert execute.schema_for(ROOT, "code_reviewer", "input") is not None
     assert execute.failure_schema_for(ROOT, "code_reviewer") is not None
 
@@ -40,7 +41,7 @@ def test_a_non_fixture_route_has_no_schema() -> None:
 def test_keyed_personas_are_fixtures_and_implemented_verdicts(tmp_path: Path) -> None:
     keyed = execute.keyed_personas(ROOT)
     assert "canary_persona" in keyed and "code_reviewer" in keyed
-    assert "decision_scout" not in keyed and "plan_critic" not in keyed
+    assert "decision_scout" in keyed and "plan_critic" not in keyed
     assert len(keyed) == len(set(keyed))
     index = tmp_path / execute.INDEX
     index.parent.mkdir(parents=True)
@@ -150,7 +151,7 @@ def test_valid_request_is_returned(tmp_path: Path) -> None:
     [
         ({"routes": []}, "routes"),
         ({"routes": [ROUTE, "x"]}, "routes"),
-        ({"route": "decision_scout", "body": GOOD}, "route_kind"),
+        ({"route": "plan_critic", "body": GOOD}, "route_kind"),
         ({"body": {"change_id": "o/r#1"}}, "input"),
     ],
 )

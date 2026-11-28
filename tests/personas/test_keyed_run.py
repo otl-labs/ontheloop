@@ -95,7 +95,7 @@ def test_implemented_verdict_route_is_accepted_and_pending_refused(tmp_path: Pat
     assert keyed_run.prepared_request(work, ROOT) == ("code_reviewer", body)
     pending = tmp_path / "pending"
     (pending / "prepared").mkdir(parents=True)
-    (pending / "prepared" / "routes.json").write_text(json.dumps({"routes": ["decision_scout"]}))
+    (pending / "prepared" / "routes.json").write_text(json.dumps({"routes": ["plan_critic"]}))
     with pytest.raises(keyed_run.Refusal) as exc:
         keyed_run.prepared_request(pending, ROOT)
     assert str(exc.value) == "route_kind"
